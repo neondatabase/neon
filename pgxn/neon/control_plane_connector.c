@@ -41,7 +41,7 @@ static char *ConsoleURL = NULL;
 static bool ForwardDDL = true;
 
 /* Curl structures for sending the HTTP requests */
-static CURL * CurlHandle;
+static CURL *CurlHandle;
 static struct curl_slist *ContentHeader = NULL;
 
 /*
@@ -54,7 +54,7 @@ typedef enum
 {
 	Op_Set,						/* An upsert: Either a creation or an alter */
 	Op_Delete,
-}			OpType;
+} OpType;
 
 typedef struct
 {
@@ -62,7 +62,7 @@ typedef struct
 	Oid			owner;
 	char		old_name[NAMEDATALEN];
 	OpType		type;
-}			DbEntry;
+} DbEntry;
 
 typedef struct
 {
@@ -70,7 +70,7 @@ typedef struct
 	char		old_name[NAMEDATALEN];
 	const char *password;
 	OpType		type;
-}			RoleEntry;
+} RoleEntry;
 
 /*
  * We keep one of these for each subtransaction in a stack. When a subtransaction
@@ -82,10 +82,10 @@ typedef struct DdlHashTable
 	struct DdlHashTable *prev_table;
 	HTAB	   *db_table;
 	HTAB	   *role_table;
-}			DdlHashTable;
+} DdlHashTable;
 
 static DdlHashTable RootTable;
-static DdlHashTable * CurrentDdlTable = &RootTable;
+static DdlHashTable *CurrentDdlTable = &RootTable;
 
 static void
 PushKeyValue(JsonbParseState **state, char *key, char *value)
@@ -199,7 +199,7 @@ typedef struct
 {
 	char		str[ERROR_SIZE];
 	size_t		size;
-}			ErrorString;
+} ErrorString;
 
 static size_t
 ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)

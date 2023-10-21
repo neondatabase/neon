@@ -67,31 +67,33 @@ typedef struct FileCacheEntry
 	BufferTag	key;
 	uint32		offset;
 	uint32		access_count;
-	uint32		bitmap[BLOCKS_PER_CHUNK/32];
-	dlist_node	lru_node; /* LRU list node */
+	uint32		bitmap[BLOCKS_PER_CHUNK / 32];
+	dlist_node	lru_node;		/* LRU list node */
 } FileCacheEntry;
 
 typedef struct FileCacheControl
 {
-	uint64 generation; /* generation is needed to handle correct hash reenabling */
-	uint32 size; /* size of cache file in chunks */
-	uint32 used; /* number of used chunks */
-	dlist_head lru; /* double linked list for LRU replacement algorithm */
+	uint64		generation;		/* generation is needed to handle correct hash
+								 * reenabling */
+	uint32		size;			/* size of cache file in chunks */
+	uint32		used;			/* number of used chunks */
+	dlist_head	lru;			/* double linked list for LRU replacement
+								 * algorithm */
 } FileCacheControl;
 
-static HTAB* lfc_hash;
-static int   lfc_desc = 0;
+static HTAB *lfc_hash;
+static int	lfc_desc = 0;
 static LWLockId lfc_lock;
-static int   lfc_max_size;
-static int   lfc_size_limit;
-static char* lfc_path;
-static  FileCacheControl* lfc_ctl;
+static int	lfc_max_size;
+static int	lfc_size_limit;
+static char *lfc_path;
+static FileCacheControl *lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM>=150000
 static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 
-void FileCacheMonitorMain(Datum main_arg);
+void		FileCacheMonitorMain(Datum main_arg);
 
 /*
  * Local file cache is mandatory and Neon can work without it.
@@ -100,10 +102,10 @@ void FileCacheMonitorMain(Datum main_arg);
  * All cache content should be invalidated to avoid reading of stale or corrupted data
  */
 static void
-lfc_disable(char const* op)
+lfc_disable(char const *op)
 {
 	HASH_SEQ_STATUS status;
-	FileCacheEntry* entry;
+	FileCacheEntry *entry;
 
 	elog(WARNING, "Failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
 
@@ -137,9 +139,10 @@ lfc_ensure_opened(void)
 	/* Open cache file if not done yet */
 	if (lfc_desc <= 0)
 	{
-		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
+		lfc_desc = BasicOpenFile(lfc_path, O_RDWR | O_CREAT);
 
-		if (lfc_desc < 0) {
+		if (lfc_desc < 0)
+		{
 			lfc_disable("open");
 			return false;
 		}
@@ -150,7 +153,7 @@ lfc_ensure_opened(void)
 static void
 lfc_shmem_startup(void)
 {
-	bool found;
+	bool		found;
 	static HASHCTL info;
 
 	if (prev_shmem_startup_hook)
@@ -160,16 +163,21 @@ lfc_shmem_startup(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	lfc_ctl = (FileCacheControl*)ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
+	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
 	{
-		uint32 lfc_size = SIZE_MB_TO_CHUNKS(lfc_max_size);
-		lfc_lock = (LWLockId)GetNamedLWLockTranche("lfc_lock");
+		uint32		lfc_size = SIZE_MB_TO_CHUNKS(lfc_max_size);
+
+		lfc_lock = (LWLockId) GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
 		lfc_hash = ShmemInitHash("lfc_hash",
-								 /* lfc_size+1 because we add new element to hash table before eviction of victim */
-								 lfc_size+1, lfc_size+1,
+
+		/*
+		 * lfc_size+1 because we add new element to hash table before eviction
+		 * of victim
+		 */
+								 lfc_size + 1, lfc_size + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
 		lfc_ctl->generation = 0;
@@ -178,7 +186,7 @@ lfc_shmem_startup(void)
 		dlist_init(&lfc_ctl->lru);
 
 		/* Remove file cache on restart */
-		(void)unlink(lfc_path);
+		(void) unlink(lfc_path);
 	}
 	LWLockRelease(AddinShmemInitLock);
 }
@@ -191,7 +199,7 @@ lfc_shmem_request(void)
 		prev_shmem_request_hook();
 #endif
 
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size)+1, sizeof(FileCacheEntry)));
+	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, sizeof(FileCacheEntry)));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
 
@@ -209,11 +217,14 @@ lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 static void
 lfc_change_limit_hook(int newval, void *extra)
 {
-	uint32 new_size = SIZE_MB_TO_CHUNKS(newval);
+	uint32		new_size = SIZE_MB_TO_CHUNKS(newval);
+
 	/*
-	 * Stats collector detach shared memory, so we should not try to access shared memory here.
-	 * Parallel workers first assign default value (0), so not perform truncation in parallel workers.
-	 * The Postmaster can handle SIGHUP and it has access to shared memory (UsedShmemSegAddr != NULL), but has no PGPROC.
+	 * Stats collector detach shared memory, so we should not try to access
+	 * shared memory here. Parallel workers first assign default value (0), so
+	 * not perform truncation in parallel workers. The Postmaster can handle
+	 * SIGHUP and it has access to shared memory (UsedShmemSegAddr != NULL),
+	 * but has no PGPROC.
 	 */
 	if (!lfc_ctl || !MyProc || !UsedShmemSegAddr || IsParallelWorker())
 		return;
@@ -221,8 +232,9 @@ lfc_change_limit_hook(int newval, void *extra)
 	/* Open cache file if not done yet */
 	if (lfc_desc <= 0)
 	{
-		lfc_desc = BasicOpenFile(lfc_path, O_RDWR|O_CREAT);
-		if (lfc_desc < 0) {
+		lfc_desc = BasicOpenFile(lfc_path, O_RDWR | O_CREAT);
+		if (lfc_desc < 0)
+		{
 			elog(WARNING, "Failed to open file cache %s: %m, disabling file cache", lfc_path);
 			lfc_size_limit = 0; /* disable file cache */
 			return;
@@ -231,11 +243,15 @@ lfc_change_limit_hook(int newval, void *extra)
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 	while (new_size < lfc_ctl->used && !dlist_is_empty(&lfc_ctl->lru))
 	{
-		/* Shrink cache by throwing away least recently accessed chunks and returning their space to file system */
-		FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
+		/*
+		 * Shrink cache by throwing away least recently accessed chunks and
+		 * returning their space to file system
+		 */
+		FileCacheEntry *victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
+
 		Assert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
-		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)victim->offset*BLOCKS_PER_CHUNK*BLCKSZ, BLOCKS_PER_CHUNK*BLCKSZ) < 0)
+		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
 			elog(LOG, "Failed to punch hole in file: %m");
 #endif
 		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
@@ -259,7 +275,7 @@ lfc_init(void)
 							"Maximal size of Neon local file cache",
 							NULL,
 							&lfc_max_size,
-							0, /* disabled by default */
+							0,	/* disabled by default */
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
@@ -272,7 +288,7 @@ lfc_init(void)
 							"Current limit for size of Neon local file cache",
 							NULL,
 							&lfc_size_limit,
-							0, /* disabled by default */
+							0,	/* disabled by default */
 							0,
 							INT_MAX,
 							PGC_SIGHUP,
@@ -312,18 +328,18 @@ lfc_init(void)
 bool
 lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 {
-	BufferTag tag;
-	FileCacheEntry* entry;
-	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
-	bool found;
-	uint32 hash;
+	BufferTag	tag;
+	FileCacheEntry *entry;
+	int			chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
+	bool		found;
+	uint32		hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0)	/* fast exit if file cache is disabled */
 		return false;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
@@ -339,13 +355,13 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 void
 lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 {
-	BufferTag tag;
-	FileCacheEntry* entry;
-	bool found;
-	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
-	uint32 hash;
+	BufferTag	tag;
+	FileCacheEntry *entry;
+	bool		found;
+	int			chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
+	uint32		hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0)	/* fast exit if file cache is disabled */
 		return;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
@@ -373,9 +389,10 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	 */
 	if (entry->bitmap[chunk_offs >> 5] == 0)
 	{
-		bool has_remaining_pages;
+		bool		has_remaining_pages;
 
-		for (int i = 0; i < (BLOCKS_PER_CHUNK / 32); i++) {
+		for (int i = 0; i < (BLOCKS_PER_CHUNK / 32); i++)
+		{
 			if (entry->bitmap[i] != 0)
 			{
 				has_remaining_pages = true;
@@ -384,8 +401,8 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 		}
 
 		/*
-		 * Put the entry at the position that is first to be reclaimed when
-		 * we have no cached pages remaining in the chunk
+		 * Put the entry at the position that is first to be reclaimed when we
+		 * have no cached pages remaining in the chunk
 		 */
 		if (!has_remaining_pages)
 		{
@@ -411,16 +428,16 @@ bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 char *buffer)
 {
-	BufferTag tag;
-	FileCacheEntry* entry;
-	ssize_t rc;
-	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
-	bool result = true;
-	uint32 hash;
-	uint64 generation;
-	uint32 entry_offset;
+	BufferTag	tag;
+	FileCacheEntry *entry;
+	ssize_t		rc;
+	int			chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
+	bool		result = true;
+	uint32		hash;
+	uint64		generation;
+	uint32		entry_offset;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0)	/* fast exit if file cache is disabled */
 		return false;
 
 	if (!lfc_ensure_opened())
@@ -428,7 +445,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -447,7 +464,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	LWLockRelease(lfc_lock);
 
-	rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t)entry_offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
+	rc = pread(lfc_desc, buffer, BLCKSZ, ((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
 	if (rc != BLCKSZ)
 	{
 		lfc_disable("read");
@@ -475,31 +492,31 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  * If cache is full then evict some other page.
  */
 void
-lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+			lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 #if PG_MAJORVERSION_NUM < 16
-		  char *buffer)
+					  char *buffer)
 #else
-		  const void *buffer)
+					  const void *buffer)
 #endif
 {
-	BufferTag tag;
-	FileCacheEntry* entry;
-	ssize_t rc;
-	bool found;
-	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
-	uint32 hash;
+	BufferTag	tag;
+	FileCacheEntry *entry;
+	ssize_t		rc;
+	bool		found;
+	int			chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
+	uint32		hash;
 
-	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+	if (lfc_size_limit == 0)	/* fast exit if file cache is disabled */
 		return;
 
 	if (!lfc_ensure_opened())
 		return;
 
 	tag.forkNum = forkNum;
-	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK-1);
-	
+	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
+
 	CopyNRelFileInfoToBufTag(tag, rinfo);
-	
+
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -507,24 +524,30 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	if (found)
 	{
-		/* Unlink entry from LRU list to pin it for the duration of IO operation */
+		/*
+		 * Unlink entry from LRU list to pin it for the duration of IO
+		 * operation
+		 */
 		if (entry->access_count++ == 0)
 			dlist_delete(&entry->lru_node);
 	}
 	else
 	{
 		/*
-		 * We have two choices if all cache pages are pinned (i.e. used in IO operations):
-		 * 1. Wait until some of this operation is completed and pages is unpinned
-		 * 2. Allocate one more chunk, so that specified cache size is more recommendation than hard limit.
-		 * As far as probability of such event (that all pages are pinned) is considered to be very very small:
-		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
+		 * We have two choices if all cache pages are pinned (i.e. used in IO
+		 * operations): 1. Wait until some of this operation is completed and
+		 * pages is unpinned 2. Allocate one more chunk, so that specified
+		 * cache size is more recommendation than hard limit. As far as
+		 * probability of such event (that all pages are pinned) is considered
+		 * to be very very small: there are should be very large number of
+		 * concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
 		 */
 		if (lfc_ctl->used >= SIZE_MB_TO_CHUNKS(lfc_size_limit) && !dlist_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
-			FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
+			FileCacheEntry *victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
+
 			Assert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
@@ -533,13 +556,14 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		else
 		{
 			lfc_ctl->used += 1;
-			entry->offset = lfc_ctl->size++; /* allocate new chunk at end of file */
+			entry->offset = lfc_ctl->size++;	/* allocate new chunk at end
+												 * of file */
 		}
 		entry->access_count = 1;
 		memset(entry->bitmap, 0, sizeof entry->bitmap);
 	}
 
-	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
+	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t) entry->offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
 	if (rc != BLCKSZ)
 	{
 		LWLockRelease(lfc_lock);
@@ -601,9 +625,9 @@ local_cache_pages(PG_FUNCTION_ARGS)
 
 	if (SRF_IS_FIRSTCALL())
 	{
-        HASH_SEQ_STATUS status;
-		FileCacheEntry* entry;
-		uint32 n_pages = 0;
+		HASH_SEQ_STATUS status;
+		FileCacheEntry *entry;
+		uint32		n_pages = 0;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 
@@ -653,8 +677,8 @@ local_cache_pages(PG_FUNCTION_ARGS)
 
 		LWLockAcquire(lfc_lock, LW_SHARED);
 
-        hash_seq_init(&status, lfc_hash);
-        while ((entry = hash_seq_search(&status)) != NULL)
+		hash_seq_init(&status, lfc_hash);
+		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				n_pages += (entry->bitmap[i >> 5] & (1 << (i & 31))) != 0;
@@ -680,14 +704,14 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		 * locks, so the information of each buffer is self-consistent.
 		 */
 		n_pages = 0;
-        hash_seq_init(&status, lfc_hash);
-        while ((entry = hash_seq_search(&status)) != NULL)
+		hash_seq_init(&status, lfc_hash);
+		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 			{
 				if (entry->bitmap[i >> 5] & (1 << (i & 31)))
 				{
-					fctx->record[n_pages].pageoffs = entry->offset*BLOCKS_PER_CHUNK + i;
+					fctx->record[n_pages].pageoffs = entry->offset * BLOCKS_PER_CHUNK + i;
 					fctx->record[n_pages].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
 					fctx->record[n_pages].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
 					fctx->record[n_pages].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
