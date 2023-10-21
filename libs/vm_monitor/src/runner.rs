@@ -156,10 +156,7 @@ impl Runner {
         // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
-            let config = match args.file_cache_on_disk {
-                true => FileCacheConfig::default_on_disk(),
-                false => FileCacheConfig::default_in_memory(),
-            };
+            let config = FileCacheConfig::default();
 
             let mut file_cache = FileCacheState::new(connstr, config, token.clone())
                 .await
@@ -187,10 +184,7 @@ impl Runner {
                 info!("file cache size actually got set to {actual_size}")
             }
 
-            if args.file_cache_on_disk {
-                file_cache_disk_size = actual_size;
-            }
-
+            file_cache_disk_size = actual_size;
             state.filecache = Some(file_cache);
         }
 
@@ -239,17 +233,11 @@ impl Runner {
 
         let requested_mem = target.mem;
         let usable_system_memory = requested_mem.saturating_sub(self.config.sys_buffer_bytes);
-        let (expected_file_cache_size, expected_file_cache_disk_size) = self
+        let expected_file_cache_size = self
             .filecache
             .as_ref()
-            .map(|file_cache| {
-                let size = file_cache.config.calculate_cache_size(usable_system_memory);
-                match file_cache.config.in_memory {
-                    true => (size, 0),
-                    false => (size, size),
-                }
-            })
-            .unwrap_or((0, 0));
+            .map(|file_cache| file_cache.config.calculate_cache_size(usable_system_memory))
+            .unwrap_or(0);
         if let Some(cgroup) = &self.cgroup {
             let (last_time, last_history) = *cgroup.watcher.borrow();
 
@@ -273,7 +261,7 @@ impl Runner {
 
             let new_threshold = self
                 .config
-                .cgroup_threshold(usable_system_memory, expected_file_cache_disk_size);
+                .cgroup_threshold(usable_system_memory, expected_file_cache_size);
 
             let current = last_history.avg_non_reclaimable;
 
@@ -300,13 +288,10 @@ impl Runner {
                 .set_file_cache_size(expected_file_cache_size)
                 .await
                 .context("failed to set file cache size")?;
-            if !file_cache.config.in_memory {
-                file_cache_disk_size = actual_usage;
-            }
+            file_cache_disk_size = actual_usage;
             let message = format!(
-                "set file cache size to {} MiB (in memory = {})",
+                "set file cache size to {} MiB",
                 bytes_to_mebibytes(actual_usage),
-                file_cache.config.in_memory,
             );
             info!("downscale: {message}");
             status.push(message);
@@ -357,9 +342,7 @@ impl Runner {
                 .set_file_cache_size(expected_usage)
                 .await
                 .context("failed to set file cache size")?;
-            if !file_cache.config.in_memory {
-                file_cache_disk_size = actual_usage;
-            }
+            file_cache_disk_size = actual_usage;
 
             if actual_usage != expected_usage {
                 warn!(
