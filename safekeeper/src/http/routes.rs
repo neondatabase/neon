@@ -61,7 +61,6 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
 
 /// Same as TermLsn, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[serde_as]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TermSwitchApiEntry {
     pub term: Term,

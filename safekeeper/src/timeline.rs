@@ -47,9 +47,7 @@ pub struct PeerInfo {
     /// Term of the last entry.
     pub last_log_term: Term,
     /// LSN of the last record.
-    #[serde_as(as = "DisplayFromStr")]
     pub flush_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub commit_lsn: Lsn,
     /// Since which LSN safekeeper has WAL. TODO: remove this once we fill new
     /// sk since backup_lsn.
