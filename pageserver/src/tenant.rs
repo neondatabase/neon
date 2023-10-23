@@ -754,7 +754,6 @@ impl Tenant {
 
         let mut timelines_to_resume_deletions = vec![];
 
-        // Wait for all the download tasks to complete & collect results.
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
