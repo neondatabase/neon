@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
 use utils::logging::{self, LogFormat};
+use utils::signals::{ShutdownSignals, Signal};
 
 use utils::{
     http::{
@@ -268,7 +269,16 @@ async fn main() -> anyhow::Result<()> {
     let server = hyper::Server::from_tcp(http_listener)?.serve(service);
 
     tracing::info!("Serving on {0}", args.listen);
-    server.await?;
+
+    tokio::task::spawn(server);
+
+    ShutdownSignals::handle(|signal| match signal {
+        Signal::Interrupt | Signal::Terminate | Signal::Quit => {
+            tracing::info!("Got {}. Terminating", signal.name());
+            // We're just a test helper: no graceful shutdown.
+            std::process::exit(0);
+        }
+    })?;
 
     Ok(())
 }
