@@ -504,9 +504,9 @@ async fn get_lsn_by_timestamp_handler(
         #[derive(serde::Serialize)]
         struct Result {
             lsn: String,
-            r#type: &'static str,
+            kind: &'static str,
         }
-        let (lsn, type_) = match result {
+        let (lsn, kind) = match result {
             LsnForTimestamp::Present(lsn) => (lsn, "present"),
             LsnForTimestamp::Future(lsn) => (lsn, "future"),
             LsnForTimestamp::Past(lsn) => (lsn, "past"),
@@ -516,7 +516,7 @@ async fn get_lsn_by_timestamp_handler(
             StatusCode::OK,
             Result {
                 lsn: lsn.to_string(),
-                r#type: type_,
+                kind: kind,
             },
         )
     } else {

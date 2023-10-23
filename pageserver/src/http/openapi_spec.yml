@@ -1393,12 +1393,12 @@ components:
       type: object
       required:
         - lsn
-        - type
+        - kind
       properties:
         lsn:
           type: string
           format: hex
-        type:
+        kind:
           type: string
 
     Error:
