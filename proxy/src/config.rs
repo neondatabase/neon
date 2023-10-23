@@ -14,6 +14,7 @@ pub struct ProxyConfig {
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
+    pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
 }
 
@@ -30,6 +31,10 @@ pub struct TlsConfig {
 
 pub struct HttpConfig {
     pub sql_over_http_timeout: tokio::time::Duration,
+}
+
+pub struct AuthenticationConfig {
+    pub scram_protocol_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
