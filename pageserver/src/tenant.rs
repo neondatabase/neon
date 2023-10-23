@@ -742,6 +742,7 @@ impl Tenant {
             Some(p) => p,
             None => {
                 // Deprecated dev mode: load from local disk state instead of remote storage
+                // https://github.com/neondatabase/neon/issues/5624
                 return self.load_local(init_order, ctx).await;
             }
         };
