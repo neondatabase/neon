@@ -628,7 +628,6 @@ pub(crate) async fn create_tenant(
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
-
         let location_conf = LocationConf::attached_single(tenant_conf, generation);
 
         // We're holding the tenants lock in write mode while doing local IO.
@@ -639,18 +638,28 @@ pub(crate) async fn create_tenant(
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let created_tenant = Tenant::spawn(conf, tenant_id, resources,
-        AttachedTenantConf::try_from(location_conf)?, None, &TENANTS, SpawnMode::Create, ctx)?;
+        let created_tenant = Tenant::spawn(
+            conf,
+            tenant_id,
+            resources,
+            AttachedTenantConf::try_from(location_conf)?,
+            None,
+            &TENANTS,
+            SpawnMode::Create,
+            ctx,
+        )?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
         let crated_tenant_id = created_tenant.tenant_id();
         anyhow::ensure!(
-                tenant_id == crated_tenant_id,
-                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
-            );
+            tenant_id == crated_tenant_id,
+            "loaded created tenant has unexpected tenant id \
+                (expect {tenant_id} != actual {crated_tenant_id})",
+        );
         Ok(created_tenant)
-    }).await
+    })
+    .await
 }
 
 #[derive(Debug, thiserror::Error)]
