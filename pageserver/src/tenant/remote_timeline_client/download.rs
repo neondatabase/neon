@@ -18,7 +18,7 @@ use crate::config::PageServerConf;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::Generation;
+use crate::tenant::{Generation, TENANT_DELETED_MARKER_FILE_NAME};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
@@ -190,6 +190,12 @@ pub async fn list_remote_timelines(
     let mut timeline_ids = HashSet::new();
 
     for timeline_remote_storage_key in timelines {
+        if timeline_remote_storage_key.object_name() == Some(TENANT_DELETED_MARKER_FILE_NAME) {
+            // A `deleted` key within `timelines/` is a marker file, not a timeline.  Ignore it.
+            // This code will be removed in https://github.com/neondatabase/neon/pull/5580
+            continue;
+        }
+
         let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
