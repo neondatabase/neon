@@ -5,7 +5,7 @@ use crate::{
     auth::{self, backend::AuthSuccess},
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
-    config::{ProxyConfig, TlsConfig},
+    config::{AuthenticationConfig, ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     metrics::{Ids, USAGE_METRICS},
@@ -96,7 +96,9 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "proxy_compute_connection_latency_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        &["protocol", "cache_miss", "pool_miss"],
+        // http/ws/tcp, true/false, true/false, success/failure
+        // 3 * 2 * 2 * 2 = 24 counters
+        &["protocol", "cache_miss", "pool_miss", "outcome"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
     )
@@ -105,19 +107,22 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
 
 pub struct LatencyTimer {
     start: Instant,
-    pool_miss: bool,
-    cache_miss: bool,
     protocol: &'static str,
+    cache_miss: bool,
+    pool_miss: bool,
+    outcome: &'static str,
 }
 
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
             start: Instant::now(),
+            protocol,
             cache_miss: false,
             // by default we don't do pooling
             pool_miss: true,
-            protocol,
+            // assume failed unless otherwise specified
+            outcome: "failed",
         }
     }
 
@@ -127,6 +132,10 @@ impl LatencyTimer {
 
     pub fn pool_hit(&mut self) {
         self.pool_miss = false;
+    }
+
+    pub fn success(mut self) {
+        self.outcome = "success";
     }
 }
 
@@ -138,6 +147,7 @@ impl Drop for LatencyTimer {
                 self.protocol,
                 bool_to_str(self.cache_miss),
                 bool_to_str(self.pool_miss),
+                self.outcome,
             ])
             .observe(duration)
     }
@@ -340,7 +350,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         mode.allow_self_signed_compute(config),
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, mode))
+        .with_session(|session| client.connect_to_db(session, mode, &config.authentication_config))
         .await
 }
 
@@ -547,7 +557,10 @@ where
 
     // try once
     let (config, err) = match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
-        Ok(res) => return Ok(res),
+        Ok(res) => {
+            latency_timer.success();
+            return Ok(res);
+        }
         Err(e) => {
             error!(error = ?e, "could not connect to compute node");
             (invalidate_cache(node_info), e)
@@ -601,7 +614,10 @@ where
     info!("wake_compute success. attempting to connect");
     loop {
         match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
-            Ok(res) => return Ok(res),
+            Ok(res) => {
+                latency_timer.success();
+                return Ok(res);
+            }
             Err(e) => {
                 let retriable = e.should_retry(num_retries);
                 if !retriable {
@@ -818,6 +834,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         self,
         session: cancellation::Session<'_>,
         mode: ClientMode,
+        config: &'static AuthenticationConfig,
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
@@ -835,7 +852,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         let latency_timer = LatencyTimer::new(mode.protocol_label());
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, mode.allow_cleartext())
+            .authenticate(&extra, &mut stream, mode.allow_cleartext(), config)
             .await
         {
             Ok(auth_result) => auth_result,
