@@ -8,6 +8,9 @@
 #include "replication/walreceiver.h"
 #include "utils/uuid.h"
 
+#include "libpqwalproposer.h"
+#include "neon_walreader.h"
+
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 
@@ -20,42 +23,8 @@
  */
 #define WL_NO_EVENTS 0
 
-struct WalProposerConn;			/* Defined in implementation (walprop_pg.c) */
+struct WalProposerConn;			/* Defined in libpqwalproposer.h */
 typedef struct WalProposerConn WalProposerConn;
-
-/* Possible return values from ReadPGAsync */
-typedef enum
-{
-	/* The full read was successful. buf now points to the data */
-	PG_ASYNC_READ_SUCCESS,
-
-	/*
-	 * The read is ongoing. Wait until the connection is read-ready, then try
-	 * again.
-	 */
-	PG_ASYNC_READ_TRY_AGAIN,
-	/* Reading failed. Check PQerrorMessage(conn) */
-	PG_ASYNC_READ_FAIL,
-} PGAsyncReadResult;
-
-/* Possible return values from WritePGAsync */
-typedef enum
-{
-	/* The write fully completed */
-	PG_ASYNC_WRITE_SUCCESS,
-
-	/*
-	 * The write started, but you'll need to call PQflush some more times to
-	 * finish it off. We just tried, so it's best to wait until the connection
-	 * is read- or write-ready to try again.
-	 *
-	 * If it becomes read-ready, call PQconsumeInput and flush again. If it
-	 * becomes write-ready, just call PQflush.
-	 */
-	PG_ASYNC_WRITE_TRY_FLUSH,
-	/* Writing failed. Check PQerrorMessage(conn) */
-	PG_ASYNC_WRITE_FAIL,
-} PGAsyncWriteResult;
 
 /*
  * WAL safekeeper state, which is used to wait for some event.
@@ -132,6 +101,40 @@ typedef enum
 	 */
 	SS_ACTIVE,
 } SafekeeperState;
+
+/*
+ * Sending WAL substates of SS_ACTIVE.
+ */
+typedef enum
+{
+	/*
+	 * We are ready to send more WAL, waiting for latch set to learn about
+	 * more WAL becoming available (or just a timeout to send heartbeat).
+	 */
+	SS_ACTIVE_SEND,
+
+	/*
+	 * Polling neon_walreader to receive chunk of WAL (probably remotely) to
+	 * send to this safekeeper.
+	 *
+	 * Note: socket management is done completely inside walproposer_pg for
+	 * simplicity, and thus simulation doesn't test it. Which is fine as
+	 * simulation is mainly aimed at consensus checks, not waiteventset
+	 * management.
+	 *
+	 * Also, while in this state we don't touch safekeeper socket, so in
+	 * theory it might close connection as inactive. This can be addressed if
+	 * needed; however, while fetching WAL we should regularly send it, so the
+	 * problem is unlikely. Vice versa is also true (SS_ACTIVE doesn't handle
+	 * walreader socket), but similarly shouldn't be a problem.
+	 */
+	SS_ACTIVE_READ_WAL,
+
+	/*
+	 * Waiting for write readiness to flush the socket.
+	 */
+	SS_ACTIVE_FLUSH,
+} SafekeeperActiveState;
 
 /* Consensus logical timestamp. */
 typedef uint64 term_t;
@@ -341,12 +344,11 @@ typedef struct Safekeeper
 	 */
 	XLogRecPtr	startStreamingAt;
 
-	bool		flushWrite;		/* set to true if we need to call AsyncFlush,*
-								 * to flush pending messages */
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
 	SafekeeperState state;		/* safekeeper state machine state */
+	SafekeeperActiveState active_state;
 	TimestampTz latestMsgReceivedAt;	/* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
@@ -367,12 +369,17 @@ typedef struct Safekeeper
 	/*
 	 * WAL reader, allocated for each safekeeper.
 	 */
-	XLogReaderState *xlogreader;
+	NeonWALReader *xlogreader;
 
 	/*
 	 * Position in wait event set. Equal to -1 if no event
 	 */
 	int			eventPos;
+
+	/*
+	 * Neon WAL reader position in wait event set, or -1 if no socket.
+	 */
+	int			nwrEventPos;
 #endif
 
 
@@ -400,31 +407,6 @@ typedef enum
 	 * We've removed it here to avoid clutter.
 	 */
 } WalProposerConnectPollStatusType;
-
-/* Re-exported and modified ExecStatusType */
-typedef enum
-{
-	/* We received a single CopyBoth result */
-	WP_EXEC_SUCCESS_COPYBOTH,
-
-	/*
-	 * Any success result other than a single CopyBoth was received. The
-	 * specifics of the result were already logged, but it may be useful to
-	 * provide an error message indicating which safekeeper messed up.
-	 *
-	 * Do not expect PQerrorMessage to be appropriately set.
-	 */
-	WP_EXEC_UNEXPECTED_SUCCESS,
-
-	/*
-	 * No result available at this time. Wait until read-ready, then call
-	 * again. Internally, this is returned when PQisBusy indicates that
-	 * PQgetResult would block.
-	 */
-	WP_EXEC_NEEDS_INPUT,
-	/* Catch-all failure. Check PQerrorMessage. */
-	WP_EXEC_FAILED,
-} WalProposerExecStatusType;
 
 /* Re-exported ConnStatusType */
 typedef enum
@@ -486,7 +468,7 @@ typedef struct walproposer_api
 	/* Flush buffer to the network, aka PQflush. */
 	int			(*conn_flush) (Safekeeper *sk);
 
-	/* Close the connection, aka PQfinish. */
+	/* Reset sk state: close pq connection, deallocate xlogreader. */
 	void		(*conn_finish) (Safekeeper *sk);
 
 	/*
@@ -506,14 +488,14 @@ typedef struct walproposer_api
 	/* Download WAL from startpos to endpos and make it available locally. */
 	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 
-	/* Read WAL from disk to buf. */
-	void		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
-
 	/* Allocate WAL reader. */
 	void		(*wal_reader_allocate) (Safekeeper *sk);
 
-	/* Deallocate event set. */
-	void		(*free_event_set) (WalProposer *wp);
+	/* Read WAL from disk to buf. */
+	NeonWALReadResult (*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count, char **errmsg);
+
+	/* Returns events to be awaited on WAL reader, if any. */
+	uint32		(*wal_reader_events) (Safekeeper *sk);
 
 	/* Initialize event set. */
 	void		(*init_event_set) (WalProposer *wp);
@@ -521,8 +503,14 @@ typedef struct walproposer_api
 	/* Update events for an existing safekeeper connection. */
 	void		(*update_event_set) (Safekeeper *sk, uint32 events);
 
+	/* Configure wait event set for yield in SS_ACTIVE. */
+	void		(*active_state_update_event_set) (Safekeeper *sk);
+
 	/* Add a new safekeeper connection to the event set. */
 	void		(*add_safekeeper_event_set) (Safekeeper *sk, uint32 events);
+
+	/* Remove safekeeper connection from event set */
+	void		(*rm_safekeeper_event_set) (Safekeeper *sk);
 
 	/*
 	 * Wait until some event happens: - timeout is reached - socket event for
@@ -708,6 +696,13 @@ extern void WalProposerStart(WalProposer *wp);
 extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
+
+/*
+ * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to
+ * recreate set from scratch, hence the export.
+ */
+extern void SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_events);
+extern Safekeeper *GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn);
 
 
 #define WPEVENT		1337		/* special log level for walproposer internal
