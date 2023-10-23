@@ -194,9 +194,10 @@ impl GlobalConnPool {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
                 connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
             } else {
-                latency_timer.pool_hit();
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
+                latency_timer.pool_hit();
+                latency_timer.success();
                 return Ok(Client {
                     inner: Some(client),
                     span: Span::current(),
