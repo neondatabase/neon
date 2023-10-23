@@ -184,12 +184,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         prefix: Option<&RemotePath>,
         _mode: ListingMode,
-    ) -> anyhow::Result<Listing, DownloadError>; /* {
-                                                     // XXX Placeholder impl.
-                                                     let mut result = Listing::default();
-                                                     result.prefixes = self.list_prefixes(prefix).await?;
-                                                     Ok(result)
-                                                 }*/
+    ) -> anyhow::Result<Listing, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
