@@ -314,6 +314,7 @@ impl PostgresRedoManager {
                 drop(proc);
                 wait_done
                     .wait_for(|v| *v)
+                    .await
                     .expect("we use scopeguard to ensure we always send `true` to the channel before dropping the sender");
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
