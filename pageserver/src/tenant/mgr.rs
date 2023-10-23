@@ -332,12 +332,7 @@ async fn init_load_tenant_configs(
             .read_dir_utf8()
             .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
 
-        let mut result = Vec::with_capacity(dir_entries.size_hint().0);
-        for dentry in dir_entries {
-            result.push(dentry?);
-        }
-
-        Ok(result)
+        Ok(dir_entries.collect::<Result<Vec<_>, std::io::Error>>()?)
     })
     .await??;
 
@@ -349,10 +344,9 @@ async fn init_load_tenant_configs(
     }
 
     while let Some(r) = join_set.join_next().await {
-        match r?? {
-            Some((tenant_id, tenant_config)) => configs.insert(tenant_id, tenant_config),
-            None => None,
-        };
+        if let Some((tenant_id, tenant_config)) = r?? {
+            configs.insert(tenant_id, tenant_config);
+        }
     }
 
     Ok(configs)
