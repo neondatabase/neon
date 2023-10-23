@@ -398,6 +398,11 @@ paths:
           content:
             application/json:
               schema:
+                $ref: "#/components/schemas/LsnByTimestampResponse"
+              schema:
+                type: string
+            application/json:
+              schema:
                 type: string
         "400":
           description: Error when no tenant id found in path, no timeline id or invalid timestamp
@@ -1383,6 +1388,18 @@ components:
         timeline_id:
           type: string
           format: hex
+
+    LsnByTimestampResponse:
+      type: object
+      required:
+        - lsn
+        - type
+      properties:
+        lsn:
+          type: string
+          format: hex
+        type:
+          type: string
 
     Error:
       type: object
