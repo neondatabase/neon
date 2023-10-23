@@ -416,14 +416,15 @@ pub async fn init_tenant_mgr(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
-        match schedule_local_tenant_processing(
+        match tenant_spawn(
             conf,
             tenant_id,
             &tenant_dir_path,
-            AttachedTenantConf::try_from(location_conf)?,
             resources.clone(),
+            AttachedTenantConf::try_from(location_conf)?,
             Some(init_order.clone()),
             &TENANTS,
+            SpawnMode::Normal,
             &ctx,
         ) {
             Ok(tenant) => {
@@ -443,15 +444,18 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
+/// Wrapper for Tenant::spawn that checks invariants before running, and inserts
+/// a broken tenant in the map if Tenant::spawn fails.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn schedule_local_tenant_processing(
+pub(crate) fn tenant_spawn(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_path: &Utf8Path,
-    location_conf: AttachedTenantConf,
     resources: TenantSharedResources,
+    location_conf: AttachedTenantConf,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
+    mode: SpawnMode,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -483,7 +487,7 @@ pub(crate) fn schedule_local_tenant_processing(
         location_conf,
         init_order,
         tenants,
-        SpawnMode::Normal,
+        mode,
         ctx,
     ) {
         Ok(tenant) => tenant,
@@ -638,9 +642,12 @@ pub(crate) async fn create_tenant(
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let created_tenant = Tenant::spawn(
+        let tenant_path = conf.tenant_path(&tenant_id);
+
+        let created_tenant = tenant_spawn(
             conf,
             tenant_id,
+            &tenant_path,
             resources,
             AttachedTenantConf::try_from(location_conf)?,
             None,
@@ -768,9 +775,10 @@ pub(crate) async fn upsert_location(
                 }
             }
 
+            let tenant_path = conf.tenant_path(&tenant_id);
+
             let new_slot = match &new_location_config.mode {
                 LocationMode::Secondary(_) => {
-                    let tenant_path = conf.tenant_path(&tenant_id);
                     // Directory doesn't need to be fsync'd because if we crash it can
                     // safely be recreated next time this tenant location is configured.
                     unsafe_create_dir_all(&tenant_path)
@@ -800,9 +808,10 @@ pub(crate) async fn upsert_location(
                         .await
                         .map_err(SetNewTenantConfigError::Persist)?;
 
-                    let tenant = match Tenant::spawn(
+                    let tenant = tenant_spawn(
                         conf,
                         tenant_id,
+                        &tenant_path,
                         TenantSharedResources {
                             broker_client,
                             remote_storage,
@@ -813,13 +822,7 @@ pub(crate) async fn upsert_location(
                         &TENANTS,
                         SpawnMode::Normal,
                         ctx,
-                    ) {
-                        Ok(tenant) => tenant,
-                        Err(e) => {
-                            error!("Failed to spawn tenant {tenant_id}, reason: {e:#}");
-                            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                        }
-                    };
+                    )?;
 
                     TenantSlot::Attached(tenant)
                 }
@@ -1008,7 +1011,7 @@ pub(crate) async fn load_tenant(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
-        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, AttachedTenantConf::try_from(location_conf)?, resources, None,  &TENANTS, ctx)
+        let new_tenant = tenant_spawn(conf, tenant_id, &tenant_path, resources, AttachedTenantConf::try_from(location_conf)?, None,  &TENANTS, SpawnMode::Normal, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -1086,7 +1089,8 @@ pub(crate) async fn attach_tenant(
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
+        let attached_tenant = tenant_spawn(conf, tenant_id, &tenant_dir,
+            resources, AttachedTenantConf::try_from(location_conf)?, None, &TENANTS, SpawnMode::Normal, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
