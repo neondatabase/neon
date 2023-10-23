@@ -764,7 +764,7 @@ impl Tenant {
 
             let index_part = match preload.index_part {
                 Ok(i) => {
-                    debug!("successfully downloaded index part for timeline {timeline_id}");
+                    debug!("remote index part exists for timeline {timeline_id}");
                     i
                 }
                 Err(e) => {
