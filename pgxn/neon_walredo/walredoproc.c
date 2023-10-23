@@ -327,9 +327,8 @@ WalRedoMain(int argc, char *argv[])
 		elog(PANIC, "log_min_messages got reset to %d, client_min_messages to %d");
 	}
 
-	SetConfigOption("log_min_messages", "warning", PGC_SUSET, PGC_S_OVERRIDE);
-	SetConfigOption("client_min_messages", "warning", PGC_SUSET,
-					PGC_S_OVERRIDE);
+	SetConfigOption("log_min_messages", "error", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("client_min_messages", "error", PGC_SUSET, PGC_S_OVERRIDE);
 
 	for (;;)
 	{
