@@ -17,6 +17,7 @@ use pageserver_api::models::{
     TenantLoadRequest, TenantLocationConfigRequest,
 };
 use remote_storage::GenericRemoteStorage;
+use serde_with::{serde_as, DisplayFromStr};
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -501,9 +502,11 @@ async fn get_lsn_by_timestamp_handler(
         .map(|v| v == "application/json")
         .unwrap_or_default()
     {
+        #[serde_as]
         #[derive(serde::Serialize)]
         struct Result {
-            lsn: String,
+            #[serde_as(as = "DisplayFromStr")]
+            lsn: Lsn,
             kind: &'static str,
         }
         let (lsn, kind) = match result {
@@ -512,13 +515,7 @@ async fn get_lsn_by_timestamp_handler(
             LsnForTimestamp::Past(lsn) => (lsn, "past"),
             LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
         };
-        json_response(
-            StatusCode::OK,
-            Result {
-                lsn: lsn.to_string(),
-                kind,
-            },
-        )
+        json_response(StatusCode::OK, Result { lsn, kind })
     } else {
         let result = match result {
             LsnForTimestamp::Present(lsn) => format!("{lsn}"),
