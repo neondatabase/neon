@@ -516,7 +516,7 @@ async fn get_lsn_by_timestamp_handler(
             StatusCode::OK,
             Result {
                 lsn: lsn.to_string(),
-                kind: kind,
+                kind,
             },
         )
     } else {
