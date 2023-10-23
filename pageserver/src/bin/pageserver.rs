@@ -259,11 +259,11 @@ fn start_pageserver(
     // A changed version string indicates changed software.
     // A changed launch timestamp indicates a pageserver restart.
     info!(
-        "version: {} launch_timestamp: {}",
+        "version: {} launch_timestamp: {} build_tag: {}",
         version(),
-        launch_ts.to_string()
+        launch_ts.to_string(),
+        BUILD_TAG,
     );
-    info!("build_tag: {BUILD_TAG}");
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
     pageserver::preinitialize_metrics();
