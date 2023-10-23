@@ -1,4 +1,4 @@
-[![Neon](https://github.com/neondatabase/neon/assets/10074684/6268f966-4b70-4f92-b694-8aca60f8abd7)(https://neon.tech)
+[![Neon](https://github.com/neondatabase/neon/assets/10074684/6268f966-4b70-4f92-b694-8aca60f8abd7)](https://neon.tech)
 
 # Neon
 
