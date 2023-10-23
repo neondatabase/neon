@@ -156,10 +156,19 @@ impl RemoteStorage for LocalFs {
         let mut result = Listing::default();
 
         if let ListingMode::NoDelimiter = mode {
-            result.keys = self
+            let keys = self
                 .list_recursive(prefix)
                 .await
                 .map_err(DownloadError::Other)?;
+
+            result.keys = keys
+                .into_iter()
+                .filter(|k| {
+                    let path = k.with_base(&self.storage_root);
+                    !path.is_dir()
+                })
+                .collect();
+
             return Ok(result);
         }
 
@@ -193,7 +202,7 @@ impl RemoteStorage for LocalFs {
             if prefix.is_dir() {
                 result.prefixes.push(stripped);
             } else {
-                result.keys.push(stripped)
+                result.keys.push(stripped);
             }
         }
 
@@ -734,6 +743,43 @@ mod fs_tests {
             Some(metadata),
             "We should get the same metadata back for partial download"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list() -> anyhow::Result<()> {
+        // No delimiter: should recursively list everything
+        let storage = create_storage()?;
+        let child = upload_dummy_file(&storage, "grandparent/parent/child", None).await?;
+        let uncle = upload_dummy_file(&storage, "grandparent/uncle", None).await?;
+
+        let listing = storage.list(None, ListingMode::NoDelimiter).await?;
+        assert!(listing.prefixes.is_empty());
+        assert_eq!(listing.keys, [uncle.clone(), child.clone()].to_vec());
+
+        // Delimiter: should only go one deep
+        let listing = storage.list(None, ListingMode::WithDelimiter).await?;
+
+        assert_eq!(
+            listing.prefixes,
+            [RemotePath::from_string("timelines").unwrap()].to_vec()
+        );
+        assert!(listing.keys.is_empty());
+
+        // Delimiter & prefix
+        let listing = storage
+            .list(
+                Some(&RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()),
+                ListingMode::WithDelimiter,
+            )
+            .await?;
+        assert_eq!(
+            listing.prefixes,
+            [RemotePath::from_string("timelines/some_timeline/grandparent/parent").unwrap()]
+                .to_vec()
+        );
+        assert_eq!(listing.keys, [uncle.clone()].to_vec());
 
         Ok(())
     }
