@@ -203,11 +203,11 @@ WalRedoMain(int argc, char *argv[])
 	am_wal_redo_postgres = true;
 	/*
 	 * Pageserver treats any output to stderr as an ERROR, so we must
-	 * log only configuration issues during startup. I.e. log WARNINGS
-	 * and above during process startup.
- 	 */
-	log_min_messages = PGWARNING;
-	client_min_messages = PGWARNING;
+	 * set the log level as early as possible to only log ERROR and 
+	 * above during WAL redo.
+	 */
+	SetConfigOption("log_min_messages", "warning", PGC_USERSET, PGC_S_FILE);
+	SetConfigOption("client_min_messages", "warning", PGC_USERSET, PGC_S_FILE);
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
@@ -321,12 +321,13 @@ WalRedoMain(int argc, char *argv[])
 	MyBackendType = B_BACKEND;
 #endif
 
-	/*
-	 * Pageserver treats any output to stderr as an ERROR, so to prevent issues
-	 * during wal redo we limit the output to ERROR and up exclusively.
-	 */
-	log_min_messages = PGERROR;
-	client_min_messages = PGERROR;
+	if (!(log_min_messages == WARNING && client_min_messages == WARNING))
+	{
+		elog(PANIC, "log_min_messages got reset to %d, client_min_messages to %d");
+	}
+
+	SetConfigOption("log_min_messages", "warning", PGC_USERSET, PGC_S_ARGV);
+	SetConfigOption("client_min_messages", "warning", PGC_USERSET, PGC_S_ARGV);
 
 	for (;;)
 	{
