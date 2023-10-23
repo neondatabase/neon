@@ -499,7 +499,7 @@ async fn get_lsn_by_timestamp_handler(
     if request
         .headers()
         .get(header::ACCEPT)
-        .map(|v| v == "application/json")
+        .map(|v| v == "application/vnd.neon-v2+json")
         .unwrap_or_default()
     {
         #[serde_as]

@@ -396,7 +396,7 @@ paths:
         "200":
           description: OK
           content:
-            application/json:
+            application/vnd.neon-v2+json:
               schema:
                 $ref: "#/components/schemas/LsnByTimestampResponse"
             application/json:
