@@ -1705,7 +1705,6 @@ class NeonPageserver(PgProtocol):
         def complete():
             log.info("Checking tenants...")
             tenants = client.tenant_list()
-            tenants = client.tenant_list()
             log.info(f"Tenant list: {tenants}...")
             any_unstable = any((t["state"]["slug"] not in stable_states) for t in tenants)
             if any_unstable:
