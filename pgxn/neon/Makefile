@@ -9,6 +9,7 @@ OBJS = \
 	libpagestore.o \
 	neon.o \
 	neon_utils.o \
+	neon_walreader.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \
