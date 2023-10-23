@@ -332,7 +332,7 @@ async fn init_load_tenant_configs(
             .read_dir_utf8()
             .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
 
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(dir_entries.size_hint().0);
         for dentry in dir_entries {
             result.push(dentry?);
         }
