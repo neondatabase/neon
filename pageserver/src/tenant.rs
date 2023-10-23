@@ -701,11 +701,18 @@ impl Tenant {
             cancel.clone(),
         )
         .await?;
-        info!("found {} timelines", remote_timeline_ids.len());
 
         let deleting = other_keys.contains(TENANT_DELETED_MARKER_FILE_NAME);
+        info!(
+            "found {} timelines, deleting={}",
+            remote_timeline_ids.len(),
+            deleting
+        );
+
         for k in other_keys {
-            info!("found non timeline key {k}");
+            if k != TENANT_DELETED_MARKER_FILE_NAME {
+                warn!("Unexpected non timeline key {k}");
+            }
         }
 
         Ok(TenantPreload {
