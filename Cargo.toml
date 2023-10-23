@@ -26,6 +26,7 @@ members = [
     "libs/tracing-utils",
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
+    "libs/walproposer",
 ]
 
 [workspace.package]
@@ -36,6 +37,10 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
 async-compression = { version = "0.4.0", features = ["tokio", "gzip"] }
+azure_core = "0.16"
+azure_identity = "0.16"
+azure_storage = "0.16"
+azure_storage_blobs = "0.16"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
@@ -76,6 +81,7 @@ hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
 hostname = "0.3.1"
+http-types = "2"
 humantime = "2.1"
 humantime-serde = "1.1.1"
 hyper = "0.14"
@@ -155,11 +161,11 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="7434d9388965a17a6d113e5dfc0e65666a03b4c2" }
+postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="7434d9388965a17a6d113e5dfc0e65666a03b4c2" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="7434d9388965a17a6d113e5dfc0e65666a03b4c2" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="7434d9388965a17a6d113e5dfc0e65666a03b4c2" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="7434d9388965a17a6d113e5dfc0e65666a03b4c2" }
 
 ## Other git libraries
 heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
@@ -180,6 +186,7 @@ tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
+walproposer = { version = "0.1", path = "./libs/walproposer/" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
@@ -195,7 +202,7 @@ tonic-build = "0.9"
 
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="7434d9388965a17a6d113e5dfc0e65666a03b4c2" }
 
 ################# Binary contents sections
 

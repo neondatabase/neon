@@ -104,6 +104,22 @@ def generate_uploads_and_deletions(
         assert gc_result["layers_removed"] > 0
 
 
+def read_all(
+    env: NeonEnv, tenant_id: Optional[TenantId] = None, timeline_id: Optional[TimelineId] = None
+):
+    if tenant_id is None:
+        tenant_id = env.initial_tenant
+    assert tenant_id is not None
+
+    if timeline_id is None:
+        timeline_id = env.initial_timeline
+    assert timeline_id is not None
+
+    env.pageserver.http_client()
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        endpoint.safe_psql("SELECT SUM(LENGTH(val)) FROM foo;")
+
+
 def get_metric_or_0(ps_http, metric: str) -> int:
     v = ps_http.get_metric_value(metric)
     return 0 if v is None else int(v)
@@ -467,3 +483,48 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     assert get_deletion_queue_depth(ps_http) == 0
     assert get_deletion_queue_validated(ps_http) > 0
     assert get_deletion_queue_executed(ps_http) > 0
+
+
+def evict_all_layers(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
+    initial_local_layers = sorted(
+        list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
+    )
+    client = env.pageserver.http_client()
+    for layer in initial_local_layers:
+        if "ephemeral" in layer.name or "temp" in layer.name:
+            continue
+        log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.name}")
+        client.evict_layer(tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.name)
+
+
+def test_eviction_across_generations(neon_env_builder: NeonEnvBuilder):
+    """
+    Eviction and on-demand downloads exercise a particular code path where RemoteLayer is constructed
+    and must be constructed using the proper generation for the layer, which may not be the same generation
+    that the tenant is running in.
+    """
+    neon_env_builder.enable_generations = True
+    neon_env_builder.enable_pageserver_remote_storage(
+        RemoteStorageKind.MOCK_S3,
+    )
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    env.pageserver.http_client()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    generate_uploads_and_deletions(env)
+
+    read_all(env, tenant_id, timeline_id)
+    evict_all_layers(env, tenant_id, timeline_id)
+    read_all(env, tenant_id, timeline_id)
+
+    # This will cause the generation to increment
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    # Now we are running as generation 2, but must still correctly remember that the layers
+    # we are evicting and downloading are from generation 1.
+    read_all(env, tenant_id, timeline_id)
+    evict_all_layers(env, tenant_id, timeline_id)
+    read_all(env, tenant_id, timeline_id)

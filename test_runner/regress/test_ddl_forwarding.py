@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import VanillaPostgres
+from fixtures.neon_fixtures import NeonEnv, VanillaPostgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -205,6 +205,10 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     ddl.wait()
     assert ddl.dbs == {"stork": "cork"}
 
+    cur.execute("DROP DATABASE stork")
+    ddl.wait()
+    assert ddl.dbs == {}
+
     with pytest.raises(psycopg2.InternalError):
         ddl.failures(True)
         cur.execute("CREATE DATABASE failure WITH OWNER=cork")
@@ -217,6 +221,94 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
         ddl.failures(True)
         cur.execute("DROP DATABASE failure")
         ddl.wait()
-    ddl.pg.connect(dbname="failure")  # Ensure we can connect after a failed drop
+    assert ddl.dbs == {"failure": "cork"}
+    ddl.failures(False)
+
+    # Check that db is still in the Postgres after failure
+    cur.execute("SELECT datconnlimit FROM pg_database WHERE datname = 'failure'")
+    result = cur.fetchone()
+    if not result:
+        raise AssertionError("Database 'failure' not found")
+    # -2 means invalid database
+    # It should be invalid because cplane request failed
+    assert result[0] == -2, "Database 'failure' is not invalid"
+
+    # Check that repeated drop succeeds
+    cur.execute("DROP DATABASE failure")
+    ddl.wait()
+    assert ddl.dbs == {}
+
+    # DB should be absent in the Postgres
+    cur.execute("SELECT count(*) FROM pg_database WHERE datname = 'failure'")
+    result = cur.fetchone()
+    if not result:
+        raise AssertionError("Could not count databases")
+    assert result[0] == 0, "Database 'failure' still exists after drop"
 
     conn.close()
+
+
+# Assert that specified database has a specific connlimit, throwing an AssertionError otherwise
+# -2 means invalid database
+# -1 means no specific per-db limit (default)
+def assert_db_connlimit(endpoint: Any, db_name: str, connlimit: int, msg: str):
+    with endpoint.cursor() as cur:
+        cur.execute("SELECT datconnlimit FROM pg_database WHERE datname = %s", (db_name,))
+        result = cur.fetchone()
+        if not result:
+            raise AssertionError(f"Database '{db_name}' not found")
+        assert result[0] == connlimit, msg
+
+
+# Test that compute_ctl can deal with invalid databases (drop them).
+# If Postgres extension cannot reach cplane, then DROP will be aborted
+# and database will be marked as invalid. Then there are two recovery
+# flows:
+# 1. User can just repeat DROP DATABASE command until it succeeds
+# 2. User can ignore, then compute_ctl will drop invalid databases
+#    automatically during full configuration
+# Here we test the latter. The first one is tested in test_ddl_forwarding
+def test_ddl_forwarding_invalid_db(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_ddl_forwarding_invalid_db", "empty")
+    endpoint = env.endpoints.create_start(
+        "test_ddl_forwarding_invalid_db",
+        # Some non-existent url
+        config_lines=["neon.console_url=http://localhost:9999/unknown/api/v0/roles_and_databases"],
+    )
+    log.info("postgres is running on 'test_ddl_forwarding_invalid_db' branch")
+
+    with endpoint.cursor() as cur:
+        cur.execute("SET neon.forward_ddl = false")
+        cur.execute("CREATE DATABASE failure")
+        cur.execute("COMMIT")
+
+    assert_db_connlimit(
+        endpoint, "failure", -1, "Database 'failure' doesn't have a valid connlimit"
+    )
+
+    with pytest.raises(psycopg2.InternalError):
+        with endpoint.cursor() as cur:
+            cur.execute("DROP DATABASE failure")
+            cur.execute("COMMIT")
+
+    # Should be invalid after failed drop
+    assert_db_connlimit(endpoint, "failure", -2, "Database 'failure' ins't invalid")
+
+    endpoint.stop()
+    endpoint.start()
+
+    # Still invalid after restart without full configuration
+    assert_db_connlimit(endpoint, "failure", -2, "Database 'failure' ins't invalid")
+
+    endpoint.stop()
+    endpoint.respec(skip_pg_catalog_updates=False)
+    endpoint.start()
+
+    # Should be cleaned up by compute_ctl during full configuration
+    with endpoint.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pg_database WHERE datname = 'failure'")
+        result = cur.fetchone()
+        if not result:
+            raise AssertionError("Could not count databases")
+        assert result[0] == 0, "Database 'failure' still exists after restart"

@@ -188,11 +188,60 @@ that.
 
 ## Error message style
 
+### PostgreSQL extensions
+
 PostgreSQL has a style guide for writing error messages:
 
 https://www.postgresql.org/docs/current/error-style-guide.html
 
 Follow that guide when writing error messages in the PostgreSQL
-extension. We don't follow it strictly in the pageserver and
-safekeeper, but the advice in the PostgreSQL style guide is generally
-good, and you can't go wrong by following it.
+extensions.
+
+### Neon Rust code
+
+#### Anyhow Context
+
+When adding anyhow `context()`, use form `present-tense-verb+action`.
+
+Example:
+- Bad: `file.metadata().context("could not get file metadata")?;`
+- Good: `file.metadata().context("get file metadata")?;`
+
+#### Logging Errors
+
+When logging any error `e`, use `could not {e:#}` or `failed to {e:#}`.
+
+If `e` is an `anyhow` error and you want to log the backtrace that it contains,
+use `{e:?}` instead of `{e:#}`.
+
+#### Rationale
+
+The `{:#}` ("alternate Display") of an `anyhow` error chain is concatenation fo the contexts, using `: `.
+
+For example, the following Rust code will result in output
+```
+ERROR  failed to list users: load users from server: parse response: invalid json
+```
+
+This is more concise / less noisy than what happens if you do `.context("could not ...")?` at each level, i.e.:
+
+```
+ERROR  could not list users: could not load users from server: could not parse response: invalid json
+```
+
+
+```rust
+fn main() {
+  match list_users().context("list users") else {
+    Ok(_) => ...,
+    Err(e) => tracing::error!("failed to {e:#}"),
+  }
+}
+fn list_users() {
+  http_get_users().context("load users from server")?;
+}
+fn http_get_users() {
+  let response = client....?;
+  response.parse().context("parse response")?; // fails with serde error "invalid json"
+}
+```

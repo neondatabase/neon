@@ -8,31 +8,34 @@ use pbkdf2::{
     Params, Pbkdf2,
 };
 use pq_proto::StartupMessageParams;
-use std::sync::atomic::{self, AtomicUsize};
 use std::{collections::HashMap, sync::Arc};
 use std::{
     fmt,
     task::{ready, Poll},
 };
+use std::{
+    ops::Deref,
+    sync::atomic::{self, AtomicUsize},
+};
 use tokio::time;
-use tokio_postgres::AsyncMessage;
+use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth, console,
     metrics::{Ids, MetricCounter, USAGE_METRICS},
-    proxy::{NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
+    proxy::{LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
 };
 use crate::{compute, config};
 
 use crate::proxy::ConnectMechanism;
 
-use tracing::{error, warn};
+use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 pub const APP_NAME: &str = "sql_over_http";
 const MAX_CONNS_PER_ENDPOINT: usize = 20;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub username: String,
     pub dbname: String,
@@ -55,7 +58,7 @@ impl fmt::Display for ConnInfo {
 }
 
 struct ConnPoolEntry {
-    conn: Client,
+    conn: ClientInner,
     _last_access: std::time::Instant,
 }
 
@@ -133,12 +136,19 @@ impl GlobalConnPool {
     }
 
     pub async fn get(
-        &self,
+        self: &Arc<Self>,
         conn_info: &ConnInfo,
         force_new: bool,
         session_id: uuid::Uuid,
     ) -> anyhow::Result<Client> {
-        let mut client: Option<Client> = None;
+        let mut client: Option<ClientInner> = None;
+        let mut latency_timer = LatencyTimer::new("http");
+
+        let pool = if force_new {
+            None
+        } else {
+            Some((conn_info.clone(), self.clone()))
+        };
 
         let mut hash_valid = false;
         if !force_new {
@@ -182,15 +192,20 @@ impl GlobalConnPool {
         let new_client = if let Some(client) = client {
             if client.inner.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(self.proxy_config, conn_info, session_id).await
+                connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
             } else {
+                latency_timer.pool_hit();
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
-                return Ok(client);
+                return Ok(Client {
+                    inner: Some(client),
+                    span: Span::current(),
+                    pool,
+                });
             }
         } else {
             info!("pool: opening a new connection '{conn_info}'");
-            connect_to_compute(self.proxy_config, conn_info, session_id).await
+            connect_to_compute(self.proxy_config, conn_info, session_id, latency_timer).await
         };
 
         match &new_client {
@@ -226,10 +241,14 @@ impl GlobalConnPool {
             _ => {}
         }
 
-        new_client
+        new_client.map(|inner| Client {
+            inner: Some(inner),
+            span: Span::current(),
+            pool,
+        })
     }
 
-    pub fn put(&self, conn_info: &ConnInfo, client: Client) -> anyhow::Result<()> {
+    fn put(&self, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
         // We want to hold this open while we return. This ensures that the pool can't close
         // while we are in the middle of returning the connection.
         let closed = self.closed.read();
@@ -324,7 +343,7 @@ struct TokioMechanism<'a> {
 
 #[async_trait]
 impl ConnectMechanism for TokioMechanism<'_> {
-    type Connection = Client;
+    type Connection = ClientInner;
     type ConnectError = tokio_postgres::Error;
     type Error = anyhow::Error;
 
@@ -347,7 +366,8 @@ async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
     session_id: uuid::Uuid,
-) -> anyhow::Result<Client> {
+    latency_timer: LatencyTimer,
+) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
 
@@ -386,6 +406,7 @@ async fn connect_to_compute(
         node_info,
         &extra,
         &creds,
+        latency_timer,
     )
     .await
 }
@@ -395,7 +416,7 @@ async fn connect_to_compute_once(
     conn_info: &ConnInfo,
     timeout: time::Duration,
     mut session: uuid::Uuid,
-) -> Result<Client, tokio_postgres::Error> {
+) -> Result<ClientInner, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
     let (client, mut connection) = config
@@ -458,21 +479,99 @@ async fn connect_to_compute_once(
         .instrument(span)
     );
 
-    Ok(Client {
+    Ok(ClientInner {
         inner: client,
         session: tx,
         ids,
     })
 }
 
-pub struct Client {
-    pub inner: tokio_postgres::Client,
+struct ClientInner {
+    inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     ids: Ids,
 }
 
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.register(self.ids.clone())
+        USAGE_METRICS.register(self.inner.as_ref().unwrap().ids.clone())
+    }
+}
+
+pub struct Client {
+    span: Span,
+    inner: Option<ClientInner>,
+    pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
+}
+
+pub struct Discard<'a> {
+    pool: &'a mut Option<(ConnInfo, Arc<GlobalConnPool>)>,
+}
+
+impl Client {
+    pub fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
+        let Self {
+            inner,
+            pool,
+            span: _,
+        } = self;
+        (
+            &mut inner
+                .as_mut()
+                .expect("client inner should not be removed")
+                .inner,
+            Discard { pool },
+        )
+    }
+
+    pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
+        self.inner().1.check_idle(status)
+    }
+    pub fn discard(&mut self) {
+        self.inner().1.discard()
+    }
+}
+
+impl Discard<'_> {
+    pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
+        if status != ReadyForQueryStatus::Idle {
+            if let Some((conn_info, _)) = self.pool.take() {
+                info!("pool: throwing away connection '{conn_info}' because connection is not idle")
+            }
+        }
+    }
+    pub fn discard(&mut self) {
+        if let Some((conn_info, _)) = self.pool.take() {
+            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
+        }
+    }
+}
+
+impl Deref for Client {
+    type Target = tokio_postgres::Client;
+
+    fn deref(&self) -> &Self::Target {
+        &self
+            .inner
+            .as_ref()
+            .expect("client inner should not be removed")
+            .inner
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let client = self
+            .inner
+            .take()
+            .expect("client inner should not be removed");
+        if let Some((conn_info, conn_pool)) = self.pool.take() {
+            let current_span = self.span.clone();
+            // return connection to the pool
+            tokio::task::spawn_blocking(move || {
+                let _span = current_span.enter();
+                let _ = conn_pool.put(&conn_info, client);
+            });
+        }
     }
 }

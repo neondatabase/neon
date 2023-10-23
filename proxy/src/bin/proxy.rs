@@ -87,6 +87,9 @@ struct ProxyCliArgs {
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
+    /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    require_client_ip: bool,
 }
 
 #[tokio::main]
@@ -241,6 +244,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
+        require_client_ip: args.require_client_ip,
     }));
 
     Ok(config)

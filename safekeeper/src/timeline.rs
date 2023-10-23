@@ -11,6 +11,7 @@ use tokio::fs;
 use serde_with::DisplayFromStr;
 use std::cmp::max;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::{
     sync::{mpsc::Sender, watch},
@@ -27,7 +28,7 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
 use crate::receive_wal::WalReceivers;
-use crate::recovery::recovery_main;
+use crate::recovery::{recovery_main, Donor, RecoveryNeededInfo};
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
     SafekeeperMemState, ServerInfo, Term, TermLsn, INVALID_TERM,
@@ -45,11 +46,12 @@ use crate::{debug_dump, wal_storage};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub sk_id: NodeId,
+    pub term: Term,
     /// Term of the last entry.
-    _last_log_term: Term,
+    pub last_log_term: Term,
     /// LSN of the last record.
     #[serde_as(as = "DisplayFromStr")]
-    _flush_lsn: Lsn,
+    pub flush_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub commit_lsn: Lsn,
     /// Since which LSN safekeeper has WAL. TODO: remove this once we fill new
@@ -61,16 +63,21 @@ pub struct PeerInfo {
     #[serde(skip)]
     #[serde(default = "Instant::now")]
     ts: Instant,
+    pub pg_connstr: String,
+    pub http_connstr: String,
 }
 
 impl PeerInfo {
     fn from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
         PeerInfo {
             sk_id: NodeId(sk_info.safekeeper_id),
-            _last_log_term: sk_info.last_log_term,
-            _flush_lsn: Lsn(sk_info.flush_lsn),
+            term: sk_info.term,
+            last_log_term: sk_info.last_log_term,
+            flush_lsn: Lsn(sk_info.flush_lsn),
             commit_lsn: Lsn(sk_info.commit_lsn),
             local_start_lsn: Lsn(sk_info.local_start_lsn),
+            pg_connstr: sk_info.safekeeper_connstr.clone(),
+            http_connstr: sk_info.http_connstr.clone(),
             ts,
         }
     }
@@ -112,7 +119,6 @@ pub struct SharedState {
     /// TODO: it might be better to remove tli completely from GlobalTimelines
     /// when tli is inactive instead of having this flag.
     active: bool,
-    num_computes: u32,
     last_removed_segno: XLogSegNo,
 }
 
@@ -151,7 +157,6 @@ impl SharedState {
             peers_info: PeersInfo(vec![]),
             wal_backup_active: false,
             active: false,
-            num_computes: 0,
             last_removed_segno: 0,
         })
     }
@@ -171,7 +176,6 @@ impl SharedState {
             peers_info: PeersInfo(vec![]),
             wal_backup_active: false,
             active: false,
-            num_computes: 0,
             last_removed_segno: 0,
         })
     }
@@ -219,7 +223,7 @@ impl SharedState {
             };
             trace!(
                 "timeline {} s3 offloading action {} pending: num_computes={}, commit_lsn={}, backup_lsn={}",
-                self.sk.state.timeline_id, action_pending, self.num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
+                self.sk.state.timeline_id, action_pending, num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
             );
         }
         res
@@ -264,6 +268,20 @@ impl SharedState {
             local_start_lsn: self.sk.state.local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
         }
+    }
+
+    /// Get our latest view of alive peers status on the timeline.
+    /// We pass our own info through the broker as well, so when we don't have connection
+    /// to the broker returned vec is empty.
+    fn get_peers(&self, heartbeat_timeout: Duration) -> Vec<PeerInfo> {
+        let now = Instant::now();
+        self.peers_info
+            .0
+            .iter()
+            // Regard peer as absent if we haven't heard from it within heartbeat_timeout.
+            .filter(|p| now.duration_since(p.ts) <= heartbeat_timeout)
+            .cloned()
+            .collect()
     }
 }
 
@@ -446,7 +464,9 @@ impl Timeline {
     /// Bootstrap new or existing timeline starting background stasks.
     pub fn bootstrap(self: &Arc<Timeline>, conf: &SafeKeeperConf) {
         // Start recovery task which always runs on the timeline.
-        tokio::spawn(recovery_main(self.clone(), conf.clone()));
+        if conf.peer_recovery_enabled {
+            tokio::spawn(recovery_main(self.clone(), conf.clone()));
+        }
     }
 
     /// Delete timeline from disk completely, by removing timeline directory. Background
@@ -531,7 +551,7 @@ impl Timeline {
             return true;
         }
         let shared_state = self.write_shared_state().await;
-        if shared_state.num_computes == 0 {
+        if self.walreceivers.get_num() == 0 {
             return shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
             reported_remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn;
         }
@@ -680,20 +700,88 @@ impl Timeline {
         Ok(())
     }
 
-    /// Get our latest view of alive peers status on the timeline.
-    /// We pass our own info through the broker as well, so when we don't have connection
-    /// to the broker returned vec is empty.
     pub async fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
         let shared_state = self.write_shared_state().await;
-        let now = Instant::now();
-        shared_state
-            .peers_info
-            .0
-            .iter()
-            // Regard peer as absent if we haven't heard from it within heartbeat_timeout.
-            .filter(|p| now.duration_since(p.ts) <= conf.heartbeat_timeout)
-            .cloned()
-            .collect()
+        shared_state.get_peers(conf.heartbeat_timeout)
+    }
+
+    /// Should we start fetching WAL from a peer safekeeper, and if yes, from
+    /// which? Answer is yes, i.e. .donors is not empty if 1) there is something
+    /// to fetch, and we can do that without running elections; 2) there is no
+    /// actively streaming compute, as we don't want to compete with it.
+    ///
+    /// If donor(s) are choosen, theirs last_log_term is guaranteed to be equal
+    /// to its last_log_term so we are sure such a leader ever had been elected.
+    ///
+    /// All possible donors are returned so that we could keep connection to the
+    /// current one if it is good even if it slightly lags behind.
+    ///
+    /// Note that term conditions above might be not met, but safekeepers are
+    /// still not aligned on last flush_lsn. Generally in this case until
+    /// elections are run it is not possible to say which safekeeper should
+    /// recover from which one -- history which would be committed is different
+    /// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
+    /// Thus we don't try to predict it here.
+    pub async fn recovery_needed(&self, heartbeat_timeout: Duration) -> RecoveryNeededInfo {
+        let ss = self.write_shared_state().await;
+        let term = ss.sk.state.acceptor_state.term;
+        let last_log_term = ss.sk.get_epoch();
+        let flush_lsn = ss.sk.flush_lsn();
+        // note that peers contain myself, but that's ok -- we are interested only in peers which are strictly ahead of us.
+        let mut peers = ss.get_peers(heartbeat_timeout);
+        // Sort by <last log term, lsn> pairs.
+        peers.sort_by(|p1, p2| {
+            let tl1 = TermLsn {
+                term: p1.last_log_term,
+                lsn: p1.flush_lsn,
+            };
+            let tl2 = TermLsn {
+                term: p2.last_log_term,
+                lsn: p2.flush_lsn,
+            };
+            tl2.cmp(&tl1) // desc
+        });
+        let num_streaming_computes = self.walreceivers.get_num_streaming();
+        let donors = if num_streaming_computes > 0 {
+            vec![] // If there is a streaming compute, don't try to recover to not intervene.
+        } else {
+            peers
+                .iter()
+                .filter_map(|candidate| {
+                    // Are we interested in this candidate?
+                    let candidate_tl = TermLsn {
+                        term: candidate.last_log_term,
+                        lsn: candidate.flush_lsn,
+                    };
+                    let my_tl = TermLsn {
+                        term: last_log_term,
+                        lsn: flush_lsn,
+                    };
+                    if my_tl < candidate_tl {
+                        // Yes, we are interested. Can we pull from it without
+                        // (re)running elections? It is possible if 1) his term
+                        // is equal to his last_log_term so we could act on
+                        // behalf of leader of this term (we must be sure he was
+                        // ever elected) and 2) our term is not higher, or we'll refuse data.
+                        if candidate.term == candidate.last_log_term && candidate.term >= term {
+                            Some(Donor::from(candidate))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        RecoveryNeededInfo {
+            term,
+            last_log_term,
+            flush_lsn,
+            peers,
+            num_streaming_computes,
+            donors,
+        }
     }
 
     pub fn get_walsenders(&self) -> &Arc<WalSenders> {
@@ -765,7 +853,7 @@ impl Timeline {
                 ps_feedback,
                 wal_backup_active: state.wal_backup_active,
                 timeline_is_active: state.active,
-                num_computes: state.num_computes,
+                num_computes: self.walreceivers.get_num() as u32,
                 last_removed_segno: state.last_removed_segno,
                 epoch_start_lsn: state.sk.epoch_start_lsn,
                 mem_state: state.sk.inmem.clone(),
@@ -792,7 +880,7 @@ impl Timeline {
             walsenders: self.walsenders.get_all(),
             wal_backup_active: state.wal_backup_active,
             active: state.active,
-            num_computes: state.num_computes,
+            num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
             epoch_start_lsn: state.sk.epoch_start_lsn,
             mem_state: state.sk.inmem.clone(),

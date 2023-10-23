@@ -73,7 +73,8 @@ static void walprop_register_bgworker(void);
 static void walprop_pg_init_standalone_sync_safekeepers(void);
 static void walprop_pg_init_walsender(void);
 static void walprop_pg_init_bgworker(void);
-static TimestampTz walprop_pg_get_current_timestamp(void);
+static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
+static TimeLineID walprop_pg_get_timeline_id(void);
 static void walprop_pg_load_libpqwalreceiver(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback;
@@ -104,6 +105,7 @@ init_walprop_config(bool syncSafekeepers)
 		walprop_config.systemId = GetSystemIdentifier();
 	else
 		walprop_config.systemId = 0;
+	walprop_config.pgTimeline = walprop_pg_get_timeline_id();
 }
 
 /*
@@ -136,7 +138,7 @@ WalProposerMain(Datum main_arg)
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
-	wp->last_reconnect_attempt = walprop_pg_get_current_timestamp();
+	wp->last_reconnect_attempt = walprop_pg_get_current_timestamp(wp);
 
 	walprop_pg_init_walsender();
 	WalProposerStart(wp);
@@ -379,7 +381,7 @@ nwp_shmem_startup_hook(void)
 }
 
 static WalproposerShmemState *
-walprop_pg_get_shmem_state(void)
+walprop_pg_get_shmem_state(WalProposer *wp)
 {
 	Assert(walprop_shared != NULL);
 	return walprop_shared;
@@ -505,7 +507,7 @@ walprop_pg_init_bgworker(void)
 }
 
 static XLogRecPtr
-walprop_pg_get_flush_rec_ptr(void)
+walprop_pg_get_flush_rec_ptr(WalProposer *wp)
 {
 #if PG_MAJORVERSION_NUM < 15
 	return GetFlushRecPtr();
@@ -515,7 +517,7 @@ walprop_pg_get_flush_rec_ptr(void)
 }
 
 static TimestampTz
-walprop_pg_get_current_timestamp(void)
+walprop_pg_get_current_timestamp(WalProposer *wp)
 {
 	return GetCurrentTimestamp();
 }
@@ -565,15 +567,15 @@ ensure_nonblocking_status(WalProposerConn *conn, bool is_nonblocking)
 
 /* Exported function definitions */
 static char *
-walprop_error_message(WalProposerConn *conn)
+walprop_error_message(Safekeeper *sk)
 {
-	return PQerrorMessage(conn->pg_conn);
+	return PQerrorMessage(sk->conn->pg_conn);
 }
 
 static WalProposerConnStatusType
-walprop_status(WalProposerConn *conn)
+walprop_status(Safekeeper *sk)
 {
-	switch (PQstatus(conn->pg_conn))
+	switch (PQstatus(sk->conn->pg_conn))
 	{
 		case CONNECTION_OK:
 			return WP_CONNECTION_OK;
@@ -584,15 +586,16 @@ walprop_status(WalProposerConn *conn)
 	}
 }
 
-static WalProposerConn *
-walprop_connect_start(char *conninfo)
+static void
+walprop_connect_start(Safekeeper *sk)
 {
-	WalProposerConn *conn;
 	PGconn	   *pg_conn;
 	const char *keywords[3];
 	const char *values[3];
 	int			n;
 	char	   *password = neon_auth_token;
+
+	Assert(sk->conn == NULL);
 
 	/*
 	 * Connect using the given connection string. If the NEON_AUTH_TOKEN
@@ -611,7 +614,7 @@ walprop_connect_start(char *conninfo)
 		n++;
 	}
 	keywords[n] = "dbname";
-	values[n] = conninfo;
+	values[n] = sk->conninfo;
 	n++;
 	keywords[n] = NULL;
 	values[n] = NULL;
@@ -619,11 +622,11 @@ walprop_connect_start(char *conninfo)
 	pg_conn = PQconnectStartParams(keywords, values, 1);
 
 	/*
-	 * Allocation of a PQconn can fail, and will return NULL. We want to fully
-	 * replicate the behavior of PQconnectStart here.
+	 * "If the result is null, then libpq has been unable to allocate a new
+	 * PGconn structure"
 	 */
 	if (!pg_conn)
-		return NULL;
+		elog(FATAL, "failed to allocate new PGconn object");
 
 	/*
 	 * And in theory this allocation can fail as well, but it's incredibly
@@ -632,20 +635,19 @@ walprop_connect_start(char *conninfo)
 	 * palloc will exit on failure though, so there's not much we could do if
 	 * it *did* fail.
 	 */
-	conn = palloc(sizeof(WalProposerConn));
-	conn->pg_conn = pg_conn;
-	conn->is_nonblocking = false;	/* connections always start in blocking
+	sk->conn = palloc(sizeof(WalProposerConn));
+	sk->conn->pg_conn = pg_conn;
+	sk->conn->is_nonblocking = false;	/* connections always start in blocking
 									 * mode */
-	conn->recvbuf = NULL;
-	return conn;
+	sk->conn->recvbuf = NULL;
 }
 
 static WalProposerConnectPollStatusType
-walprop_connect_poll(WalProposerConn *conn)
+walprop_connect_poll(Safekeeper *sk)
 {
 	WalProposerConnectPollStatusType return_val;
 
-	switch (PQconnectPoll(conn->pg_conn))
+	switch (PQconnectPoll(sk->conn->pg_conn))
 	{
 		case PGRES_POLLING_FAILED:
 			return_val = WP_CONN_POLLING_FAILED;
@@ -682,24 +684,24 @@ walprop_connect_poll(WalProposerConn *conn)
 }
 
 static bool
-walprop_send_query(WalProposerConn *conn, char *query)
+walprop_send_query(Safekeeper *sk, char *query)
 {
 	/*
 	 * We need to be in blocking mode for sending the query to run without
 	 * requiring a call to PQflush
 	 */
-	if (!ensure_nonblocking_status(conn, false))
+	if (!ensure_nonblocking_status(sk->conn, false))
 		return false;
 
 	/* PQsendQuery returns 1 on success, 0 on failure */
-	if (!PQsendQuery(conn->pg_conn, query))
+	if (!PQsendQuery(sk->conn->pg_conn, query))
 		return false;
 
 	return true;
 }
 
 static WalProposerExecStatusType
-walprop_get_query_result(WalProposerConn *conn)
+walprop_get_query_result(Safekeeper *sk)
 {
 	PGresult   *result;
 	WalProposerExecStatusType return_val;
@@ -708,14 +710,14 @@ walprop_get_query_result(WalProposerConn *conn)
 	char	   *unexpected_success = NULL;
 
 	/* Consume any input that we might be missing */
-	if (!PQconsumeInput(conn->pg_conn))
+	if (!PQconsumeInput(sk->conn->pg_conn))
 		return WP_EXEC_FAILED;
 
-	if (PQisBusy(conn->pg_conn))
+	if (PQisBusy(sk->conn->pg_conn))
 		return WP_EXEC_NEEDS_INPUT;
 
 
-	result = PQgetResult(conn->pg_conn);
+	result = PQgetResult(sk->conn->pg_conn);
 
 	/*
 	 * PQgetResult returns NULL only if getting the result was successful &
@@ -777,24 +779,28 @@ walprop_get_query_result(WalProposerConn *conn)
 }
 
 static pgsocket
-walprop_socket(WalProposerConn *conn)
+walprop_socket(Safekeeper *sk)
 {
-	return PQsocket(conn->pg_conn);
+	return PQsocket(sk->conn->pg_conn);
 }
 
 static int
-walprop_flush(WalProposerConn *conn)
+walprop_flush(Safekeeper *sk)
 {
-	return (PQflush(conn->pg_conn));
+	return (PQflush(sk->conn->pg_conn));
 }
 
 static void
-walprop_finish(WalProposerConn *conn)
+walprop_finish(Safekeeper *sk)
 {
-	if (conn->recvbuf != NULL)
-		PQfreemem(conn->recvbuf);
-	PQfinish(conn->pg_conn);
-	pfree(conn);
+	if (!sk->conn)
+		return;
+
+	if (sk->conn->recvbuf != NULL)
+		PQfreemem(sk->conn->recvbuf);
+	PQfinish(sk->conn->pg_conn);
+	pfree(sk->conn);
+	sk->conn = NULL;
 }
 
 /*
@@ -804,18 +810,18 @@ walprop_finish(WalProposerConn *conn)
  * to this function.
  */
 static PGAsyncReadResult
-walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
+walprop_async_read(Safekeeper *sk, char **buf, int *amount)
 {
 	int			result;
 
-	if (conn->recvbuf != NULL)
+	if (sk->conn->recvbuf != NULL)
 	{
-		PQfreemem(conn->recvbuf);
-		conn->recvbuf = NULL;
+		PQfreemem(sk->conn->recvbuf);
+		sk->conn->recvbuf = NULL;
 	}
 
 	/* Call PQconsumeInput so that we have the data we need */
-	if (!PQconsumeInput(conn->pg_conn))
+	if (!PQconsumeInput(sk->conn->pg_conn))
 	{
 		*amount = 0;
 		*buf = NULL;
@@ -833,7 +839,7 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 	 * sometimes be triggered by the server returning an ErrorResponse (which
 	 * also happens to have the effect that the copy is done).
 	 */
-	switch (result = PQgetCopyData(conn->pg_conn, &conn->recvbuf, true))
+	switch (result = PQgetCopyData(sk->conn->pg_conn, &sk->conn->recvbuf, true))
 	{
 		case 0:
 			*amount = 0;
@@ -848,7 +854,7 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 				 * We can check PQgetResult to make sure that the server
 				 * failed; it'll always result in PGRES_FATAL_ERROR
 				 */
-				ExecStatusType status = PQresultStatus(PQgetResult(conn->pg_conn));
+				ExecStatusType status = PQresultStatus(PQgetResult(sk->conn->pg_conn));
 
 				if (status != PGRES_FATAL_ERROR)
 					elog(FATAL, "unexpected result status %d after failed PQgetCopyData", status);
@@ -869,18 +875,18 @@ walprop_async_read(WalProposerConn *conn, char **buf, int *amount)
 		default:
 			/* Positive values indicate the size of the returned result */
 			*amount = result;
-			*buf = conn->recvbuf;
+			*buf = sk->conn->recvbuf;
 			return PG_ASYNC_READ_SUCCESS;
 	}
 }
 
 static PGAsyncWriteResult
-walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
+walprop_async_write(Safekeeper *sk, void const *buf, size_t size)
 {
 	int			result;
 
 	/* If we aren't in non-blocking mode, switch to it. */
-	if (!ensure_nonblocking_status(conn, true))
+	if (!ensure_nonblocking_status(sk->conn, true))
 		return PG_ASYNC_WRITE_FAIL;
 
 	/*
@@ -888,7 +894,7 @@ walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 	 * queued, 0 if it was not queued because of full buffers, or -1 if an
 	 * error occurred
 	 */
-	result = PQputCopyData(conn->pg_conn, buf, size);
+	result = PQputCopyData(sk->conn->pg_conn, buf, size);
 
 	/*
 	 * We won't get a result of zero because walproposer always empties the
@@ -916,7 +922,7 @@ walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
 	 * sucessful, 1 if it was unable to send all the data in the send queue
 	 * yet -1 if it failed for some reason
 	 */
-	switch (result = PQflush(conn->pg_conn))
+	switch (result = PQflush(sk->conn->pg_conn))
 	{
 		case 0:
 			return PG_ASYNC_WRITE_SUCCESS;
@@ -934,22 +940,22 @@ walprop_async_write(WalProposerConn *conn, void const *buf, size_t size)
  * information, refer to the comments there.
  */
 static bool
-walprop_blocking_write(WalProposerConn *conn, void const *buf, size_t size)
+walprop_blocking_write(Safekeeper *sk, void const *buf, size_t size)
 {
 	int			result;
 
 	/* If we are in non-blocking mode, switch out of it. */
-	if (!ensure_nonblocking_status(conn, false))
+	if (!ensure_nonblocking_status(sk->conn, false))
 		return false;
 
-	if ((result = PQputCopyData(conn->pg_conn, buf, size)) == -1)
+	if ((result = PQputCopyData(sk->conn->pg_conn, buf, size)) == -1)
 		return false;
 
 	Assert(result == 1);
 
 	/* Because the connection is non-blocking, flushing returns 0 or -1 */
 
-	if ((result = PQflush(conn->pg_conn)) == -1)
+	if ((result = PQflush(sk->conn->pg_conn)) == -1)
 		return false;
 
 	Assert(result == 0);
@@ -1381,11 +1387,11 @@ XLogWalPropClose(XLogRecPtr recptr)
 }
 
 static void
-walprop_pg_wal_read(XLogReaderState *state, char *buf, XLogRecPtr startptr, Size count)
+walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count)
 {
 	WALReadError errinfo;
 
-	if (!WALRead(state,
+	if (!WALRead(sk->xlogreader,
 				 buf,
 				 startptr,
 				 count,
@@ -1396,31 +1402,38 @@ walprop_pg_wal_read(XLogReaderState *state, char *buf, XLogRecPtr startptr, Size
 	}
 }
 
-static XLogReaderState *
-walprop_pg_wal_reader_allocate(void)
+static void
+walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
-	return XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
+	sk->xlogreader = XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
+	if (sk->xlogreader == NULL)
+		elog(FATAL, "Failed to allocate xlog reader");
 }
 
 static WaitEventSet *waitEvents;
 
 static void
-walprop_pg_free_event_set(void)
+walprop_pg_free_event_set(WalProposer *wp)
 {
 	if (waitEvents)
 	{
 		FreeWaitEventSet(waitEvents);
 		waitEvents = NULL;
 	}
+
+	for (int i = 0; i < wp->n_safekeepers; i++)
+	{
+		wp->safekeeper[i].eventPos = -1;
+	}
 }
 
 static void
-walprop_pg_init_event_set(int n_safekeepers)
+walprop_pg_init_event_set(WalProposer *wp)
 {
 	if (waitEvents)
 		elog(FATAL, "double-initialization of event set");
 
-	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + n_safekeepers);
+	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + wp->n_safekeepers);
 	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
 					  MyLatch, NULL);
 	AddWaitEventToSet(waitEvents, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
@@ -1439,11 +1452,11 @@ walprop_pg_update_event_set(Safekeeper *sk, uint32 events)
 static void
 walprop_pg_add_safekeeper_event_set(Safekeeper *sk, uint32 events)
 {
-	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk->conn), NULL, sk);
+	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk), NULL, sk);
 }
 
 static int
-walprop_pg_wait_event_set(long timeout, Safekeeper **sk, uint32 *events)
+walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32 *events)
 {
 	WaitEvent	event = {0};
 	int			rc = 0;
@@ -1499,7 +1512,7 @@ walprop_pg_wait_event_set(long timeout, Safekeeper **sk, uint32 *events)
 }
 
 static void
-walprop_pg_finish_sync_safekeepers(XLogRecPtr lsn)
+walprop_pg_finish_sync_safekeepers(WalProposer *wp, XLogRecPtr lsn)
 {
 	fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(lsn));
 	exit(0);
@@ -1611,7 +1624,7 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 			 * pageserver.
 			 */
 								quorumFeedback.rf.disk_consistent_lsn,
-								walprop_pg_get_current_timestamp(), false);
+								walprop_pg_get_current_timestamp(wp), false);
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback, wp);
@@ -1628,10 +1641,58 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 }
 
 static void
-walprop_pg_confirm_wal_streamed(XLogRecPtr lsn)
+walprop_pg_confirm_wal_streamed(WalProposer *wp, XLogRecPtr lsn)
 {
 	if (MyReplicationSlot)
 		PhysicalConfirmReceivedLocation(lsn);
+}
+
+static XLogRecPtr
+walprop_pg_get_redo_start_lsn(WalProposer *wp)
+{
+	return GetRedoStartLsn();
+}
+
+static bool
+walprop_pg_strong_random(WalProposer *wp, void *buf, size_t len)
+{
+	return pg_strong_random(buf, len);
+}
+
+static void
+walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
+{
+	elog(FATAL, "unexpected log_internal message at level %d: %s", level, line);
+}
+
+static void
+walprop_pg_after_election(WalProposer *wp)
+{
+	FILE* f;
+	XLogRecPtr lrRestartLsn;
+
+	/* We don't need to do anything in syncSafekeepers mode.*/
+	if (wp->config->syncSafekeepers)
+		return;
+
+	/*
+	 * If there are active logical replication subscription we need
+	 * to provide enough WAL for their WAL senders based on th position
+	 * of their replication slots.
+	 */
+	f = fopen("restart.lsn", "rb");
+	if (f != NULL && !wp->config->syncSafekeepers)
+	{
+		fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
+		fclose(f);
+		if (lrRestartLsn != InvalidXLogRecPtr)
+		{
+			elog(LOG, "Logical replication restart LSN %X/%X",  LSN_FORMAT_ARGS(lrRestartLsn));
+			/* start from the beginning of the segment to fetch page headers verifed by XLogReader */
+			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
+			wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
+		}
+	}
 }
 
 static const walproposer_api walprop_pg = {
@@ -1639,7 +1700,6 @@ static const walproposer_api walprop_pg = {
 	.start_streaming = walprop_pg_start_streaming,
 	.get_flush_rec_ptr = walprop_pg_get_flush_rec_ptr,
 	.get_current_timestamp = walprop_pg_get_current_timestamp,
-	.get_timeline_id = walprop_pg_get_timeline_id,
 	.conn_error_message = walprop_error_message,
 	.conn_status = walprop_status,
 	.conn_connect_start = walprop_connect_start,
@@ -1659,9 +1719,11 @@ static const walproposer_api walprop_pg = {
 	.update_event_set = walprop_pg_update_event_set,
 	.add_safekeeper_event_set = walprop_pg_add_safekeeper_event_set,
 	.wait_event_set = walprop_pg_wait_event_set,
-	.strong_random = pg_strong_random,
-	.get_redo_start_lsn = GetRedoStartLsn,
+	.strong_random = walprop_pg_strong_random,
+	.get_redo_start_lsn = walprop_pg_get_redo_start_lsn,
 	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.confirm_wal_streamed = walprop_pg_confirm_wal_streamed,
+	.log_internal = walprop_pg_log_internal,
+	.after_election = walprop_pg_after_election,
 };

@@ -1,9 +1,9 @@
 import time
 
 import pytest
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
 from fixtures.pageserver.utils import (
+    wait_for_last_record_lsn,
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
@@ -41,9 +41,12 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
 def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     """
-    This test sets fail point at the end of first compaction phase:
-    after flushing new L1 layers but before deletion of L0 layers
-    it should cause generation of duplicate L1 layer by compaction after restart.
+    Test sets fail point at the end of first compaction phase: after
+    flushing new L1 layer but before deletion of L0 layers.
+
+    The L1 used to be overwritten, but with crash-consistency via remote
+    index_part.json, we end up deleting the not yet uploaded L1 layer on
+    startup.
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
@@ -65,7 +68,8 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
     connstr = endpoint.connstr(options="-csynchronous_commit=off")
     pg_bin.run_capture(["pgbench", "-i", "-s1", connstr])
 
-    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    endpoint.stop()
 
     # make sure we receive no new wal after this, so that we'll write over the same L1 file.
     endpoint.stop()
@@ -74,7 +78,7 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
     # hit the exit failpoint
     with pytest.raises(ConnectionError, match="Remote end closed connection without response"):
-        pageserver_http.timeline_compact(tenant_id, timeline_id)
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     env.pageserver.stop()
 
     # now the duplicate L1 has been created, but is not yet uploaded
@@ -107,33 +111,32 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
         l1_found = path
 
     assert l1_found is not None, "failed to find L1 locally"
-    original_created_at = l1_found.stat()[8]
 
     uploaded = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / l1_found.name
     assert not uploaded.exists(), "to-be-overwritten should not yet be uploaded"
 
-    # give room for fs timestamps
-    time.sleep(1)
-
     env.pageserver.start()
     wait_until_tenant_active(pageserver_http, tenant_id)
 
-    message = f".*duplicated L1 layer layer={l1_found.name}"
-    env.pageserver.allowed_errors.append(message)
+    assert not l1_found.exists(), "partial compaction result should had been removed during startup"
+
+    # wait for us to catch up again
+    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
+
     # give time for log flush
     time.sleep(1)
 
+    message = f".*duplicated L1 layer layer={l1_found.name}"
     found_msg = env.pageserver.log_contains(message)
-    assert found_msg is not None, "no layer was duplicated, has this been fixed already?"
+    # resident or evicted, it should not be overwritten, however it should had been non-existing at startup
+    assert (
+        found_msg is None
+    ), "layer should had been removed during startup, did it live on as evicted?"
 
-    log.info(f"found log line: {found_msg}")
-
-    overwritten_at = l1_found.stat()[8]
-    assert original_created_at < overwritten_at, "expected the L1 to be overwritten"
+    assert l1_found.exists(), "the L1 reappears"
 
     wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
 
-    uploaded_at = uploaded.stat()[8]
-    assert overwritten_at <= uploaded_at, "expected the L1 to finally be uploaded"
+    assert uploaded.exists(), "the L1 is uploaded"

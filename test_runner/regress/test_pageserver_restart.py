@@ -4,6 +4,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import s3_storage
+from fixtures.utils import wait_until
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -16,8 +17,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
 
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_pageserver_restart")
-    endpoint = env.endpoints.create_start("test_pageserver_restart")
+    endpoint = env.endpoints.create_start("main")
     pageserver_http = env.pageserver.http_client()
 
     pg_conn = endpoint.connect()
@@ -75,27 +75,52 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
-    # Validate startup time metrics
-    metrics = pageserver_http.get_metrics()
+    # Wait for metrics to indicate startup complete, so that we can know all
+    # startup phases will be reflected in the subsequent checks
+    def assert_complete():
+        for sample in pageserver_http.get_metrics().query_all(
+            "pageserver_startup_duration_seconds"
+        ):
+            labels = dict(sample.labels)
+            log.info(f"metric {labels['phase']}={sample.value}")
+            if labels["phase"] == "complete" and sample.value > 0:
+                return
+
+        raise AssertionError("No 'complete' metric yet")
+
+    wait_until(30, 1.0, assert_complete)
 
     # Expectation callbacks: arg t is sample value, arg p is the previous phase's sample value
-    expectations = {
-        "initial": lambda t, p: True,  # make no assumptions about the initial time point, it could be 0 in theory
+    expectations = [
+        (
+            "initial",
+            lambda t, p: True,
+        ),  # make no assumptions about the initial time point, it could be 0 in theory
+        # Remote phase of initial_tenant_load should happen before overall phase is complete
+        ("initial_tenant_load_remote", lambda t, p: t >= 0.0 and t >= p),
         # Initial tenant load should reflect the delay we injected
-        "initial_tenant_load": lambda t, p: t >= (tenant_load_delay_ms / 1000.0) and t >= p,
+        ("initial_tenant_load", lambda t, p: t >= (tenant_load_delay_ms / 1000.0) and t >= p),
         # Subsequent steps should occur in expected order
-        "initial_logical_sizes": lambda t, p: t > 0 and t >= p,
-        "background_jobs_can_start": lambda t, p: t > 0 and t >= p,
-        "complete": lambda t, p: t > 0 and t >= p,
-    }
+        ("initial_logical_sizes", lambda t, p: t > 0 and t >= p),
+        ("background_jobs_can_start", lambda t, p: t > 0 and t >= p),
+        ("complete", lambda t, p: t > 0 and t >= p),
+    ]
 
+    # Accumulate the runtime of each startup phase
+    values = {}
+    metrics = pageserver_http.get_metrics()
     prev_value = None
     for sample in metrics.query_all("pageserver_startup_duration_seconds"):
-        labels = dict(sample.labels)
-        phase = labels["phase"]
+        phase = sample.labels["phase"]
         log.info(f"metric {phase}={sample.value}")
-        assert phase in expectations, f"Unexpected phase {phase}"
-        assert expectations[phase](
+        assert phase in [e[0] for e in expectations], f"Unexpected phase {phase}"
+        values[phase] = sample
+
+    # Apply expectations to the metrics retrieved
+    for phase, expectation in expectations:
+        assert phase in values, f"No data for phase {phase}"
+        sample = values[phase]
+        assert expectation(
             sample.value, prev_value
         ), f"Unexpected value for {phase}: {sample.value}"
         prev_value = sample.value

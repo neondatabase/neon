@@ -15,6 +15,7 @@ pub struct ProxyConfig {
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
+    pub require_client_ip: bool,
 }
 
 #[derive(Debug)]

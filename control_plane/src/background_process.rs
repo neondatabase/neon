@@ -86,7 +86,7 @@ where
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
         .args(args);
-    let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
+    let filled_cmd = fill_remote_storage_secrets_vars(fill_rust_env_vars(background_command));
     filled_cmd.envs(envs);
 
     let pid_file_to_check = match initial_pid_file {
@@ -238,11 +238,13 @@ fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     filled_cmd
 }
 
-fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     for env_key in [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        "AZURE_STORAGE_ACCOUNT",
+        "AZURE_STORAGE_ACCESS_KEY",
     ] {
         if let Ok(value) = std::env::var(env_key) {
             cmd = cmd.env(env_key, value);
