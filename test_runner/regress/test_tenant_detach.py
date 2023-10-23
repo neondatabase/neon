@@ -744,9 +744,6 @@ def test_ignore_while_attaching(
     env.pageserver.allowed_errors.append(
         f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
     )
-    # An endpoint is starting up concurrently with our detach, it can
-    # experience RPC failure due to shutdown.
-    env.pageserver.allowed_errors.append(".*query handler.*failed.*Shutting down")
 
     data_id = 1
     data_secret = "very secret secret"

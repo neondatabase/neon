@@ -1,3 +1,4 @@
+import filecmp
 import os
 import pathlib
 import random
@@ -11,7 +12,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.errors
@@ -19,6 +20,7 @@ import psycopg2.extras
 import pytest
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
@@ -399,8 +401,11 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 def wait(f, desc, timeout=30, wait_f=None):
     started_at = time.time()
     while True:
-        if f():
-            break
+        try:
+            if f():
+                break
+        except Exception:
+            pass
         elapsed = time.time() - started_at
         if elapsed > timeout:
             raise RuntimeError(f"timed out waiting {elapsed:.0f}s for {desc}")
@@ -983,6 +988,141 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
         endpoint.start()
 
 
+# Test that we can create timeline with one safekeeper down and initialize it
+# later when some data already had been written.
+def test_late_init(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    sk1 = env.safekeepers[0]
+    sk1.stop()
+
+    # create and insert smth while safekeeper is down...
+    env.neon_cli.create_branch("test_late_init")
+    endpoint = env.endpoints.create_start("test_late_init")
+    endpoint.safe_psql("create table t(key int, value text)")
+    endpoint.safe_psql("insert into t select generate_series(1, 1000), 'payload'")
+    log.info("insert with safekeeper down done")
+    endpoint.stop()  # stop compute
+
+    # stop another safekeeper, and start one which missed timeline creation
+    sk2 = env.safekeepers[1]
+    sk2.stop()
+    sk1.start()
+
+    # insert some more
+    endpoint = env.endpoints.create_start("test_late_init")
+    endpoint.safe_psql("insert into t select generate_series(1,100), 'payload'")
+
+
+# is timeline flush_lsn equal on provided safekeepers?
+def is_flush_lsn_aligned(sk1_http_cli, sk2_http_cli, tenant_id, timeline_id):
+    status1 = sk1_http_cli.timeline_status(tenant_id, timeline_id)
+    status2 = sk2_http_cli.timeline_status(tenant_id, timeline_id)
+    log.info(
+        f"waiting for flush_lsn alignment, sk1.flush_lsn={status1.flush_lsn}, sk2.flush_lsn={status2.flush_lsn}"
+    )
+    return status1.flush_lsn == status2.flush_lsn
+
+
+# Test behaviour with one safekeeper down and missing a lot of WAL. Namely, that
+# 1) walproposer can't recover node if it misses WAL written by previous computes, but
+#    still starts up and functions normally if two other sks are ok.
+# 2) walproposer doesn't keep WAL after some threshold (pg_wal bloat is limited), but functions
+#    normally if two other sks are ok.
+# 3) Lagged safekeeper can still recover by peer recovery.
+def test_one_sk_down(neon_env_builder: NeonEnvBuilder):
+    pass
+
+
+# Smaller version of test_one_sk_down testing peer recovery in isolation: that
+# it works without compute at all.
+def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_peer_recovery")
+    endpoint = env.endpoints.create_start("test_peer_recovery")
+
+    endpoint.safe_psql("create table t(key int, value text)")
+    sk1 = env.safekeepers[0]
+    sk2 = env.safekeepers[1]
+    sk1_http_cli = sk1.http_client()
+    sk2_http_cli = sk2.http_client()
+    # ensure tli gets created on sk1, peer recovery won't do that
+    wait(
+        partial(is_flush_lsn_aligned, sk1_http_cli, sk2_http_cli, tenant_id, timeline_id),
+        "flush_lsn to get aligned",
+    )
+
+    sk1 = env.safekeepers[0]
+    sk1.stop()
+
+    # roughly fills one segment
+    endpoint.safe_psql("insert into t select generate_series(1,250000), 'payload'")
+
+    endpoint.stop()  # stop compute
+
+    # now start safekeeper, but with peer recovery disabled; it should lag for about a segment
+    sk1.start(extra_opts=["--peer-recovery=false"])
+    sk1_tli_status = sk1_http_cli.timeline_status(tenant_id, timeline_id)
+    sk2_tli_status = sk2_http_cli.timeline_status(tenant_id, timeline_id)
+    log.info(
+        f"flush_lsns after insertion: sk1={sk1_tli_status.flush_lsn}, sk2={sk2_tli_status.flush_lsn}"
+    )
+    assert sk2_tli_status.flush_lsn - sk1_tli_status.flush_lsn >= 16 * 1024 * 1024
+
+    # wait a bit, lsns shouldn't change
+    # time.sleep(5)
+    sk1_tli_status = sk1_http_cli.timeline_status(tenant_id, timeline_id)
+    sk2_tli_status = sk2_http_cli.timeline_status(tenant_id, timeline_id)
+    log.info(
+        f"flush_lsns after waiting: sk1={sk1_tli_status.flush_lsn}, sk2={sk2_tli_status.flush_lsn}"
+    )
+    assert sk2_tli_status.flush_lsn - sk1_tli_status.flush_lsn >= 16 * 1024 * 1024
+
+    # now restart safekeeper with peer recovery enabled and wait for recovery
+    sk1.stop().start(extra_opts=["--peer-recovery=true"])
+    wait(
+        partial(is_flush_lsn_aligned, sk1_http_cli, sk2_http_cli, tenant_id, timeline_id),
+        "flush_lsn to get aligned",
+    )
+
+    # check that WALs are identic after recovery
+    segs = sk1.list_segments(tenant_id, timeline_id)
+    log.info(f"segs are {segs}")
+
+    (_, mismatch, not_regular) = filecmp.cmpfiles(
+        sk1.timeline_dir(tenant_id, timeline_id),
+        sk2.timeline_dir(tenant_id, timeline_id),
+        segs,
+        shallow=False,
+    )
+    log.info(
+        f"filecmp result mismatch and not regular files:\n\t mismatch={mismatch}\n\t not_regular={not_regular}"
+    )
+
+    for f in mismatch:
+        f1 = os.path.join(sk1.timeline_dir(tenant_id, timeline_id), f)
+        f2 = os.path.join(sk2.timeline_dir(tenant_id, timeline_id), f)
+        stdout_filename = "{}.filediff".format(f2)
+
+        with open(stdout_filename, "w") as stdout_f:
+            subprocess.run("xxd {} > {}.hex ".format(f1, f1), shell=True)
+            subprocess.run("xxd {} > {}.hex ".format(f2, f2), shell=True)
+
+            cmd = "diff {}.hex {}.hex".format(f1, f2)
+            subprocess.run([cmd], stdout=stdout_f, shell=True)
+
+    assert (mismatch, not_regular) == ([], [])
+
+    # stop one of safekeepers which weren't recovering and insert a bit more to check we can commit
+    env.safekeepers[2].stop()
+    endpoint = env.endpoints.create_start("test_peer_recovery")
+    endpoint.safe_psql("insert into t select generate_series(1,100), 'payload'")
+
+
 class SafekeeperEnv:
     def __init__(
         self,
@@ -1477,3 +1617,72 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+
+# In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
+# when compute is active, but there are no writes to the timeline. In that case
+# pageserver should maintain a single connection to safekeeper and don't attempt
+# to reconnect extra times.
+#
+# The only way to verify this without manipulating time is to sleep for a while.
+# In this test we sleep for 60 seconds, so this test takes at least 1 minute to run.
+# This is longer than most other tests, we run it only for v16 to save CI resources.
+def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
+    if os.environ.get("PYTEST_CURRENT_TEST", "").find("[debug-pg16]") == -1:
+        pytest.skip("run only on debug postgres v16 to save CI resources")
+
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_sk_auth_restart_endpoint")
+
+    def collect_stats() -> Dict[str, float]:
+        # we need to collect safekeeper_pg_queries_received_total metric from all safekeepers
+        sk_metrics = [
+            parse_metrics(sk.http_client().get_metrics_str(), f"safekeeper_{sk.id}")
+            for sk in env.safekeepers
+        ]
+
+        total: Dict[str, float] = {}
+
+        for sk in sk_metrics:
+            queries_received = sk.query_all("safekeeper_pg_queries_received_total")
+            log.info(f"{sk.name} queries received: {queries_received}")
+            for sample in queries_received:
+                total[sample.labels["query"]] = total.get(sample.labels["query"], 0) + sample.value
+
+        log.info(f"Total queries received: {total}")
+
+        # in the perfect world, we should see only one START_REPLICATION query,
+        # here we check for 5 to prevent flakiness
+        assert total.get("START_REPLICATION", 0) <= 5
+
+        # in the perfect world, we should see ~6 START_WAL_PUSH queries,
+        # here we check for 15 to prevent flakiness
+        assert total.get("START_WAL_PUSH", 0) <= 15
+
+        return total
+
+    collect_stats()
+
+    endpoint = env.endpoints.create_start("test_sk_auth_restart_endpoint")
+    # just write something to the timeline
+    endpoint.safe_psql("create table t(i int)")
+    collect_stats()
+
+    # sleep a bit
+    time.sleep(30)
+
+    # force checkpoint in pageserver to advance remote_consistent_lsn
+    wait_lsn_force_checkpoint(tenant_id, timeline_id, endpoint, env.pageserver)
+
+    collect_stats()
+
+    time.sleep(30)
+
+    final_stats = collect_stats()
+    # pageserver should connect to safekeepers at least once
+    assert final_stats.get("START_REPLICATION", 0) >= 1
+    # walproposer should connect to each safekeeper at least once
+    assert final_stats.get("START_WAL_PUSH", 0) >= 3

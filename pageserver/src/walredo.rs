@@ -297,7 +297,6 @@ impl PostgresRedoManager {
                             // Another thread was faster to observe the error, and already took the process out of rotation.
                         }
                     }
-                    drop(guard);
                 }
                 // NB: there may still be other concurrent threads using `proc`.
                 // The last one will send SIGKILL when the underlying Arc reaches refcount 0.
@@ -313,10 +312,10 @@ impl PostgresRedoManager {
                 // This probably needs revisiting at some later point.
                 let mut wait_done = proc.stderr_logger_task_done.clone();
                 drop(proc);
-                match wait_done.wait_for(|v| *v).await {
-                    Ok(_) => {}
-                    Err(_) => todo!(),
-                };
+                wait_done
+                    .wait_for(|v| *v)
+                    .await
+                    .expect("we use scopeguard to ensure we always send `true` to the channel before dropping the sender");
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
             }
@@ -713,7 +712,7 @@ impl WalRedoProcess {
                     // the child, the writing end of the stderr pipe gets closed.
                     match stderr.readable_mut().await {
                         Ok(mut guard) => {
-                            let mut errbuf: [u8; 16384] = [0; 16384];
+                            let mut errbuf = [0; 16384];
                             let res = guard.try_io(|fd| {
                                 use std::io::Read;
                                 fd.get_mut().read(&mut errbuf)
@@ -726,10 +725,8 @@ impl WalRedoProcess {
                                 Ok(Ok(n)) => {
                                     // The message might not be split correctly into lines here. But this is
                                     // good enough, the important thing is to get the message to the log.
-                                    error!(
-                                        output=?String::from_utf8_lossy(&errbuf[0..n]),
-                                        "received output",
-                                    );
+                                    let output = String::from_utf8_lossy(&errbuf[0..n]).to_string();
+                                    error!(output, "received output");
                                 },
                                 Ok(Err(e)) => {
                                     error!(error = ?e, "read() error, waiting for cancellation");

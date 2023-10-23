@@ -285,7 +285,7 @@ dependencies = [
  "log",
  "parking",
  "polling",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "slab",
  "socket2 0.4.9",
  "waker-fn",
@@ -2582,7 +2582,7 @@ checksum = "adcf93614601c8129ddf72e2d5633df827ba6551541c6d8c59520a371475be1f"
 dependencies = [
  "hermit-abi",
  "io-lifetimes",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "windows-sys 0.48.0",
 ]
 
@@ -3561,7 +3561,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3574,7 +3574,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3585,7 +3585,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -3603,7 +3603,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3734,7 +3734,7 @@ dependencies = [
  "byteorder",
  "hex",
  "lazy_static",
- "rustix 0.36.14",
+ "rustix 0.36.16",
 ]
 
 [[package]]
@@ -4317,9 +4317,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.36.14"
+version = "0.36.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14e4d67015953998ad0eb82887a0eb0129e18a7e2f3b7b0f6c422fddcd503d62"
+checksum = "6da3636faa25820d8648e0e31c5d519bbb01f72fdf57131f0f5f7da5fed36eab"
 dependencies = [
  "bitflags",
  "errno",
@@ -4331,9 +4331,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.37.19"
+version = "0.37.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acf8729d8542766f1b2cf77eb034d52f40d375bb8b615d0b147089946e16613d"
+checksum = "d4eb579851244c2c03e7c24f501c3432bed80b8f720af1d6e5b0e0f01555a035"
 dependencies = [
  "bitflags",
  "errno",
@@ -5174,7 +5174,7 @@ dependencies = [
  "cfg-if",
  "fastrand 1.9.0",
  "redox_syscall 0.3.5",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "windows-sys 0.45.0",
 ]
 
@@ -5407,7 +5407,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d#a2d0652ec3f8f710ff8cfc2e7c68f096fb852d9d"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -6090,6 +6090,17 @@ checksum = "36df944cda56c7d8d8b7496af378e6b16de9284591917d307c9b4d313c44e698"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "walproposer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "postgres_ffi",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]

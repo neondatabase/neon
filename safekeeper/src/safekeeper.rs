@@ -91,6 +91,69 @@ impl TermHistory {
         }
         TermHistory(res)
     }
+
+    /// Find point of divergence between leader (walproposer) term history and
+    /// safekeeper. Arguments are not symmetrics as proposer history ends at
+    /// +infinity while safekeeper at flush_lsn.
+    /// C version is at walproposer SendProposerElected.
+    pub fn find_highest_common_point(
+        prop_th: &TermHistory,
+        sk_th: &TermHistory,
+        sk_wal_end: Lsn,
+    ) -> Option<TermLsn> {
+        let (prop_th, sk_th) = (&prop_th.0, &sk_th.0); // avoid .0 below
+
+        if let Some(sk_th_last) = sk_th.last() {
+            assert!(
+                sk_th_last.lsn <= sk_wal_end,
+                "safekeeper term history end {:?} LSN is higher than WAL end {:?}",
+                sk_th_last,
+                sk_wal_end
+            );
+        }
+
+        // find last common term, if any...
+        let mut last_common_idx = None;
+        for i in 0..min(sk_th.len(), prop_th.len()) {
+            if prop_th[i].term != sk_th[i].term {
+                break;
+            }
+            // If term is the same, LSN must be equal as well.
+            assert!(
+                prop_th[i].lsn == sk_th[i].lsn,
+                "same term {} has different start LSNs: prop {}, sk {}",
+                prop_th[i].term,
+                prop_th[i].lsn,
+                sk_th[i].lsn
+            );
+            last_common_idx = Some(i);
+        }
+        let last_common_idx = match last_common_idx {
+            None => return None, // no common point
+            Some(lci) => lci,
+        };
+        // Now find where it ends at both prop and sk and take min. End of
+        // (common) term is the start of the next except it is the last one;
+        // there it is flush_lsn in case of safekeeper or, in case of proposer
+        // +infinity, so we just take flush_lsn then.
+        if last_common_idx == prop_th.len() - 1 {
+            Some(TermLsn {
+                term: prop_th[last_common_idx].term,
+                lsn: sk_wal_end,
+            })
+        } else {
+            let prop_common_term_end = prop_th[last_common_idx + 1].lsn;
+            let sk_common_term_end = if last_common_idx + 1 < sk_th.len() {
+                sk_th[last_common_idx + 1].lsn
+            } else {
+                sk_wal_end
+            };
+            Some(TermLsn {
+                term: prop_th[last_common_idx].term,
+                lsn: min(prop_common_term_end, sk_common_term_end),
+            })
+        }
+    }
 }
 
 /// Display only latest entries for Debug.
@@ -305,19 +368,19 @@ pub struct AcceptorGreeting {
 /// Vote request sent from proposer to safekeepers
 #[derive(Debug, Deserialize)]
 pub struct VoteRequest {
-    term: Term,
+    pub term: Term,
 }
 
 /// Vote itself, sent from safekeeper to proposer
 #[derive(Debug, Serialize)]
 pub struct VoteResponse {
-    term: Term, // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
+    pub term: Term, // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     vote_given: u64, // fixme u64 due to padding
     // Safekeeper flush_lsn (end of WAL) + history of term switches allow
     // proposer to choose the most advanced one.
-    flush_lsn: Lsn,
+    pub flush_lsn: Lsn,
     truncate_lsn: Lsn,
-    term_history: TermHistory,
+    pub term_history: TermHistory,
     timeline_start_lsn: Lsn,
 }
 
@@ -344,7 +407,8 @@ pub struct AppendRequest {
 pub struct AppendRequestHeader {
     // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     pub term: Term,
-    // LSN since the proposer appends WAL; determines epoch switch point.
+    // TODO: remove this field, it in unused -- LSN of term switch can be taken
+    // from ProposerElected (as well as from term history).
     pub epoch_start_lsn: Lsn,
     /// start position of message in WAL
     pub begin_lsn: Lsn,
@@ -759,7 +823,7 @@ where
             bail!("refusing ProposerElected which is going to overwrite correct WAL: term={}, flush_lsn={}, start_streaming_at={}; restarting the handshake should help",
                    msg.term, self.flush_lsn(), msg.start_streaming_at)
         }
-        // Otherwise this shouldn't happen.
+        // Otherwise we must never attempt to truncate committed data.
         assert!(
             msg.start_streaming_at >= self.inmem.commit_lsn,
             "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}",
@@ -810,6 +874,14 @@ where
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
 
+        // Cache LSN where term starts to immediately fsync control file with
+        // commit_lsn once we reach it -- sync-safekeepers finishes when
+        // persisted commit_lsn on majority of safekeepers aligns.
+        self.epoch_start_lsn = match msg.term_history.0.last() {
+            None => bail!("proposer elected with empty term history"),
+            Some(term_lsn_start) => term_lsn_start.lsn,
+        };
+
         Ok(None)
     }
 
@@ -835,10 +907,7 @@ where
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
         // otherwise commit_lsn might jump over epoch_start_lsn.
-        // Also note that commit_lsn can reach epoch_start_lsn earlier
-        // that we receive new epoch_start_lsn, and we still need to sync
-        // control file in this case.
-        if commit_lsn == self.epoch_start_lsn && self.state.commit_lsn != commit_lsn {
+        if commit_lsn >= self.epoch_start_lsn && self.state.commit_lsn < self.epoch_start_lsn {
             self.persist_control_file(self.state.clone()).await?;
         }
 
@@ -902,7 +971,6 @@ where
         // Now we know that we are in the same term as the proposer,
         // processing the message.
 
-        self.epoch_start_lsn = msg.h.epoch_start_lsn;
         self.inmem.proposer_uuid = msg.h.proposer_uuid;
 
         // do the job
@@ -1184,5 +1252,66 @@ mod tests {
         assert!(resp.is_ok());
         sk.wal_store.truncate_wal(Lsn(3)).await.unwrap(); // imitate the complete record at 3 %)
         assert_eq!(sk.get_epoch(), 1);
+    }
+
+    #[test]
+    fn test_find_highest_common_point_none() {
+        let prop_th = TermHistory(vec![(0, Lsn(1)).into()]);
+        let sk_th = TermHistory(vec![(1, Lsn(1)).into(), (2, Lsn(2)).into()]);
+        assert_eq!(
+            TermHistory::find_highest_common_point(&prop_th, &sk_th, Lsn(3),),
+            None
+        );
+    }
+
+    #[test]
+    fn test_find_highest_common_point_middle() {
+        let prop_th = TermHistory(vec![
+            (1, Lsn(10)).into(),
+            (2, Lsn(20)).into(),
+            (4, Lsn(40)).into(),
+        ]);
+        let sk_th = TermHistory(vec![
+            (1, Lsn(10)).into(),
+            (2, Lsn(20)).into(),
+            (3, Lsn(30)).into(), // sk ends last common term 2 at 30
+        ]);
+        assert_eq!(
+            TermHistory::find_highest_common_point(&prop_th, &sk_th, Lsn(40),),
+            Some(TermLsn {
+                term: 2,
+                lsn: Lsn(30),
+            })
+        );
+    }
+
+    #[test]
+    fn test_find_highest_common_point_sk_end() {
+        let prop_th = TermHistory(vec![
+            (1, Lsn(10)).into(),
+            (2, Lsn(20)).into(), // last common term 2, sk will end it at 32 sk_end_lsn
+            (4, Lsn(40)).into(),
+        ]);
+        let sk_th = TermHistory(vec![(1, Lsn(10)).into(), (2, Lsn(20)).into()]);
+        assert_eq!(
+            TermHistory::find_highest_common_point(&prop_th, &sk_th, Lsn(32),),
+            Some(TermLsn {
+                term: 2,
+                lsn: Lsn(32),
+            })
+        );
+    }
+
+    #[test]
+    fn test_find_highest_common_point_walprop() {
+        let prop_th = TermHistory(vec![(1, Lsn(10)).into(), (2, Lsn(20)).into()]);
+        let sk_th = TermHistory(vec![(1, Lsn(10)).into(), (2, Lsn(20)).into()]);
+        assert_eq!(
+            TermHistory::find_highest_common_point(&prop_th, &sk_th, Lsn(32),),
+            Some(TermLsn {
+                term: 2,
+                lsn: Lsn(32),
+            })
+        );
     }
 }
