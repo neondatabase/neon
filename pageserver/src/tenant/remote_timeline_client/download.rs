@@ -188,15 +188,6 @@ pub async fn list_remote_timelines(
     let mut timeline_ids = HashSet::new();
     let mut other_prefixes = HashSet::new();
 
-    tracing::info!("list_remote_timelines prefixes:");
-    for p in &listing.prefixes {
-        tracing::info!("  '{p}'");
-    }
-    tracing::info!("list_remote_timelines keys:");
-    for p in &listing.keys {
-        tracing::info!("  '{p}'");
-    }
-
     for timeline_remote_storage_key in listing.prefixes {
         let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
