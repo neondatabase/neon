@@ -440,7 +440,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
     info!("version: {GIT_VERSION}");
     info!("build_tag: {BUILD_TAG}");
-    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // On any shutdown signal, log receival and exit.
     std::thread::spawn(move || {
