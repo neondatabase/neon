@@ -839,6 +839,8 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
+        // The local filesystem contents are a cache of what's in the remote IndexPart;
+        // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
         crate::failpoint_support::sleep_millis_async!("attach-before-activate");
