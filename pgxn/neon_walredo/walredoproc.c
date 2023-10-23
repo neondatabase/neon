@@ -206,8 +206,9 @@ WalRedoMain(int argc, char *argv[])
 	 * set the log level as early as possible to only log ERROR and 
 	 * above during WAL redo.
 	 */
-	SetConfigOption("log_min_messages", "warning", PGC_USERSET, PGC_S_FILE);
-	SetConfigOption("client_min_messages", "warning", PGC_USERSET, PGC_S_FILE);
+	SetConfigOption("log_min_messages", "warning", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("client_min_messages", "warning", PGC_SUSET,
+					PGC_S_OVERRIDE);
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of
@@ -326,8 +327,9 @@ WalRedoMain(int argc, char *argv[])
 		elog(PANIC, "log_min_messages got reset to %d, client_min_messages to %d");
 	}
 
-	SetConfigOption("log_min_messages", "warning", PGC_USERSET, PGC_S_ARGV);
-	SetConfigOption("client_min_messages", "warning", PGC_USERSET, PGC_S_ARGV);
+	SetConfigOption("log_min_messages", "warning", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("client_min_messages", "warning", PGC_SUSET,
+					PGC_S_OVERRIDE);
 
 	for (;;)
 	{
