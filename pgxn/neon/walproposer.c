@@ -125,7 +125,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		}
 
 		initStringInfo(&wp->safekeeper[wp->n_safekeepers].outbuf);
-		wp->api.wal_reader_allocate(&wp->safekeeper[wp->n_safekeepers]);
+		wp->safekeeper[wp->n_safekeepers].xlogreader = NULL;
 		wp->safekeeper[wp->n_safekeepers].flushWrite = false;
 		wp->safekeeper[wp->n_safekeepers].startStreamingAt = InvalidXLogRecPtr;
 		wp->safekeeper[wp->n_safekeepers].streamingAt = InvalidXLogRecPtr;
@@ -355,6 +355,12 @@ ShutdownConnection(Safekeeper *sk)
 	sk->voteResponse.termHistory.entries = NULL;
 
 	HackyRemoveWalProposerEvent(sk);
+
+	if (sk->xlogreader)
+	{
+		NeonWALReaderFree(sk->xlogreader);
+		sk->xlogreader = NULL;
+	}
 }
 
 /*
@@ -1104,6 +1110,10 @@ SendProposerElected(Safekeeper *sk)
 	term_t		lastCommonTerm;
 	int			i;
 
+	/* Now that we are ready to send it's a good moment to create WAL reader */
+	Assert(!sk->xlogreader);
+	wp->api.wal_reader_allocate(sk);
+
 	/*
 	 * Determine start LSN by comparing safekeeper's log term switch history
 	 * and proposer's, searching for the divergence point.
@@ -1369,10 +1379,17 @@ SendAppendRequests(Safekeeper *sk)
 		/* write the WAL itself */
 		enlargeStringInfo(&sk->outbuf, req->endLsn - req->beginLsn);
 		/* wal_read will raise error on failure */
-		wp->api.wal_read(sk,
-						 &sk->outbuf.data[sk->outbuf.len],
-						 req->beginLsn,
-						 req->endLsn - req->beginLsn);
+		if (!wp->api.wal_read(sk,
+							  &sk->outbuf.data[sk->outbuf.len],
+							  req->beginLsn,
+							  req->endLsn - req->beginLsn))
+		{
+			walprop_log(WARNING, "WAL reading for node %s:%s failed: %s",
+						sk->host, sk->port,
+						NeonWALReaderErrMsg(sk->xlogreader));
+			ShutdownConnection(sk);
+			return false;
+		}
 		sk->outbuf.len += req->endLsn - req->beginLsn;
 
 		writeResult = wp->api.conn_async_write(sk, sk->outbuf.data, sk->outbuf.len);

@@ -45,6 +45,7 @@
 
 #include "neon.h"
 #include "walproposer.h"
+#include "neon_walreader.h"
 #include "libpq-fe.h"
 
 #define XLOG_HDR_SIZE (1 + 8 * 3)	/* 'w' + startPos + walEnd + timestamp */
@@ -1386,26 +1387,20 @@ XLogWalPropClose(XLogRecPtr recptr)
 	walpropFile = -1;
 }
 
-static void
+static bool
 walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count)
 {
-	WALReadError errinfo;
-
-	if (!WALRead(sk->xlogreader,
-				 buf,
-				 startptr,
-				 count,
-				 walprop_pg_get_timeline_id(),
-				 &errinfo))
-	{
-		WALReadRaiseError(&errinfo);
-	}
+	return NeonWALRead(sk->xlogreader,
+					   buf,
+					   startptr,
+					   count,
+					   walprop_pg_get_timeline_id());
 }
 
 static void
 walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
-	sk->xlogreader = XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(.segment_open = wal_segment_open,.segment_close = wal_segment_close), NULL);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn);
 	if (sk->xlogreader == NULL)
 		elog(FATAL, "Failed to allocate xlog reader");
 }

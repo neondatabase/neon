@@ -10,6 +10,8 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
+#include "neon_walreader.h"
+
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 
@@ -369,7 +371,7 @@ typedef struct Safekeeper
 	/*
 	 * WAL reader, allocated for each safekeeper.
 	 */
-	XLogReaderState *xlogreader;
+	NeonWALReader *xlogreader;
 
 	/*
 	 * Position in wait event set. Equal to -1 if no event
@@ -509,7 +511,7 @@ typedef struct walproposer_api
 	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 
 	/* Read WAL from disk to buf. */
-	void		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
+	bool		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
 
 	/* Allocate WAL reader. */
 	void		(*wal_reader_allocate) (Safekeeper *sk);
