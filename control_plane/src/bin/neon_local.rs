@@ -806,7 +806,15 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.reconfigure()?;
+            let pageserver_id =
+                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
+                    Some(NodeId(
+                        id_str.parse().context("while parsing pageserver id")?,
+                    ))
+                } else {
+                    None
+                };
+            endpoint.reconfigure(pageserver_id)?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -1381,6 +1389,7 @@ fn cli() -> Command {
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
+                            .arg(endpoint_pageserver_id_arg)
                             .arg(endpoint_id_arg.clone())
                             .arg(tenant_id_arg.clone())
                 )

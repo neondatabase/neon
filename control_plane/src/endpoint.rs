@@ -623,13 +623,34 @@ impl Endpoint {
         }
     }
 
-    pub fn reconfigure(&self) -> Result<()> {
-        let spec_path = self.endpoint_path().join("spec.json");
-        let file = std::fs::File::open(spec_path)?;
-        let mut spec: ComputeSpec = serde_json::from_reader(file)?;
+    pub fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
+        let mut spec: ComputeSpec = {
+            let spec_path = self.endpoint_path().join("spec.json");
+            let file = std::fs::File::open(spec_path)?;
+            serde_json::from_reader(file)?
+        };
 
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
+
+        if let Some(pageserver_id) = pageserver_id {
+            let endpoint_config_path = self.endpoint_path().join("endpoint.json");
+            let mut endpoint_conf: EndpointConf = {
+                let file = std::fs::File::open(&endpoint_config_path)?;
+                serde_json::from_reader(file)?
+            };
+            endpoint_conf.pageserver_id = pageserver_id;
+            std::fs::write(
+                endpoint_config_path,
+                serde_json::to_string_pretty(&endpoint_conf)?,
+            )?;
+
+            let pageserver =
+                PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
+            let ps_http_conf = &pageserver.pg_connection_config;
+            let (host, port) = (ps_http_conf.host(), ps_http_conf.port());
+            spec.pageserver_connstring = Some(format!("postgresql://no_user@{host}:{port}"));
+        }
 
         let client = reqwest::blocking::Client::new();
         let response = client

@@ -41,6 +41,11 @@ pub fn write_postgres_conf(
     // File::create() destroys the file content if it exists.
     let mut file = File::create(path)?;
 
+    // Write the postgresql.conf content from the spec file as is.
+    if let Some(conf) = &spec.cluster.postgresql_conf {
+        writeln!(file, "{}", conf)?;
+    }
+
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
     if let Some(s) = &spec.pageserver_connstring {
@@ -86,11 +91,6 @@ pub fn write_postgres_conf(
 
     if let Some(port) = extension_server_port {
         writeln!(file, "neon.extension_server_port={}", port)?;
-    }
-
-    // Write the postgresql.conf content from the spec file as is.
-    if let Some(conf) = &spec.cluster.postgresql_conf {
-        writeln!(file, "{}", conf)?;
     }
 
     Ok(())

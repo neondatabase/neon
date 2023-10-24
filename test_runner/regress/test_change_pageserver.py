@@ -13,8 +13,8 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch("test_change_pageserver")
     endpoint = env.endpoints.create_start("test_change_pageserver")
 
+    alt_pageserver_id = env.pageservers[1].id
     env.pageservers[1].tenant_attach(env.initial_tenant)
-    new_pageserver_pg_port = env.pageservers[1].service_port.pg
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -47,10 +47,7 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
-    endpoint.config(
-        [f"neon.pageserver_connstring='postgresql://no_user:@localhost:{new_pageserver_pg_port}'"]
-    )
-    endpoint.reconfigure()
+    endpoint.reconfigure(pageserver_id=alt_pageserver_id)
     env.pageservers[
         0
     ].stop()  # Stop the old pageserver just to make sure we're reading from the new one
