@@ -17,8 +17,6 @@ def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgB
     n_restarts = 10
     scale = 10
 
-    env.pageserver.allowed_errors.append(".*query handler.*failed.*Shutting down")
-
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])

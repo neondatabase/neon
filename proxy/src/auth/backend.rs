@@ -6,6 +6,7 @@ pub use link::LinkAuthError;
 
 use crate::{
     auth::{self, ClientCredentials},
+    config::AuthenticationConfig,
     console::{
         self,
         provider::{CachedNodeInfo, ConsoleReqExtra},
@@ -124,6 +125,7 @@ async fn auth_quirks(
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     allow_cleartext: bool,
+    config: &'static AuthenticationConfig,
 ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
@@ -145,7 +147,7 @@ async fn auth_quirks(
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
-    classic::authenticate(api, extra, creds, client).await
+    classic::authenticate(api, extra, creds, client, config).await
 }
 
 impl BackendType<'_, ClientCredentials<'_>> {
@@ -180,6 +182,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         extra: &ConsoleReqExtra<'_>,
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
         allow_cleartext: bool,
+        config: &'static AuthenticationConfig,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
 
@@ -192,7 +195,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 let api = api.as_ref();
-                auth_quirks(api, extra, creds, client, allow_cleartext).await?
+                auth_quirks(api, extra, creds, client, allow_cleartext, config).await?
             }
             Postgres(api, creds) => {
                 info!(
@@ -202,7 +205,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 let api = api.as_ref();
-                auth_quirks(api, extra, creds, client, allow_cleartext).await?
+                auth_quirks(api, extra, creds, client, allow_cleartext, config).await?
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {

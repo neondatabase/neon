@@ -19,6 +19,7 @@ use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::ops::Range;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -370,7 +371,6 @@ impl Timeline {
         }
     }
 
-    ///
     /// Subroutine of find_lsn_for_timestamp(). Returns true, if there are any
     /// commits that committed after 'search_timestamp', at LSN 'probe_lsn'.
     ///
@@ -385,6 +385,50 @@ impl Timeline {
         found_larger: &mut bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if timestamp >= search_timestamp {
+                *found_larger = true;
+                return ControlFlow::Break(true);
+            } else {
+                *found_smaller = true;
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+    }
+
+    /// Obtain the possible timestamp range for the given lsn.
+    ///
+    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
+    pub async fn get_timestamp_for_lsn(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<TimestampTz>, PageReconstructError> {
+        let mut max: Option<TimestampTz> = None;
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if let Some(max_prev) = max {
+                max = Some(max_prev.max(timestamp));
+            } else {
+                max = Some(timestamp);
+            }
+            ControlFlow::Continue(())
+        })
+        .await?;
+
+        Ok(max)
+    }
+
+    /// Runs the given function on all the timestamps for a given lsn
+    ///
+    /// The return value is either given by the closure, or set to the `Default`
+    /// impl's output.
+    async fn map_all_timestamps<T: Default>(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+        mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
+    ) -> Result<T, PageReconstructError> {
         for segno in self
             .list_slru_segments(SlruKind::Clog, probe_lsn, ctx)
             .await?
@@ -402,16 +446,14 @@ impl Timeline {
                     timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
                     let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
 
-                    if timestamp >= search_timestamp {
-                        *found_larger = true;
-                        return Ok(true);
-                    } else {
-                        *found_smaller = true;
+                    match f(timestamp) {
+                        ControlFlow::Break(b) => return Ok(b),
+                        ControlFlow::Continue(()) => (),
                     }
                 }
             }
         }
-        Ok(false)
+        Ok(Default::default())
     }
 
     /// Get a list of SLRU segments
@@ -497,6 +539,23 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
+    }
+
+    pub async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        match self.get(AUX_FILES_KEY, lsn, ctx).await {
+            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+                Ok(dir) => Ok(dir.files),
+                Err(e) => Err(PageReconstructError::from(e)),
+            },
+            Err(e) => {
+                warn!("Failed to get info about AUX files: {}", e);
+                Ok(HashMap::new())
+            }
+        }
     }
 
     /// Does the same as get_current_logical_size but counted on demand.
@@ -616,6 +675,7 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
+        result.add_key(AUX_FILES_KEY);
 
         Ok(result.to_keyspace())
     }
@@ -691,6 +751,12 @@ impl<'a> DatadirModification<'a> {
             dbdirs: HashMap::new(),
         })?;
         self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+        // Create AuxFilesDirectory
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
 
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
@@ -796,6 +862,12 @@ impl<'a> DatadirModification<'a> {
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            // Create AuxFilesDirectory as well
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: HashMap::new(),
+            })?;
+            self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         }
         if r.is_none() {
             // Create RelDirectory
@@ -1120,6 +1192,36 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub async fn put_file(
+        &mut self,
+        path: &str,
+        content: &[u8],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
+            Ok(buf) => AuxFilesDirectory::des(&buf)?,
+            Err(e) => {
+                warn!("Failed to get info about AUX files: {}", e);
+                AuxFilesDirectory {
+                    files: HashMap::new(),
+                }
+            }
+        };
+        let path = path.to_string();
+        if content.is_empty() {
+            dir.files.remove(&path);
+        } else {
+            dir.files.insert(path, Bytes::copy_from_slice(content));
+        }
+        self.put(
+            AUX_FILES_KEY,
+            Value::Image(Bytes::from(
+                AuxFilesDirectory::ser(&dir).context("serialize")?,
+            )),
+        );
+        Ok(())
+    }
+
     ///
     /// Flush changes accumulated so far to the underlying repository.
     ///
@@ -1255,6 +1357,11 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AuxFilesDirectory {
+    files: HashMap<String, Bytes>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RelSizeEntry {
     nblocks: u32,
@@ -1303,9 +1410,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 02 pg_twophase
 //
 // 03 misc
-//    controlfile
+//    Controlfile
 //    checkpoint
 //    pg_version
+//
+// 04 aux files
 //
 // Below is a full list of the keyspace allocation:
 //
@@ -1344,6 +1453,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
+//
+// AuxFiles:
+// 03 00000000 00000000 00000000 00   00000002
+//
+
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1565,6 +1679,15 @@ const CHECKPOINT_KEY: Key = Key {
     field4: 0,
     field5: 0,
     field6: 1,
+};
+
+const AUX_FILES_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 2,
 };
 
 // Reverse mappings for a few Keys.

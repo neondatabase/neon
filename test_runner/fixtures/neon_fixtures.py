@@ -1631,7 +1631,10 @@ class NeonPageserver(PgProtocol):
             ".*took more than expected to complete.*",
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
-            '.*registered custom resource manager "neon".*',
+            '.*registered custom resource manager \\\\"neon\\\\".*',
+            # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
+            # and it is not a failure of our code when it happens.
+            ".*DeleteObjects.*We encountered an internal error. Please try again.*",
         ]
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
@@ -2755,6 +2758,20 @@ class Safekeeper:
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
 
+    def timeline_dir(self, tenant_id, timeline_id) -> str:
+        return os.path.join(self.data_dir(), str(tenant_id), str(timeline_id))
+
+    def list_segments(self, tenant_id, timeline_id) -> List[str]:
+        """
+        Get list of segment names of the given timeline.
+        """
+        tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        segments = []
+        for _, _, filenames in os.walk(tli_dir):
+            segments.extend([f for f in filenames if f != "safekeeper.control"])
+        segments.sort()
+        return segments
+
 
 @dataclass
 class SafekeeperTimelineStatus:
@@ -3117,6 +3134,22 @@ def check_restored_datadir_content(
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])
+
+
+def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+    """Wait logical replication subscriber to sync with publisher."""
+    publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    while True:
+        res = subscriber.safe_psql("select latest_end_lsn from pg_catalog.pg_stat_subscription")[0][
+            0
+        ]
+        if res:
+            log.info(f"subscriber_lsn={res}")
+            subscriber_lsn = Lsn(res)
+            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
+            if subscriber_lsn >= publisher_lsn:
+                return subscriber_lsn
+        time.sleep(0.5)
 
 
 def wait_for_last_flush_lsn(

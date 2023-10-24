@@ -372,6 +372,13 @@ impl SafekeeperPostgresHandler {
     /// from a walproposer recovery function. This connection gets a special handling:
     /// safekeeper must stream all local WAL till the flush_lsn, whether committed or not.
     pub fn is_walproposer_recovery(&self) -> bool {
-        self.appname == Some("wal_proposer_recovery".to_string())
+        match &self.appname {
+            None => false,
+            Some(appname) => {
+                appname == "wal_proposer_recovery" ||
+                // set by safekeeper peer recovery
+                appname.starts_with("safekeeper")
+            }
+        }
     }
 }

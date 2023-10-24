@@ -1298,10 +1298,6 @@ pub(crate) mod mock {
             }
         }
 
-        pub fn get_executed(&self) -> usize {
-            self.executed.load(Ordering::Relaxed)
-        }
-
         #[allow(clippy::await_holding_lock)]
         pub async fn pump(&self) {
             if let Some(remote_storage) = &self.remote_storage {

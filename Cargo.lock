@@ -285,7 +285,7 @@ dependencies = [
  "log",
  "parking",
  "polling",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "slab",
  "socket2 0.4.9",
  "waker-fn",
@@ -854,6 +854,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "azure_identity"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b67b337346da8739e91ea1e9400a6ebc9bc54e0b2af1d23c9bcd565950588f9"
+dependencies = [
+ "async-lock",
+ "async-trait",
+ "azure_core",
+ "futures",
+ "log",
+ "oauth2",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "time 0.3.21",
+ "tz-rs",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "azure_storage"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1131,9 +1152,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e3c5919066adf22df73762e50cffcde3a758f2a848b113b586d1f86728b673b"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-integer",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "winapi",
 ]
 
@@ -2559,7 +2582,7 @@ checksum = "adcf93614601c8129ddf72e2d5633df827ba6551541c6d8c59520a371475be1f"
 dependencies = [
  "hermit-abi",
  "io-lifetimes",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "windows-sys 0.48.0",
 ]
 
@@ -2947,6 +2970,34 @@ checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
 dependencies = [
  "hermit-abi",
  "libc",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2819ce041d2ee131036f4fc9d6ae7ae125a3a40e97ba64d04fe799ad9dabbb44"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "oauth2"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c38841cdd844847e3e7c8d29cef9dcfed8877f8f56f9071f77843ecf3baf937f"
+dependencies = [
+ "base64 0.13.1",
+ "chrono",
+ "getrandom 0.2.9",
+ "http",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2 0.10.6",
+ "thiserror",
+ "url",
 ]
 
 [[package]]
@@ -3510,7 +3561,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3523,7 +3574,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3534,7 +3585,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -3552,7 +3603,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3683,7 +3734,7 @@ dependencies = [
  "byteorder",
  "hex",
  "lazy_static",
- "rustix 0.36.14",
+ "rustix 0.36.16",
 ]
 
 [[package]]
@@ -4021,6 +4072,7 @@ dependencies = [
  "aws-smithy-http",
  "aws-types",
  "azure_core",
+ "azure_identity",
  "azure_storage",
  "azure_storage_blobs",
  "bytes",
@@ -4265,9 +4317,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.36.14"
+version = "0.36.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14e4d67015953998ad0eb82887a0eb0129e18a7e2f3b7b0f6c422fddcd503d62"
+checksum = "6da3636faa25820d8648e0e31c5d519bbb01f72fdf57131f0f5f7da5fed36eab"
 dependencies = [
  "bitflags",
  "errno",
@@ -4279,9 +4331,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.37.19"
+version = "0.37.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acf8729d8542766f1b2cf77eb034d52f40d375bb8b615d0b147089946e16613d"
+checksum = "d4eb579851244c2c03e7c24f501c3432bed80b8f720af1d6e5b0e0f01555a035"
 dependencies = [
  "bitflags",
  "errno",
@@ -5122,7 +5174,7 @@ dependencies = [
  "cfg-if",
  "fastrand 1.9.0",
  "redox_syscall 0.3.5",
- "rustix 0.37.19",
+ "rustix 0.37.25",
  "windows-sys 0.45.0",
 ]
 
@@ -5219,6 +5271,8 @@ checksum = "8f3403384eaacbca9923fa06940178ac13e4edb725486d70e8e15881d0c836cc"
 dependencies = [
  "itoa",
  "js-sys",
+ "libc",
+ "num_threads",
  "serde",
  "time-core",
  "time-macros 0.2.9",
@@ -5353,7 +5407,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=9011f7110db12b5e15afaf98f8ac834501d50ddc#9011f7110db12b5e15afaf98f8ac834501d50ddc"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5368,7 +5422,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
- "socket2 0.4.9",
+ "socket2 0.5.3",
  "tokio",
  "tokio-util",
 ]
@@ -5771,6 +5825,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "497961ef93d974e23eb6f433eb5fe1b7930b659f06d12dec6fc44a8f554c0bba"
 
 [[package]]
+name = "tz-rs"
+version = "0.6.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33851b15c848fad2cf4b105c6bb66eb9512b6f6c44a4b13f57c53c73c707e2b4"
+dependencies = [
+ "const_fn",
+]
+
+[[package]]
 name = "uname"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6027,6 +6090,17 @@ checksum = "36df944cda56c7d8d8b7496af378e6b16de9284591917d307c9b4d313c44e698"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "walproposer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "postgres_ffi",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -6434,7 +6508,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "socket2 0.4.9",
  "standback",
  "syn 1.0.109",
  "syn 2.0.28",
