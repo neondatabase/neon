@@ -40,6 +40,7 @@ use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::Timeline;
@@ -72,9 +73,11 @@ pub struct State {
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
+    secondary_controller: SecondaryController,
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
@@ -83,6 +86,7 @@ impl State {
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
+        secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
@@ -97,6 +101,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
+            secondary_controller,
         })
     }
 
@@ -1576,6 +1581,36 @@ async fn disk_usage_eviction_run(
     json_response(StatusCode::OK, response)
 }
 
+async fn secondary_download_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    state
+        .secondary_controller
+        .download_tenant(tenant_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn secondary_upload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    state
+        .secondary_controller
+        .upload_tenant(tenant_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1811,6 +1846,16 @@ pub fn make_router(
         })
         .put("/v1/deletion_queue/flush", |r| {
             api_handler(r, deletion_queue_flush)
+        })
+        .post("/v1/secondary/:tenant_id/upload", |r| {
+            testing_api_handler("force heatmap upload", r, secondary_upload_handler)
+        })
+        .post("/v1/secondary/:tenant_id/download", |r| {
+            testing_api_handler(
+                "force secondary layer download",
+                r,
+                secondary_download_handler,
+            )
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
