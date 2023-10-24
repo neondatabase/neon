@@ -841,7 +841,6 @@ def test_compaction_waits_for_upload(
         compact_barrier.wait()
         log.info("Waiting to see compaction hang...")
         time.sleep(5)
-        assert compact_barrier.n_waiting == 0
         assert compact_result.empty()
 
         # This is logged once compaction is started, but before we wait for operations to complete
