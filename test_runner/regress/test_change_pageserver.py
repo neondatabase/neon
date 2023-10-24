@@ -48,6 +48,14 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     assert cur.fetchone() == (100000,)
 
     endpoint.reconfigure(pageserver_id=alt_pageserver_id)
+
+    # Verify that the neon.pageserver_connstring GUC is set to the correct thing
+    cur.execute("SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'")
+    connstring = cur.fetchone()
+    assert connstring is not None
+    expected_connstring = f"postgresql://no_user:@localhost:{env.pageservers[1].service_port.pg}"
+    assert expected_connstring == expected_connstring
+
     env.pageservers[
         0
     ].stop()  # Stop the old pageserver just to make sure we're reading from the new one

@@ -801,7 +801,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
         "reconfigure" => {
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
-                .ok_or_else(|| anyhow!("No endpoint ID provided to sighup"))?;
+                .ok_or_else(|| anyhow!("No endpoint ID provided to reconfigure"))?;
             let endpoint = cplane
                 .endpoints
                 .get(endpoint_id.as_str())
