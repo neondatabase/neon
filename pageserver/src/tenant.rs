@@ -286,6 +286,8 @@ pub struct Tenant {
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 
     pub(crate) heatmap_hook: Mutex<HeatmapHook>,
+
+    pub(crate) cancel: CancellationToken,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -2073,6 +2075,7 @@ impl Tenant {
         // we just ignore the failure to stop
 
         tracing::debug!("shutting down...");
+        self.cancel.cancel();
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
@@ -2620,6 +2623,7 @@ impl Tenant {
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             heatmap_hook: Mutex::default(),
+            cancel: CancellationToken::new(),
         }
     }
 
