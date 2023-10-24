@@ -691,11 +691,9 @@ impl RemoteTimelineClient {
                         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
                         Some((name, meta.generation))
                     } else {
-                        // This can only happen if we forgot to to schedule the file upload
-                        // before scheduling the delete. Log it because it is a rare/strange
-                        // situation, and in case something is misbehaving, we'd like to know which
-                        // layers experienced this.
-                        info!(
+                        // This should never happen: callers should ensure that any layer they
+                        // request deletion of has already been scheduled for upload
+                        error!(
                             "Deleting layer {name} not found in latest_files list, never uploaded?"
                         );
                         None
