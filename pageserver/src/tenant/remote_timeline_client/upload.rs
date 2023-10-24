@@ -60,6 +60,8 @@ pub(super) async fn upload_timeline_layer<'a>(
         bail!("failpoint before-upload-layer")
     });
 
+    pausable_failpoint!("before-upload-layer-pausable");
+
     let storage_path = remote_path(conf, source_path, generation)?;
     let source_file_res = fs::File::open(&source_path).await;
     let source_file = match source_file_res {
