@@ -878,6 +878,29 @@ class NeonEnv:
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
         return AuthKeys(pub=pub, priv=priv)
 
+    def regenerate_keys_at(self, privkey_path: Path, pubkey_path: Path):
+        # compare generate_auth_keys() in local_env.rs
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ed25519", "-out", privkey_path],
+            cwd=self.repo_dir,
+            check=True,
+        )
+
+        subprocess.run(
+            [
+                "openssl",
+                "pkey",
+                "-in",
+                privkey_path,
+                "-pubout",
+                "-out",
+                pubkey_path,
+            ],
+            cwd=self.repo_dir,
+            check=True,
+        )
+        del self.auth_keys
+
     def generate_endpoint_id(self) -> str:
         """
         Generate a unique endpoint ID

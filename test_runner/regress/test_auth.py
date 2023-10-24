@@ -1,5 +1,5 @@
-import subprocess
 from contextlib import closing
+from pathlib import Path
 
 import psycopg2
 import pytest
@@ -93,28 +93,7 @@ def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
     pageserver_http_client_old.reload_auth_validation_keys()
 
     # Regenerate the keys
-    # compare generate_auth_keys() in local_env.rs
-    # openssl genpkey -algorithm ed25519 -out auth_private_key.pem
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "ed25519", "-out", "auth_private_key.pem"],
-        cwd=env.repo_dir,
-        check=True,
-    )
-    subprocess.run(
-        [
-            "openssl",
-            "pkey",
-            "-in",
-            "auth_private_key.pem",
-            "-pubout",
-            "-out",
-            "auth_public_key.pem",
-        ],
-        cwd=env.repo_dir,
-        check=True,
-    )
-
-    del env.auth_keys
+    env.regenerate_keys_at(Path("auth_private_key.pem"), Path("auth_public_key.pem"))
 
     # Reload the keys on the pageserver side
     pageserver_http_client_old.reload_auth_validation_keys()
