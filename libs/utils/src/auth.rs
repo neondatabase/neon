@@ -115,7 +115,7 @@ impl JwtAuth {
         if let Some(res) = res {
             res.map_err(anyhow::Error::new)
         } else {
-            anyhow::bail!("no JWT token authorized")
+            anyhow::bail!("no JWT decoding keys configured")
         }
     }
 }
