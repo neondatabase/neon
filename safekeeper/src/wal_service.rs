@@ -36,14 +36,14 @@ pub async fn task_main(
         let conf = conf.clone();
         let conn_id = issue_connection_id(&mut connection_count);
 
-        tokio::spawn(async move {
-            if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope)
-                .instrument(info_span!("", cid = %conn_id))
-                .await
-            {
-                error!("connection handler exited: {}", err);
+        tokio::spawn(
+            async move {
+                if let Err(err) = handle_socket(socket, conf, conn_id, allowed_auth_scope).await {
+                    error!("connection handler exited: {}", err);
+                }
             }
-        });
+            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty)),
+        );
     }
 }
 
