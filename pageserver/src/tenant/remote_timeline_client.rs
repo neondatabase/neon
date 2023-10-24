@@ -1097,7 +1097,7 @@ impl RemoteTimelineClient {
                         .timeline_path(&self.tenant_id, &self.timeline_id)
                         .join(layer_file_name.file_name());
 
-                    upload::upload_timeline_layer(
+                    let result = upload::upload_timeline_layer(
                         self.conf,
                         &self.storage_impl,
                         &path,
@@ -1111,7 +1111,27 @@ impl RemoteTimelineClient {
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),
                     )
-                    .await
+                    .await;
+
+                    if let Ok(outcome) = &result {
+                        match outcome {
+                            upload::UploadOutcome::NotFound => {
+                                // Layer uploads can be no-ops if the file is not found on local disk.  In this case, we must
+                                // update our remote metadata to reflect that the file doesn't exist (it was added to `latest_files`)
+                                // when scheduled.
+                                let mut guard = self.upload_queue.lock().unwrap();
+                                if let Ok(upload_queue) = guard.initialized_mut() {
+                                    upload_queue.latest_files.remove(layer_file_name);
+                                    upload_queue
+                                        .latest_files_changes_since_metadata_upload_scheduled += 1;
+                                }
+                            }
+                            upload::UploadOutcome::Uploaded => {
+                                // Success, no special handling required.
+                            }
+                        }
+                    }
+                    result.map(|_| ())
                 }
                 UploadOp::UploadMetadata(ref index_part, _lsn) => {
                     let mention_having_future_layers = if cfg!(feature = "testing") {

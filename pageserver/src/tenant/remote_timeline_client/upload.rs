@@ -45,6 +45,11 @@ pub(super) async fn upload_index_part<'a>(
         .with_context(|| format!("upload index part for '{tenant_id} / {timeline_id}'"))
 }
 
+pub(super) enum UploadOutcome {
+    Uploaded,
+    NotFound,
+}
+
 /// Attempts to upload given layer files.
 /// No extra checks for overlapping files is made and any files that are already present remotely will be overwritten, if submitted during the upload.
 ///
@@ -55,7 +60,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     source_path: &'a Utf8Path,
     known_metadata: &'a LayerFileMetadata,
     generation: Generation,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<UploadOutcome> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
@@ -73,7 +78,7 @@ pub(super) async fn upload_timeline_layer<'a>(
             // something worse, like when a file is scheduled for upload before
             // it has been written to disk yet.
             info!(path = %source_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
-            return Ok(());
+            return Ok(UploadOutcome::NotFound);
         }
         Err(e) => {
             Err(e).with_context(|| format!("open a source file for layer {source_path:?}"))?
@@ -99,5 +104,5 @@ pub(super) async fn upload_timeline_layer<'a>(
         .await
         .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
-    Ok(())
+    Ok(UploadOutcome::Uploaded)
 }
