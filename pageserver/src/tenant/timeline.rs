@@ -2793,10 +2793,13 @@ impl Timeline {
                 )
             };
 
+        let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
+        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
+
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
-        {
+        let metadata = {
             let mut guard = self.layers.write().await;
 
             if let Some(ref l) = delta_layer_to_add {
@@ -2812,8 +2815,14 @@ impl Timeline {
             }
 
             guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer);
+            if disk_consistent_lsn != old_disk_consistent_lsn {
+                assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+                Some(self.schedule_uploads(disk_consistent_lsn, layer_paths_to_upload)?)
+            } else {
+                None
+            }
             // release lock on 'layers'
-        }
+        };
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -2829,16 +2838,14 @@ impl Timeline {
         //
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
-        let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
-        let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
 
         // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
         // After crash, we will restart WAL streaming and processing from that point.
-        if disk_consistent_lsn != old_disk_consistent_lsn {
-            assert!(disk_consistent_lsn > old_disk_consistent_lsn);
-            self.update_metadata_file(disk_consistent_lsn, layer_paths_to_upload)
+        if let Some(metadata) = metadata {
+            save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
                 .await
-                .context("update_metadata_file")?;
+                .context("save_metadata")?;
+
             // Also update the in-memory copy
             self.disk_consistent_lsn.store(disk_consistent_lsn);
         }
