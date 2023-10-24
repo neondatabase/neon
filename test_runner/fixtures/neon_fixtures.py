@@ -1448,7 +1448,7 @@ class NeonCli(AbstractNeonCli):
     def endpoint_reconfigure(
         self,
         endpoint_id: str,
-        tenant_id: Optional[TenantId]] = None,
+        tenant_id: Optional[TenantId] = None,
         pageserver_id: Optional[str] = None,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
