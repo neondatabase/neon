@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use once_cell::sync::Lazy;
 use prometheus::{
@@ -6,14 +9,14 @@ use prometheus::{
     proto::{self, LabelPair},
 };
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TokioCollector {
-    handles: Vec<tokio::runtime::Handle>,
+    handles: Arc<Mutex<Vec<tokio::runtime::Handle>>>,
 }
 
 impl TokioCollector {
     pub fn add_runtime(&mut self, handle: tokio::runtime::Handle) {
-        self.handles.push(handle);
+        self.handles.lock().unwrap().push(handle);
     }
 
     fn guage(
@@ -28,33 +31,6 @@ impl TokioCollector {
             m.set_gauge(g);
             m
         })
-    }
-
-    fn metric(
-        &self,
-        desc: &Desc,
-        typ: proto::MetricType,
-        f: impl Fn(&tokio::runtime::RuntimeMetrics) -> proto::Metric,
-    ) -> proto::MetricFamily {
-        let mut m = proto::MetricFamily::default();
-        m.set_name(desc.fq_name.clone());
-        m.set_help(desc.help.clone());
-        m.set_field_type(typ);
-        let mut metrics = vec![];
-        for rt in &self.handles {
-            let rt_metrics = rt.metrics();
-            let mut m = f(&rt_metrics);
-
-            let mut label_id = LabelPair::default();
-            label_id.set_name("id".to_owned());
-            label_id.set_value(rt.id().to_string());
-
-            m.set_label(vec![label_id]);
-            metrics.push(m);
-        }
-
-        m.set_metric(metrics);
-        m
     }
 
     // fn guage_per_worker(
@@ -85,35 +61,59 @@ impl TokioCollector {
         })
     }
 
+    fn metric(
+        &self,
+        desc: &Desc,
+        typ: proto::MetricType,
+        f: impl Fn(&tokio::runtime::RuntimeMetrics) -> proto::Metric,
+    ) -> proto::MetricFamily {
+        self.metrics(desc, typ, |rt, label_id, metrics| {
+            let mut m = f(rt);
+            m.set_label(vec![label_id.clone()]);
+            metrics.push(m);
+        })
+    }
+
     fn metric_per_worker(
         &self,
         desc: &Desc,
         typ: proto::MetricType,
         f: impl Fn(&tokio::runtime::RuntimeMetrics, usize) -> proto::Metric,
     ) -> proto::MetricFamily {
-        let mut m = proto::MetricFamily::default();
-        m.set_name(desc.fq_name.clone());
-        m.set_help(desc.help.clone());
-        m.set_field_type(typ);
-        let mut metrics = vec![];
-        for rt in &self.handles {
-            let rt_metrics = rt.metrics();
-            let workers = rt_metrics.num_workers();
-
+        self.metrics(desc, typ, |rt, label_id, metrics| {
+            let workers = rt.num_workers();
             for i in 0..workers {
-                let mut m = f(&rt_metrics, i);
-
-                let mut label_id = LabelPair::default();
-                label_id.set_name("id".to_owned());
-                label_id.set_value(rt.id().to_string());
+                let mut m = f(rt, i);
 
                 let mut label_worker = LabelPair::default();
                 label_worker.set_name("worker".to_owned());
                 label_worker.set_value(i.to_string());
 
-                m.set_label(vec![label_id, label_worker]);
+                m.set_label(vec![label_id.clone(), label_worker]);
                 metrics.push(m);
             }
+        })
+    }
+
+    fn metrics(
+        &self,
+        desc: &Desc,
+        typ: proto::MetricType,
+        f: impl Fn(&tokio::runtime::RuntimeMetrics, LabelPair, &mut Vec<proto::Metric>),
+    ) -> proto::MetricFamily {
+        let mut m = proto::MetricFamily::default();
+        m.set_name(desc.fq_name.clone());
+        m.set_help(desc.help.clone());
+        m.set_field_type(typ);
+        let mut metrics = vec![];
+        for rt in &*self.handles.lock().unwrap() {
+            let rt_metrics = rt.metrics();
+
+            let mut label_id = LabelPair::default();
+            label_id.set_name("id".to_owned());
+            label_id.set_value(rt.id().to_string());
+
+            f(&rt_metrics, label_id, &mut metrics);
         }
 
         m.set_metric(metrics);
