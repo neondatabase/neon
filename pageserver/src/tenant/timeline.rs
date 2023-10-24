@@ -2846,11 +2846,11 @@ impl Timeline {
     }
 
     /// Update metadata file
-    async fn update_metadata_file(
+    fn schedule_uploads(
         &self,
         disk_consistent_lsn: Lsn,
         layer_paths_to_upload: HashMap<LayerFileName, LayerFileMetadata>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TimelineMetadata> {
         // We can only save a valid 'prev_record_lsn' value on disk if we
         // flushed *all* in-memory changes to disk. We only track
         // 'prev_record_lsn' in memory for the latest processed record, so we
@@ -2887,16 +2887,26 @@ impl Timeline {
             x.unwrap()
         ));
 
-        save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
-            .await
-            .context("save_metadata")?;
-
         if let Some(remote_client) = &self.remote_client {
             for (path, layer_metadata) in layer_paths_to_upload {
                 remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
             }
             remote_client.schedule_index_upload_for_metadata_update(&metadata)?;
         }
+
+        Ok(metadata)
+    }
+
+    async fn update_metadata_file(
+        &self,
+        disk_consistent_lsn: Lsn,
+        layer_paths_to_upload: HashMap<LayerFileName, LayerFileMetadata>,
+    ) -> anyhow::Result<()> {
+        let metadata = self.schedule_uploads(disk_consistent_lsn, layer_paths_to_upload)?;
+
+        save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
+            .await
+            .context("save_metadata")?;
 
         Ok(())
     }
