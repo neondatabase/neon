@@ -104,6 +104,11 @@ impl JwtAuth {
         Ok(Self::new(decoding_keys))
     }
 
+    /// Attempt to decode the token with the internal decoding keys.
+    ///
+    /// The function tries the stored decoding keys in succession,
+    /// and returns the first yielding a successful result.
+    /// If there is no working decoding key, it returns the last error.
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
         let mut res = None;
         for decoding_key in &self.decoding_keys {
