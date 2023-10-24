@@ -3,10 +3,7 @@ mod heatmap_uploader;
 
 use std::sync::Arc;
 
-use crate::{
-    config::PageServerConf,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-};
+use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 
 use self::heatmap_uploader::heatmap_uploader_task;
 
@@ -69,17 +66,11 @@ impl SecondaryController {
 }
 
 pub fn spawn_tasks(
-    conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
     remote_storage: GenericRemoteStorage,
     background_jobs_can_start: Barrier,
     cancel: CancellationToken,
 ) -> SecondaryController {
-    let mgr_clone = tenant_manager.clone();
-    let storage_clone = remote_storage.clone();
-    let cancel_clone = cancel.clone();
-    let bg_jobs_clone = background_jobs_can_start.clone();
-
     let (upload_req_tx, upload_req_rx) =
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
