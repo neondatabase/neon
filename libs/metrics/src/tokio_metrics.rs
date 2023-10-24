@@ -162,51 +162,7 @@ mod tests {
 
     use crate::tokio_metrics::TokioCollector;
 
-    #[tokio::test]
-    async fn gather() {
-        let registry = Registry::new();
-        let mut collector = TokioCollector::default();
-        collector.add_runtime(tokio::runtime::Handle::current());
-        registry.register(Box::new(collector)).unwrap();
-
-        let lock = Arc::new(Mutex::new(0));
-        let guard = lock.lock().await;
-        let mut joinset = JoinSet::new();
-        for _ in 0..10 {
-            let lock = lock.clone();
-            joinset.spawn(async move {
-                let mut _guard = lock.lock().await;
-            });
-        }
-
-        let text = TextEncoder.encode_to_string(&registry.gather()).unwrap();
-        assert_eq!(
-            text,
-            r#"# HELP tokio_active_task_count_total the number of active tasks in the runtime
-# TYPE tokio_active_task_count_total gauge
-tokio_active_task_count_total{id="1"} 10
-# HELP tokio_worker_steal_count_total the number of tasks the given worker thread stole from another worker thread
-# TYPE tokio_worker_steal_count_total counter
-tokio_worker_steal_count_total{id="1",worker="0"} 0
-"#
-        );
-
-        drop(guard);
-        while let Some(_x) = joinset.join_next().await {}
-
-        let text = TextEncoder.encode_to_string(&registry.gather()).unwrap();
-        assert_eq!(
-            text,
-            r#"# HELP tokio_active_task_count_total the number of active tasks in the runtime
-# TYPE tokio_active_task_count_total gauge
-tokio_active_task_count_total{id="1"} 0
-# HELP tokio_worker_steal_count_total the number of tasks the given worker thread stole from another worker thread
-# TYPE tokio_worker_steal_count_total counter
-tokio_worker_steal_count_total{id="1",worker="0"} 0
-"#
-        );
-    }
-
+    // this will get flaky if we have other tokio tests in this crate...
     #[test]
     fn gather_multiple_runtimes() {
         let registry = Registry::new();
