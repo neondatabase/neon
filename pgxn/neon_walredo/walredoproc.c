@@ -203,11 +203,13 @@ WalRedoMain(int argc, char *argv[])
 	am_wal_redo_postgres = true;
 	/*
 	 * Pageserver treats any output to stderr as an ERROR, so we must
-	 * set the log level as early as possible to only log ERROR and 
-	 * above during WAL redo.
+	 * set the log level as early as possible to only log FATAL and 
+	 * above during WAL redo (note that loglevel ERROR also logs LOG,
+	 * which is super strange but that's not something we can solve
+	 * for here. ¯\_(-_-)_/¯
 	 */
-	SetConfigOption("log_min_messages", "warning", PGC_SUSET, PGC_S_OVERRIDE);
-	SetConfigOption("client_min_messages", "warning", PGC_SUSET,
+	SetConfigOption("log_min_messages", "FATAL", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("client_min_messages", "ERROR", PGC_SUSET,
 					PGC_S_OVERRIDE);
 
 	/*
@@ -321,14 +323,6 @@ WalRedoMain(int argc, char *argv[])
 #if PG_MAJORVERSION_NUM >= 16
 	MyBackendType = B_BACKEND;
 #endif
-
-	if (!(log_min_messages == WARNING && client_min_messages == WARNING))
-	{
-		elog(PANIC, "log_min_messages got reset to %d, client_min_messages to %d");
-	}
-
-	SetConfigOption("log_min_messages", "error", PGC_SUSET, PGC_S_OVERRIDE);
-	SetConfigOption("client_min_messages", "error", PGC_SUSET, PGC_S_OVERRIDE);
 
 	for (;;)
 	{
