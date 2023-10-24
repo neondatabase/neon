@@ -189,6 +189,10 @@ class PageserverHttpClient(requests.Session):
         assert res_json is None
         return res_json
 
+    def reload_auth_validation_keys(self):
+        res = self.post(f"http://localhost:{self.port}/v1/reload_auth_validation_keys")
+        self.verbose_error(res)
+
     def tenant_list(self) -> List[Dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         self.verbose_error(res)

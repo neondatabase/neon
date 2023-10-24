@@ -1,3 +1,4 @@
+import subprocess
 from contextlib import closing
 
 import psycopg2
@@ -80,6 +81,76 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
             cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (5000050000,)
+
+
+def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = True
+    env = neon_env_builder.init_start()
+
+    pageserver_token_old = env.auth_keys.generate_pageserver_token()
+    pageserver_http_client_old = env.pageserver.http_client(pageserver_token_old)
+
+    pageserver_http_client_old.reload_auth_validation_keys()
+
+    # Regenerate the keys
+    # compare generate_auth_keys() in local_env.rs
+    # openssl genpkey -algorithm ed25519 -out auth_private_key.pem
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "ed25519", "-out", "auth_private_key.pem"],
+        cwd=env.repo_dir,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "pkey",
+            "-in",
+            "auth_private_key.pem",
+            "-pubout",
+            "-out",
+            "auth_public_key.pem",
+        ],
+        cwd=env.repo_dir,
+        check=True,
+    )
+
+    del env.auth_keys
+
+    # Reload the keys on the pageserver side
+    pageserver_http_client_old.reload_auth_validation_keys()
+
+    # Next attempt fails as we use the old auth token
+    with pytest.raises(
+        PageserverApiException,
+        match="Unauthorized: malformed jwt token",
+    ):
+        pageserver_http_client_old.reload_auth_validation_keys()
+
+    # same goes for attempts trying to create a branch
+    with pytest.raises(
+        PageserverApiException,
+        match="Unauthorized: malformed jwt token",
+    ):
+        pageserver_http_client_old.timeline_create(
+            pg_version=env.pg_version,
+            tenant_id=env.initial_tenant,
+            new_timeline_id=TimelineId.generate(),
+            ancestor_timeline_id=env.initial_timeline,
+        )
+
+    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
+
+    pageserver_token_new = env.auth_keys.generate_pageserver_token()
+    pageserver_http_client_new = env.pageserver.http_client(pageserver_token_new)
+
+    # timeline creation works with the new token/http client
+    pageserver_http_client_new.timeline_create(
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        new_timeline_id=TimelineId.generate(),
+        ancestor_timeline_id=env.initial_timeline,
+    )
+    pageserver_http_client_new.reload_auth_validation_keys()
 
 
 @pytest.mark.parametrize("auth_enabled", [False, True])
