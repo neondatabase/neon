@@ -40,21 +40,9 @@ impl PartialOrd for RelTag {
 
 impl Ord for RelTag {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut cmp = self.spcnode.cmp(&other.spcnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.dbnode.cmp(&other.dbnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.relnode.cmp(&other.relnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.forknum.cmp(&other.forknum);
-
-        cmp
+        // Custom ordering where we put forknum to the end of the list
+        let other_tup = (other.spcnode, other.dbnode, other.relnode, other.forknum);
+        (self.spcnode, self.dbnode, self.relnode, self.forknum).cmp(&other_tup)
     }
 }
 
