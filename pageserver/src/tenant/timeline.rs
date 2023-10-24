@@ -2817,6 +2817,9 @@ impl Timeline {
             guard.finish_flush_l0_layer(delta_layer_to_add, &frozen_layer);
             if disk_consistent_lsn != old_disk_consistent_lsn {
                 assert!(disk_consistent_lsn > old_disk_consistent_lsn);
+                self.disk_consistent_lsn.store(disk_consistent_lsn);
+
+                // Schedule remote uploads that will reflect our new disk_consistent_lsn
                 Some(self.schedule_uploads(disk_consistent_lsn, layer_paths_to_upload)?)
             } else {
                 None
@@ -2839,15 +2842,11 @@ impl Timeline {
         // TODO: This perhaps should be done in 'flush_frozen_layers', after flushing
         // *all* the layers, to avoid fsyncing the file multiple times.
 
-        // If we were able to advance 'disk_consistent_lsn', save it the metadata file.
-        // After crash, we will restart WAL streaming and processing from that point.
+        // If we updated our disk_consistent_lsn, persist the updated metadata to local disk.
         if let Some(metadata) = metadata {
             save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
                 .await
                 .context("save_metadata")?;
-
-            // Also update the in-memory copy
-            self.disk_consistent_lsn.store(disk_consistent_lsn);
         }
         Ok(())
     }
