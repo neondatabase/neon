@@ -42,8 +42,7 @@ use utils::auth::{JwtAuth, Scope};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version,
-    project_build_tag,
+    project_build_tag, project_git_version,
     sentry_init::init_sentry,
     tcp_listener,
 };

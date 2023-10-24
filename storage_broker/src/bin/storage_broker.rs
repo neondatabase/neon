@@ -44,8 +44,8 @@ use storage_broker::{
 };
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
-use utils::{project_git_version, project_build_tag};
 use utils::sentry_init::init_sentry;
+use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);

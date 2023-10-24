@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
-use utils::{project_git_version, project_build_tag, sentry_init::init_sentry};
+use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);

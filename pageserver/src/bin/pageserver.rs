@@ -34,8 +34,8 @@ use postgres_backend::AuthType;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
-    auth::JwtAuth, logging, project_git_version, project_build_tag, sentry_init::init_sentry, signals::Signal,
-    tcp_listener,
+    auth::JwtAuth, logging, project_build_tag, project_git_version, sentry_init::init_sentry,
+    signals::Signal, tcp_listener,
 };
 
 project_git_version!(GIT_VERSION);
