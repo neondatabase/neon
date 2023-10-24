@@ -1,4 +1,7 @@
-# Throttling GetPage@LSN
+# GetPage@LSN Rate Limit
+
+Author: Christian Schwarz
+Date: Oct 24, 2023
 
 ## Summary
 
