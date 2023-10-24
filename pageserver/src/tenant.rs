@@ -194,6 +194,45 @@ struct TimelinePreload {
     index_part: Result<MaybeDeletedIndexPart, DownloadError>,
 }
 
+/// To include the HeatmapWriter in tenant shutdown, we provide a hook
+/// for it to publish a barrier when upload is going on.  We will take
+/// this and wait on it during shutdown, ensuring that there is no
+/// upload going on once shutdown() returns.
+pub struct HeatmapHook {
+    // Mutually exclude shutdown and any in-flight uploads
+    //
+    // If this is None, we are shutting down
+    in_progress: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl Default for HeatmapHook {
+    fn default() -> Self {
+        Self {
+            in_progress: Some(Arc::default()),
+        }
+    }
+}
+
+impl HeatmapHook {
+    pub(crate) fn enter(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.in_progress.as_ref().map(|l| {
+            l.clone()
+                .try_lock_owned()
+                // expect: shutdown cannot have started yet or in_progress would have been None,
+                // so we expect that only one HeatmapWriter may take this lock at once.
+                // Depends on the invariant that HeatmapWriter is the only thing that calls
+                // enter(), and that it will never try and do uploads concurrently for the same
+                // tenant.
+                .expect("Tried to double-lock HeatmapHook")
+        })
+    }
+
+    /// Returns a lock that the caller should wait on before proceeding with shutdown
+    fn shutdown(&mut self) -> Arc<tokio::sync::Mutex<()>> {
+        self.in_progress.take().expect("Called shutdown twice")
+    }
+}
+
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
 ///
@@ -245,6 +284,8 @@ pub struct Tenant {
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
+
+    pub(crate) heatmap_hook: Mutex<HeatmapHook>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -2063,6 +2104,14 @@ impl Tenant {
             }
         }
 
+        let heatmap_hook_lock = {
+            let mut hook = self.heatmap_hook.lock().unwrap();
+            hook.shutdown()
+        };
+        tracing::debug!("shutdown waiting heatmap uploads...");
+        // Take & drop lock to ensure any heatmap upload is complete.
+        drop(heatmap_hook_lock.lock().await);
+
         tracing::debug!("shutdown waiting for tasks...");
         // shutdown all tenant and timeline tasks: gc, compaction, page service
         // No new tasks will be started for this tenant because it's in `Stopping` state.
@@ -2570,6 +2619,7 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
+            heatmap_hook: Mutex::default(),
         }
     }
 
