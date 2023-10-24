@@ -1631,7 +1631,7 @@ class NeonPageserver(PgProtocol):
             ".*took more than expected to complete.*",
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
-            '.*registered custom resource manager "neon".*',
+            '.*registered custom resource manager \\\\"neon\\\\".*',
             # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
             # and it is not a failure of our code when it happens.
             ".*DeleteObjects.*We encountered an internal error. Please try again.*",
@@ -2757,6 +2757,20 @@ class Safekeeper:
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
+
+    def timeline_dir(self, tenant_id, timeline_id) -> str:
+        return os.path.join(self.data_dir(), str(tenant_id), str(timeline_id))
+
+    def list_segments(self, tenant_id, timeline_id) -> List[str]:
+        """
+        Get list of segment names of the given timeline.
+        """
+        tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        segments = []
+        for _, _, filenames in os.walk(tli_dir):
+            segments.extend([f for f in filenames if f != "safekeeper.control"])
+        segments.sort()
+        return segments
 
 
 @dataclass

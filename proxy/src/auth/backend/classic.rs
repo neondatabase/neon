@@ -4,6 +4,7 @@ use super::AuthSuccess;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
+    config::AuthenticationConfig,
     console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
     proxy::{handle_try_wake, retry_after},
     sasl, scram,
@@ -17,6 +18,7 @@ pub(super) async fn authenticate(
     extra: &ConsoleReqExtra<'_>,
     creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    config: &'static AuthenticationConfig,
 ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
     info!("fetching user's authentication info");
     let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
@@ -42,7 +44,16 @@ pub(super) async fn authenticate(
                 error
             })?;
 
-            let auth_outcome = auth_flow.authenticate().await.map_err(|error| {
+            let auth_outcome = tokio::time::timeout(
+                config.scram_protocol_timeout,
+                auth_flow.authenticate(),
+            )
+            .await
+            .map_err(|error| {
+                warn!("error processing scram messages error = authentication timed out, execution time exeeded {} seconds", config.scram_protocol_timeout.as_secs());
+                auth::io::Error::new(auth::io::ErrorKind::TimedOut, error)
+            })?
+            .map_err(|error| {
                 warn!(?error, "error processing scram messages");
                 error
             })?;

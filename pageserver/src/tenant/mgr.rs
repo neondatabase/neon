@@ -1,7 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
@@ -256,83 +256,99 @@ async fn init_load_generations(
     Ok(Some(generations))
 }
 
+/// Given a directory discovered in the pageserver's tenants/ directory, attempt
+/// to load a tenant config from it.
+///
+/// If file is missing, return Ok(None)
+fn load_tenant_config(
+    conf: &'static PageServerConf,
+    dentry: Utf8DirEntry,
+) -> anyhow::Result<Option<(TenantId, anyhow::Result<LocationConf>)>> {
+    let tenant_dir_path = dentry.path().to_path_buf();
+    if crate::is_temporary(&tenant_dir_path) {
+        info!("Found temporary tenant directory, removing: {tenant_dir_path}");
+        // No need to use safe_remove_tenant_dir_all because this is already
+        // a temporary path
+        if let Err(e) = std::fs::remove_dir_all(&tenant_dir_path) {
+            error!(
+                "Failed to remove temporary directory '{}': {:?}",
+                tenant_dir_path, e
+            );
+        }
+        return Ok(None);
+    }
+
+    // This case happens if we crash during attachment before writing a config into the dir
+    let is_empty = tenant_dir_path
+        .is_empty_dir()
+        .with_context(|| format!("Failed to check whether {tenant_dir_path:?} is an empty dir"))?;
+    if is_empty {
+        info!("removing empty tenant directory {tenant_dir_path:?}");
+        if let Err(e) = std::fs::remove_dir(&tenant_dir_path) {
+            error!(
+                "Failed to remove empty tenant directory '{}': {e:#}",
+                tenant_dir_path
+            )
+        }
+        return Ok(None);
+    }
+
+    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+    if tenant_ignore_mark_file.exists() {
+        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+        return Ok(None);
+    }
+
+    let tenant_id = match tenant_dir_path
+        .file_name()
+        .unwrap_or_default()
+        .parse::<TenantId>()
+    {
+        Ok(id) => id,
+        Err(_) => {
+            warn!("Invalid tenant path (garbage in our repo directory?): {tenant_dir_path}",);
+            return Ok(None);
+        }
+    };
+
+    Ok(Some((
+        tenant_id,
+        Tenant::load_tenant_config(conf, &tenant_id),
+    )))
+}
+
 /// Initial stage of load: walk the local tenants directory, clean up any temp files,
 /// and load configurations for the tenants we found.
+///
+/// Do this in parallel, because we expect 10k+ tenants, so serial execution can take
+/// seconds even on reasonably fast drives.
 async fn init_load_tenant_configs(
     conf: &'static PageServerConf,
 ) -> anyhow::Result<HashMap<TenantId, anyhow::Result<LocationConf>>> {
     let tenants_dir = conf.tenants_path();
 
-    let mut dir_entries = tenants_dir
-        .read_dir_utf8()
-        .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
+    let dentries = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Utf8DirEntry>> {
+        let dir_entries = tenants_dir
+            .read_dir_utf8()
+            .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
+
+        Ok(dir_entries.collect::<Result<Vec<_>, std::io::Error>>()?)
+    })
+    .await??;
 
     let mut configs = HashMap::new();
 
-    loop {
-        match dir_entries.next() {
-            None => break,
-            Some(Ok(dentry)) => {
-                let tenant_dir_path = dentry.path().to_path_buf();
-                if crate::is_temporary(&tenant_dir_path) {
-                    info!("Found temporary tenant directory, removing: {tenant_dir_path}");
-                    // No need to use safe_remove_tenant_dir_all because this is already
-                    // a temporary path
-                    if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
-                        error!(
-                            "Failed to remove temporary directory '{}': {:?}",
-                            tenant_dir_path, e
-                        );
-                    }
-                    continue;
-                }
+    let mut join_set = JoinSet::new();
+    for dentry in dentries {
+        join_set.spawn_blocking(move || load_tenant_config(conf, dentry));
+    }
 
-                // This case happens if we:
-                // * crash during attach before creating the attach marker file
-                // * crash during tenant delete before removing tenant directory
-                let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
-                    format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
-                })?;
-                if is_empty {
-                    info!("removing empty tenant directory {tenant_dir_path:?}");
-                    if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
-                        error!(
-                            "Failed to remove empty tenant directory '{}': {e:#}",
-                            tenant_dir_path
-                        )
-                    }
-                    continue;
-                }
-
-                let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-                if tenant_ignore_mark_file.exists() {
-                    info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-                    continue;
-                }
-
-                let tenant_id = match tenant_dir_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .parse::<TenantId>()
-                {
-                    Ok(id) => id,
-                    Err(_) => {
-                        warn!(
-                            "Invalid tenant path (garbage in our repo directory?): {tenant_dir_path}",
-                        );
-                        continue;
-                    }
-                };
-
-                configs.insert(tenant_id, Tenant::load_tenant_config(conf, &tenant_id));
-            }
-            Some(Err(e)) => {
-                // An error listing the top level directory indicates serious problem
-                // with local filesystem: we will fail to load, and fail to start.
-                anyhow::bail!(e);
-            }
+    while let Some(r) = join_set.join_next().await {
+        if let Some((tenant_id, tenant_config)) = r?? {
+            configs.insert(tenant_id, tenant_config);
         }
     }
+
     Ok(configs)
 }
 
