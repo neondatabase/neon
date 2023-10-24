@@ -4123,17 +4123,6 @@ impl Timeline {
 
         debug!("retain_lsns: {:?}", retain_lsns);
 
-        // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See storage_sync module level comment on consistency.
-        // Do it here because we don't want to hold self.layers.write() while waiting.
-        if let Some(remote_client) = &self.remote_client {
-            debug!("waiting for upload ops to complete");
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for layer upload ops to complete")?;
-        }
-
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers = KeySpaceRandomAccum::default();
 
@@ -4244,6 +4233,18 @@ impl Timeline {
             .replace((new_gc_cutoff, wanted_image_layers.to_keyspace()));
 
         if !layers_to_remove.is_empty() {
+            // Before deleting any layers, we need to wait for their upload ops to finish.
+            // Presence of a layer in LayerManager implies it has been schedule for upload,
+            // so by waiting for uploads _after_ walking the layers, we are guaranteed that
+            // everything we are deleting was uploaded.
+            if let Some(remote_client) = &self.remote_client {
+                debug!("waiting for upload ops to complete");
+                remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for layer upload ops to complete")?;
+            }
+
             // Persist the new GC cutoff value in the metadata file, before
             // we actually remove anything.
             self.update_metadata_file(self.disk_consistent_lsn.load(), HashMap::new())
