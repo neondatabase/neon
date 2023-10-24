@@ -1449,7 +1449,7 @@ class NeonCli(AbstractNeonCli):
         self,
         endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
-        pageserver_id: Optional[str] = None,
+        pageserver_id: Optional[int] = None,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = ["endpoint", "reconfigure", endpoint_id]
@@ -2548,7 +2548,7 @@ class Endpoint(PgProtocol):
 
         return self
 
-    def reconfigure(self, pageserver_id: Optional[str] = None):
+    def reconfigure(self, pageserver_id: Optional[int] = None):
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
 
