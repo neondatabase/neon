@@ -1,5 +1,8 @@
+import pytest
+import os
 import shutil
 from contextlib import closing
+from fixtures.log_helper import log
 
 from fixtures.compare_fixtures import NeonCompare, PgCompare
 from fixtures.pg_version import PgVersion
@@ -18,6 +21,9 @@ from fixtures.pg_version import PgVersion
 def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
+    # Number of times to run the write query. One run creates 350MB of wal.
+    n_writes = 100
+
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("create table huge (i int, j int);")
@@ -25,7 +31,10 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
             # Run INSERT, recording the time and I/O it takes
             with env.record_pageserver_writes("pageserver_writes"):
                 with env.record_duration("insert"):
-                    cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
+                    for i in range(n_writes):
+                        if n_writes > 1:
+                            log.info(f"running query {i}/{n_writes}")
+                        cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
                     env.flush()
 
             env.report_peak_memory_use()
@@ -39,7 +48,9 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
 
 
 def measure_recovery_time(env: NeonCompare):
-    client = env.env.pageserver.http_client()
+    # Hmm why is pageserver less ready to respond to http when the datadir is large?
+    from urllib3.util.retry import Retry
+    client = env.env.pageserver.http_client(retries=Retry(1000))
     pg_version = PgVersion(client.timeline_detail(env.tenant, env.timeline)["pg_version"])
 
     # Stop pageserver and remove tenant data
@@ -57,3 +68,13 @@ def measure_recovery_time(env: NeonCompare):
 
         # Flush, which will also wait for lsn to catch up
         env.flush()
+
+
+# This test is meant for local iteration only. The use case is when you want to re-run
+# the measure_recovery_time part of test_bulk_insert, but without running the setup.
+# It allows you to iterate on results 2x faster while trying to improve wal ingestion
+# performance.
+@pytest.mark.skip("this is a convenience test for local dev only")
+def test_recovery(neon_env_builder):
+    env = neon_env_builder.init_start()
+    measure_recovery_time(env)
