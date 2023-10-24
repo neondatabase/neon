@@ -392,8 +392,11 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             if ALLOWLIST_ROUTES.contains(request.uri()) {
                 None
             } else {
-                // Option<SwappableJwtAuth> is always provided as data below, hence unwrap().
-                request.data::<Option<SwappableJwtAuth>>().unwrap().as_ref()
+                // Option<Arc<SwappableJwtAuth>> is always provided as data below, hence unwrap().
+                request
+                    .data::<Option<Arc<SwappableJwtAuth>>>()
+                    .unwrap()
+                    .as_deref()
             }
         }))
     }

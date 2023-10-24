@@ -62,6 +62,12 @@ impl SwappableJwtAuth {
     }
 }
 
+impl std::fmt::Debug for SwappableJwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Swappable({:?})", self.0.load())
+    }
+}
+
 pub struct JwtAuth {
     decoding_keys: Vec<DecodingKey>,
     validation: Validation,
