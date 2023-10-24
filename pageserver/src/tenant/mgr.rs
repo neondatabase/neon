@@ -902,12 +902,12 @@ impl TenantManager {
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(_) => {
-                let tenant_path = self.conf.tenant_path(&tenant_id);
+                let timelines_path = self.conf.timelines_path(&tenant_id);
                 // Directory doesn't need to be fsync'd because if we crash it can
                 // safely be recreated next time this tenant location is configured.
-                unsafe_create_dir_all(&tenant_path)
+                unsafe_create_dir_all(&timelines_path)
                     .await
-                    .with_context(|| format!("Creating {tenant_path}"))?;
+                    .with_context(|| format!("Creating {timelines_path}"))?;
 
                 Tenant::persist_tenant_config(self.conf, &tenant_id, &new_location_config)
                     .await
