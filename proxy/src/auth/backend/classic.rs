@@ -1,4 +1,4 @@
-use super::{AuthStuff, AuthSuccess};
+use super::{AuthSuccess, ComputeCredentials};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
@@ -16,7 +16,7 @@ pub(super) async fn authenticate(
     creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     config: &'static AuthenticationConfig,
-) -> auth::Result<AuthSuccess<AuthStuff>> {
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     info!("fetching user's authentication info");
     let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
@@ -72,6 +72,8 @@ pub(super) async fn authenticate(
 
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: AuthStuff::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(scram_keys)),
+        value: ComputeCredentials::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
+            scram_keys,
+        )),
     })
 }

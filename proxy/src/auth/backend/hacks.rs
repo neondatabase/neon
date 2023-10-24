@@ -1,4 +1,4 @@
-use super::{AuthStuff, AuthSuccess};
+use super::{AuthSuccess, ComputeCredentials};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     stream,
@@ -12,7 +12,7 @@ use tracing::{info, warn};
 /// use this mechanism for websocket connections.
 pub async fn cleartext_hack(
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<AuthStuff>> {
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("cleartext auth flow override is enabled, proceeding");
     let password = AuthFlow::new(client)
         .begin(auth::CleartextPassword)
@@ -23,7 +23,7 @@ pub async fn cleartext_hack(
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: AuthStuff::Password(password),
+        value: ComputeCredentials::Password(password),
     })
 }
 
@@ -32,7 +32,7 @@ pub async fn cleartext_hack(
 pub async fn password_hack(
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<AuthStuff>> {
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("project not specified, resorting to the password hack auth flow");
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
@@ -46,6 +46,6 @@ pub async fn password_hack(
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: AuthStuff::Password(payload.password),
+        value: ComputeCredentials::Password(payload.password),
     })
 }

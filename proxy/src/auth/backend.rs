@@ -120,7 +120,7 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
-pub enum AuthStuff {
+pub enum ComputeCredentials {
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
 }
@@ -134,7 +134,7 @@ async fn auth_quirks_creds(
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
-) -> auth::Result<AuthSuccess<AuthStuff>> {
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -190,8 +190,8 @@ async fn auth_quirks(
     };
 
     match auth_stuff.value {
-        AuthStuff::Password(password) => node.config.password(password),
-        AuthStuff::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
+        ComputeCredentials::Password(password) => node.config.password(password),
+        ComputeCredentials::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
     };
 
     Ok(AuthSuccess {
