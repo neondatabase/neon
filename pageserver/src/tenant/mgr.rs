@@ -919,7 +919,7 @@ impl TenantManager {
                 // safely be recreated next time this tenant location is configured.
                 unsafe_create_dir_all(&timelines_path)
                     .await
-                    .with_context(|| format!("Creating {tenant_path}"))?;
+                    .with_context(|| format!("Creating {timelines_path}"))?;
 
                 Tenant::persist_tenant_config(self.conf, &tenant_id, &new_location_config)
                     .await
