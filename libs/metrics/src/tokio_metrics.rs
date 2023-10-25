@@ -158,6 +158,7 @@ impl prometheus::core::Collector for TokioCollector {
 }
 
 #[cfg(test)]
+#[cfg(tokio_unstable)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
@@ -166,7 +167,6 @@ mod tests {
 
     use crate::tokio_metrics::TokioCollector;
 
-    // this will get flaky if we have other tokio tests in this crate...
     #[test]
     fn gather_multiple_runtimes() {
         let registry = Registry::new();
