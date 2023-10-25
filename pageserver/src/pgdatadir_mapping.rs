@@ -365,16 +365,16 @@ impl Timeline {
                 // just after importing a cluster.
                 Ok(LsnForTimestamp::NoData(min_lsn))
             }
+            (false, true) => {
+                // Didn't find any commit timestamps smaller than the request
+                Ok(LsnForTimestamp::Past(min_lsn))
+            }
             (true, false) => {
                 // Only found a commit with timestamp smaller than the request.
                 // It's still a valid case for branch creation, return it.
                 // And `update_gc_info()` ignores LSN for a `LsnForTimestamp::Future`
                 // case, anyway.
                 Ok(LsnForTimestamp::Future(commit_lsn))
-            }
-            (false, true) => {
-                // Didn't find any commit timestamps smaller than the request
-                Ok(LsnForTimestamp::Past(min_lsn))
             }
             (true, true) => Ok(LsnForTimestamp::Present(commit_lsn)),
         }
