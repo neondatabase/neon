@@ -3875,15 +3875,11 @@ impl Timeline {
                 remote_client.schedule_gc_update(&gc_layers)?;
             }
 
-            // FIXME: this apply does not need to be carried
-            let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers)?;
+            guard.finish_gc_timeline(&layer_removal_cs, gc_layers);
 
             if result.layers_removed != 0 {
-                // testing anything else than exit with this failpoint is not representative
                 fail_point!("after-timeline-gc-removed-layers");
             }
-
-            apply.flush();
         }
 
         info!(

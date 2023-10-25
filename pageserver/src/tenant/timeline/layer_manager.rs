@@ -23,16 +23,6 @@ pub(crate) struct LayerManager {
     layer_fmgr: LayerFileManager<Layer>,
 }
 
-/// After GC, the layer map changes will not be applied immediately. Users should manually apply the changes after
-/// scheduling deletes in remote client.
-pub(crate) struct ApplyGcResultGuard<'a>(BatchedUpdates<'a>);
-
-impl ApplyGcResultGuard<'_> {
-    pub(crate) fn flush(self) {
-        self.0.flush();
-    }
-}
-
 impl LayerManager {
     pub(crate) fn create() -> Self {
         Self {
@@ -207,7 +197,7 @@ impl LayerManager {
         &mut self,
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         gc_layers: Vec<Layer>,
-    ) -> Result<ApplyGcResultGuard> {
+    ) {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
             Self::delete_historic_layer(
@@ -217,7 +207,7 @@ impl LayerManager {
                 &mut self.layer_fmgr,
             );
         }
-        Ok(ApplyGcResultGuard(updates))
+        updates.flush()
     }
 
     /// Helper function to insert a layer into the layer map and file manager.
