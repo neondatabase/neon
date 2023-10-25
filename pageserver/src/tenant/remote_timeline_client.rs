@@ -750,7 +750,7 @@ impl RemoteTimelineClient {
     }
 
     /// Schedules deletion for layer files which have previously been unlinked from the
-    /// `index_part.json` with [`Self::schedule_unlinking_of_layers_from_index_part`].
+    /// `index_part.json` with [`Self::schedule_gc_update`] or [`Self::schedule_compaction_update`].
     pub(crate) fn schedule_deletion_of_unlinked(
         self: &Arc<Self>,
         layers: Vec<(LayerFileName, Generation)>,
