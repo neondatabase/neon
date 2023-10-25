@@ -10,6 +10,7 @@ use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
+use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
@@ -271,7 +272,9 @@ impl DeletionHeader {
         let temp_path = path_with_suffix_extension(&header_path, TEMP_SUFFIX);
         VirtualFile::crashsafe_overwrite(&header_path, &temp_path, &header_bytes)
             .await
-            .map_err(Into::into)
+            .maybe_fatal_err("save deletion header")?;
+
+        Ok(())
     }
 }
 
@@ -360,6 +363,7 @@ impl DeletionList {
         let bytes = serde_json::to_vec(self).expect("Failed to serialize deletion list");
         VirtualFile::crashsafe_overwrite(&path, &temp_path, &bytes)
             .await
+            .maybe_fatal_err("save deletion list")
             .map_err(Into::into)
     }
 }
