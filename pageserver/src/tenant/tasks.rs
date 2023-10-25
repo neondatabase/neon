@@ -183,7 +183,16 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+            if !first {
+                // The first iteration is typically much slower, because all tenants compete for the
+                // compaction sempahore to run, and because of concurrent startup work like initializing
+                // logical sizes.  To avoid routinely spamming warnings, we suppress this log on first iteration.
+                warn_when_period_overrun(
+                    started_at.elapsed(),
+                    period,
+                    BackgroundLoopKind::Compaction,
+                );
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -251,7 +260,12 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
+            if !first {
+                // The first iteration is typically much slower, because all tenants compete for the
+                // compaction sempahore to run, and because of concurrent startup work like initializing
+                // logical sizes.  To avoid routinely spamming warnings, we suppress this log on first iteration.
+                warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
