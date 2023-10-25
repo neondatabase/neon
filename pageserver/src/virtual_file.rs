@@ -208,6 +208,82 @@ impl CrashsafeOverwriteError {
     }
 }
 
+/// Identify error types that should alwways terminate the process.  Other
+/// error types may be elegible for retry.
+pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
+    use nix::errno::Errno::*;
+    match e.raw_os_error().map(nix::errno::from_i32) {
+        Some(EIO) => {
+            // Terminate on EIO because we no longer trust the device to store
+            // data safely, or to uphold persistence guarantees on fsync.
+            true
+        }
+        Some(EROFS) => {
+            // Terminate on EROFS because a filesystem is usually remounted
+            // readonly when it has experienced some critical issue, so the same
+            // logic as EIO applies.
+            true
+        }
+        Some(EACCES) => {
+            // Terminate on EACCESS because we should always have permissions
+            // for our own data dir: if we don't, then we can't do our job and
+            // need administrative intervention to fix permissions.  Terminating
+            // is the best way to make sure we stop cleanly rather than going
+            // into infinite retry loops, and will make it clear to the outside
+            // world that we need help.
+            true
+        }
+        _ => {
+            // Treat all other local file I/O errors are retryable.  This includes:
+            // - ENOSPC: we stay up and wait for eviction to free some space
+            // - EINVAL, EBADF, EBADFD: this is a code bug, not a filesystem/hardware issue
+            // - WriteZero, Interrupted: these are used internally VirtualFile
+            false
+        }
+    }
+}
+
+/// Call this when the local filesystem gives us an error with an external
+/// cause: this includes EIO, EROFS, and EACCESS: all these indicate either
+/// bad storage or bad configuration, and we can't fix that from inside
+/// a running process.
+pub(crate) fn on_fatal_io_error(e: &std::io::Error, context: &str) -> ! {
+    tracing::error!("Fatal I/O error: {e}: {context})");
+    std::process::abort();
+}
+
+pub(crate) trait MaybeFatalIo<T> {
+    fn maybe_fatal_err(self, context: &str) -> std::io::Result<T>;
+    fn fatal_err(self, context: &str) -> T;
+}
+
+impl<T> MaybeFatalIo<T> for std::io::Result<T> {
+    /// Terminate the process if the result is an error of a fatal type, else pass it through
+    ///
+    /// This is appropriate for writes, where we typically want to die on EIO/ACCES etc, but
+    /// not on ENOSPC.
+    fn maybe_fatal_err(self, context: &str) -> std::io::Result<T> {
+        if let Err(e) = &self {
+            if is_fatal_io_error(e) {
+                on_fatal_io_error(e, context);
+            }
+        }
+        self
+    }
+
+    /// Terminate the process on any I/O error.
+    ///
+    /// This is appropriate for reads on files that we know exist: they should always work.
+    fn fatal_err(self, context: &str) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => {
+                on_fatal_io_error(&e, context);
+            }
+        }
+    }
+}
+
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
