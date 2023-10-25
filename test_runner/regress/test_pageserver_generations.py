@@ -486,16 +486,20 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
 
 def evict_all_layers(env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
-    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
-    initial_local_layers = sorted(
-        list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
-    )
     client = env.pageserver.http_client()
-    for layer in initial_local_layers:
-        if "ephemeral" in layer.name or "temp" in layer.name:
+
+    layer_map = client.layer_map_info(tenant_id, timeline_id)
+
+    for layer in layer_map.historic_layers:
+        if layer.remote:
+            log.info(
+                f"Skipping trying to evict remote layer {tenant_id}/{timeline_id} {layer.layer_file_name}"
+            )
             continue
-        log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.name}")
-        client.evict_layer(tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.name)
+        log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer.layer_file_name}")
+        client.evict_layer(
+            tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer.layer_file_name
+        )
 
 
 def test_eviction_across_generations(neon_env_builder: NeonEnvBuilder):
