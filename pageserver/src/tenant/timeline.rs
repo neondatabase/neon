@@ -161,7 +161,7 @@ pub struct Timeline {
     ///
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
-    generation: Generation,
+    pub(crate) generation: Generation,
 
     pub pg_version: u32,
 
