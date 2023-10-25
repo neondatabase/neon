@@ -1,13 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use once_cell::sync::Lazy;
-use prometheus::{
-    core::Desc,
-    proto::{self, LabelPair},
-};
+use prometheus::{core::Desc, proto};
 
 use crate::register_internal;
 
@@ -82,7 +75,7 @@ impl TokioCollector {
             for i in 0..workers {
                 let mut m = f(rt, i);
 
-                let mut label_worker = LabelPair::default();
+                let mut label_worker = proto::LabelPair::default();
                 label_worker.set_name("worker".to_owned());
                 label_worker.set_value(i.to_string());
                 let mut labels = labels.clone();
@@ -99,7 +92,7 @@ impl TokioCollector {
         &self,
         desc: &Desc,
         typ: proto::MetricType,
-        f: impl Fn(&tokio::runtime::RuntimeMetrics, Vec<LabelPair>, &mut Vec<proto::Metric>),
+        f: impl Fn(&tokio::runtime::RuntimeMetrics, Vec<proto::LabelPair>, &mut Vec<proto::Metric>),
     ) -> proto::MetricFamily {
         let mut m = proto::MetricFamily::default();
         m.set_name(desc.fq_name.clone());
@@ -109,7 +102,7 @@ impl TokioCollector {
         for (rt, name) in &*self.handles.lock().unwrap() {
             let rt_metrics = rt.metrics();
 
-            let mut label_name = LabelPair::default();
+            let mut label_name = proto::LabelPair::default();
             label_name.set_name("runtime".to_owned());
             label_name.set_value(name.to_owned());
 
@@ -123,25 +116,28 @@ impl TokioCollector {
     }
 }
 
-static ACTIVE_TASK_COUNT: Lazy<Desc> = Lazy::new(|| {
+#[cfg(tokio_unstable)]
+static ACTIVE_TASK_COUNT: once_cell::sync::Lazy<Desc> = once_cell::sync::Lazy::new(|| {
     Desc::new(
         "tokio_active_task_count_total".to_owned(),
         "the number of active tasks in the runtime".to_owned(),
         vec!["runtime".to_owned()],
-        HashMap::default(),
+        Default::default(),
     )
     .expect("should be a valid description")
 });
-static WORKER_STEAL_COUNT: Lazy<Desc> = Lazy::new(|| {
+#[cfg(tokio_unstable)]
+static WORKER_STEAL_COUNT: once_cell::sync::Lazy<Desc> = once_cell::sync::Lazy::new(|| {
     Desc::new(
         "tokio_worker_steal_count_total".to_owned(),
         "the number of tasks the given worker thread stole from another worker thread".to_owned(),
         vec!["runtime".to_owned(), "worker".to_owned()],
-        HashMap::default(),
+        Default::default(),
     )
     .expect("should be a valid description")
 });
 
+#[allow(unused_mut, clippy::let_and_return)]
 impl prometheus::core::Collector for TokioCollector {
     fn desc(&self) -> Vec<&Desc> {
         let mut metrics = Vec::new();
