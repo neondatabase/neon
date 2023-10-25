@@ -4,10 +4,11 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
-use proxy::metrics;
+use proxy::usage_metrics;
 
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
+use proxy::serverless;
 use std::pin::pin;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -129,14 +130,16 @@ async fn main() -> anyhow::Result<()> {
         cancellation_token.clone(),
     ));
 
-    if let Some(wss_address) = args.wss {
-        let wss_address: SocketAddr = wss_address.parse()?;
-        info!("Starting wss on {wss_address}");
-        let wss_listener = TcpListener::bind(wss_address).await?;
+    // TODO: rename the argument to something like serverless.
+    // It now covers more than just websockets, it also covers SQL over HTTP.
+    if let Some(serverless_address) = args.wss {
+        let serverless_address: SocketAddr = serverless_address.parse()?;
+        info!("Starting wss on {serverless_address}");
+        let serverless_listener = TcpListener::bind(serverless_address).await?;
 
-        client_tasks.spawn(http::websocket::task_main(
+        client_tasks.spawn(serverless::task_main(
             config,
-            wss_listener,
+            serverless_listener,
             cancellation_token.clone(),
         ));
     }
@@ -144,11 +147,11 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
-    maintenance_tasks.spawn(http::server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
-        maintenance_tasks.spawn(metrics::task_main(metrics_config));
+        maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
     let maintenance = loop {
