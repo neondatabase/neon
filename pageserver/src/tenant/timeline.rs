@@ -3858,12 +3858,12 @@ impl Timeline {
         if !layers_to_remove.is_empty() {
             // Persist the new GC cutoff value in the metadata file, before
             // we actually remove anything.
+            //
+            // This does not in fact have any effect as we no longer consider local metadata unless
+            // running without remote storage.
             self.update_metadata_file(self.disk_consistent_lsn.load(), None)
                 .await?;
 
-            // Actually delete the layers from disk and remove them from the map.
-            // (couldn't do this in the loop above, because you cannot modify a collection
-            // while iterating it. BTreeMap::retain() would be another option)
             let gc_layers = layers_to_remove
                 .iter()
                 .map(|x| guard.get_from_desc(x))
