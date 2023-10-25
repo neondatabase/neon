@@ -1388,18 +1388,18 @@ impl TimelineMetrics {
         }
     }
 
-    pub fn record_new_file_metrics(&self, sz: u64) {
+    pub(crate) fn record_new_file_metrics(&self, sz: u64) {
         self.resident_physical_size_add(sz);
         self.num_persistent_files_created.inc_by(1);
         self.persistent_bytes_written.inc_by(sz);
     }
 
-    pub fn resident_physical_size_sub(&self, sz: u64) {
+    pub(crate) fn resident_physical_size_sub(&self, sz: u64) {
         self.resident_physical_size_gauge.sub(sz);
         crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
     }
 
-    pub fn resident_physical_size_add(&self, sz: u64) {
+    pub(crate) fn resident_physical_size_add(&self, sz: u64) {
         self.resident_physical_size_gauge.add(sz);
         crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
     }
