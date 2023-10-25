@@ -207,10 +207,13 @@ impl Layer {
     /// then.
     ///
     /// On drop, this will cause a call to [`RemoteTimelineClient::schedule_deletion_of_unlinked`].
-    /// This means that the [unlinking] must have happened strictly before the value this is called
-    /// on gets dropped.
+    /// This means that the unlinking by [gc] or [compaction] must have happened strictly before
+    /// the value this is called on gets dropped.
     ///
-    /// [unlinking]: [`RemoteTimelineClient::schedule_unlinking_of_layers_from_index_part`]
+    /// This is ensured by both of those methods accepting references to Layer.
+    ///
+    /// [gc]: [`RemoteTimelineClient::schedule_gc_update`]
+    /// [compaction]: [`RemoteTimelineClient::schedule_compaction_update`]
     pub(crate) fn garbage_collect_on_drop(&self) {
         self.0.garbage_collect_on_drop();
     }

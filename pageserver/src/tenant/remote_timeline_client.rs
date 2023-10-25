@@ -687,17 +687,15 @@ impl RemoteTimelineClient {
     ///
     /// The files will be leaked in remote storage unless [`Self::schedule_deletion_of_unlinked`]
     /// is invoked on them.
-    pub(crate) fn schedule_unlinking_of_layers_from_index_part(
-        self: &Arc<Self>,
-        layers: &[Layer],
-    ) -> anyhow::Result<()> {
+    pub(crate) fn schedule_gc_update(self: &Arc<Self>, gc_layers: &[Layer]) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
         // just forget the return value; after uploading the next index_part.json, we can consider
-        // the layer files as "dangling". this is fine however.
+        // the layer files as "dangling". this is fine, at worst case we create work for the
+        // scrubber.
 
-        let names = layers.iter().map(|x| x.layer_desc().filename());
+        let names = gc_layers.iter().map(|x| x.layer_desc().filename());
 
         self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
 

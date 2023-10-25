@@ -3872,9 +3872,10 @@ impl Timeline {
             result.layers_removed = gc_layers.len() as u64;
 
             if let Some(remote_client) = self.remote_client.as_ref() {
-                remote_client.schedule_unlinking_of_layers_from_index_part(&gc_layers)?;
+                remote_client.schedule_gc_update(&gc_layers)?;
             }
 
+            // FIXME: this apply does not need to be carried
             let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers)?;
 
             if result.layers_removed != 0 {
