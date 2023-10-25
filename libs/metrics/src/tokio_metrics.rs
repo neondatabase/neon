@@ -11,15 +11,15 @@ use prometheus::{
 
 #[derive(Default, Clone)]
 pub struct TokioCollector {
-    handles: Arc<Mutex<Vec<tokio::runtime::Handle>>>,
+    handles: Arc<Mutex<Vec<(tokio::runtime::Handle, String)>>>,
 }
 
 impl TokioCollector {
-    pub fn add_runtime(&mut self, handle: tokio::runtime::Handle) {
-        self.handles.lock().unwrap().push(handle);
+    pub fn add_runtime(&mut self, handle: tokio::runtime::Handle, name: String) {
+        self.handles.lock().unwrap().push((handle, name));
     }
 
-    fn guage(
+    fn gauge(
         &self,
         desc: &Desc,
         f: impl Fn(&tokio::runtime::RuntimeMetrics) -> f64,
@@ -32,20 +32,6 @@ impl TokioCollector {
             m
         })
     }
-
-    // fn guage_per_worker(
-    //     &self,
-    //     desc: &Desc,
-    //     f: impl Fn(&tokio::runtime::RuntimeMetrics, usize) -> f64,
-    // ) -> proto::MetricFamily {
-    //     self.metric_per_worker(desc, proto::MetricType::GAUGE, |m, i| {
-    //         let mut g = proto::Gauge::default();
-    //         g.set_value(f(m, i));
-    //         let mut m = proto::Metric::default();
-    //         m.set_gauge(g);
-    //         m
-    //     })
-    // }
 
     fn counter_per_worker(
         &self,
@@ -67,9 +53,9 @@ impl TokioCollector {
         typ: proto::MetricType,
         f: impl Fn(&tokio::runtime::RuntimeMetrics) -> proto::Metric,
     ) -> proto::MetricFamily {
-        self.metrics(desc, typ, |rt, label_id, metrics| {
+        self.metrics(desc, typ, |rt, labels, metrics| {
             let mut m = f(rt);
-            m.set_label(vec![label_id.clone()]);
+            m.set_label(labels.clone());
             metrics.push(m);
         })
     }
@@ -80,7 +66,7 @@ impl TokioCollector {
         typ: proto::MetricType,
         f: impl Fn(&tokio::runtime::RuntimeMetrics, usize) -> proto::Metric,
     ) -> proto::MetricFamily {
-        self.metrics(desc, typ, |rt, label_id, metrics| {
+        self.metrics(desc, typ, |rt, labels, metrics| {
             let workers = rt.num_workers();
             for i in 0..workers {
                 let mut m = f(rt, i);
@@ -88,8 +74,10 @@ impl TokioCollector {
                 let mut label_worker = LabelPair::default();
                 label_worker.set_name("worker".to_owned());
                 label_worker.set_value(i.to_string());
+                let mut labels = labels.clone();
+                labels.push(label_worker);
 
-                m.set_label(vec![label_id.clone(), label_worker]);
+                m.set_label(labels);
                 metrics.push(m);
             }
         })
@@ -99,21 +87,23 @@ impl TokioCollector {
         &self,
         desc: &Desc,
         typ: proto::MetricType,
-        f: impl Fn(&tokio::runtime::RuntimeMetrics, LabelPair, &mut Vec<proto::Metric>),
+        f: impl Fn(&tokio::runtime::RuntimeMetrics, Vec<LabelPair>, &mut Vec<proto::Metric>),
     ) -> proto::MetricFamily {
         let mut m = proto::MetricFamily::default();
         m.set_name(desc.fq_name.clone());
         m.set_help(desc.help.clone());
         m.set_field_type(typ);
         let mut metrics = vec![];
-        for rt in &*self.handles.lock().unwrap() {
+        for (rt, name) in &*self.handles.lock().unwrap() {
             let rt_metrics = rt.metrics();
 
-            let mut label_id = LabelPair::default();
-            label_id.set_name("id".to_owned());
-            label_id.set_value(rt.id().to_string());
+            let mut label_name = LabelPair::default();
+            label_name.set_name("runtime".to_owned());
+            label_name.set_value(name.to_owned());
 
-            f(&rt_metrics, label_id, &mut metrics);
+            let labels = vec![label_name];
+
+            f(&rt_metrics, labels, &mut metrics);
         }
 
         m.set_metric(metrics);
@@ -125,7 +115,7 @@ static ACTIVE_TASK_COUNT: Lazy<Desc> = Lazy::new(|| {
     Desc::new(
         "tokio_active_task_count_total".to_owned(),
         "the number of active tasks in the runtime".to_owned(),
-        vec!["id".to_owned()],
+        vec!["runtime".to_owned()],
         HashMap::default(),
     )
     .expect("should be a valid description")
@@ -134,7 +124,7 @@ static WORKER_STEAL_COUNT: Lazy<Desc> = Lazy::new(|| {
     Desc::new(
         "tokio_worker_steal_count_total".to_owned(),
         "the number of tasks the given worker thread stole from another worker thread".to_owned(),
-        vec!["id".to_owned(), "worker".to_owned()],
+        vec!["runtime".to_owned(), "worker".to_owned()],
         HashMap::default(),
     )
     .expect("should be a valid description")
@@ -147,7 +137,7 @@ impl prometheus::core::Collector for TokioCollector {
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
         vec![
-            self.guage(&ACTIVE_TASK_COUNT, |m| m.active_tasks_count() as f64),
+            self.gauge(&ACTIVE_TASK_COUNT, |m| m.active_tasks_count() as f64),
             self.counter_per_worker(&WORKER_STEAL_COUNT, |m, i| m.worker_steal_count(i) as f64),
         ]
     }
@@ -171,8 +161,8 @@ mod tests {
         let runtime1 = runtime::Builder::new_current_thread().build().unwrap();
         let runtime2 = runtime::Builder::new_current_thread().build().unwrap();
 
-        collector.add_runtime(runtime1.handle().clone());
-        collector.add_runtime(runtime2.handle().clone());
+        collector.add_runtime(runtime1.handle().clone(), "runtime1".to_owned());
+        collector.add_runtime(runtime2.handle().clone(), "runtime2".to_owned());
 
         registry.register(Box::new(collector)).unwrap();
 
@@ -216,12 +206,12 @@ mod tests {
                 text,
                 r#"# HELP tokio_active_task_count_total the number of active tasks in the runtime
 # TYPE tokio_active_task_count_total gauge
-tokio_active_task_count_total{id="1"} 5
-tokio_active_task_count_total{id="2"} 5
+tokio_active_task_count_total{runtime="runtime1"} 5
+tokio_active_task_count_total{runtime="runtime2"} 5
 # HELP tokio_worker_steal_count_total the number of tasks the given worker thread stole from another worker thread
 # TYPE tokio_worker_steal_count_total counter
-tokio_worker_steal_count_total{id="1",worker="0"} 0
-tokio_worker_steal_count_total{id="2",worker="0"} 0
+tokio_worker_steal_count_total{runtime="runtime1",worker="0"} 0
+tokio_worker_steal_count_total{runtime="runtime2",worker="0"} 0
 "#
             );
 
@@ -233,12 +223,12 @@ tokio_worker_steal_count_total{id="2",worker="0"} 0
                 text,
                 r#"# HELP tokio_active_task_count_total the number of active tasks in the runtime
 # TYPE tokio_active_task_count_total gauge
-tokio_active_task_count_total{id="1"} 0
-tokio_active_task_count_total{id="2"} 5
+tokio_active_task_count_total{runtime="runtime1"} 0
+tokio_active_task_count_total{runtime="runtime2"} 5
 # HELP tokio_worker_steal_count_total the number of tasks the given worker thread stole from another worker thread
 # TYPE tokio_worker_steal_count_total counter
-tokio_worker_steal_count_total{id="1",worker="0"} 0
-tokio_worker_steal_count_total{id="2",worker="0"} 0
+tokio_worker_steal_count_total{runtime="runtime1",worker="0"} 0
+tokio_worker_steal_count_total{runtime="runtime2",worker="0"} 0
 "#
             );
 
@@ -250,12 +240,12 @@ tokio_worker_steal_count_total{id="2",worker="0"} 0
                 text,
                 r#"# HELP tokio_active_task_count_total the number of active tasks in the runtime
 # TYPE tokio_active_task_count_total gauge
-tokio_active_task_count_total{id="1"} 0
-tokio_active_task_count_total{id="2"} 0
+tokio_active_task_count_total{runtime="runtime1"} 0
+tokio_active_task_count_total{runtime="runtime2"} 0
 # HELP tokio_worker_steal_count_total the number of tasks the given worker thread stole from another worker thread
 # TYPE tokio_worker_steal_count_total counter
-tokio_worker_steal_count_total{id="1",worker="0"} 0
-tokio_worker_steal_count_total{id="2",worker="0"} 0
+tokio_worker_steal_count_total{runtime="runtime1",worker="0"} 0
+tokio_worker_steal_count_total{runtime="runtime2",worker="0"} 0
 "#
             );
         });
