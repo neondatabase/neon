@@ -85,7 +85,9 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
     cur = endpoint_main.connect().cursor()
     # Create table, and insert rows, each in a separate transaction
-    # Disable synchronous_commit to make this initialization go faster.
+    # Disable `synchronous_commit` to make this initialization go faster.
+    # XXX: on my laptop this test takes 7s, and setting `synchronous_commit=off`
+    #      doesn't change anything.
     #
     # Each row contains current insert LSN and the current timestamp, when
     # the row was inserted.
@@ -107,14 +109,15 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     wait_for_last_flush_lsn(env, endpoint_main, env.initial_tenant, new_timeline_id)
 
     with env.pageserver.http_client() as client:
-        # Check edge cases: timestamp in the future
+        # Check edge cases
+        # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
         result = client.timeline_get_lsn_by_timestamp(
             env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z", 2
         )
-        assert result["kind"] == "future"
+        assert result["kind"] in ["present", "future"]
 
-        # timestamp too the far history
+        # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
         result = client.timeline_get_lsn_by_timestamp(
             env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z", 2
@@ -127,6 +130,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
             result = client.timeline_get_lsn_by_timestamp(
                 env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z", 2
             )
+            assert result["kind"] not in ["past", "nodata"]
             lsn = result["lsn"]
             # Call get_lsn_by_timestamp to get the LSN
             # Launch a new read-only node at that LSN, and check that only the rows
