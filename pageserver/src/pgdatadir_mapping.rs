@@ -675,8 +675,9 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-        result.add_key(AUX_FILES_KEY);
-
+        if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
+            result.add_key(AUX_FILES_KEY);
+        }
         Ok(result.to_keyspace())
     }
 
