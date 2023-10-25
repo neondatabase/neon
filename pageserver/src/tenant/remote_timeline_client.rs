@@ -209,8 +209,7 @@ mod upload;
 use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
-// re-export these
-pub use download::{is_temp_download_file, list_remote_timelines};
+
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff::{
@@ -235,7 +234,6 @@ use crate::metrics::{
 };
 use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
-pub(crate) use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::AsLayerDesc;
 use crate::tenant::upload_queue::Delete;
 use crate::tenant::TIMELINES_SEGMENT_NAME;
@@ -249,7 +247,6 @@ use crate::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
 };
-pub use index::LayerFileMetadata;
 
 use utils::id::{TenantId, TimelineId};
 
@@ -258,6 +255,9 @@ use self::index::IndexPart;
 use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
 use super::upload_queue::SetDeletedFlagProgress;
 use super::Generation;
+
+pub(crate) use download::{is_temp_download_file, list_remote_timelines};
+pub(crate) use index::LayerFileMetadata;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
