@@ -3079,6 +3079,7 @@ impl Timeline {
         Ok(false)
     }
 
+    #[tracing::instrument(skip_all, fields(%lsn, %force))]
     async fn create_image_layers(
         &self,
         partitioning: &KeyPartitioning,

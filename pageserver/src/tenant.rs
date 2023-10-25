@@ -1057,8 +1057,8 @@ impl Tenant {
                     TimelineId::try_from(timeline_uninit_mark_file.file_stem())
                         .with_context(|| {
                             format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {timeline_uninit_mark_file}",
-                        )
+                                "Could not parse timeline id out of the timeline uninit mark name {timeline_uninit_mark_file}",
+                            )
                         })?;
                 let timeline_dir = self.conf.timeline_path(&self.tenant_id, &timeline_id);
                 if let Err(e) =
