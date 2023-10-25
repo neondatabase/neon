@@ -8,7 +8,7 @@ use pbkdf2::{
     Params, Pbkdf2,
 };
 use pq_proto::StartupMessageParams;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 use std::{
     fmt,
     task::{ready, Poll},
