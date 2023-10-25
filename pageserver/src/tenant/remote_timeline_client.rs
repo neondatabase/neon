@@ -627,7 +627,7 @@ impl RemoteTimelineClient {
     ///
     /// Launch an upload operation in the background.
     ///
-    pub fn schedule_layer_file_upload(
+    pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
@@ -635,6 +635,17 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
+        self.schedule_layer_file_upload0(upload_queue, layer_file_name, layer_metadata);
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    fn schedule_layer_file_upload0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        layer_file_name: &LayerFileName,
+        layer_metadata: &LayerFileMetadata,
+    ) {
         upload_queue
             .latest_files
             .insert(layer_file_name.clone(), layer_metadata.clone());
@@ -643,12 +654,7 @@ impl RemoteTimelineClient {
         let op = UploadOp::UploadLayer(layer_file_name.clone(), layer_metadata.clone());
         self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
-
         info!("scheduled layer file upload {layer_file_name}");
-
-        // Launch the task immediately, if possible
-        self.launch_queued_tasks(upload_queue);
-        Ok(())
     }
 
     /// Launch a delete operation in the background.
@@ -666,16 +672,13 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        let no_bail_here = || {
-            let with_generations =
-                self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+        let with_generations =
+            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, &names);
 
-            self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
 
-            // Launch the tasks immediately, if possible
-            self.launch_queued_tasks(upload_queue);
-        };
-        no_bail_here();
+        // Launch the tasks immediately, if possible
+        self.launch_queued_tasks(upload_queue);
         Ok(())
     }
 
@@ -694,7 +697,7 @@ impl RemoteTimelineClient {
 
         // just forget the return value; after uploading the next index_part.json, we can consider
         // the layer files as "dangling". this is fine however.
-        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, &names);
 
         self.launch_queued_tasks(upload_queue);
 
@@ -706,7 +709,7 @@ impl RemoteTimelineClient {
     fn schedule_unlinking_of_layers_from_index_part0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        names: Vec<LayerFileName>,
+        names: &[LayerFileName],
     ) -> Vec<(LayerFileName, Generation)> {
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
         // so we don't need update it. Just serialize it.
@@ -715,14 +718,14 @@ impl RemoteTimelineClient {
         // Decorate our list of names with each name's generation, dropping
         // makes that are unexpectedly missing from our metadata.
         let with_generations: Vec<_> = names
-            .into_iter()
+            .iter()
             .filter_map(|name| {
                 // Remove from latest_files, learning the file's remote generation in the process
-                let meta = upload_queue.latest_files.remove(&name);
+                let meta = upload_queue.latest_files.remove(name);
 
                 if let Some(meta) = meta {
                     upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                    Some((name, meta.generation))
+                    Some((name.to_owned(), meta.generation))
                 } else {
                     // This can only happen if we forgot to to schedule the file upload
                     // before scheduling the delete. Log it because it is a rare/strange
@@ -734,6 +737,9 @@ impl RemoteTimelineClient {
             })
             .collect();
 
+        // after unlinking files from the upload_queue.latest_files we must always schedule an
+        // index_part update, because that needs to be uploaded before we can actually delete the
+        // files.
         if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
             self.schedule_index_upload(upload_queue, metadata);
         }
@@ -742,7 +748,7 @@ impl RemoteTimelineClient {
     }
 
     /// Schedules deletion for layer files which have previously been unlinked from the
-    /// `index_part.json`.
+    /// `index_part.json` with [`Self::schedule_unlinking_of_layers_from_index_part`].
     #[allow(unused)] // will be used by Layer::drop in PR#4938
     pub(crate) fn schedule_deletion_of_unlinked(
         self: &Arc<Self>,
@@ -771,6 +777,29 @@ impl RemoteTimelineClient {
         });
         self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
+    }
+
+    /// Schedules a compaction update to the remote `index_part.json`.
+    ///
+    /// `compacted_from` represent the L0 names which have been `compacted_to` L1 layers.
+    pub(crate) fn schedule_compaction_update(
+        self: &Arc<Self>,
+        compacted_from: &[LayerFileName],
+        compacted_to: &[(LayerFileName, LayerFileMetadata)],
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        for (name, m) in compacted_to {
+            self.schedule_layer_file_upload0(upload_queue, name, m);
+        }
+
+        let with_generations =
+            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, compacted_from);
+        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        self.launch_queued_tasks(upload_queue);
+
+        Ok(())
     }
 
     ///
