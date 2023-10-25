@@ -1401,6 +1401,7 @@ components:
           format: hex
         kind:
           type: string
+          enum: [past, present, future, nodata]
 
     Error:
       type: object
