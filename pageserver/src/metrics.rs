@@ -1404,11 +1404,6 @@ impl TimelineMetrics {
         crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
     }
 
-    pub fn resident_physical_size_set(&self, sz: u64) {
-        self.resident_physical_size_gauge.set(sz);
-        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.set(sz);
-    }
-
     pub fn resident_physical_size_get(&self) -> u64 {
         self.resident_physical_size_gauge.get()
     }
