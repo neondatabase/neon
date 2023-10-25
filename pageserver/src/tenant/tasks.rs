@@ -159,11 +159,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             // TODO: we shouldn't need to await to find tenant and this could be moved outside of
             // loop, #3501. There are also additional "allowed_errors" in tests.
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
-                }
+            if first && random_init_delay(period, &cancel).await.is_err() {
+                break;
             }
 
             let started_at = Instant::now();
@@ -201,6 +198,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+
+            first = false;
         }
     }
     .await;
@@ -232,11 +231,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             let period = tenant.get_gc_period();
 
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
-                }
+            if first && random_init_delay(period, &cancel).await.is_err() {
+                break;
             }
 
             let started_at = Instant::now();
@@ -274,6 +270,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+
+            first = false;
         }
     }
     .await;
