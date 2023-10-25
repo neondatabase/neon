@@ -653,11 +653,10 @@ impl RemoteTimelineClient {
 
     /// Launch a delete operation in the background.
     ///
-    /// The operation does not modify local state but assumes the local files have already been
-    /// deleted, and is used to mirror those changes to remote.
+    /// The operation does not modify local filesystem state.
     ///
     /// Note: This schedules an index file upload before the deletions.  The
-    /// deletion won't actually be performed, until any previously scheduled
+    /// deletion won't actually be performed, until all previously scheduled
     /// upload operations, and the index file upload, have completed
     /// successfully.
     pub fn schedule_layer_file_deletion(
@@ -667,62 +666,111 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        // Deleting layers doesn't affect the values stored in TimelineMetadata,
-        // so we don't need update it. Just serialize it.
-        let metadata = upload_queue.latest_metadata.clone();
-
-        // Update the remote index file, removing the to-be-deleted files from the index,
-        // before deleting the actual files.
-        //
-        // Once we start removing files from upload_queue.latest_files, there's
-        // no going back! Otherwise, some of the files would already be removed
-        // from latest_files, but not yet scheduled for deletion. Use a closure
-        // to syntactically forbid ? or bail! calls here.
         let no_bail_here = || {
-            // Decorate our list of names with each name's generation, dropping
-            // makes that are unexpectedly missing from our metadata.
-            let with_generations: Vec<_> = names
-                .into_iter()
-                .filter_map(|name| {
-                    // Remove from latest_files, learning the file's remote generation in the process
-                    let meta = upload_queue.latest_files.remove(&name);
+            let with_generations =
+                self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
 
-                    if let Some(meta) = meta {
-                        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                        Some((name, meta.generation))
-                    } else {
-                        // This can only happen if we forgot to to schedule the file upload
-                        // before scheduling the delete. Log it because it is a rare/strange
-                        // situation, and in case something is misbehaving, we'd like to know which
-                        // layers experienced this.
-                        info!(
-                            "Deleting layer {name} not found in latest_files list, never uploaded?"
-                        );
-                        None
-                    }
-                })
-                .collect();
-
-            if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-                self.schedule_index_upload(upload_queue, metadata);
-            }
-
-            for (name, gen) in &with_generations {
-                info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
-            }
-
-            // schedule the actual deletions
-            let op = UploadOp::Delete(Delete {
-                layers: with_generations,
-            });
-            self.calls_unfinished_metric_begin(&op);
-            upload_queue.queued_operations.push_back(op);
+            self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
 
             // Launch the tasks immediately, if possible
             self.launch_queued_tasks(upload_queue);
         };
         no_bail_here();
         Ok(())
+    }
+
+    /// Unlinks the layer files from `index_part.json` but does not yet schedule deletion for the
+    /// layer files, leaving them dangling.
+    ///
+    /// The files will be leaked in remote storage unless [`Self::schedule_deletion_of_unlinked`]
+    /// is invoked on them.
+    #[allow(unused)] // will be used by PR#4938
+    pub(crate) fn schedule_unlinking_of_layers_from_index_part(
+        self: &Arc<Self>,
+        names: Vec<LayerFileName>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        // just forget the return value; after uploading the next index_part.json, we can consider
+        // the layer files as "dangling". this is fine however.
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+
+        self.launch_queued_tasks(upload_queue);
+
+        Ok(())
+    }
+
+    /// Update the remote index file, removing the to-be-deleted files from the index,
+    /// allowing scheduling of actual deletions later.
+    fn schedule_unlinking_of_layers_from_index_part0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        names: Vec<LayerFileName>,
+    ) -> Vec<(LayerFileName, Generation)> {
+        // Deleting layers doesn't affect the values stored in TimelineMetadata,
+        // so we don't need update it. Just serialize it.
+        let metadata = upload_queue.latest_metadata.clone();
+
+        // Decorate our list of names with each name's generation, dropping
+        // makes that are unexpectedly missing from our metadata.
+        let with_generations: Vec<_> = names
+            .into_iter()
+            .filter_map(|name| {
+                // Remove from latest_files, learning the file's remote generation in the process
+                let meta = upload_queue.latest_files.remove(&name);
+
+                if let Some(meta) = meta {
+                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                    Some((name, meta.generation))
+                } else {
+                    // This can only happen if we forgot to to schedule the file upload
+                    // before scheduling the delete. Log it because it is a rare/strange
+                    // situation, and in case something is misbehaving, we'd like to know which
+                    // layers experienced this.
+                    info!("Deleting layer {name} not found in latest_files list, never uploaded?");
+                    None
+                }
+            })
+            .collect();
+
+        if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
+            self.schedule_index_upload(upload_queue, metadata);
+        }
+
+        with_generations
+    }
+
+    /// Schedules deletion for layer files which have previously been unlinked from the
+    /// `index_part.json`.
+    #[allow(unused)] // will be used by Layer::drop in PR#4938
+    pub(crate) fn schedule_deletion_of_unlinked(
+        self: &Arc<Self>,
+        layers: Vec<(LayerFileName, Generation)>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        self.schedule_deletion_of_unlinked0(upload_queue, layers);
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    fn schedule_deletion_of_unlinked0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        with_generations: Vec<(LayerFileName, Generation)>,
+    ) {
+        for (name, gen) in &with_generations {
+            info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
+        }
+
+        // schedule the actual deletions
+        let op = UploadOp::Delete(Delete {
+            layers: with_generations,
+        });
+        self.calls_unfinished_metric_begin(&op);
+        upload_queue.queued_operations.push_back(op);
     }
 
     ///
