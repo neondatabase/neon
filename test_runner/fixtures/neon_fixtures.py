@@ -1719,6 +1719,11 @@ class NeonPageserver(PgProtocol):
                 break
 
             if error_or_warn.search(line):
+                # Is this a torn log line?  This happens when force-killing a process and restarting
+                # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+                if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                    continue
+
                 # It's an ERROR or WARN. Is it in the allow-list?
                 for a in self.allowed_errors:
                     if re.match(a, line):
