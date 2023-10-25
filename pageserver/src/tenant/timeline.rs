@@ -3078,8 +3078,7 @@ impl Timeline {
                             .context("download layer for failpoint")?,
                     );
                 }
-                // FIXME: println
-                println!("compact-level0-phase1-return-same"); // so that we can check if we hit the failpoint
+                tracing::info!("compact-level0-phase1-return-same"); // so that we can check if we hit the failpoint
                 return Ok(CompactLevel0Phase1Result {
                     new_layers,
                     deltas_to_compact: level0_deltas,
