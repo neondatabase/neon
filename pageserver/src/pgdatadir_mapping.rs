@@ -30,9 +30,21 @@ pub type BlockNumber = u32;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
+    /// Found commits both before and after the given timestamp
     Present(Lsn),
+
+    /// All commits <= LSN happened before the given timestamp
     Future(Lsn),
+
+    /// All commits > LSN happened after the given timestamp,
+    /// but any commits older than the returned LSN
+    /// might have happened before or after the given timestamp.
+    /// We don't know because no data before the given lsn is available
     Past(Lsn),
+
+    /// We have found no commit with a timestamp,
+    /// so we can't return anything meaningful.
+    /// The associated LSN is a lower bound value.
     NoData(Lsn),
 }
 
