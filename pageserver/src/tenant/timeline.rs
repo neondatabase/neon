@@ -1625,7 +1625,7 @@ impl Timeline {
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if let Some(rtc) = self.remote_client.as_ref() {
-            rtc.schedule_layer_file_deletion(needs_cleanup)?;
+            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
@@ -3871,14 +3871,17 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
+            if let Some(remote_client) = self.remote_client.as_ref() {
+                remote_client.schedule_unlinking_of_layers_from_index_part(&gc_layers)?;
+            }
+
             let apply = guard.finish_gc_timeline(&layer_removal_cs, gc_layers)?;
 
             if result.layers_removed != 0 {
+                // testing anything else than exit with this failpoint is not representative
                 fail_point!("after-timeline-gc-removed-layers");
             }
 
-            // FIXME: need to unlink the layers immediatedly here, then use deleting unlinked from
-            // Layer::drop
             apply.flush();
         }
 

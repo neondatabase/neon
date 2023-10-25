@@ -205,6 +205,12 @@ impl Layer {
 
     /// Delete the layer file when the `self` gets dropped, also try to schedule a remote index upload
     /// then.
+    ///
+    /// On drop, this will cause a call to [`RemoteTimelineClient::schedule_deletion_of_unlinked`].
+    /// This means that the [unlinking] must have happened strictly before the value this is called
+    /// on gets dropped.
+    ///
+    /// [unlinking]: [`RemoteTimelineClient::schedule_unlinking_of_layers_from_index_part`]
     pub(crate) fn garbage_collect_on_drop(&self) {
         self.0.garbage_collect_on_drop();
     }
@@ -429,6 +435,7 @@ impl Drop for LayerInner {
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
+        let gen = self.generation;
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
 
@@ -458,8 +465,7 @@ impl Drop for LayerInner {
                     timeline.metrics.resident_physical_size_sub(file_size);
                 }
                 if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    // FIXME: use the delete unlinked
-                    let res = remote_client.schedule_layer_file_deletion(vec![file_name]);
+                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, gen)]);
 
                     if let Err(e) = res {
                         // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
