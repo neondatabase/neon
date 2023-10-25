@@ -396,12 +396,9 @@ paths:
         "200":
           description: OK
           content:
-            application/vnd.neon-v2+json:
-              schema:
-                $ref: "#/components/schemas/LsnByTimestampResponse"
             application/json:
               schema:
-                type: string
+                $ref: "#/components/schemas/LsnByTimestampResponse"
         "400":
           description: Error when no tenant id found in path, no timeline id or invalid timestamp
           content:

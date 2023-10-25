@@ -485,6 +485,8 @@ async fn get_lsn_by_timestamp_handler(
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let version: Option<u8> = parse_query_param(&request, "version")?;
+
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
@@ -496,12 +498,7 @@ async fn get_lsn_by_timestamp_handler(
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
 
-    if request
-        .headers()
-        .get(header::ACCEPT)
-        .map(|v| v == "application/vnd.neon-v2+json")
-        .unwrap_or_default()
-    {
+    if version.unwrap_or(0) > 1 {
         #[serde_as]
         #[derive(serde::Serialize)]
         struct Result {
