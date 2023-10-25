@@ -22,6 +22,11 @@ https://docs.pytest.org/en/6.2.x/logging.html
 # log format is specified in pytest.ini file
 LOGGING = {
     "version": 1,
+    "formatters": {
+        "standard": {
+            "datefmt": "%m/%d/%Y %I:%M:%SZ %p %Z",
+        }
+    },
     "loggers": {
         "root": {"level": "INFO"},
         "root.safekeeper_async": {"level": "INFO"},  # a lot of logs on DEBUG level
