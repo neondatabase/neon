@@ -1178,7 +1178,7 @@ impl RemoteTimelineClient {
                     upload::upload_timeline_layer(
                         self.conf,
                         &self.storage_impl,
-                        &path,
+                        path,
                         layer_metadata,
                         self.generation,
                     )
