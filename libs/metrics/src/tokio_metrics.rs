@@ -9,16 +9,24 @@ use prometheus::{
     proto::{self, LabelPair},
 };
 
+use crate::register_internal;
+
 #[derive(Default, Clone)]
 pub struct TokioCollector {
     handles: Arc<Mutex<Vec<(tokio::runtime::Handle, String)>>>,
 }
 
 impl TokioCollector {
-    pub fn add_runtime(&mut self, handle: tokio::runtime::Handle, name: String) {
+    pub fn add_runtime(&mut self, handle: tokio::runtime::Handle, name: String) -> &mut Self {
         self.handles.lock().unwrap().push((handle, name));
+        self
     }
 
+    pub fn register(&self) -> Result<(), prometheus::Error> {
+        register_internal(Box::new(self.clone()))
+    }
+
+    #[cfg(tokio_unstable)]
     fn gauge(
         &self,
         desc: &Desc,
@@ -33,6 +41,7 @@ impl TokioCollector {
         })
     }
 
+    #[cfg(tokio_unstable)]
     fn counter_per_worker(
         &self,
         desc: &Desc,
@@ -47,6 +56,7 @@ impl TokioCollector {
         })
     }
 
+    #[cfg(tokio_unstable)]
     fn metric(
         &self,
         desc: &Desc,
@@ -60,6 +70,7 @@ impl TokioCollector {
         })
     }
 
+    #[cfg(tokio_unstable)]
     fn metric_per_worker(
         &self,
         desc: &Desc,
@@ -83,6 +94,7 @@ impl TokioCollector {
         })
     }
 
+    #[cfg(tokio_unstable)]
     fn metrics(
         &self,
         desc: &Desc,
@@ -132,14 +144,20 @@ static WORKER_STEAL_COUNT: Lazy<Desc> = Lazy::new(|| {
 
 impl prometheus::core::Collector for TokioCollector {
     fn desc(&self) -> Vec<&Desc> {
-        vec![&ACTIVE_TASK_COUNT, &WORKER_STEAL_COUNT]
+        let mut metrics = Vec::new();
+        #[cfg(tokio_unstable)]
+        metrics.extend([&*ACTIVE_TASK_COUNT, &*WORKER_STEAL_COUNT]);
+        metrics
     }
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
-        vec![
+        let mut metrics = Vec::new();
+        #[cfg(tokio_unstable)]
+        metrics.extend([
             self.gauge(&ACTIVE_TASK_COUNT, |m| m.active_tasks_count() as f64),
             self.counter_per_worker(&WORKER_STEAL_COUNT, |m, i| m.worker_steal_count(i) as f64),
-        ]
+        ]);
+        metrics
     }
 }
 

@@ -21,7 +21,6 @@ pub use prometheus::{register_int_gauge_vec, IntGaugeVec};
 pub use prometheus::{Encoder, TextEncoder};
 use prometheus::{Registry, Result};
 
-#[cfg(tokio_unstable)]
 pub mod tokio_metrics;
 
 pub mod launch_timestamp;
