@@ -1452,8 +1452,20 @@ async fn disk_usage_eviction_run(
     }
 
     impl crate::disk_usage_eviction_task::Usage for Usage {
-        fn has_pressure(&self) -> bool {
+        fn over_pressure(&self) -> bool {
             self.config.evict_bytes > self.freed_bytes
+        }
+
+        fn no_pressure(&self) -> bool {
+            !self.over_pressure()
+        }
+
+        fn pressure(&self) -> f64 {
+            if self.over_pressure() {
+                1.0
+            } else {
+                0.0
+            }
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {

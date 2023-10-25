@@ -67,14 +67,25 @@ use crate::{
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: Percent,
     pub min_avail_bytes: u64,
+
+    // Control how far we will go when evicting: when usage exceeds max_usage_pct or min_avail_bytes,
+    // we will keep evicting layers until we reach the target.  The resulting disk usage should look
+    // like a sawtooth bouncing between the upper max/min line and the lower target line.
+    #[serde(default)]
+    pub target_usage_pct: Option<Percent>,
+    #[serde(default)]
+    pub target_avail_bytes: Option<u64>,
+
     #[serde(with = "humantime_serde")]
     pub period: Duration,
     #[cfg(feature = "testing")]
     pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
 }
 
-enum Mode {
+#[derive(Default)]
+enum Status {
     /// We are within disk limits, and not currently doing any eviction
+    #[default]
     Idle,
     /// Disk limits have been exceeded: we will evict soon
     UnderPressure,
@@ -82,19 +93,14 @@ enum Mode {
     Evicting,
 }
 
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Idle
-    }
-}
-
 #[derive(Default)]
 pub struct State {
     /// Exclude http requests and background task from running at the same time.
     mutex: tokio::sync::Mutex<()>,
 
-    /// Publish the current status of eviction work
-    mode: std::sync::RwLock<Mode>,
+    /// Publish the current status of eviction work, for visibility to other subsystems
+    /// that modify their behavior if disk pressure is high or if eviction is going on.
+    status: std::sync::RwLock<Status>,
 }
 
 pub fn launch_disk_usage_global_eviction_task(
@@ -194,7 +200,9 @@ async fn disk_usage_eviction_task(
 }
 
 pub trait Usage: Clone + Copy + std::fmt::Debug {
-    fn has_pressure(&self) -> bool;
+    fn pressure(&self) -> f64;
+    fn over_pressure(&self) -> bool;
+    fn no_pressure(&self) -> bool;
     fn add_available_bytes(&mut self, bytes: u64);
 }
 
@@ -208,18 +216,18 @@ async fn disk_usage_eviction_task_iteration(
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
 
-    if usage_pre.has_pressure() {
-        *state.mode.write().unwrap() = Mode::Evicting;
+    if usage_pre.over_pressure() {
+        *state.status.write().unwrap() = Status::Evicting;
     }
 
     let res = disk_usage_eviction_task_iteration_impl(state, storage, usage_pre, cancel).await;
     match res {
         Ok(outcome) => {
             debug!(?outcome, "disk_usage_eviction_iteration finished");
-            let new_mode = match outcome {
+            let new_status = match outcome {
                 IterationOutcome::NoPressure | IterationOutcome::Cancelled => {
                     // nothing to do, select statement below will handle things
-                    Mode::Idle
+                    Status::Idle
                 }
                 IterationOutcome::Finished(outcome) => {
                     // Verify with statvfs whether we made any real progress
@@ -229,29 +237,29 @@ async fn disk_usage_eviction_task_iteration(
 
                     debug!(?after, "disk usage");
 
-                    if after.has_pressure() {
+                    if after.over_pressure() {
                         // Don't bother doing an out-of-order iteration here now.
                         // In practice, the task period is set to a value in the tens-of-seconds range,
                         // which will cause another iteration to happen soon enough.
                         // TODO: deltas between the three different usages would be helpful,
                         // consider MiB, GiB, TiB
                         warn!(?outcome, ?after, "disk usage still high");
-                        Mode::UnderPressure
+                        Status::UnderPressure
                     } else {
                         info!(?outcome, ?after, "disk usage pressure relieved");
-                        Mode::Idle
+                        Status::Idle
                     }
                 }
             };
 
-            *state.mode.write().unwrap() = new_mode;
+            *state.status.write().unwrap() = new_status;
         }
         Err(e) => {
             error!("disk_usage_eviction_iteration failed: {:#}", e);
-            *state.mode.write().unwrap() = if usage_pre.has_pressure() {
-                Mode::UnderPressure
+            *state.status.write().unwrap() = if usage_pre.over_pressure() {
+                Status::UnderPressure
             } else {
-                Mode::Idle
+                Status::Idle
             };
         }
     }
@@ -318,10 +326,10 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     debug!(?usage_pre, "disk usage");
 
-    if !usage_pre.has_pressure() {
+    if !usage_pre.over_pressure() {
         return Ok(IterationOutcome::NoPressure);
     } else {
-        *state.mode.write().unwrap() = Mode::Evicting;
+        *state.status.write().unwrap() = Status::Evicting;
     }
 
     warn!(
@@ -369,7 +377,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let mut warned = None;
     let mut usage_planned = usage_pre;
     for (i, (partition, candidate)) in candidates.into_iter().enumerate() {
-        if !usage_planned.has_pressure() {
+        if usage_planned.no_pressure() {
             debug!(
                 no_candidates_evicted = i,
                 "took enough candidates for pressure to be relieved"
@@ -679,22 +687,57 @@ mod filesystem_level_usage {
     }
 
     impl super::Usage for Usage<'_> {
-        fn has_pressure(&self) -> bool {
-            let usage_pct =
-                (100.0 * (1.0 - ((self.avail_bytes as f64) / (self.total_bytes as f64)))) as u64;
+        /// Does the pressure exceed 1.0, i.e. has the disk usage exceeded upper bounds?
+        ///
+        /// This is the condition for starting eviction.
+        fn over_pressure(&self) -> bool {
+            self.pressure() >= 1.0
+        }
 
-            let pressures = [
-                (
-                    "min_avail_bytes",
-                    self.avail_bytes < self.config.min_avail_bytes,
-                ),
-                (
-                    "max_usage_pct",
-                    usage_pct >= self.config.max_usage_pct.get() as u64,
-                ),
-            ];
+        /// Is the pressure <0, ie.. has disk usage gone below the target bound?
+        ///
+        /// This is the condition for dropping out of eviction.
+        fn no_pressure(&self) -> bool {
+            self.pressure() <= 0.0
+        }
 
-            pressures.into_iter().any(|(_, has_pressure)| has_pressure)
+        fn pressure(&self) -> f64 {
+            let max_usage = std::cmp::min(
+                self.total_bytes - self.config.min_avail_bytes,
+                (self.total_bytes as f64 * (self.config.max_usage_pct.get() as f64 / 100.0)) as u64,
+            );
+
+            let mut target_usage = max_usage;
+            if let Some(target_avail_bytes) = self.config.target_avail_bytes {
+                target_usage = std::cmp::min(target_usage, self.total_bytes - target_avail_bytes);
+            }
+            if let Some(target_usage_pct) = self.config.target_usage_pct {
+                target_usage = std::cmp::min(
+                    target_usage,
+                    (self.total_bytes as f64 * (target_usage_pct.get() as f64 / 100.0)) as u64,
+                );
+            };
+
+            let usage = self.total_bytes - self.avail_bytes;
+            eprintln!(
+                "pressure: {} {}, current {}",
+                target_usage, max_usage, usage
+            );
+            if target_usage == max_usage {
+                // We are configured with a zero sized range: treat anything at+beyond limit as pressure 1.0, else 0.0
+                if usage >= max_usage {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else if usage <= target_usage {
+                // No pressure.
+                0.0
+            } else {
+                // We are above target: pressure is the ratio of how much we exceed target to the size of the gap
+                let range_size = (max_usage - target_usage) as f64;
+                (usage - target_usage) as f64 / range_size
+            }
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {
@@ -748,6 +791,8 @@ mod filesystem_level_usage {
             config: &DiskUsageEvictionTaskConfig {
                 max_usage_pct: Percent::new(85).unwrap(),
                 min_avail_bytes: 0,
+                target_avail_bytes: None,
+                target_usage_pct: None,
                 period: Duration::MAX,
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
@@ -756,24 +801,24 @@ mod filesystem_level_usage {
             avail_bytes: 0,
         };
 
-        assert!(usage.has_pressure(), "expected pressure at 100%");
+        assert!(usage.over_pressure(), "expected pressure at 100%");
 
         usage.add_available_bytes(14_000);
-        assert!(usage.has_pressure(), "expected pressure at 86%");
+        assert!(usage.over_pressure(), "expected pressure at 86%");
 
         usage.add_available_bytes(999);
-        assert!(usage.has_pressure(), "expected pressure at 85.001%");
+        assert!(usage.over_pressure(), "expected pressure at 85.001%");
 
         usage.add_available_bytes(1);
-        assert!(usage.has_pressure(), "expected pressure at precisely 85%");
+        assert!(usage.over_pressure(), "expected pressure at precisely 85%");
 
         usage.add_available_bytes(1);
-        assert!(!usage.has_pressure(), "no pressure at 84.999%");
+        assert!(!usage.over_pressure(), "no pressure at 84.999%");
 
         usage.add_available_bytes(999);
-        assert!(!usage.has_pressure(), "no pressure at 84%");
+        assert!(!usage.over_pressure(), "no pressure at 84%");
 
         usage.add_available_bytes(16_000);
-        assert!(!usage.has_pressure());
+        assert!(!usage.over_pressure());
     }
 }

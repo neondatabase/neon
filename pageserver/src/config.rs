@@ -1479,6 +1479,8 @@ threshold = "20m"
             Some(DiskUsageEvictionTaskConfig {
                 max_usage_pct: Percent::new(80).unwrap(),
                 min_avail_bytes: 0,
+                target_avail_bytes: None,
+                target_usage_pct: None,
                 period: Duration::from_secs(10),
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
