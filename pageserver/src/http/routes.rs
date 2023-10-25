@@ -514,6 +514,8 @@ async fn get_lsn_by_timestamp_handler(
         };
         json_response(StatusCode::OK, Result { lsn, kind })
     } else {
+        // FIXME: this is a temporary crutch not to break backwards compatibility
+        // See https://github.com/neondatabase/neon/pull/5608
         let result = match result {
             LsnForTimestamp::Present(lsn) => format!("{lsn}"),
             LsnForTimestamp::Future(_lsn) => "future".into(),
