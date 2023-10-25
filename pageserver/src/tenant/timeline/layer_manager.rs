@@ -8,6 +8,7 @@ use utils::{
 
 use crate::{
     config::PageServerConf,
+    metrics::TimelineMetrics,
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
@@ -143,10 +144,19 @@ impl LayerManager {
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub(crate) fn track_new_image_layers(&mut self, image_layers: &[ResidentLayer]) {
+    pub(crate) fn track_new_image_layers(
+        &mut self,
+        image_layers: &[ResidentLayer],
+        metrics: &TimelineMetrics,
+    ) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
             Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+
+            // record these here instead of Layer::finish_creating because otherwise partial
+            // failure with create_image_layers would balloon up the physical size gauge. downside
+            // is that all layers need to be created before metrics are updated.
+            metrics.record_new_file_metrics(layer.layer_desc().file_size);
         }
         updates.flush();
     }
@@ -156,6 +166,7 @@ impl LayerManager {
         &mut self,
         delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
+        metrics: &TimelineMetrics,
     ) {
         let inmem = self
             .layer_map
@@ -171,6 +182,7 @@ impl LayerManager {
         if let Some(l) = delta_layer {
             let mut updates = self.layer_map.batch_update();
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
             updates.flush();
         }
     }
@@ -181,10 +193,12 @@ impl LayerManager {
         layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: &[Layer],
         compact_to: &[ResidentLayer],
+        metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
             Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         for l in compact_from {
             Self::delete_historic_layer(layer_removal_cs, l, &mut updates, &mut self.layer_fmgr);

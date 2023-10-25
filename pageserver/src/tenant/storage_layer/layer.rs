@@ -177,13 +177,6 @@ impl Layer {
         std::fs::rename(temp_path, owner.local_path())
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
-        {
-            let metrics = &timeline.metrics;
-            let file_size = owner.layer_desc().file_size;
-
-            metrics.record_new_file_metrics(file_size);
-        }
-
         Ok(ResidentLayer { downloaded, owner })
     }
 

@@ -2486,7 +2486,7 @@ impl Timeline {
         let metadata = {
             let mut guard = self.layers.write().await;
 
-            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer);
+            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
 
             if disk_consistent_lsn != old_disk_consistent_lsn {
                 assert!(disk_consistent_lsn > old_disk_consistent_lsn);
@@ -2866,7 +2866,7 @@ impl Timeline {
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
         // now they are being scheduled outside of write lock
-        guard.track_new_image_layers(&image_layers);
+        guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
 
@@ -3538,8 +3538,13 @@ impl Timeline {
             deltas_to_compact
         };
 
-        // deletion will happen later, the layer file manager sets wanted_garbage_collected
-        guard.finish_compact_l0(&layer_removal_cs, &remove_layers, &insert_layers);
+        // deletion will happen later, the layer file manager calls garbage_collect_on_drop
+        guard.finish_compact_l0(
+            &layer_removal_cs,
+            &remove_layers,
+            &insert_layers,
+            &self.metrics,
+        );
 
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.schedule_compaction_update(&remove_layers, &new_layers)?;
