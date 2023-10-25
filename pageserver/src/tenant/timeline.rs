@@ -3870,7 +3870,7 @@ impl Timeline {
         // now, we just skip the file to avoid unintentional modification to files on the disk and in the layer map.
         let mut duplicated_layers = HashSet::new();
 
-        let mut uploaded_layers = Vec::new();
+        let mut uploaded_layers = Vec::with_capacity(new_layers.len());
         let mut insert_layers = Vec::new();
         let mut remove_layers = Vec::new();
 
