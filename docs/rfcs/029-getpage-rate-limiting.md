@@ -8,6 +8,9 @@ Date: Oct 24, 2023
 This RFC proposes basic rate-limiting GetPage@LSN requests inside Pageserver
 and the interactions with its client, i.e., the neon_smgr component in Compute.
 
+The result of implementing & executing this RFC will be a fleet-wide upper limit for
+**"the highest GetPage/second that Pageserver can support for a single tenant"**.
+
 ## Background
 
 ### GetPage@LSN Request Flow
@@ -144,11 +147,19 @@ Rollout will happen as follows:
 - deploy 1: implementation + config: disabled by default, ability to enable it per tenant through tenant_conf
 - experimentation in staging and later production to study impact & interaction with auto-scaling
 - determination of a sensible global default value
+  - the value will be chosen as high as possible ...
+  - ... but low enough to work towards this RFC's goal that one tenant should not be able to dominate a pageserver instance.
 - deploy 2: implementation fixes if any + config: enabled by default with the aforementioned global default
 - reset of the experimental per-tenant overrides
+- gain experience & lower the limit over time
+  - we stop lowering the limit as soon as this RFC's goal is achieved, i.e.,
+    once we decide that in practice the chosen value sufficiently de-risks operating large pageservers
 
 The per-tenant override will remain for emergencies and testing.
 But since Console doesn't preserve it during tenant migrations, it isn't durably configurable for the tenant.
+
+Toward the upper layers of the Neon stack, the resulting limit will be
+**"the highest GetPage/second that Pageserver can support for a single tenant"**.
 
 ### Rationale
 
@@ -156,13 +167,14 @@ We decided against error + retry because of worries about starvation.
 
 ## Future Work
 
-Enable per-tenant override via Console.
+Enable per-tenant emergency override of the limit via Console.
 Should be part of a more general framework to specify tenant config overrides.
-A simple JSON field in Admin UI would do.
+**NB:** this is **not** the right mechanism to _sell_ different max GetPage/IOPS levels to users,
+or _auto-scale_ max GetPage/IOPS levels. Such functionality will require a separate RFC that
+concerns itself with GetPage/IOPS capacity planning.
 
 Compute-side metrics for GetPage latency.
 
-Back-channel to inform Compute that it's being rate-limited.
+Back-channel to inform Compute/Autoscaling/ControlPlane that the project is being IO-rate-limited.
 
 Compute-side neon_smgr improvements to avoid sending the same GetPage request multiple times if multiple backends experience a cache miss.
-
