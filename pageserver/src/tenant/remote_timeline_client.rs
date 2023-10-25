@@ -718,10 +718,10 @@ impl RemoteTimelineClient {
         // Decorate our list of names with each name's generation, dropping
         // makes that are unexpectedly missing from our metadata.
         let with_generations: Vec<_> = names
-            .into_iter()
+            .iter()
             .filter_map(|name| {
                 // Remove from latest_files, learning the file's remote generation in the process
-                let meta = upload_queue.latest_files.remove(&name);
+                let meta = upload_queue.latest_files.remove(name);
 
                 if let Some(meta) = meta {
                     upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
