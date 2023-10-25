@@ -392,13 +392,19 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: The version of the endpoint to use
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: string
+                $ref: "#/components/schemas/LsnByTimestampResponse"
         "400":
           description: Error when no tenant id found in path, no timeline id or invalid timestamp
           content:
@@ -1383,6 +1389,19 @@ components:
         timeline_id:
           type: string
           format: hex
+
+    LsnByTimestampResponse:
+      type: object
+      required:
+        - lsn
+        - kind
+      properties:
+        lsn:
+          type: string
+          format: hex
+        kind:
+          type: string
+          enum: [past, present, future, nodata]
 
     Error:
       type: object

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use futures::TryFutureExt;
 use humantime::format_rfc3339;
-use hyper::header::CONTENT_TYPE;
+use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
@@ -17,6 +17,7 @@ use pageserver_api::models::{
     TenantLoadRequest, TenantLocationConfigRequest,
 };
 use remote_storage::GenericRemoteStorage;
+use serde_with::{serde_as, DisplayFromStr};
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -484,6 +485,8 @@ async fn get_lsn_by_timestamp_handler(
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let version: Option<u8> = parse_query_param(&request, "version")?;
+
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
@@ -495,13 +498,32 @@ async fn get_lsn_by_timestamp_handler(
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
 
-    let result = match result {
-        LsnForTimestamp::Present(lsn) => format!("{lsn}"),
-        LsnForTimestamp::Future(_lsn) => "future".into(),
-        LsnForTimestamp::Past(_lsn) => "past".into(),
-        LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-    };
-    json_response(StatusCode::OK, result)
+    if version.unwrap_or(0) > 1 {
+        #[serde_as]
+        #[derive(serde::Serialize)]
+        struct Result {
+            #[serde_as(as = "DisplayFromStr")]
+            lsn: Lsn,
+            kind: &'static str,
+        }
+        let (lsn, kind) = match result {
+            LsnForTimestamp::Present(lsn) => (lsn, "present"),
+            LsnForTimestamp::Future(lsn) => (lsn, "future"),
+            LsnForTimestamp::Past(lsn) => (lsn, "past"),
+            LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
+        };
+        json_response(StatusCode::OK, Result { lsn, kind })
+    } else {
+        // FIXME: this is a temporary crutch not to break backwards compatibility
+        // See https://github.com/neondatabase/neon/pull/5608
+        let result = match result {
+            LsnForTimestamp::Present(lsn) => format!("{lsn}"),
+            LsnForTimestamp::Future(_lsn) => "future".into(),
+            LsnForTimestamp::Past(_lsn) => "past".into(),
+            LsnForTimestamp::NoData(_lsn) => "nodata".into(),
+        };
+        json_response(StatusCode::OK, result)
+    }
 }
 
 async fn get_timestamp_of_lsn_handler(
@@ -767,6 +789,10 @@ async fn tenant_size_handler(
         .map_err(ApiError::InternalServerError)?;
 
     let mut sizes = None;
+    let accepts_html = headers
+        .get(header::ACCEPT)
+        .map(|v| v == "text/html")
+        .unwrap_or_default();
     if !inputs_only.unwrap_or(false) {
         let storage_model = inputs
             .calculate_model()
@@ -774,11 +800,11 @@ async fn tenant_size_handler(
         let size = storage_model.calculate();
 
         // If request header expects html, return html
-        if headers["Accept"] == "text/html" {
+        if accepts_html {
             return synthetic_size_html_response(inputs, storage_model, size);
         }
         sizes = Some(size);
-    } else if headers["Accept"] == "text/html" {
+    } else if accepts_html {
         return Err(ApiError::BadRequest(anyhow!(
             "inputs_only parameter is incompatible with html output request"
         )));
@@ -929,7 +955,7 @@ fn synthetic_size_html_response(
 pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>, ApiError> {
     let response = Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/html")
+        .header(header::CONTENT_TYPE, "text/html")
         .body(Body::from(data.as_bytes().to_vec()))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
@@ -1310,7 +1336,7 @@ async fn getpage_at_lsn_handler(
         Result::<_, ApiError>::Ok(
             Response::builder()
                 .status(StatusCode::OK)
-                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
                 .body(hyper::Body::from(page))
                 .unwrap(),
         )
