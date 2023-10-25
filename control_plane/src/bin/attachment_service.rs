@@ -221,8 +221,21 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
             generation: 0,
         });
 
-    if attach_req.pageserver_id.is_some() {
+    if let Some(attaching_pageserver) = attach_req.pageserver_id.as_ref() {
         tenant_state.generation += 1;
+        tracing::info!(
+            "attach_hook: issuing generation {} to pageserver {}",
+            attaching_pageserver,
+            tenant_state.generation
+        );
+    } else if let Some(ps_id) = tenant_state.pageserver {
+        tracing::info!(
+            "attach_hook: dropping pageserver {} in generation {}",
+            ps_id,
+            tenant_state.generation
+        );
+    } else {
+        tracing::info!("attach_hook: no-op: tenant already has no pageserver");
     }
     tenant_state.pageserver = attach_req.pageserver_id;
     let generation = tenant_state.generation;
