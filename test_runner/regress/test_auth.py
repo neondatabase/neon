@@ -121,8 +121,6 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     env.regenerate_keys_at(
         Path("auth_private_key.pem"), Path("auth_public_key.pem/auth_public_key_new.pem")
     )
-    # We set this for env.auth_keys computation to pick up the new key
-    env.auth_public_key_path = configured_pub_key_path / "auth_public_key_new.pem"
 
     # Reload the keys on the pageserver side
     pageserver_http_client_old.reload_auth_validation_keys()
