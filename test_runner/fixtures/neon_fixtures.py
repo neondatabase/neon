@@ -360,7 +360,6 @@ class PgProtocol:
 
 @dataclass
 class AuthKeys:
-    pub: str
     priv: str
 
     def generate_token(self, *, scope: str, **token_data: str) -> str:
@@ -716,7 +715,6 @@ class NeonEnv:
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.pageserver_config_override = config.pageserver_config_override
-        self.auth_public_key_path: Optional[Path] = None
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -875,10 +873,8 @@ class NeonEnv:
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
-        pem_path = self.auth_public_key_path or (Path(self.repo_dir) / "auth_public_key.pem")
-        pub = pem_path.read_text()
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
-        return AuthKeys(pub=pub, priv=priv)
+        return AuthKeys(priv=priv)
 
     def regenerate_keys_at(self, privkey_path: Path, pubkey_path: Path):
         # compare generate_auth_keys() in local_env.rs
