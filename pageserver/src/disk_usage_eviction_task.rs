@@ -73,10 +73,28 @@ pub struct DiskUsageEvictionTaskConfig {
     pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
 }
 
+enum Mode {
+    /// We are within disk limits, and not currently doing any eviction
+    Idle,
+    /// Disk limits have been exceeded: we will evict soon
+    UnderPressure,
+    /// We are currently doing an eviction pass.
+    Evicting,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Idle
+    }
+}
+
 #[derive(Default)]
 pub struct State {
     /// Exclude http requests and background task from running at the same time.
     mutex: tokio::sync::Mutex<()>,
+
+    /// Publish the current status of eviction work
+    mode: std::sync::RwLock<Mode>,
 }
 
 pub fn launch_disk_usage_global_eviction_task(
@@ -189,13 +207,19 @@ async fn disk_usage_eviction_task_iteration(
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
+
+    if usage_pre.has_pressure() {
+        *state.mode.write().unwrap() = Mode::Evicting;
+    }
+
     let res = disk_usage_eviction_task_iteration_impl(state, storage, usage_pre, cancel).await;
     match res {
         Ok(outcome) => {
             debug!(?outcome, "disk_usage_eviction_iteration finished");
-            match outcome {
+            let new_mode = match outcome {
                 IterationOutcome::NoPressure | IterationOutcome::Cancelled => {
                     // nothing to do, select statement below will handle things
+                    Mode::Idle
                 }
                 IterationOutcome::Finished(outcome) => {
                     // Verify with statvfs whether we made any real progress
@@ -212,14 +236,23 @@ async fn disk_usage_eviction_task_iteration(
                         // TODO: deltas between the three different usages would be helpful,
                         // consider MiB, GiB, TiB
                         warn!(?outcome, ?after, "disk usage still high");
+                        Mode::UnderPressure
                     } else {
                         info!(?outcome, ?after, "disk usage pressure relieved");
+                        Mode::Idle
                     }
                 }
-            }
+            };
+
+            *state.mode.write().unwrap() = new_mode;
         }
         Err(e) => {
             error!("disk_usage_eviction_iteration failed: {:#}", e);
+            *state.mode.write().unwrap() = if usage_pre.has_pressure() {
+                Mode::UnderPressure
+            } else {
+                Mode::Idle
+            };
         }
     }
 
@@ -287,6 +320,8 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     if !usage_pre.has_pressure() {
         return Ok(IterationOutcome::NoPressure);
+    } else {
+        *state.mode.write().unwrap() = Mode::Evicting;
     }
 
     warn!(
