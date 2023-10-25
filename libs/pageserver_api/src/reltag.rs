@@ -22,9 +22,9 @@ use postgres_ffi::Oid;
 /// [See more related comments here](https:///github.com/postgres/postgres/blob/99c5852e20a0987eca1c38ba0c09329d4076b6a0/src/include/storage/relfilenode.h#L57).
 ///
 // FIXME: should move 'forknum' as last field to keep this consistent with Postgres.
-// Then we could replace the custo Ord and PartialOrd implementations below with
-// deriving them.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
+// Then we could replace the custom Ord and PartialOrd implementations below with
+// deriving them. This will require changes in walredoproc.c.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize)]
 pub struct RelTag {
     pub forknum: u8,
     pub spcnode: Oid,
@@ -40,21 +40,9 @@ impl PartialOrd for RelTag {
 
 impl Ord for RelTag {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut cmp = self.spcnode.cmp(&other.spcnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.dbnode.cmp(&other.dbnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.relnode.cmp(&other.relnode);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
-        cmp = self.forknum.cmp(&other.forknum);
-
-        cmp
+        // Custom ordering where we put forknum to the end of the list
+        let other_tup = (other.spcnode, other.dbnode, other.relnode, other.forknum);
+        (self.spcnode, self.dbnode, self.relnode, self.forknum).cmp(&other_tup)
     }
 }
 
