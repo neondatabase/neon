@@ -64,6 +64,8 @@ int			max_reconnect_attempts = 60;
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
 static bool pageserver_flush(void);
+static void pageserver_disconnect(void);
+
 
 static pqsigfunc	 prev_signal_handler;
 
@@ -74,9 +76,8 @@ pageserver_sighup_handler(SIGNAL_ARGS)
 	{
         	prev_signal_handler(postgres_signal_arg);
 	}
-	neon_log(LOG, "Received SIGHUP, flushing existing pageserver. New pageserver connstring is %s", page_server_connstring);
-	pageserver_flush();
-	neon_log(LOG, "Flush complete");
+	neon_log(LOG, "Received SIGHUP, disconnecting pageserver. New pageserver connstring is %s", page_server_connstring);
+	pageserver_disconnect();
 }
 
 static bool
