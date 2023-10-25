@@ -126,13 +126,43 @@ For example, suppose we pick a limit that allows up to 10 tenants to go at limit
 For example, suppose our Pageserver can serve 100k IOPS total at a 100% page cache miss rate.
 If each tenant gets a hard limit of 10k IOPS, we can serve up to 10 tenants at limit speed without latency degradation.
 
-The mechanism for backpressure is still subject to debate. TCP-based implicit backpressure requires less changes.
-But, explicit "come back later" errors would allow the Compute to keep query latency lower by adjusting queue depth and reducing speculative requests (prefetch) in response to "come back later" errors.
+The mechanism for backpressure will be TCP-based implicit backpressure.
+The compute team isn't concerned about prefetch queue depth.
+Pageserver will implement it by delaying the reading of requests from the libpq connection(s).
+Pageserver will implement starvation prevention, but not guaranteed fairness, among connections by using a fair semaphore.
 
-Regarding metrics / the internal getpage latency SLO:
-we will measure the getpage latency SLO _after_ the rate limiter and introduce a new metric to measure the amount of rate limiting:
-* For implicit backpressure, that would be the number of  tenants and amount of time that was spent waiting for the rate limiter.
-* For explicit backpressure through error code, that would be counter metrics for number of backpressure errors returned.
+Regarding metrics / the internal GetPage latency SLO:
+we will measure the GetPage latency SLO _after_ the rate limiter and introduce a new metric to measure the amount of rate limiting, quantified by:
+- histogram that records the tenants' observations of queue depth before they start waiting (one such histogram per pageserver)
+- histogram that records the tenants' observations of time spent waiting (one such histogram per pageserver)
 
-The new metric can will be used to inform refinements of the limit value, capacity planning, or performance investigations.
-It will not be something that we'll alert on, because if we're rate limiting, the system works as intended.
+Further observability measures:
+- a WARN log message at frequency 1/min if the tenant/timeline/connection spent any time waiting for the rate limit;
+  the message will identify the tenant/timeline/connection to allow correlation with compute logs/stats
+
+Rollout will happen as follows:
+- deploy 1: implementation + config: disabled by default, ability to enable it per tenant through tenant_conf
+- experimentation in staging and later production to study impact & interaction with auto-scaling
+- determination of a sensible global default value
+- deploy 2: implementation fixes if any + config: enabled by default with the aforementioned global default
+- reset of the experimental per-tenant overrides
+
+The per-tenant override will remain for emergencies and testing.
+But since Console doesn't preserve it during tenant migrations, it isn't durably configurable for the tenant.
+
+### Rationale
+
+We decided against error + retry because of worries about starvation.
+
+## Future Work
+
+Enable per-tenant override via Console.
+Should be part of a more general framework to specify tenant config overrides.
+A simple JSON field in Admin UI would do.
+
+Compute-side metrics for GetPage latency.
+
+Back-channel to inform Compute that it's being rate-limited.
+
+Compute-side neon_smgr improvements to avoid sending the same GetPage request multiple times if multiple backends experience a cache miss.
+
