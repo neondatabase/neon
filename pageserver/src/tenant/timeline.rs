@@ -1871,7 +1871,7 @@ impl Timeline {
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
         );
-        self.metrics.resident_physical_size_set(total_physical_size);
+        self.metrics.resident_physical_size_add(total_physical_size);
 
         timer.stop_and_record();
         Ok(())
