@@ -362,7 +362,7 @@ impl Timeline {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                Ok(LsnForTimestamp::NoData(max_lsn))
+                Ok(LsnForTimestamp::NoData(min_lsn))
             }
             (true, false) => {
                 // Only found a commit with timestamp smaller than the request.
@@ -373,7 +373,7 @@ impl Timeline {
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
-                Ok(LsnForTimestamp::Past(max_lsn))
+                Ok(LsnForTimestamp::Past(min_lsn))
             }
             (true, true) => Ok(LsnForTimestamp::Present(commit_lsn)),
         }
