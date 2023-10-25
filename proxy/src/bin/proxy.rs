@@ -4,7 +4,7 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
-use proxy::metrics;
+use proxy::usage_metrics;
 
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
-        maintenance_tasks.spawn(metrics::task_main(metrics_config));
+        maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
     let maintenance = loop {

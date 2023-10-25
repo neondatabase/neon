@@ -8,9 +8,9 @@ use crate::{
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
-    metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
+    usage_metrics::{Ids, USAGE_METRICS},
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
