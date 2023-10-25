@@ -4,8 +4,12 @@ from pathlib import Path
 
 import psycopg2
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder, PgProtocol
-from fixtures.pageserver.http import PageserverApiException
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgProtocol,
+)
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import TenantId, TimelineId
 
 
@@ -84,26 +88,49 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
             assert cur.fetchone() == (5000050000,)
 
 
+def assert_client_authorized(env: NeonEnv, http_client: PageserverHttpClient):
+    http_client.timeline_create(
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        new_timeline_id=TimelineId.generate(),
+        ancestor_timeline_id=env.initial_timeline,
+    )
+
+
+def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient):
+    with pytest.raises(
+        PageserverApiException,
+        match="Unauthorized: malformed jwt token",
+    ):
+        assert_client_authorized(env, http_client)
+
+
 def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
 
     pageserver_token_old = env.auth_keys.generate_pageserver_token()
     pageserver_http_client_old = env.pageserver.http_client(pageserver_token_old)
 
     pageserver_http_client_old.reload_auth_validation_keys()
 
-    env.auth_public_key_path = (
-        Path(env.repo_dir) / "auth_public_key.pem" / "auth_public_key_old.pem"
-    )
-    os.rename(
-        Path(env.repo_dir) / "auth_public_key.pem", Path(env.repo_dir) / "auth_public_key.pem.file"
-    )
-    os.mkdir(Path(env.repo_dir) / "auth_public_key.pem")
+    # This test is to ensure that the pageserver supports multiple keys.
+    # The neon_local tool generates one key pair at a hardcoded path by default.
+    # As a preparation for our test, move the public key of the key pair into a
+    # directory at the same location as the hardcoded path by:
+    # 1. moving the the file at `configured_pub_key_path` to a temporary location
+    # 2. creating a new directory at `configured_pub_key_path`
+    # 3. moving the file from the temporary location into the newly created directory
+    configured_pub_key_path = Path(env.repo_dir) / "auth_public_key.pem"
+    os.rename(configured_pub_key_path, Path(env.repo_dir) / "auth_public_key.pem.file")
+    os.mkdir(configured_pub_key_path)
     os.rename(
         Path(env.repo_dir) / "auth_public_key.pem.file",
-        Path(env.repo_dir) / "auth_public_key.pem" / "auth_public_key_old.pem",
+        configured_pub_key_path / "auth_public_key_old.pem",
     )
+    # We set this for env.auth_keys computation to pick it up
+    env.auth_public_key_path = configured_pub_key_path / "auth_public_key_old.pem"
 
     # Add a new key pair
     env.regenerate_keys_at(
@@ -113,40 +140,28 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     # Reload the keys on the pageserver side
     pageserver_http_client_old.reload_auth_validation_keys()
 
-    # We can continue using the old token
-    pageserver_http_client_old.reload_auth_validation_keys()
+    # We can continue doing things using the old token
+    assert_client_authorized(env, pageserver_http_client_old)
 
     pageserver_token_new = env.auth_keys.generate_pageserver_token()
     pageserver_http_client_new = env.pageserver.http_client(pageserver_token_new)
 
-    # Timeline creation works with the new token/http client
-    pageserver_http_client_new.timeline_create(
-        pg_version=env.pg_version,
-        tenant_id=env.initial_tenant,
-        new_timeline_id=TimelineId.generate(),
-        ancestor_timeline_id=env.initial_timeline,
-    )
+    # The new token also works
+    assert_client_authorized(env, pageserver_http_client_new)
 
     # Remove the old token and reload
     os.remove(Path(env.repo_dir) / "auth_public_key.pem" / "auth_public_key_old.pem")
     pageserver_http_client_old.reload_auth_validation_keys()
 
-    # Reloading fails now with the old token
-    with pytest.raises(
-        PageserverApiException,
-        match="Unauthorized: malformed jwt token",
-    ):
-        pageserver_http_client_old.reload_auth_validation_keys()
-
-    # The new token still works
-    pageserver_http_client_new.reload_auth_validation_keys()
-
-    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
+    # Reloading fails now with the old token, but the new token still works
+    assert_client_not_authorized(env, pageserver_http_client_old)
+    assert_client_authorized(env, pageserver_http_client_new)
 
 
 def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
 
     pageserver_token_old = env.auth_keys.generate_pageserver_token()
     pageserver_http_client_old = env.pageserver.http_client(pageserver_token_old)
@@ -166,30 +181,16 @@ def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
     ):
         pageserver_http_client_old.reload_auth_validation_keys()
 
-    # same goes for attempts trying to create a branch
-    with pytest.raises(
-        PageserverApiException,
-        match="Unauthorized: malformed jwt token",
-    ):
-        pageserver_http_client_old.timeline_create(
-            pg_version=env.pg_version,
-            tenant_id=env.initial_tenant,
-            new_timeline_id=TimelineId.generate(),
-            ancestor_timeline_id=env.initial_timeline,
-        )
-
-    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
+    # same goes for attempts trying to create a timeline
+    assert_client_not_authorized(env, pageserver_http_client_old)
 
     pageserver_token_new = env.auth_keys.generate_pageserver_token()
     pageserver_http_client_new = env.pageserver.http_client(pageserver_token_new)
 
-    # timeline creation works with the new token/http client
-    pageserver_http_client_new.timeline_create(
-        pg_version=env.pg_version,
-        tenant_id=env.initial_tenant,
-        new_timeline_id=TimelineId.generate(),
-        ancestor_timeline_id=env.initial_timeline,
-    )
+    # timeline creation works with the new token
+    assert_client_authorized(env, pageserver_http_client_new)
+
+    # reloading also works with the new token
     pageserver_http_client_new.reload_auth_validation_keys()
 
 
