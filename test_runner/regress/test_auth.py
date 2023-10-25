@@ -13,6 +13,23 @@ from fixtures.pageserver.http import PageserverApiException, PageserverHttpClien
 from fixtures.types import TenantId, TimelineId
 
 
+def assert_client_authorized(env: NeonEnv, http_client: PageserverHttpClient):
+    http_client.timeline_create(
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        new_timeline_id=TimelineId.generate(),
+        ancestor_timeline_id=env.initial_timeline,
+    )
+
+
+def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient):
+    with pytest.raises(
+        PageserverApiException,
+        match="Unauthorized: malformed jwt token",
+    ):
+        assert_client_authorized(env, http_client)
+
+
 def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
@@ -33,30 +50,16 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     ps.safe_psql("set FOO", password=pageserver_token)
 
     # tenant can create branches
-    tenant_http_client.timeline_create(
-        pg_version=env.pg_version,
-        tenant_id=env.initial_tenant,
-        new_timeline_id=TimelineId.generate(),
-        ancestor_timeline_id=env.initial_timeline,
-    )
+    assert_client_authorized(env, tenant_http_client)
+
     # console can create branches for tenant
-    pageserver_http_client.timeline_create(
-        pg_version=env.pg_version,
-        tenant_id=env.initial_tenant,
-        new_timeline_id=TimelineId.generate(),
-        ancestor_timeline_id=env.initial_timeline,
-    )
+    assert_client_authorized(env, pageserver_http_client)
 
     # fail to create branch using token with different tenant_id
     with pytest.raises(
         PageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
     ):
-        invalid_tenant_http_client.timeline_create(
-            pg_version=env.pg_version,
-            tenant_id=env.initial_tenant,
-            new_timeline_id=TimelineId.generate(),
-            ancestor_timeline_id=env.initial_timeline,
-        )
+        assert_client_authorized(env, invalid_tenant_http_client)
 
     # create tenant using management token
     pageserver_http_client.tenant_create(TenantId.generate())
@@ -86,23 +89,6 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
             cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (5000050000,)
-
-
-def assert_client_authorized(env: NeonEnv, http_client: PageserverHttpClient):
-    http_client.timeline_create(
-        pg_version=env.pg_version,
-        tenant_id=env.initial_tenant,
-        new_timeline_id=TimelineId.generate(),
-        ancestor_timeline_id=env.initial_timeline,
-    )
-
-
-def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient):
-    with pytest.raises(
-        PageserverApiException,
-        match="Unauthorized: malformed jwt token",
-    ):
-        assert_client_authorized(env, http_client)
 
 
 def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
