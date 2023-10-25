@@ -203,6 +203,10 @@ runs:
         COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         BASE_S3_URL: ${{ steps.generate-report.outputs.base-s3-url }}
       run: |
+        if [ ! -d "${WORKDIR}/report/data/test-cases" ]; then
+          exit 0
+        fi
+
         export DATABASE_URL=${REGRESS_TEST_RESULT_CONNSTR_NEW}
 
         ./scripts/pysync
