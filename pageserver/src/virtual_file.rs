@@ -19,6 +19,7 @@ use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockWriteGuard};
+use utils::fs_ext;
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -170,41 +171,6 @@ impl OpenFiles {
             },
             slot_guard,
         )
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CrashsafeOverwriteError {
-    #[error("final path has no parent dir")]
-    FinalPathHasNoParentDir,
-    #[error("remove tempfile")]
-    RemovePreviousTempfile(#[source] std::io::Error),
-    #[error("create tempfile")]
-    CreateTempfile(#[source] std::io::Error),
-    #[error("write tempfile")]
-    WriteContents(#[source] std::io::Error),
-    #[error("sync tempfile")]
-    SyncTempfile(#[source] std::io::Error),
-    #[error("rename tempfile to final path")]
-    RenameTempfileToFinalPath(#[source] std::io::Error),
-    #[error("open final path parent dir")]
-    OpenFinalPathParentDir(#[source] std::io::Error),
-    #[error("sync final path parent dir")]
-    SyncFinalPathParentDir(#[source] std::io::Error),
-}
-impl CrashsafeOverwriteError {
-    /// Returns true iff the new contents are durably stored.
-    pub fn are_new_contents_durable(&self) -> bool {
-        match self {
-            Self::FinalPathHasNoParentDir => false,
-            Self::RemovePreviousTempfile(_) => false,
-            Self::CreateTempfile(_) => false,
-            Self::WriteContents(_) => false,
-            Self::SyncTempfile(_) => false,
-            Self::RenameTempfileToFinalPath(_) => false,
-            Self::OpenFinalPathParentDir(_) => false,
-            Self::SyncFinalPathParentDir(_) => true,
-        }
     }
 }
 
@@ -360,15 +326,13 @@ impl VirtualFile {
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
         content: &[u8],
-    ) -> Result<(), CrashsafeOverwriteError> {
+    ) -> std::io::Result<()> {
         let Some(final_path_parent) = final_path.parent() else {
-            return Err(CrashsafeOverwriteError::FinalPathHasNoParentDir);
+            return Err(std::io::Error::from_raw_os_error(
+                nix::errno::Errno::EINVAL as i32,
+            ));
         };
-        match std::fs::remove_file(tmp_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(CrashsafeOverwriteError::RemovePreviousTempfile(e)),
-        }
+        std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
         let mut file = Self::open_with_options(
             tmp_path,
             OpenOptions::new()
@@ -377,31 +341,20 @@ impl VirtualFile {
                 // we bail out instead of causing damage.
                 .create_new(true),
         )
-        .await
-        .map_err(CrashsafeOverwriteError::CreateTempfile)?;
-        file.write_all(content)
-            .await
-            .map_err(CrashsafeOverwriteError::WriteContents)?;
-        file.sync_all()
-            .await
-            .map_err(CrashsafeOverwriteError::SyncTempfile)?;
+        .await?;
+        file.write_all(content).await?;
+        file.sync_all().await?;
         drop(file); // before the rename, that's important!
                     // renames are atomic
-        std::fs::rename(tmp_path, final_path)
-            .map_err(CrashsafeOverwriteError::RenameTempfileToFinalPath)?;
+        std::fs::rename(tmp_path, final_path)?;
         // Only open final path parent dirfd now, so that this operation only
         // ever holds one VirtualFile fd at a time.  That's important because
         // the current `find_victim_slot` impl might pick the same slot for both
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
         let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
-                .await
-                .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
-        final_parent_dirfd
-            .sync_all()
-            .await
-            .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
+            Self::open_with_options(final_path_parent, OpenOptions::new().read(true)).await?;
+        final_parent_dirfd.sync_all().await?;
         Ok(())
     }
 
