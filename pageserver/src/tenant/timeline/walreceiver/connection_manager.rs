@@ -26,8 +26,7 @@ use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::BrokerClientChannel;
-use storage_broker::Streaming;
+use storage_broker::{BrokerClientChannel, Code, Streaming};
 use tokio::select;
 use tracing::*;
 
@@ -137,8 +136,17 @@ pub(super) async fn connection_manager_loop_step(
             broker_update = broker_subscription.message() => {
                 match broker_update {
                     Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
-                    Err(e) => {
-                        error!("broker subscription failed: {e}");
+                    Err(status) => {
+                        match status.code() {
+                            Code::Unknown if status.message().contains("stream closed because of a broken pipe") => {
+                                // tonic's error handling doesn't provide a clear code for disconnections: we get
+                                // "h2 protocol error: error reading a body from connection: stream closed because of a broken pipe"
+                                info!("broker disconnected: {status}");
+                            },
+                            _ => {
+                                warn!("broker subscription failed: {status}");
+                            }
+                        }
                         return ControlFlow::Continue(());
                     }
                     Ok(None) => {
