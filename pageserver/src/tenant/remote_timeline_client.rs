@@ -237,7 +237,6 @@ use crate::metrics::{
 };
 use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::upload_queue::Delete;
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::{
@@ -250,6 +249,7 @@ use crate::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
 };
+pub use index::LayerFileMetadata;
 
 use utils::id::{TenantId, TimelineId};
 
