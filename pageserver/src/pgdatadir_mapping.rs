@@ -355,7 +355,8 @@ impl Timeline {
             }
         }
         // If `found_smaller == true`, `low` is the LSN of the first commit record
-        // **before** the `search_timestamp` + 1 (to hit the while loop exit condition).
+        // **before** `search_timestamp` + 1 (otherwise the while loop exit condition
+        // wouldn't be hit).
         // Subtract 1 to get back the exact commit LSN.
         let commit_lsn = Lsn((low - 1) * 8);
         match (found_smaller, found_larger) {
