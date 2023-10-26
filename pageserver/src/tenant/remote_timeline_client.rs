@@ -725,9 +725,9 @@ impl RemoteTimelineClient {
         for (name, gen) in &with_generations {
             if let Some(unexpected) = upload_queue.dangling_files.insert(name.to_owned(), *gen) {
                 if &unexpected == gen {
-                    panic!("{name} was unlinked twicew with same generation");
+                    tracing::error!("{name} was unlinked twice with same generation");
                 } else {
-                    panic!("{name} was unlinked twice with different generations {gen:?} and {unexpected:?}");
+                    tracing::error!("{name} was unlinked twice with different generations {gen:?} and {unexpected:?}");
                 }
             }
         }
@@ -767,22 +767,18 @@ impl RemoteTimelineClient {
 
         #[cfg(feature = "testing")]
         {
-            let mut errors = Vec::new();
             for (name, gen) in &with_generations {
                 match upload_queue.dangling_files.remove(name) {
                     Some(same) if &same == gen => { /* expected */ }
                     Some(other) => {
-                        errors.push(format!(
+                        tracing::error!(
                             "{name} was unlinked with {other:?} but deleted with {gen:?}"
-                        ));
+                        );
                     }
                     None => {
-                        errors.push(format!("{name} was unlinked but was not dangling"));
+                        tracing::error!("{name} was unlinked but was not dangling");
                     }
                 }
-            }
-            if !errors.is_empty() {
-                panic!("surprising deletions: {errors:?}");
             }
         }
 

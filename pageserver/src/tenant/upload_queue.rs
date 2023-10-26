@@ -82,7 +82,10 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 
     /// Files which have been unlinked but not yet had scheduled a deletion for. Only kept around
-    /// for asserting.
+    /// for error logging.
+    ///
+    /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
+    /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
 }
