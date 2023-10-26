@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::block_io::BlockCursor;
 use pageserver::tenant::disk_btree::DiskBtreeReader;
 use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
+use pageserver::tenant::storage_layer::{delta_layer, image_layer};
+use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::{page_cache, virtual_file};
 use pageserver::{
@@ -20,6 +22,7 @@ use pageserver::{
 };
 use std::fs;
 use utils::bin_ser::BeSer;
+use utils::id::{TenantId, TimelineId};
 
 use crate::layer_map_analyzer::parse_filename;
 
@@ -44,6 +47,13 @@ pub(crate) enum LayerCmd {
         timeline: String,
         /// The id from list-layer command
         id: usize,
+    },
+    RewriteSummary {
+        layer_file_path: Utf8PathBuf,
+        #[clap(long)]
+        new_tenant_id: Option<TenantId>,
+        #[clap(long)]
+        new_timeline_id: Option<TimelineId>,
     },
 }
 
@@ -100,6 +110,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     println!("- timeline {}", timeline.file_name().to_string_lossy());
                 }
             }
+            Ok(())
         }
         LayerCmd::ListLayer {
             path,
@@ -128,6 +139,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     idx += 1;
                 }
             }
+            Ok(())
         }
         LayerCmd::DumpLayer {
             path,
@@ -168,7 +180,63 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                     idx += 1;
                 }
             }
+            Ok(())
+        }
+        LayerCmd::RewriteSummary {
+            layer_file_path,
+            new_tenant_id,
+            new_timeline_id,
+        } => {
+            pageserver::virtual_file::init(10);
+            pageserver::page_cache::init(100);
+
+            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+
+            macro_rules! rewrite_closure {
+                ($($summary_ty:tt)*) => {{
+                    |summary| $($summary_ty)* {
+                        tenant_id: new_tenant_id.unwrap_or(summary.tenant_id),
+                        timeline_id: new_timeline_id.unwrap_or(summary.timeline_id),
+                        ..summary
+                    }
+                }};
+            }
+
+            let res = ImageLayer::rewrite_summary(
+                layer_file_path,
+                rewrite_closure!(image_layer::Summary),
+                &ctx,
+            )
+            .await;
+            match res {
+                Ok(()) => {
+                    println!("Successfully rewrote summary of image layer {layer_file_path}");
+                    return Ok(());
+                }
+                Err(image_layer::RewriteSummaryError::MagicMismatch) => (), // fallthrough
+                Err(image_layer::RewriteSummaryError::Other(e)) => {
+                    return Err(e);
+                }
+            }
+
+            let res = DeltaLayer::rewrite_summary(
+                layer_file_path,
+                rewrite_closure!(delta_layer::Summary),
+                &ctx,
+            )
+            .await;
+            match res {
+                Ok(()) => {
+                    println!("Successfully rewrote summary of delta layer {layer_file_path}");
+                    return Ok(());
+                }
+                Err(delta_layer::RewriteSummaryError::MagicMismatch) => (), // fallthrough
+                Err(delta_layer::RewriteSummaryError::Other(e)) => {
+                    return Err(e);
+                }
+            }
+
+            anyhow::bail!("not an image or delta layer: {layer_file_path}");
         }
     }
-    Ok(())
 }

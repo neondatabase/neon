@@ -58,6 +58,7 @@ class HistoricLayerInfo:
     lsn_start: str
     lsn_end: Optional[str]
     remote: bool
+    remote_path: Optional[str] = None
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
@@ -68,6 +69,7 @@ class HistoricLayerInfo:
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
+            remote_path=d.get("remote_path"),
         )
 
 
