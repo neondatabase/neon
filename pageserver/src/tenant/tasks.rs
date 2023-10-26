@@ -159,11 +159,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             // TODO: we shouldn't need to await to find tenant and this could be moved outside of
             // loop, #3501. There are also additional "allowed_errors" in tests.
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
-                }
+            if first && random_init_delay(period, &cancel).await.is_err() {
+                break;
             }
 
             let started_at = Instant::now();
@@ -183,7 +180,16 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+            if !first {
+                // The first iteration is typically much slower, because all tenants compete for the
+                // compaction sempahore to run, and because of concurrent startup work like initializing
+                // logical sizes.  To avoid routinely spamming warnings, we suppress this log on first iteration.
+                warn_when_period_overrun(
+                    started_at.elapsed(),
+                    period,
+                    BackgroundLoopKind::Compaction,
+                );
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -192,6 +198,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+
+            first = false;
         }
     }
     .await;
@@ -223,11 +231,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             let period = tenant.get_gc_period();
 
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
-                }
+            if first && random_init_delay(period, &cancel).await.is_err() {
+                break;
             }
 
             let started_at = Instant::now();
@@ -251,7 +256,12 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
+            if !first {
+                // The first iteration is typically much slower, because all tenants compete for the
+                // compaction sempahore to run, and because of concurrent startup work like initializing
+                // logical sizes.  To avoid routinely spamming warnings, we suppress this log on first iteration.
+                warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -260,6 +270,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+
+            first = false;
         }
     }
     .await;

@@ -1,4 +1,5 @@
 use super::storage_layer::LayerFileName;
+use super::storage_layer::ResidentLayer;
 use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -203,18 +204,6 @@ impl UploadQueue {
             UploadQueue::Stopped(stopped) => Ok(stopped),
         }
     }
-
-    pub(crate) fn get_layer_metadata(
-        &self,
-        name: &LayerFileName,
-    ) -> anyhow::Result<Option<LayerFileMetadata>> {
-        match self {
-            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
-                anyhow::bail!("queue is in state {}", self.as_str())
-            }
-            UploadQueue::Initialized(inner) => Ok(inner.latest_files.get(name).cloned()),
-        }
-    }
 }
 
 /// An in-progress upload or delete task.
@@ -237,7 +226,7 @@ pub(crate) struct Delete {
 #[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
+    UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
@@ -252,13 +241,13 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => {
+            UploadOp::UploadLayer(layer, metadata) => {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    path.file_name(),
+                    layer,
                     metadata.file_size(),
-                    metadata.generation,
+                    metadata.generation
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => {

@@ -167,8 +167,6 @@
 //!   - download their remote [`IndexPart`]s
 //!   - create `Timeline` struct and a `RemoteTimelineClient`
 //!   - initialize the client's upload queue with its `IndexPart`
-//!   - create [`RemoteLayer`](super::storage_layer::RemoteLayer) instances
-//!     for layers that are referenced by `IndexPart` but not present locally
 //!   - schedule uploads for layers that are only present locally.
 //! - After the above is done for each timeline, open the tenant for business by
 //!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
@@ -189,8 +187,7 @@ mod upload;
 use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
-// re-export these
-pub use download::{is_temp_download_file, list_remote_timelines};
+
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff::{
@@ -215,7 +212,7 @@ use crate::metrics::{
 };
 use crate::task_mgr::shutdown_token;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::storage_layer::AsLayerDesc;
 use crate::tenant::upload_queue::Delete;
 use crate::tenant::TIMELINES_SEGMENT_NAME;
 use crate::{
@@ -233,9 +230,12 @@ use utils::id::{TenantId, TimelineId};
 
 use self::index::IndexPart;
 
-use super::storage_layer::LayerFileName;
+use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
 use super::upload_queue::SetDeletedFlagProgress;
 use super::Generation;
+
+pub(crate) use download::{is_temp_download_file, list_remote_timelines};
+pub(crate) use index::LayerFileMetadata;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -609,101 +609,181 @@ impl RemoteTimelineClient {
     ///
     /// Launch an upload operation in the background.
     ///
-    pub fn schedule_layer_file_upload(
+    pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
-        layer_file_name: &LayerFileName,
-        layer_metadata: &LayerFileMetadata,
+        layer: ResidentLayer,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        upload_queue
-            .latest_files
-            .insert(layer_file_name.clone(), layer_metadata.clone());
-        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-
-        let op = UploadOp::UploadLayer(layer_file_name.clone(), layer_metadata.clone());
-        self.calls_unfinished_metric_begin(&op);
-        upload_queue.queued_operations.push_back(op);
-
-        info!("scheduled layer file upload {layer_file_name}");
-
-        // Launch the task immediately, if possible
+        self.schedule_layer_file_upload0(upload_queue, layer);
         self.launch_queued_tasks(upload_queue);
         Ok(())
     }
 
+    fn schedule_layer_file_upload0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        layer: ResidentLayer,
+    ) {
+        let metadata = layer.metadata();
+
+        upload_queue
+            .latest_files
+            .insert(layer.layer_desc().filename(), metadata.clone());
+        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+
+        info!("scheduled layer file upload {layer}");
+        let op = UploadOp::UploadLayer(layer, metadata);
+        self.calls_unfinished_metric_begin(&op);
+        upload_queue.queued_operations.push_back(op);
+    }
+
     /// Launch a delete operation in the background.
     ///
-    /// The operation does not modify local state but assumes the local files have already been
-    /// deleted, and is used to mirror those changes to remote.
+    /// The operation does not modify local filesystem state.
     ///
     /// Note: This schedules an index file upload before the deletions.  The
-    /// deletion won't actually be performed, until any previously scheduled
+    /// deletion won't actually be performed, until all previously scheduled
     /// upload operations, and the index file upload, have completed
     /// successfully.
     pub fn schedule_layer_file_deletion(
         self: &Arc<Self>,
-        names: Vec<LayerFileName>,
+        names: &[LayerFileName],
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
+        let with_generations =
+            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned());
+
+        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+
+        // Launch the tasks immediately, if possible
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    /// Unlinks the layer files from `index_part.json` but does not yet schedule deletion for the
+    /// layer files, leaving them dangling.
+    ///
+    /// The files will be leaked in remote storage unless [`Self::schedule_deletion_of_unlinked`]
+    /// is invoked on them.
+    pub(crate) fn schedule_gc_update(self: &Arc<Self>, gc_layers: &[Layer]) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        // just forget the return value; after uploading the next index_part.json, we can consider
+        // the layer files as "dangling". this is fine, at worst case we create work for the
+        // scrubber.
+
+        let names = gc_layers.iter().map(|x| x.layer_desc().filename());
+
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+
+        self.launch_queued_tasks(upload_queue);
+
+        Ok(())
+    }
+
+    /// Update the remote index file, removing the to-be-deleted files from the index,
+    /// allowing scheduling of actual deletions later.
+    fn schedule_unlinking_of_layers_from_index_part0<I>(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        names: I,
+    ) -> Vec<(LayerFileName, Generation)>
+    where
+        I: IntoIterator<Item = LayerFileName>,
+    {
         // Deleting layers doesn't affect the values stored in TimelineMetadata,
         // so we don't need update it. Just serialize it.
         let metadata = upload_queue.latest_metadata.clone();
 
-        // Update the remote index file, removing the to-be-deleted files from the index,
-        // before deleting the actual files.
-        //
-        // Once we start removing files from upload_queue.latest_files, there's
-        // no going back! Otherwise, some of the files would already be removed
-        // from latest_files, but not yet scheduled for deletion. Use a closure
-        // to syntactically forbid ? or bail! calls here.
-        let no_bail_here = || {
-            // Decorate our list of names with each name's generation, dropping
-            // makes that are unexpectedly missing from our metadata.
-            let with_generations: Vec<_> = names
-                .into_iter()
-                .filter_map(|name| {
-                    // Remove from latest_files, learning the file's remote generation in the process
-                    let meta = upload_queue.latest_files.remove(&name);
+        // Decorate our list of names with each name's generation, dropping
+        // names that are unexpectedly missing from our metadata.
+        let with_generations: Vec<_> = names
+            .into_iter()
+            .filter_map(|name| {
+                let meta = upload_queue.latest_files.remove(&name);
 
-                    if let Some(meta) = meta {
-                        upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                        Some((name, meta.generation))
-                    } else {
-                        // This can only happen if we forgot to to schedule the file upload
-                        // before scheduling the delete. Log it because it is a rare/strange
-                        // situation, and in case something is misbehaving, we'd like to know which
-                        // layers experienced this.
-                        info!(
-                            "Deleting layer {name} not found in latest_files list, never uploaded?"
-                        );
-                        None
-                    }
-                })
-                .collect();
+                if let Some(meta) = meta {
+                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+                    Some((name, meta.generation))
+                } else {
+                    // This can only happen if we forgot to to schedule the file upload
+                    // before scheduling the delete. Log it because it is a rare/strange
+                    // situation, and in case something is misbehaving, we'd like to know which
+                    // layers experienced this.
+                    info!("Deleting layer {name} not found in latest_files list, never uploaded?");
+                    None
+                }
+            })
+            .collect();
 
-            if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
-                self.schedule_index_upload(upload_queue, metadata);
-            }
+        // after unlinking files from the upload_queue.latest_files we must always schedule an
+        // index_part update, because that needs to be uploaded before we can actually delete the
+        // files.
+        if upload_queue.latest_files_changes_since_metadata_upload_scheduled > 0 {
+            self.schedule_index_upload(upload_queue, metadata);
+        }
 
-            for (name, gen) in &with_generations {
-                info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
-            }
+        with_generations
+    }
 
-            // schedule the actual deletions
-            let op = UploadOp::Delete(Delete {
-                layers: with_generations,
-            });
-            self.calls_unfinished_metric_begin(&op);
-            upload_queue.queued_operations.push_back(op);
+    /// Schedules deletion for layer files which have previously been unlinked from the
+    /// `index_part.json` with [`Self::schedule_gc_update`] or [`Self::schedule_compaction_update`].
+    pub(crate) fn schedule_deletion_of_unlinked(
+        self: &Arc<Self>,
+        layers: Vec<(LayerFileName, Generation)>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
 
-            // Launch the tasks immediately, if possible
-            self.launch_queued_tasks(upload_queue);
-        };
-        no_bail_here();
+        self.schedule_deletion_of_unlinked0(upload_queue, layers);
+        self.launch_queued_tasks(upload_queue);
+        Ok(())
+    }
+
+    fn schedule_deletion_of_unlinked0(
+        self: &Arc<Self>,
+        upload_queue: &mut UploadQueueInitialized,
+        with_generations: Vec<(LayerFileName, Generation)>,
+    ) {
+        for (name, gen) in &with_generations {
+            info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
+        }
+
+        // schedule the actual deletions
+        let op = UploadOp::Delete(Delete {
+            layers: with_generations,
+        });
+        self.calls_unfinished_metric_begin(&op);
+        upload_queue.queued_operations.push_back(op);
+    }
+
+    /// Schedules a compaction update to the remote `index_part.json`.
+    ///
+    /// `compacted_from` represent the L0 names which have been `compacted_to` L1 layers.
+    pub(crate) fn schedule_compaction_update(
+        self: &Arc<Self>,
+        compacted_from: &[Layer],
+        compacted_to: &[ResidentLayer],
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        for layer in compacted_to {
+            self.schedule_layer_file_upload0(upload_queue, layer.clone());
+        }
+
+        let names = compacted_from.iter().map(|x| x.layer_desc().filename());
+
+        let with_generations =
+            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
+        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        self.launch_queued_tasks(upload_queue);
+
         Ok(())
     }
 
@@ -1075,16 +1155,12 @@ impl RemoteTimelineClient {
             }
 
             let upload_result: anyhow::Result<()> = match &task.op {
-                UploadOp::UploadLayer(ref layer_file_name, ref layer_metadata) => {
-                    let path = self
-                        .conf
-                        .timeline_path(&self.tenant_id, &self.timeline_id)
-                        .join(layer_file_name.file_name());
-
+                UploadOp::UploadLayer(ref layer, ref layer_metadata) => {
+                    let path = layer.local_path();
                     upload::upload_timeline_layer(
                         self.conf,
                         &self.storage_impl,
-                        &path,
+                        path,
                         layer_metadata,
                         self.generation,
                     )
@@ -1401,13 +1477,6 @@ impl RemoteTimelineClient {
             }
         }
     }
-
-    pub(crate) fn get_layer_metadata(
-        &self,
-        name: &LayerFileName,
-    ) -> anyhow::Result<Option<LayerFileMetadata>> {
-        self.upload_queue.lock().unwrap().get_layer_metadata(name)
-    }
 }
 
 pub fn remote_timelines_path(tenant_id: &TenantId) -> RemotePath {
@@ -1495,6 +1564,7 @@ mod tests {
         context::RequestContext,
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::Layer,
             Generation, Tenant, Timeline,
         },
         DEFAULT_PG_VERSION,
@@ -1667,32 +1737,29 @@ mod tests {
         let generation = harness.generation;
 
         // Create a couple of dummy files,  schedule upload for them
-        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
-        let layer_file_name_2: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D9-00000000016B5A52".parse().unwrap();
-        let layer_file_name_3: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59DA-00000000016B5A53".parse().unwrap();
-        let content_1 = dummy_contents("foo");
-        let content_2 = dummy_contents("bar");
-        let content_3 = dummy_contents("baz");
 
-        for (filename, content) in [
-            (&layer_file_name_1, &content_1),
-            (&layer_file_name_2, &content_2),
-            (&layer_file_name_3, &content_3),
-        ] {
-            std::fs::write(timeline_path.join(filename.file_name()), content).unwrap();
-        }
+        let layers = [
+            ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), dummy_contents("foo")),
+            ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D9-00000000016B5A52".parse().unwrap(), dummy_contents("bar")),
+            ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59DA-00000000016B5A53".parse().unwrap(), dummy_contents("baz"))
+        ]
+        .into_iter()
+        .map(|(name, contents): (LayerFileName, Vec<u8>)| {
+            std::fs::write(timeline_path.join(name.file_name()), &contents).unwrap();
+
+            Layer::for_resident(
+                harness.conf,
+                &timeline,
+                name,
+                LayerFileMetadata::new(contents.len() as u64, generation),
+            )
+        }).collect::<Vec<_>>();
 
         client
-            .schedule_layer_file_upload(
-                &layer_file_name_1,
-                &LayerFileMetadata::new(content_1.len() as u64, generation),
-            )
+            .schedule_layer_file_upload(layers[0].clone())
             .unwrap();
         client
-            .schedule_layer_file_upload(
-                &layer_file_name_2,
-                &LayerFileMetadata::new(content_2.len() as u64, generation),
-            )
+            .schedule_layer_file_upload(layers[1].clone())
             .unwrap();
 
         // Check that they are started immediately, not queued
@@ -1750,38 +1817,42 @@ mod tests {
                 .collect(),
             &[
                 &initial_layer.file_name(),
-                &layer_file_name_1.file_name(),
-                &layer_file_name_2.file_name(),
+                &layers[0].layer_desc().filename().file_name(),
+                &layers[1].layer_desc().filename().file_name(),
             ],
         );
         assert_eq!(index_part.metadata, metadata);
 
         // Schedule upload and then a deletion. Check that the deletion is queued
         client
-            .schedule_layer_file_upload(
-                &layer_file_name_3,
-                &LayerFileMetadata::new(content_3.len() as u64, generation),
-            )
+            .schedule_layer_file_upload(layers[2].clone())
             .unwrap();
+
+        // this is no longer consistent with how deletion works with Layer::drop, but in this test
+        // keep using schedule_layer_file_deletion because we don't have a way to wait for the
+        // spawn_blocking started by the drop.
         client
-            .schedule_layer_file_deletion([layer_file_name_1.clone()].to_vec())
+            .schedule_layer_file_deletion(&[layers[0].layer_desc().filename()])
             .unwrap();
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
 
             // Deletion schedules upload of the index file, and the file deletion itself
-            assert!(upload_queue.queued_operations.len() == 2);
-            assert!(upload_queue.inprogress_tasks.len() == 1);
-            assert!(upload_queue.num_inprogress_layer_uploads == 1);
-            assert!(upload_queue.num_inprogress_deletions == 0);
-            assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
+            assert_eq!(upload_queue.queued_operations.len(), 2);
+            assert_eq!(upload_queue.inprogress_tasks.len(), 1);
+            assert_eq!(upload_queue.num_inprogress_layer_uploads, 1);
+            assert_eq!(upload_queue.num_inprogress_deletions, 0);
+            assert_eq!(
+                upload_queue.latest_files_changes_since_metadata_upload_scheduled,
+                0
+            );
         }
         assert_remote_files(
             &[
                 &initial_layer.file_name(),
-                &layer_file_name_1.file_name(),
-                &layer_file_name_2.file_name(),
+                &layers[0].layer_desc().filename().file_name(),
+                &layers[1].layer_desc().filename().file_name(),
                 "index_part.json",
             ],
             &remote_timeline_dir,
@@ -1795,8 +1866,8 @@ mod tests {
         assert_remote_files(
             &[
                 &initial_layer.file_name(),
-                &layer_file_name_2.file_name(),
-                &layer_file_name_3.file_name(),
+                &layers[1].layer_desc().filename().file_name(),
+                &layers[2].layer_desc().filename().file_name(),
                 "index_part.json",
             ],
             &remote_timeline_dir,
@@ -1824,6 +1895,13 @@ mod tests {
             &content_1,
         )
         .unwrap();
+
+        let layer_file_1 = Layer::for_resident(
+            harness.conf,
+            &timeline,
+            layer_file_name_1.clone(),
+            LayerFileMetadata::new(content_1.len() as u64, harness.generation),
+        );
 
         #[derive(Debug, PartialEq, Clone, Copy)]
         struct BytesStartedFinished {
@@ -1860,10 +1938,7 @@ mod tests {
         let actual_a = get_bytes_started_stopped();
 
         client
-            .schedule_layer_file_upload(
-                &layer_file_name_1,
-                &LayerFileMetadata::new(content_1.len() as u64, harness.generation),
-            )
+            .schedule_layer_file_upload(layer_file_1.clone())
             .unwrap();
 
         let actual_b = get_bytes_started_stopped();

@@ -12,13 +12,12 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_for_upload_queue_empty,
-    wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
 from fixtures.types import Lsn
@@ -384,7 +383,7 @@ def test_download_remote_layers_api(
     env.pageserver.start(extra_env_vars={"FAILPOINTS": "remote-storage-download-pre-rename=return"})
     env.pageserver.allowed_errors.extend(
         [
-            f".*download_all_remote_layers.*{tenant_id}.*{timeline_id}.*layer download failed.*remote-storage-download-pre-rename failpoint",
+            ".*download failed: downloading evicted layer file failed.*",
             f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
         ]
     )
@@ -635,57 +634,6 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
         kinds_after[layer.kind] += 1
 
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
-
-
-def test_ondemand_download_failure_to_replace(neon_env_builder: NeonEnvBuilder):
-    """
-    Make sure that we fail on being unable to replace a RemoteLayer instead of for example livelocking.
-
-    See: https://github.com/neondatabase/neon/issues/3533
-    """
-
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-
-    # disable gc and compaction via default tenant config because config is lost while detaching
-    # so that compaction will not be the one to download the layer but the http handler is
-    neon_env_builder.pageserver_config_override = (
-        """tenant_config={gc_period = "0s", compaction_period = "0s"}"""
-    )
-
-    env = neon_env_builder.init_start()
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-    assert timeline_id is not None
-
-    pageserver_http = env.pageserver.http_client()
-
-    # remove layers so that they will be redownloaded
-    pageserver_http.tenant_detach(tenant_id)
-    pageserver_http.tenant_attach(tenant_id)
-
-    wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
-    pageserver_http.configure_failpoints(("layermap-replace-notfound", "return"))
-
-    # requesting details with non-incremental size should trigger a download of the only layer
-    # this will need to be adjusted if an index for logical sizes is ever implemented
-    with pytest.raises(PageserverApiException):
-        # PageserverApiException is expected because of the failpoint (timeline_detail building does something)
-        # ReadTimeout can happen on our busy CI, but it should not, because there is no more busylooping
-        # but should it be added back, we would wait for 15s here.
-        pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=15)
-
-    actual_message = ".* ERROR .*layermap-replace-notfound"
-    assert env.pageserver.log_contains(actual_message) is not None
-    env.pageserver.allowed_errors.append(actual_message)
-
-    env.pageserver.allowed_errors.append(
-        ".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info"
-    )
-    # this might get to run and attempt on-demand, but not always
-    env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'")
-
-    # if the above returned, then we didn't have a livelock, and all is well
 
 
 def stringify(conf: Dict[str, Any]) -> Dict[str, str]:

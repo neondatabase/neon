@@ -137,9 +137,7 @@ pub(crate) mod timeline;
 pub mod size;
 
 pub(crate) use timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
-pub use timeline::{
-    LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
-};
+pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 // re-export for use in remote_timeline_client.rs
 pub use crate::tenant::metadata::save_metadata;
@@ -1038,8 +1036,8 @@ impl Tenant {
                     TimelineId::try_from(timeline_uninit_mark_file.file_stem())
                         .with_context(|| {
                             format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {timeline_uninit_mark_file}",
-                        )
+                                "Could not parse timeline id out of the timeline uninit mark name {timeline_uninit_mark_file}",
+                            )
                         })?;
                 let timeline_dir = self.conf.timeline_path(&self.tenant_id, &timeline_id);
                 if let Err(e) =
@@ -4174,6 +4172,7 @@ mod tests {
 
     #[tokio::test]
     async fn delta_layer_dumping() -> anyhow::Result<()> {
+        use storage_layer::AsLayerDesc;
         let (tenant, ctx) = TenantHarness::create("test_layer_dumping")?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -4181,16 +4180,18 @@ mod tests {
         make_some_layers(tline.as_ref(), Lsn(0x20), &ctx).await?;
 
         let layer_map = tline.layers.read().await;
-        let level0_deltas = layer_map.layer_map().get_level0_deltas()?;
+        let level0_deltas = layer_map
+            .layer_map()
+            .get_level0_deltas()?
+            .into_iter()
+            .map(|desc| layer_map.get_from_desc(&desc))
+            .collect::<Vec<_>>();
 
         assert!(!level0_deltas.is_empty());
 
         for delta in level0_deltas {
-            let delta = layer_map.get_from_desc(&delta);
             // Ensure we are dumping a delta layer here
-            let delta = delta.downcast_delta_layer().unwrap();
-
-            delta.dump(false, &ctx).await.unwrap();
+            assert!(delta.layer_desc().is_delta);
             delta.dump(true, &ctx).await.unwrap();
         }
 

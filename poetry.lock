@@ -2447,20 +2447,20 @@ test = ["websockets"]
 
 [[package]]
 name = "werkzeug"
-version = "2.2.3"
+version = "3.0.1"
 description = "The comprehensive WSGI web application library."
 optional = false
-python-versions = ">=3.7"
+python-versions = ">=3.8"
 files = [
-    {file = "Werkzeug-2.2.3-py3-none-any.whl", hash = "sha256:56433961bc1f12533306c624f3be5e744389ac61d722175d543e1751285da612"},
-    {file = "Werkzeug-2.2.3.tar.gz", hash = "sha256:2e1ccc9417d4da358b9de6f174e3ac094391ea1d4fbef2d667865d819dfd0afe"},
+    {file = "werkzeug-3.0.1-py3-none-any.whl", hash = "sha256:90a285dc0e42ad56b34e696398b8122ee4c681833fb35b8334a095d82c56da10"},
+    {file = "werkzeug-3.0.1.tar.gz", hash = "sha256:507e811ecea72b18a404947aded4b3390e1db8f826b494d76550ef45bb3b1dcc"},
 ]
 
 [package.dependencies]
 MarkupSafe = ">=2.1.1"
 
 [package.extras]
-watchdog = ["watchdog"]
+watchdog = ["watchdog (>=2.3)"]
 
 [[package]]
 name = "wrapt"
@@ -2719,4 +2719,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "c5981d8d7c2deadd47c823bc35f86f830c8e320b653d2d3718bade1f4d2dabca"
+content-hash = "74649cf47c52f21b01b096a42044750b1c9677576b405be0489c2909127a9bf1"

@@ -675,8 +675,9 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-        result.add_key(AUX_FILES_KEY);
-
+        if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
+            result.add_key(AUX_FILES_KEY);
+        }
         Ok(result.to_keyspace())
     }
 
@@ -1201,7 +1202,8 @@ impl<'a> DatadirModification<'a> {
         let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
             Ok(buf) => AuxFilesDirectory::des(&buf)?,
             Err(e) => {
-                warn!("Failed to get info about AUX files: {}", e);
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about AUX files: {}", e);
                 AuxFilesDirectory {
                     files: HashMap::new(),
                 }

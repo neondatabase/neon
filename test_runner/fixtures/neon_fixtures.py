@@ -1617,7 +1617,7 @@ class NeonPageserver(PgProtocol):
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
-            ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*compaction_loop.*Compaction failed, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             ".*task iteration took longer than the configured period.*",
@@ -1754,6 +1754,11 @@ class NeonPageserver(PgProtocol):
                 break
 
             if error_or_warn.search(line):
+                # Is this a torn log line?  This happens when force-killing a process and restarting
+                # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+                if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                    continue
+
                 # It's an ERROR or WARN. Is it in the allow-list?
                 for a in self.allowed_errors:
                     if re.match(a, line):
