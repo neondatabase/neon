@@ -747,6 +747,46 @@ async fn tenant_ignore_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn tenant_duplicate_handler(
+    mut request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let src_tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+
+    let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    let new_tenant_id = request_data.new_tenant_id;
+    check_permission(&request, None)?;
+
+    let _timer = STORAGE_TIME_GLOBAL
+        .get_metric_with_label_values(&[StorageTimeOperation::DuplicateTenant.into()])
+        .expect("bug")
+        .start_timer();
+
+    let tenant_conf =
+        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
+
+    let state = get_state(&request);
+
+    let generation = get_request_generation(state, request_data.generation)?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    mgr::duplicate_tenant(
+        state.conf,
+        tenant_conf,
+        src_tenant_id,
+        new_tenant_id,
+        generation,
+        state.tenant_resources(),
+        &ctx,
+        &cancel,
+    )
+    .instrument(info_span!("tenant_duplicate", %src_tenant_id, tenant_id = %new_tenant_id))
+    .await?;
+
+    json_response(StatusCode::CREATED, TenantCreateResponse(new_tenant_id))
+}
+
 async fn tenant_list_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1786,6 +1826,9 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_id/ignore", |r| {
             api_handler(r, tenant_ignore_handler)
+        })
+        .post("/v1/tenant/:tenant_id/duplicate", |r| {
+            api_handler(r, tenant_duplicate_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)

@@ -6,9 +6,11 @@ use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
+use tokio::io::AsyncSeekExt;
 use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use anyhow::Context;
@@ -30,7 +32,11 @@ use crate::metrics::TENANT_MANAGER as METRICS;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{create_tenant_files, AttachedTenantConf, SpawnMode, Tenant, TenantState};
+use crate::tenant::span::debug_assert_current_span_has_tenant_id;
+use crate::tenant::storage_layer::{DeltaLayer, ImageLayer, LayerFileName};
+use crate::tenant::{
+    create_tenant_files, remote_timeline_client, AttachedTenantConf, IndexPart, Tenant, TenantState,
+};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -40,7 +46,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
 use super::timeline::delete::DeleteTimelineFlow;
-use super::TenantSharedResources;
+use super::{SpawnMode, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
@@ -733,6 +739,171 @@ pub(crate) async fn create_tenant(
     slot_guard.upsert(TenantSlot::Attached(created_tenant.clone()))?;
 
     Ok(created_tenant)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn duplicate_tenant(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    src_tenant_id: TenantId,
+    new_tenant_id: TenantId,
+    generation: Generation,
+    resources: TenantSharedResources,
+    ctx: &RequestContext,
+    cancel: &CancellationToken,
+) -> Result<(), TenantMapInsertError> {
+    debug_assert_current_span_has_tenant_id();
+
+    // TODO: would be nice to use tenant_map_insert here, but, we're not ready to create a Tenant object yet
+    let tempdir = path_with_suffix_extension(
+        conf.tenants_path().join(&new_tenant_id.to_string()),
+        &format!("duplication.{TEMP_FILE_SUFFIX}"),
+    );
+    tokio::fs::remove_dir_all(&tempdir)
+        .await
+        .or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        })
+        .context("pre-run clean up tempdir")?;
+
+    tokio::fs::create_dir(&tempdir)
+        .await
+        .context("create tempdir")?;
+
+    // Copy the tenant's data in S3
+    let remote_storage = resources
+        .remote_storage
+        .as_ref()
+        .context("only works with remote storage")?;
+
+    let (remote_src_timelines, other_prefixes) = remote_timeline_client::list_remote_timelines(
+        remote_storage,
+        src_tenant_id,
+        cancel.clone(),
+    )
+    .await
+    .context("list src timelines")?;
+
+    if !other_prefixes.is_empty() {
+        return Err(TenantMapInsertError::Other(anyhow::anyhow!(
+            "unimplemented: handling of other prefixes in src tenant: {:?}",
+            other_prefixes
+        )));
+    }
+
+    info!(?remote_src_timelines, "got src timelines");
+
+    for timeline_id in remote_src_timelines {
+        async {
+            let tempdir = tempdir.join(&timeline_id.to_string());
+
+            tokio::fs::create_dir(&tempdir)
+                .await
+                .context("create tempdir for timeline")?;
+
+            let remote_src_tl =
+                remote_timeline_client::remote_timeline_path(&src_tenant_id, &timeline_id);
+            let remote_dst_tl =
+                remote_timeline_client::remote_timeline_path(&new_tenant_id, &timeline_id);
+
+            let object_names = remote_storage
+                .list_prefixes(Some(&remote_src_tl))
+                .await
+                .context("list timeline remote prefix")?;
+
+            for name in object_names {
+                async {
+                    let name = name.object_name().context(
+                        "list_prefixes return values should always have object_name()=Some",
+                    )?;
+                    let remote_src_obj = remote_src_tl.join(name);
+                    let remote_dst_obj = remote_dst_tl.join(name);
+
+                    let tmp_obj_filepath = tempdir.join(name);
+                    let mut tmp_obj_file = tokio::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(&tmp_obj_filepath)
+                        .await
+                        .context("create temp file")?;
+                    let mut tmp_dl = remote_storage
+                        .download(&remote_src_obj)
+                        .await
+                        .context("start download")?;
+                    let tmp_obj_size =
+                        tokio::io::copy(&mut tmp_dl.download_stream, &mut tmp_obj_file)
+                            .await
+                            .context("do the download")?;
+
+                    if name == IndexPart::FILE_NAME {
+                        // needs no patching
+                    } else {
+                        let name = LayerFileName::from_str(name).map_err(|e: String| {
+                            anyhow::anyhow!("unknown key in timeline s3 prefix: {name:?}: {e}")
+                        })?;
+                        match name {
+                            LayerFileName::Image(_) => {
+                                ImageLayer::rewrite_tenant_timeline(
+                                    &tmp_obj_filepath,
+                                    new_tenant_id,
+                                    timeline_id, /* leave as is */
+                                    ctx,
+                                )
+                                .await
+                                .context("rewrite tenant timeline")?;
+                            }
+                            LayerFileName::Delta(_) => {
+                                DeltaLayer::rewrite_tenant_timeline(
+                                    &tmp_obj_filepath,
+                                    new_tenant_id,
+                                    timeline_id, /* leave as is */
+                                    ctx,
+                                )
+                                .await
+                                .context("rewrite tenant timeline")?;
+                            }
+                        }
+                    }
+
+                    info!(?remote_dst_obj, "uploading");
+
+                    tmp_obj_file
+                        .seek(std::io::SeekFrom::Start(0))
+                        .await
+                        .context("seek tmp file to beginning for upload")?;
+                    remote_storage
+                        .upload(
+                            tmp_obj_file,
+                            tmp_obj_size as usize,
+                            &remote_dst_obj,
+                            tmp_dl.metadata,
+                        )
+                        .await
+                        .context("upload modified")?;
+
+                    tokio::fs::remove_file(tmp_obj_filepath)
+                        .await
+                        .context("remove temp file")?;
+
+                    anyhow::Ok(())
+                }
+                .instrument(info_span!("copy object", object_name=?name))
+                .await
+                .context("copy object")?;
+            }
+            anyhow::Ok(())
+        }
+        .instrument(info_span!("copy_timeline", timeline_id=%timeline_id))
+        .await?;
+    }
+
+    tokio::fs::remove_dir_all(&tempdir)
+        .await
+        .context("post-run clean up tempdir")?;
+
+    attach_tenant(conf, new_tenant_id, generation, tenant_conf, resources, ctx).await
 }
 
 #[derive(Debug, thiserror::Error)]

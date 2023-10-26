@@ -51,6 +51,9 @@ pub enum StorageTimeOperation {
 
     #[strum(serialize = "create tenant")]
     CreateTenant,
+
+    #[strum(serialize = "duplicate tenant")]
+    DuplicateTenant,
 }
 
 pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
