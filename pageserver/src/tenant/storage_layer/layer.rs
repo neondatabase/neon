@@ -1479,4 +1479,4 @@ impl GcFailed {
 }
 
 static LAYER_IMPL_METRICS: once_cell::sync::Lazy<LayerImplMetrics> =
-    once_cell::sync::Lazy::new(|| LayerImplMetrics::default());
+    once_cell::sync::Lazy::new(LayerImplMetrics::default);
