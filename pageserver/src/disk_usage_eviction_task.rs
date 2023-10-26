@@ -47,21 +47,24 @@ use std::{
 };
 
 use anyhow::Context;
-use camino::Utf8Path;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::completion;
 use utils::serde_percent::Percent;
+use utils::{completion, id::TimelineId};
 
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
-        storage_layer::{AsLayerDesc, EvictionError, Layer},
+        mgr::TenantManager,
+        remote_timeline_client::LayerFileMetadata,
+        secondary::SecondaryTenant,
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerFileName},
         Timeline,
     },
 };
@@ -125,6 +128,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
+    tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
@@ -150,8 +154,7 @@ pub fn launch_disk_usage_global_eviction_task(
                 _ = background_jobs_barrier.wait() => { }
             };
 
-            disk_usage_eviction_task(&state, task_config, &storage, &conf.tenants_path(), cancel)
-                .await;
+            disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel).await;
             Ok(())
         },
     );
@@ -164,7 +167,7 @@ async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir: &Utf8Path,
+    tenant_manager: Arc<TenantManager>,
     cancel: CancellationToken,
 ) {
     scopeguard::defer! {
@@ -191,7 +194,7 @@ async fn disk_usage_eviction_task(
                 state,
                 task_config,
                 storage,
-                tenants_dir,
+                &tenant_manager,
                 &cancel,
             )
             .await;
@@ -226,10 +229,11 @@ async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir: &Utf8Path,
+    tenant_manager: &Arc<TenantManager>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
+    let tenants_dir = tenant_manager.get_conf().tenants_path();
+    let usage_pre = filesystem_level_usage::get(&tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
     let res = disk_usage_eviction_task_iteration_impl(
         state,
@@ -248,7 +252,7 @@ async fn disk_usage_eviction_task_iteration(
                 }
                 IterationOutcome::Finished(outcome) => {
                     // Verify with statvfs whether we made any real progress
-                    let after = filesystem_level_usage::get(tenants_dir, task_config)
+                    let after = filesystem_level_usage::get(&tenants_dir, task_config)
                         // It's quite unlikely to hit the error here. Keep the code simple and bail out.
                         .context("get filesystem-level disk usage after evictions")?;
 
@@ -355,18 +359,17 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
         let nth = i + 1;
-        let desc = candidate.layer.layer_desc();
         let total_candidates = candidates.len();
-        let size = desc.file_size;
+        let size = candidate.layer.get_file_size();
         let rel = candidate.relative_last_activity;
         debug!(
             "cand {nth}/{total_candidates}: size={size}, rel_last_activity={rel}, no_access_for={}us, partition={partition:?}, {}/{}/{}",
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
-            desc.tenant_shard_id,
-            desc.timeline_id,
-            candidate.layer,
+            candidate.layer.get_tenant_shard_id(),
+            candidate.layer.get_timeline_id(),
+            candidate.layer.get_name(),
         );
     }
 
@@ -398,7 +401,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             warned = Some(usage_planned);
         }
 
-        usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
+        usage_planned.add_available_bytes(candidate.layer.get_file_size());
         evicted_amount += 1;
     }
 
@@ -464,16 +467,20 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             };
 
             js.spawn(async move {
-                let rtc = candidate.timeline.remote_client.as_ref().expect(
-                    "holding the witness, all timelines must have a remote timeline client",
-                );
-                let file_size = candidate.layer.layer_desc().file_size;
-                candidate
-                    .layer
-                    .evict_and_wait(rtc)
-                    .await
-                    .map(|()| file_size)
-                    .map_err(|e| (file_size, e))
+                match candidate.layer {
+                    EvictionLayer::Attached(layer) => {
+                        let file_size = layer.layer_desc().file_size;
+
+                        layer
+                            .evict_and_wait()
+                            .await
+                            .map(|()| file_size)
+                            .map_err(|e| (file_size, e))
+                    }
+                    EvictionLayer::Secondary(_layer) => {
+                        todo!();
+                    }
+                }
             });
 
             tokio::task::yield_now().await;
@@ -502,9 +509,61 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 }
 
 #[derive(Clone)]
+struct SecondaryLayer {
+    secondary_tenant: Arc<SecondaryTenant>,
+    timeline_id: TimelineId,
+    name: LayerFileName,
+    metadata: LayerFileMetadata,
+}
+
+/// Full [`Layer`] objects are specific to tenants in attached mode.  This type is a layer
+/// of indirection to store either a `Layer`, or a reference to a secondary tenant and a layer name.
+#[derive(Clone)]
+enum EvictionLayer {
+    Attached(Layer),
+    #[allow(dead_code)]
+    Secondary(SecondaryLayer),
+}
+
+impl From<Layer> for EvictionLayer {
+    fn from(value: Layer) -> Self {
+        Self::Attached(value)
+    }
+}
+
+impl EvictionLayer {
+    fn get_tenant_shard_id(&self) -> &TenantShardId {
+        match self {
+            Self::Attached(l) => &l.layer_desc().tenant_shard_id,
+            Self::Secondary(sl) => sl.secondary_tenant.get_tenant_shard_id(),
+        }
+    }
+
+    fn get_timeline_id(&self) -> &TimelineId {
+        match self {
+            Self::Attached(l) => &l.layer_desc().timeline_id,
+            Self::Secondary(sl) => &sl.timeline_id,
+        }
+    }
+
+    fn get_name(&self) -> LayerFileName {
+        match self {
+            Self::Attached(l) => l.layer_desc().filename(),
+            Self::Secondary(sl) => sl.name.clone(),
+        }
+    }
+
+    fn get_file_size(&self) -> u64 {
+        match self {
+            Self::Attached(l) => l.layer_desc().file_size,
+            Self::Secondary(sl) => sl.metadata.file_size(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct EvictionCandidate {
-    timeline: Arc<Timeline>,
-    layer: Layer,
+    layer: EvictionLayer,
     last_activity_ts: SystemTime,
     relative_last_activity: finite_f32::FiniteF32,
 }
@@ -665,11 +724,7 @@ async fn collect_eviction_candidates(
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
-            tenant_candidates.extend(
-                info.resident_layers
-                    .into_iter()
-                    .map(|layer_infos| (tl.clone(), layer_infos)),
-            );
+            tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
             if cancel.is_cancelled() {
@@ -707,7 +762,7 @@ async fn collect_eviction_candidates(
         // Sort layers most-recently-used first, then partition by
         // cumsum above/below min_resident_size.
         tenant_candidates
-            .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
+            .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
 
         // keeping the -1 or not decides if every tenant should lose their least recently accessed
@@ -741,7 +796,7 @@ async fn collect_eviction_candidates(
             .unwrap_or(1);
         let divider = total as f32;
 
-        for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
+        for (i, layer_info) in tenant_candidates.into_iter().enumerate() {
             let file_size = layer_info.file_size();
 
             // as we iterate this reverse sorted list, the most recently accessed layer will always
@@ -762,9 +817,8 @@ async fn collect_eviction_candidates(
             };
 
             let candidate = EvictionCandidate {
-                timeline,
                 last_activity_ts: layer_info.last_activity_ts,
-                layer: layer_info.layer,
+                layer: layer_info.layer.into(),
                 relative_last_activity,
             };
             let partition = if cumsum > min_resident_size as i128 {

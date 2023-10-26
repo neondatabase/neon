@@ -107,7 +107,7 @@ impl SecondaryTenant {
         self.detail.lock().unwrap().config = config.clone();
     }
 
-    fn get_tenant_shard_id(&self) -> &TenantShardId {
+    pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
 }
