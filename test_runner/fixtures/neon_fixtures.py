@@ -1616,16 +1616,16 @@ class NeonPageserver(PgProtocol):
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
-            ".*compaction_loop.*Compaction failed, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*compaction_loop.*Compaction failed.*, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             ".*task iteration took longer than the configured period.*",
             # this is until #3501
-            ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
+            ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
             # these can happen anytime we do compactions from background task and shutdown pageserver
             r".*ERROR.*ancestor timeline \S+ is being stopped",
             # this is expected given our collaborative shutdown approach for the UploadQueue
-            ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
+            ".*Compaction failed.*, retrying in .*: queue is in state Stopped.*",
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
