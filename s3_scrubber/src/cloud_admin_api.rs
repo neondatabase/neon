@@ -260,7 +260,7 @@ impl CloudAdminApiClient {
 
         let mut pagination_offset = 0;
         const PAGINATION_LIMIT: usize = 512;
-        let mut result: Vec<ProjectData> = Vec::new();
+        let mut result: Vec<ProjectData> = Vec::with_capacity(PAGINATION_LIMIT);
         loop {
             let response = self
                 .http_client
