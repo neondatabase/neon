@@ -324,7 +324,7 @@ fn start_pageserver(
     if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
         // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
-        info!("Loading public key(s) for verifying JWT tokens from {key_path:#?}");
+        info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
 
         let jwt_auth = JwtAuth::from_key_path(key_path)?;
         let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));

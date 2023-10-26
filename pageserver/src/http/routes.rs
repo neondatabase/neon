@@ -367,7 +367,7 @@ async fn reload_auth_validation_keys_handler(
     };
     // unwrap is ok because check is performed when creating config, so path is set and exists
     let key_path = config.auth_validation_public_key_path.as_ref().unwrap();
-    info!("Reloading public key(s) for verifying JWT tokens from {key_path:#?}");
+    info!("Reloading public key(s) for verifying JWT tokens from {key_path:?}");
 
     match JwtAuth::from_key_path(key_path) {
         Ok(new_auth) => {
@@ -375,7 +375,7 @@ async fn reload_auth_validation_keys_handler(
             json_response(StatusCode::OK, ())
         }
         Err(e) => {
-            warn!("Error reloading public keys from {key_path:#?}: {e:}");
+            warn!("Error reloading public keys from {key_path:?}: {e:}");
             json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
         }
     }
