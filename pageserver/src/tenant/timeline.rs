@@ -2629,7 +2629,7 @@ impl Timeline {
                 // 4. fsync the parent directory.
                 // Note that (1),(2),(3) today happen inside write_to_disk().
                 //
-                // FIXME: writer has already fsynced contents, we only need to fsync the rename
+                // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
                 par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
@@ -3498,8 +3498,6 @@ impl Timeline {
         // Before deleting any layers, we need to wait for their upload ops to finish.
         // See remote_timeline_client module level comment on consistency.
         // Do it here because we don't want to hold self.layers.write() while waiting.
-        //
-        // FIXME: this will become extra with #4938
         if let Some(remote_client) = &self.remote_client {
             debug!("waiting for upload ops to complete");
             remote_client

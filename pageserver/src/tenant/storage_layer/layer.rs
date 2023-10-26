@@ -1082,8 +1082,7 @@ pub(crate) struct DownloadedLayer {
 impl std::fmt::Debug for DownloadedLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DownloadedLayer")
-            // FIXME: this is not useful, always "Weak"
-            .field("owner", &self.owner)
+            // owner omitted because it is always "Weak"
             .field("kind", &self.kind)
             .finish()
     }
