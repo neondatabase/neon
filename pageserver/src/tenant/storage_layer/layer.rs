@@ -567,80 +567,80 @@ impl LayerInner {
         allow_download: bool,
         ctx: Option<&RequestContext>,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
-        let download = move || async move {
-            // disable any scheduled but not yet running eviction deletions for this
-            self.version.fetch_add(1, Ordering::Relaxed);
+        loop {
+            let download = move || async move {
+                // disable any scheduled but not yet running eviction deletions for this
+                self.version.fetch_add(1, Ordering::Relaxed);
 
-            // no need to make the evict_and_wait wait for the actual download to complete
-            drop(self.status.send(Status::Downloaded));
+                // no need to make the evict_and_wait wait for the actual download to complete
+                drop(self.status.send(Status::Downloaded));
 
-            let timeline = self
-                .timeline
-                .upgrade()
-                .ok_or_else(|| DownloadError::TimelineShutdown)?;
+                let timeline = self
+                    .timeline
+                    .upgrade()
+                    .ok_or_else(|| DownloadError::TimelineShutdown)?;
 
-            let can_ever_evict = timeline.remote_client.as_ref().is_some();
+                let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
-            // check if we really need to be downloaded; could have been already downloaded by a
-            // cancelled previous attempt.
-            let needs_download = self
-                .needs_download()
-                .await
-                .map_err(DownloadError::PreStatFailed)?;
+                // check if we really need to be downloaded; could have been already downloaded by a
+                // cancelled previous attempt.
+                let needs_download = self
+                    .needs_download()
+                    .await
+                    .map_err(DownloadError::PreStatFailed)?;
 
-            if let Some(reason) = needs_download {
-                // only reset this after we've decided we really need to download. otherwise it'd
-                // be impossible to mark cancelled downloads for eviction, like one could imagine
-                // we would like to do for prefetching which was not needed.
-                self.wanted_evicted.store(false, Ordering::Release);
+                if let Some(reason) = needs_download {
+                    // only reset this after we've decided we really need to download. otherwise it'd
+                    // be impossible to mark cancelled downloads for eviction, like one could imagine
+                    // we would like to do for prefetching which was not needed.
+                    self.wanted_evicted.store(false, Ordering::Release);
 
-                if !can_ever_evict {
-                    return Err(DownloadError::NoRemoteStorage);
+                    if !can_ever_evict {
+                        return Err(DownloadError::NoRemoteStorage);
+                    }
+
+                    tracing::debug!(%reason, "downloading layer");
+
+                    if let Some(ctx) = ctx {
+                        self.check_expected_download(ctx)?;
+                    }
+
+                    if !allow_download {
+                        // this does look weird, but for LayerInner the "downloading" means also changing
+                        // internal once related state ...
+                        return Err(DownloadError::DownloadRequired);
+                    }
+
+                    self.spawn_download_and_wait(timeline).await?;
+                } else {
+                    // the file is present locally, probably by a previous but cancelled call to
+                    // get_or_maybe_download. alternatively we might be running without remote storage.
                 }
 
-                tracing::debug!(%reason, "downloading layer");
+                let res = Arc::new(DownloadedLayer {
+                    owner: Arc::downgrade(self),
+                    kind: tokio::sync::OnceCell::default(),
+                });
 
-                if let Some(ctx) = ctx {
-                    self.check_expected_download(ctx)?;
-                }
+                self.access_stats.record_residence_event(
+                    LayerResidenceStatus::Resident,
+                    LayerResidenceEventReason::ResidenceChange,
+                );
 
-                if !allow_download {
-                    // this does look weird, but for LayerInner the "downloading" means also changing
-                    // internal once related state ...
-                    return Err(DownloadError::DownloadRequired);
-                }
+                Ok(ResidentOrWantedEvicted::Resident(res))
+            };
 
-                self.spawn_download_and_wait(timeline).await?;
-            } else {
-                // the file is present locally, probably by a previous but cancelled call to
-                // get_or_maybe_download. alternatively we might be running without remote storage.
+            let locked = self.inner.get_or_init(download).await?;
+
+            if let Some(strong) = Self::get_or_apply_evictedness(Some(locked), &self.wanted_evicted)
+            {
+                return Ok(strong);
             }
 
-            let res = Arc::new(DownloadedLayer {
-                owner: Arc::downgrade(self),
-                kind: tokio::sync::OnceCell::default(),
-            });
-
-            self.access_stats.record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::ResidenceChange,
-            );
-
-            Ok(if self.wanted_evicted.load(Ordering::Acquire) {
-                // because we reset wanted_evictness earlier, this most likely means while we were
-                // downloading someone wanted to evict this layer.
-                ResidentOrWantedEvicted::WantedEvicted(Arc::downgrade(&res))
-            } else {
-                ResidentOrWantedEvicted::Resident(res.clone())
-            })
-        };
-
-        let locked = self.inner.get_or_init(download).await?;
-
-        Ok(
-            Self::get_or_apply_evictedness(Some(locked), &self.wanted_evicted)
-                .expect("It is not none, we just received it"),
-        )
+            // the situation in which we might need to retry is that our init was ready
+            // immediatedly, but the DownloadedLayer had been dropped BUT failed to complete
+            // Self::evict_blocking
+        }
     }
 
     /// Nag or fail per RequestContext policy
@@ -902,6 +902,13 @@ impl LayerInner {
                 // downloadness-state has advanced, we might no longer be the latest eviction
                 // work; don't do anything.
                 return;
+                // this is possible to get to by having:
+                //
+                // 1. wanted_evicted.store(true)
+                // 2. ResidentOrWantedEvicted::downgrade
+                // 3. DownloadedLayer::drop
+                // 4. LayerInner::get_or_maybe_download
+                // 5. LayerInner::evict_blocking
             }
 
             // free the DownloadedLayer allocation
