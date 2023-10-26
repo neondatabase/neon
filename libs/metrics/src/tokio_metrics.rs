@@ -1,22 +1,20 @@
-use std::sync::{Arc, Mutex};
-
 use prometheus::{core::Desc, proto};
 
 use crate::register_internal;
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct TokioCollector {
-    handles: Arc<Mutex<Vec<(tokio::runtime::Handle, String)>>>,
+    handles: Vec<(tokio::runtime::Handle, String)>,
 }
 
 impl TokioCollector {
-    pub fn add_runtime(&mut self, handle: tokio::runtime::Handle, name: String) -> &mut Self {
-        self.handles.lock().unwrap().push((handle, name));
+    pub fn add_runtime(mut self, handle: tokio::runtime::Handle, name: String) -> Self {
+        self.handles.push((handle, name));
         self
     }
 
-    pub fn register(&self) -> Result<(), prometheus::Error> {
-        register_internal(Box::new(self.clone()))
+    pub fn register(self) -> Result<(), prometheus::Error> {
+        register_internal(Box::new(self))
     }
 
     #[cfg(tokio_unstable)]
@@ -99,7 +97,7 @@ impl TokioCollector {
         m.set_help(desc.help.clone());
         m.set_field_type(typ);
         let mut metrics = vec![];
-        for (rt, name) in &*self.handles.lock().unwrap() {
+        for (rt, name) in &self.handles {
             let rt_metrics = rt.metrics();
 
             let mut label_name = proto::LabelPair::default();
@@ -170,13 +168,13 @@ mod tests {
     #[test]
     fn gather_multiple_runtimes() {
         let registry = Registry::new();
-        let mut collector = TokioCollector::default();
 
         let runtime1 = runtime::Builder::new_current_thread().build().unwrap();
         let runtime2 = runtime::Builder::new_current_thread().build().unwrap();
 
-        collector.add_runtime(runtime1.handle().clone(), "runtime1".to_owned());
-        collector.add_runtime(runtime2.handle().clone(), "runtime2".to_owned());
+        let collector = TokioCollector::default()
+            .add_runtime(runtime1.handle().clone(), "runtime1".to_owned())
+            .add_runtime(runtime2.handle().clone(), "runtime2".to_owned());
 
         registry.register(Box::new(collector)).unwrap();
 

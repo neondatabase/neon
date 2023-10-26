@@ -151,8 +151,7 @@ pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| 
 });
 
 pub fn runtime_collector() -> TokioCollector {
-    let mut collector = TokioCollector::default();
-    collector
+    TokioCollector::default()
         .add_runtime(
             COMPUTE_REQUEST_RUNTIME.handle().clone(),
             "compute".to_owned(),
@@ -162,8 +161,7 @@ pub fn runtime_collector() -> TokioCollector {
             WALRECEIVER_RUNTIME.handle().clone(),
             "walreceiver".to_owned(),
         )
-        .add_runtime(BACKGROUND_RUNTIME.handle().clone(), "background".to_owned());
-    collector
+        .add_runtime(BACKGROUND_RUNTIME.handle().clone(), "background".to_owned())
 }
 
 #[derive(Debug, Clone, Copy)]
