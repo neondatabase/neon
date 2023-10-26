@@ -1568,11 +1568,12 @@ async fn disk_usage_eviction_run(
         )));
     }
 
-    let state = state.disk_usage_eviction_state.clone();
+    let eviction_state = state.disk_usage_eviction_state.clone();
 
     let cancel = CancellationToken::new();
     let child_cancel = cancel.clone();
     let _g = cancel.drop_guard();
+    let tenant_manager = state.tenant_manager.clone();
 
     crate::task_mgr::spawn(
         crate::task_mgr::BACKGROUND_RUNTIME.handle(),
@@ -1583,8 +1584,9 @@ async fn disk_usage_eviction_run(
         false,
         async move {
             let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-                &state,
+                &eviction_state,
                 usage,
+                &tenant_manager,
                 &child_cancel,
             )
             .await;
