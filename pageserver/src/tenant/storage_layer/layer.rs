@@ -3,12 +3,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
@@ -92,7 +93,7 @@ impl Layer {
 
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
-            timeline,
+            Arc::downgrade(timeline),
             access_stats,
             desc,
             None,
@@ -103,6 +104,34 @@ impl Layer {
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_some());
 
         owner
+    }
+
+    /// A layer which is resident locally in a secondary location: not associated with a live Timeline object.
+    pub(crate) fn for_secondary(
+        conf: &'static PageServerConf,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+        file_name: LayerFileName,
+        metadata: LayerFileMetadata,
+    ) -> Self {
+        let desc = PersistentLayerDesc::from_filename(
+            *tenant_shard_id,
+            *timeline_id,
+            file_name,
+            metadata.file_size(),
+        );
+
+        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
+
+        Layer(Arc::new(LayerInner::new(
+            conf,
+            Weak::default(),
+            access_stats,
+            desc,
+            None,
+            metadata.generation,
+            metadata.shard,
+        )))
     }
 
     /// Creates a Layer value for a file we know to be resident in timeline directory.
@@ -133,7 +162,7 @@ impl Layer {
 
             LayerInner::new(
                 conf,
-                timeline,
+                Arc::downgrade(timeline),
                 access_stats,
                 desc,
                 Some(inner),
@@ -177,7 +206,7 @@ impl Layer {
             );
             LayerInner::new(
                 conf,
-                timeline,
+                Arc::downgrade(timeline),
                 access_stats,
                 desc,
                 Some(inner),
@@ -556,7 +585,7 @@ impl Drop for LayerInner {
 impl LayerInner {
     fn new(
         conf: &'static PageServerConf,
-        timeline: &Arc<Timeline>,
+        timeline: Weak<Timeline>,
         access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
@@ -564,7 +593,7 @@ impl LayerInner {
         shard: ShardIndex,
     ) -> Self {
         let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
+            .timeline_path(&desc.tenant_shard_id, &desc.timeline_id)
             .join(desc.filename().to_string());
 
         let (inner, version) = if let Some(inner) = downloaded {
@@ -575,12 +604,17 @@ impl LayerInner {
             (heavier_once_cell::OnceCell::default(), 0)
         };
 
+        let have_remote_client = timeline
+            .upgrade()
+            .map(|t| t.remote_client.is_some())
+            .unwrap_or(false);
+
         LayerInner {
             conf,
             path,
             desc,
-            timeline: Arc::downgrade(timeline),
-            have_remote_client: timeline.remote_client.is_some(),
+            timeline,
+            have_remote_client,
             access_stats,
             wanted_deleted: AtomicBool::new(false),
             wanted_evicted: AtomicBool::new(false),
