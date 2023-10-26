@@ -766,18 +766,14 @@ impl RemoteTimelineClient {
         }
 
         #[cfg(feature = "testing")]
-        {
-            for (name, gen) in &with_generations {
-                match upload_queue.dangling_files.remove(name) {
-                    Some(same) if &same == gen => { /* expected */ }
-                    Some(other) => {
-                        tracing::error!(
-                            "{name} was unlinked with {other:?} but deleted with {gen:?}"
-                        );
-                    }
-                    None => {
-                        tracing::error!("{name} was unlinked but was not dangling");
-                    }
+        for (name, gen) in &with_generations {
+            match upload_queue.dangling_files.remove(name) {
+                Some(same) if &same == gen => { /* expected */ }
+                Some(other) => {
+                    tracing::error!("{name} was unlinked with {other:?} but deleted with {gen:?}");
+                }
+                None => {
+                    tracing::error!("{name} was unlinked but was not dangling");
                 }
             }
         }
