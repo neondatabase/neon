@@ -16,7 +16,7 @@ use utils::sync::heavier_once_cell;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
-use crate::tenant::{remote_timeline_client::LayerFileMetadata, RemoteTimelineClient, Timeline};
+use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
 use super::image_layer;
@@ -233,17 +233,14 @@ impl Layer {
     ///
     /// Technically cancellation safe, but cancelling might shift the viewpoint of what generation
     /// of download-evict cycle on retry.
-    pub(crate) async fn evict_and_wait(
-        &self,
-        rtc: &RemoteTimelineClient,
-    ) -> Result<(), EvictionError> {
-        self.0.evict_and_wait(rtc).await
+    pub(crate) async fn evict_and_wait(&self) -> Result<(), EvictionError> {
+        self.0.evict_and_wait().await
     }
 
     /// Delete the layer file when the `self` gets dropped, also try to schedule a remote index upload
     /// then.
     ///
-    /// On drop, this will cause a call to [`RemoteTimelineClient::schedule_deletion_of_unlinked`].
+    /// On drop, this will cause a call to [`crate::tenant::remote_timeline_client::RemoteTimelineClient::schedule_deletion_of_unlinked`].
     /// This means that the unlinking by [gc] or [compaction] must have happened strictly before
     /// the value this is called on gets dropped.
     ///
@@ -640,10 +637,7 @@ impl LayerInner {
 
     /// Cancellation safe, however dropping the future and calling this method again might result
     /// in a new attempt to evict OR join the previously started attempt.
-    pub(crate) async fn evict_and_wait(
-        &self,
-        _: &RemoteTimelineClient,
-    ) -> Result<(), EvictionError> {
+    pub(crate) async fn evict_and_wait(&self) -> Result<(), EvictionError> {
         use tokio::sync::broadcast::error::RecvError;
 
         assert!(self.have_remote_client);
