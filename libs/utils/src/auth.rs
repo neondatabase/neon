@@ -3,7 +3,6 @@
 use arc_swap::ArcSwap;
 use serde;
 use std::{fs, sync::Arc};
-use tracing::warn;
 
 use anyhow::Result;
 use camino::Utf8Path;
@@ -103,7 +102,7 @@ impl JwtAuth {
             anyhow::bail!("path is neither a directory or a file")
         };
         if decoding_keys.is_empty() {
-            warn!("Configured for JWT auth with zero decoding keys. All JWT gated requests will be rejected.");
+            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests will be rejected.");
         }
         Ok(Self::new(decoding_keys))
     }
