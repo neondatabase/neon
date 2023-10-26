@@ -807,9 +807,7 @@ impl RemoteTimelineClient {
 
         let names = compacted_from.iter().map(|x| x.layer_desc().filename());
 
-        let with_generations =
-            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
-        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
         self.launch_queued_tasks(upload_queue);
 
         Ok(())
