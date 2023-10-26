@@ -80,6 +80,11 @@ pub(crate) struct UploadQueueInitialized {
     /// tasks to finish. For example, metadata upload cannot be performed before all
     /// preceding layer file uploads have completed.
     pub(crate) queued_operations: VecDeque<UploadOp>,
+
+    /// Files which have been unlinked but not yet had scheduled a deletion for. Only kept around
+    /// for asserting.
+    #[cfg(feature = "testing")]
+    pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
 }
 
 impl UploadQueueInitialized {
@@ -136,6 +141,8 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -181,6 +188,8 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
         };
 
         *self = UploadQueue::Initialized(state);

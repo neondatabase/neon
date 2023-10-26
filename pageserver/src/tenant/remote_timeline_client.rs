@@ -721,6 +721,17 @@ impl RemoteTimelineClient {
             })
             .collect();
 
+        #[cfg(feature = "testing")]
+        for (name, gen) in &with_generations {
+            if let Some(unexpected) = upload_queue.dangling_files.insert(name.to_owned(), *gen) {
+                if &unexpected == gen {
+                    panic!("{name} was unlinked twicew with same generation");
+                } else {
+                    panic!("{name} was unlinked twice with different generations {gen:?} and {unexpected:?}");
+                }
+            }
+        }
+
         // after unlinking files from the upload_queue.latest_files we must always schedule an
         // index_part update, because that needs to be uploaded before we can actually delete the
         // files.
@@ -752,6 +763,27 @@ impl RemoteTimelineClient {
     ) {
         for (name, gen) in &with_generations {
             info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
+        }
+
+        #[cfg(feature = "testing")]
+        {
+            let mut errors = Vec::new();
+            for (name, gen) in &with_generations {
+                match upload_queue.dangling_files.remove(name) {
+                    Some(same) if &same == gen => { /* expected */ }
+                    Some(other) => {
+                        errors.push(format!(
+                            "{name} was unlinked with {other:?} but deleted with {gen:?}"
+                        ));
+                    }
+                    None => {
+                        errors.push(format!("{name} was unlinked but was not dangling"));
+                    }
+                }
+            }
+            if !errors.is_empty() {
+                panic!("surprising deletions: {errors:?}");
+            }
         }
 
         // schedule the actual deletions
@@ -1434,6 +1466,8 @@ impl RemoteTimelineClient {
                         num_inprogress_deletions: 0,
                         inprogress_tasks: HashMap::default(),
                         queued_operations: VecDeque::default(),
+                        #[cfg(feature = "testing")]
+                        dangling_files: HashMap::default(),
                     };
 
                     let upload_queue = std::mem::replace(
