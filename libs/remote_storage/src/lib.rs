@@ -102,7 +102,7 @@ impl RemotePath {
         self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Utf8Path) -> Self {
+    pub fn join<P: AsRef<Utf8Path>>(&self, segment: P) -> Self {
         Self(self.0.join(segment))
     }
 
