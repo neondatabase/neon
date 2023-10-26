@@ -526,6 +526,7 @@ fn start_pageserver(
             conf,
             remote_storage.clone(),
             disk_usage_eviction_state.clone(),
+            tenant_manager.clone(),
             background_jobs_barrier.clone(),
         )?;
     }

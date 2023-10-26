@@ -52,9 +52,6 @@ use super::{
 /// should not wait a minute between freshens)
 const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
 
-const DEFAULT_SCHEDULING_INTERVAL: Duration = Duration::from_millis(60000);
-const _MIN_SCHEDULING_INTERVAL: Duration = Duration::from_millis(1000);
-
 #[derive(Debug, Clone)]
 pub(super) struct OnDiskState {
     layer: Layer,
