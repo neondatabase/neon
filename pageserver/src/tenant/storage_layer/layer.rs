@@ -328,7 +328,13 @@ impl ResidentOrWantedEvicted {
     fn get(&self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
-            ResidentOrWantedEvicted::WantedEvicted(weak) => weak.upgrade(),
+            ResidentOrWantedEvicted::WantedEvicted(weak) => match weak.upgrade() {
+                Some(strong) => {
+                    LAYER_IMPL_METRICS.inc_raced_wanted_evicted_accesses();
+                    Some(strong)
+                }
+                None => None,
+            },
         }
     }
     /// When eviction is first requested, drop down to holding a [`Weak`].
@@ -438,11 +444,8 @@ impl Drop for LayerInner {
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
             let _g = span.entered();
 
-            let mut removed = false;
-            match std::fs::remove_file(path) {
-                Ok(()) => {
-                    removed = true;
-                }
+            let removed = match std::fs::remove_file(path) {
+                Ok(()) => true,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // until we no longer do detaches by removing all local files before removing the
                     // tenant from the global map, we will always get these errors even if we knew what
@@ -450,11 +453,14 @@ impl Drop for LayerInner {
                     //
                     // we currently do not track the latest state, so we'll also end up here on evicted
                     // layers.
+                    false
                 }
                 Err(e) => {
                     tracing::error!("failed to remove garbage collected layer: {e}");
+                    LAYER_IMPL_METRICS.inc_gc_removes_failed();
+                    false
                 }
-            }
+            };
 
             if let Some(timeline) = timeline.upgrade() {
                 if removed {
@@ -473,11 +479,15 @@ impl Drop for LayerInner {
                         } else {
                             tracing::warn!("scheduling deletion on drop failed: {e:#}");
                         }
+                        LAYER_IMPL_METRICS.inc_gcs_failed(GcFailed::DeleteSchedulingFailed);
+                    } else {
+                        LAYER_IMPL_METRICS.inc_completed_gcs();
                     }
                 }
             } else {
                 // no need to nag that timeline is gone: under normal situation on
                 // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+                LAYER_IMPL_METRICS.inc_gcs_failed(GcFailed::TimelineGone);
             }
         });
     }
@@ -518,7 +528,16 @@ impl LayerInner {
     }
 
     fn garbage_collect_on_drop(&self) {
-        self.wanted_garbage_collected.store(true, Ordering::Release);
+        let res = self.wanted_garbage_collected.compare_exchange(
+            false,
+            true,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
+
+        if res.is_ok() {
+            LAYER_IMPL_METRICS.inc_started_gcs();
+        }
     }
 
     pub(crate) async fn evict_and_wait(
@@ -531,7 +550,13 @@ impl LayerInner {
 
         let mut rx = self.status.subscribe();
 
-        self.wanted_evicted.store(true, Ordering::Release);
+        let res =
+            self.wanted_evicted
+                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed);
+
+        if res.is_ok() {
+            LAYER_IMPL_METRICS.inc_started_evictions();
+        }
 
         if self.get().is_none() {
             // it was not evictable in the first place
@@ -615,6 +640,7 @@ impl LayerInner {
                 } else {
                     // the file is present locally, probably by a previous but cancelled call to
                     // get_or_maybe_download. alternatively we might be running without remote storage.
+                    LAYER_IMPL_METRICS.inc_init_needed_no_download();
                 }
 
                 let res = Arc::new(DownloadedLayer {
@@ -640,6 +666,7 @@ impl LayerInner {
             // the situation in which we might need to retry is that our init was ready
             // immediatedly, but the DownloadedLayer had been dropped BUT failed to complete
             // Self::evict_blocking
+            LAYER_IMPL_METRICS.inc_retried_get_or_maybe_download();
         }
     }
 
@@ -720,6 +747,8 @@ impl LayerInner {
                             // however, could be that we should consider marking the layer
                             // for eviction? alas, cannot: because only DownloadedLayer
                             // will handle that.
+                            tracing::info!("layer file download completed after requester had cancelled");
+                            LAYER_IMPL_METRICS.inc_download_completed_without_requester();
                         },
                         Err(e) => {
                             // our caller is cancellation safe, but we might be racing with
@@ -727,6 +756,7 @@ impl LayerInner {
                             // token support: these attempts should converge regardless of
                             // their completion order.
                             tracing::error!("layer file download failed, and additionally failed to communicate this to caller: {e:?}");
+                            LAYER_IMPL_METRICS.inc_download_failed_without_requester();
                         }
                     }
                 }
@@ -880,6 +910,7 @@ impl LayerInner {
                 // if LayerInner is already dropped here, do nothing because the garbage collection
                 // has already ran while we were in queue
                 let Some(this) = this.upgrade() else {
+                    LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
                     return;
                 };
                 this.evict_blocking(version);
@@ -888,9 +919,16 @@ impl LayerInner {
     }
 
     fn evict_blocking(&self, version: usize) {
+        match self.evict_blocking0(version) {
+            Ok(()) => LAYER_IMPL_METRICS.inc_completed_evictions(),
+            Err(reason) => LAYER_IMPL_METRICS.inc_eviction_cancelled(reason),
+        }
+    }
+
+    fn evict_blocking0(&self, version: usize) -> Result<(), EvictionCancelled> {
         // deleted or detached timeline, don't do anything.
         let Some(timeline) = self.timeline.upgrade() else {
-            return;
+            return Err(EvictionCancelled::TimelineGone);
         };
 
         // to avoid starting a new download while we evict, keep holding on to the
@@ -901,7 +939,7 @@ impl LayerInner {
             if version != self.version.load(Ordering::Relaxed) {
                 // downloadness-state has advanced, we might no longer be the latest eviction
                 // work; don't do anything.
-                return;
+                //
                 // this is possible to get to by having:
                 //
                 // 1. wanted_evicted.store(true)
@@ -909,6 +947,7 @@ impl LayerInner {
                 // 3. DownloadedLayer::drop
                 // 4. LayerInner::get_or_maybe_download
                 // 5. LayerInner::evict_blocking
+                return Err(EvictionCancelled::VersionCheckFailed);
             }
 
             // free the DownloadedLayer allocation
@@ -928,7 +967,7 @@ impl LayerInner {
             LayerResidenceEventReason::ResidenceChange,
         );
 
-        match capture_mtime_and_remove(&self.path) {
+        let res = match capture_mtime_and_remove(&self.path) {
             Ok(local_layer_mtime) => {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
@@ -951,17 +990,23 @@ impl LayerInner {
                 timeline
                     .metrics
                     .resident_physical_size_sub(self.desc.file_size);
+
+                Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::info!("failed to evict file from disk, it was already gone");
+                Err(EvictionCancelled::FileNotFound)
             }
             Err(e) => {
                 tracing::warn!("failed to evict file from disk: {e:#}");
+                Err(EvictionCancelled::RemoveFailed)
             }
-        }
+        };
 
         // we are still holding the permit, so no new spawn_download_and_wait can happen
         drop(self.status.send(Status::Evicted));
+
+        res
     }
 
     fn metadata(&self) -> LayerFileMetadata {
@@ -1074,7 +1119,7 @@ impl DownloadedLayer {
             );
 
             // there is nothing async here, but it should be async
-            if owner.desc.is_delta {
+            let res = if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_id,
                     owner.desc.timeline_id,
@@ -1097,7 +1142,12 @@ impl DownloadedLayer {
                     .map(LayerKind::Image)
             }
             // this will be a permanent failure
-            .context("load layer")
+            .context("load layer");
+
+            if res.is_err() {
+                LAYER_IMPL_METRICS.inc_permanent_loading_failures();
+            }
+            res
         };
         self.kind.get_or_init(init).await.as_ref().map_err(|e| {
             // errors are not clonabled, cannot but stringify
@@ -1228,3 +1278,205 @@ impl From<ResidentLayer> for Layer {
         value.owner
     }
 }
+
+use metrics::{IntCounter, IntCounterVec};
+
+struct LayerImplMetrics {
+    started_evictions: IntCounter,
+    completed_evictions: IntCounter,
+    cancelled_evictions: IntCounterVec,
+
+    started_gcs: IntCounter,
+    completed_gcs: IntCounter,
+    failed_gcs: IntCounterVec,
+
+    rare_counters: IntCounterVec,
+}
+
+impl Default for LayerImplMetrics {
+    fn default() -> Self {
+        let evictions = metrics::register_int_counter_vec!(
+            "pageserver_layer_evictions_count",
+            "Evictions started and completed in the Layer implementation",
+            &["state"]
+        )
+        .unwrap();
+
+        let started_evictions = evictions
+            .get_metric_with_label_values(&["started"])
+            .unwrap();
+        let completed_evictions = evictions
+            .get_metric_with_label_values(&["completed"])
+            .unwrap();
+
+        let cancelled_evictions = metrics::register_int_counter_vec!(
+            "pageserver_layer_cancelled_evictions_count",
+            "Different reasons for evictions to have been cancelled or failed",
+            &["reason"]
+        )
+        .unwrap();
+
+        let gcs = metrics::register_int_counter_vec!(
+            "pageserver_layer_gcs_count",
+            "Garbage collections started and completed in the Layer implementation",
+            &["state"]
+        )
+        .unwrap();
+
+        let started_gcs = gcs.get_metric_with_label_values(&["pending"]).unwrap();
+        let completed_gcs = gcs.get_metric_with_label_values(&["completed"]).unwrap();
+
+        let failed_gcs = metrics::register_int_counter_vec!(
+            "pageserver_layer_failed_gcs_count",
+            "Different reasons for garbage collections to have failed",
+            &["reason"]
+        )
+        .unwrap();
+
+        let rare_counters = metrics::register_int_counter_vec!(
+            "pageserver_layer_assumed_rare_count",
+            "Times unexpected or assumed rare event happened",
+            &["event"]
+        )
+        .unwrap();
+
+        Self {
+            started_evictions,
+            completed_evictions,
+            cancelled_evictions,
+
+            started_gcs,
+            completed_gcs,
+            failed_gcs,
+
+            rare_counters,
+        }
+    }
+}
+
+impl LayerImplMetrics {
+    fn inc_started_evictions(&self) {
+        self.started_evictions.inc();
+    }
+    fn inc_completed_evictions(&self) {
+        self.completed_evictions.inc();
+    }
+    fn inc_eviction_cancelled(&self, reason: EvictionCancelled) {
+        self.cancelled_evictions
+            .get_metric_with_label_values(&[reason.as_str()])
+            .unwrap()
+            .inc()
+    }
+
+    fn inc_started_gcs(&self) {
+        self.started_gcs.inc();
+    }
+    fn inc_completed_gcs(&self) {
+        self.completed_gcs.inc();
+    }
+    fn inc_gcs_failed(&self, reason: GcFailed) {
+        self.failed_gcs
+            .get_metric_with_label_values(&[reason.as_str()])
+            .unwrap()
+            .inc();
+    }
+
+    /// Counted separatedly from failed gcs because we will complete the gc attempt regardless of
+    /// failure to delete local file.
+    fn inc_gc_removes_failed(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["gc_remove_failed"])
+            .unwrap()
+            .inc();
+    }
+
+    /// Expected rare because requires a race with `evict_blocking` and
+    /// `get_or_maybe_download`.
+    fn inc_retried_get_or_maybe_download(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["retried_gomd"])
+            .unwrap()
+            .inc();
+    }
+
+    /// Expected rare because cancellations are unexpected
+    fn inc_download_completed_without_requester(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["download_completed_without"])
+            .unwrap()
+            .inc();
+    }
+
+    /// Expected rare because cancellations are unexpected
+    fn inc_download_failed_without_requester(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["download_failed_without"])
+            .unwrap()
+            .inc();
+    }
+
+    /// The Weak in ResidentOrWantedEvicted::WantedEvicted was successfully upgraded.
+    ///
+    /// If this counter is always zero, we should replace ResidentOrWantedEvicted type with an
+    /// Option.
+    fn inc_raced_wanted_evicted_accesses(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["raced_wanted_evicted"])
+            .unwrap()
+            .inc();
+    }
+
+    /// These are only expected for [`Self::inc_download_completed_without_requester`] amount when
+    /// running with remote storage.
+    fn inc_init_needed_no_download(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["init_needed_no_download"])
+            .unwrap()
+            .inc();
+    }
+
+    /// Expected rare because all layer files should be readable and good
+    fn inc_permanent_loading_failures(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["permanent_loading_failure"])
+            .unwrap()
+            .inc();
+    }
+}
+
+enum EvictionCancelled {
+    LayerGone,
+    TimelineGone,
+    VersionCheckFailed,
+    FileNotFound,
+    RemoveFailed,
+}
+
+impl EvictionCancelled {
+    fn as_str(&self) -> &'static str {
+        match self {
+            EvictionCancelled::LayerGone => "layer_gone",
+            EvictionCancelled::TimelineGone => "timeline_gone",
+            EvictionCancelled::VersionCheckFailed => "version_check_fail",
+            EvictionCancelled::FileNotFound => "file_not_found",
+            EvictionCancelled::RemoveFailed => "remove_failed",
+        }
+    }
+}
+
+enum GcFailed {
+    TimelineGone,
+    DeleteSchedulingFailed,
+}
+
+impl GcFailed {
+    fn as_str(&self) -> &'static str {
+        match self {
+            GcFailed::TimelineGone => "timeline_gone",
+            GcFailed::DeleteSchedulingFailed => "delete_scheduling_failed",
+        }
+    }
+}
+
+static LAYER_IMPL_METRICS: once_cell::sync::Lazy<LayerImplMetrics> =
+    once_cell::sync::Lazy::new(|| LayerImplMetrics::default());
