@@ -48,7 +48,6 @@ use std::{
 };
 
 use anyhow::Context;
-use camino::Utf8Path;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -62,6 +61,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
+        mgr::TenantManager,
         storage_layer::{AsLayerDesc, EvictionError, Layer},
         Timeline,
     },
@@ -87,6 +87,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
+    tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
@@ -112,8 +113,7 @@ pub fn launch_disk_usage_global_eviction_task(
                 _ = background_jobs_barrier.wait() => { }
             };
 
-            disk_usage_eviction_task(&state, task_config, &storage, &conf.tenants_path(), cancel)
-                .await;
+            disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel).await;
             Ok(())
         },
     );
@@ -126,7 +126,7 @@ async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     _storage: &GenericRemoteStorage,
-    tenants_dir: &Utf8Path,
+    tenant_manager: Arc<TenantManager>,
     cancel: CancellationToken,
 ) {
     scopeguard::defer! {
@@ -150,7 +150,8 @@ async fn disk_usage_eviction_task(
 
         async {
             let res =
-                disk_usage_eviction_task_iteration(state, task_config, tenants_dir, &cancel).await;
+                disk_usage_eviction_task_iteration(state, task_config, &tenant_manager, &cancel)
+                    .await;
 
             match res {
                 Ok(()) => {}
@@ -181,10 +182,11 @@ pub trait Usage: Clone + Copy + std::fmt::Debug {
 async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
-    tenants_dir: &Utf8Path,
+    tenant_manager: &Arc<TenantManager>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
+    let tenants_dir = tenant_manager.get_conf().tenants_path();
+    let usage_pre = filesystem_level_usage::get(&tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
     let res = disk_usage_eviction_task_iteration_impl(state, usage_pre, cancel).await;
     match res {
@@ -196,7 +198,7 @@ async fn disk_usage_eviction_task_iteration(
                 }
                 IterationOutcome::Finished(outcome) => {
                     // Verify with statvfs whether we made any real progress
-                    let after = filesystem_level_usage::get(tenants_dir, task_config)
+                    let after = filesystem_level_usage::get(&tenants_dir, task_config)
                         // It's quite unlikely to hit the error here. Keep the code simple and bail out.
                         .context("get filesystem-level disk usage after evictions")?;
 

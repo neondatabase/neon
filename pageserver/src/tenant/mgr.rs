@@ -774,6 +774,11 @@ pub(crate) async fn set_new_tenant_config(
 }
 
 impl TenantManager {
+    /// As a convenience to avoid carrying a configuration reference separately, anyone who
+    /// as a reference to the TenantManager can access configuration this way.
+    pub(crate) fn get_conf(&self) -> &PageServerConf {
+        self.conf
+    }
     #[instrument(skip_all, fields(%tenant_id))]
     pub(crate) async fn upsert_location(
         &self,
