@@ -433,7 +433,7 @@ impl Drop for LayerInner {
             return;
         }
 
-        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id, layer = %self);
+        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
