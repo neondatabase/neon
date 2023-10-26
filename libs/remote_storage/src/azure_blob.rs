@@ -353,4 +353,8 @@ impl RemoteStorage for AzureBlobStorage {
         }
         Ok(())
     }
+
+    async fn copy_object(&self, src: &RemotePath, dst: &RemotePath) -> anyhow::Result<()> {
+        unimplemented!()
+    }
 }
