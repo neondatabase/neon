@@ -221,6 +221,8 @@ impl S3Bucket {
             )),
         }
     }
+
+
 }
 
 pin_project_lite::pin_project! {
@@ -546,6 +548,11 @@ impl RemoteStorage for S3Bucket {
         let paths = std::array::from_ref(path);
         self.delete_objects(paths).await
     }
+
+    async fn copy_object(&self, src: &RemotePath, dst: &RemotePath) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
 }
 
 /// On drop (cancellation) count towards [`metrics::BucketMetrics::cancelled_waits`].
@@ -628,4 +635,6 @@ mod tests {
             }
         }
     }
+
+
 }
