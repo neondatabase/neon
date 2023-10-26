@@ -171,11 +171,20 @@ static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+static NUM_BYTES_PROXIED_PER_CLIENT_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
         crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
+    )
+    .unwrap()
+});
+
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes",
+        "Number of bytes sent/received between all clients and backends.",
+        &["direction"],
     )
     .unwrap()
 });
@@ -764,24 +773,28 @@ pub async fn proxy_pass(
         branch_id: aux.branch_id.to_string(),
     });
 
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
+    let m_sent2 = NUM_BYTES_PROXIED_PER_CLIENT_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
+            m_sent2.inc_by(cnt as u64);
             usage.record_egress(cnt as u64);
         },
     );
 
-    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx"]);
+    let m_recv2 = NUM_BYTES_PROXIED_PER_CLIENT_COUNTER.with_label_values(&aux.traffic_labels("rx"));
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);
+            m_recv2.inc_by(cnt as u64);
         },
     );
 
