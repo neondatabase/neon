@@ -1822,6 +1822,11 @@ impl Tenant {
         pitr: Duration,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
+        // Don't start doing work during shutdown
+        if let TenantState::Stopping { .. } = self.current_state() {
+            return Ok(GcResult::default());
+        }
+
         // there is a global allowed_error for this
         anyhow::ensure!(
             self.is_active(),
@@ -1850,6 +1855,12 @@ impl Tenant {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        // Don't start doing work during shutdown
+        if let TenantState::Stopping { .. } = self.current_state() {
+            return Ok(());
+        }
+
+        // We should only be called once the tenant has activated.
         anyhow::ensure!(
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
