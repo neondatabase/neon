@@ -552,7 +552,8 @@ impl Timeline {
                 Err(e) => Err(PageReconstructError::from(e)),
             },
             Err(e) => {
-                warn!("Failed to get info about AUX files: {}", e);
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about AUX files: {}", e);
                 Ok(HashMap::new())
             }
         }
