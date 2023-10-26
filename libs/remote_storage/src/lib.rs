@@ -114,7 +114,7 @@ impl RemotePath {
         self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Utf8Path) -> Self {
+    pub fn join<P: AsRef<Utf8Path>>(&self, segment: P) -> Self {
         Self(self.0.join(segment))
     }
 
@@ -215,6 +215,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+
+    async fn copy_object(&self, src: &RemotePath, dst: &RemotePath) -> anyhow::Result<()>;
 }
 
 pub struct Download {
@@ -375,6 +377,15 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.delete_objects(paths).await,
             Self::AzureBlob(s) => s.delete_objects(paths).await,
             Self::Unreliable(s) => s.delete_objects(paths).await,
+        }
+    }
+
+    pub async fn copy_object(&self, src: &RemotePath, dst: &RemotePath) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.copy_object(src, dst).await,
+            Self::AwsS3(s) => s.copy_object(src, dst).await,
+            Self::AzureBlob(s) => s.copy_object(src, dst).await,
+            Self::Unreliable(s) => s.copy_object(src, dst).await,
         }
     }
 }
