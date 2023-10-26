@@ -844,6 +844,49 @@ impl Drop for DeltaLayerWriter {
     }
 }
 
+impl DeltaLayer {
+    /// Assume the file at `path` is corrupt if this function returns with an error.
+    pub(crate) async fn rewrite_tenant_timeline(
+        path: &Utf8Path,
+        new_tenant: TenantId,
+        new_timeline: TimelineId,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let file = VirtualFile::open_with_options(
+            path,
+            &*std::fs::OpenOptions::new().read(true).write(true),
+        )
+        .await
+        .with_context(|| format!("Failed to open file '{}'", path))?;
+        let file = FileBlockReader::new(file);
+        let summary_blk = file.read_blk(0, ctx).await?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let mut file = file.file;
+        if actual_summary.magic != DELTA_FILE_MAGIC {
+            bail!("File '{}' is not a delta layer", path);
+        }
+        let new_summary = Summary {
+            tenant_id: new_tenant,
+            timeline_id: new_timeline,
+            ..actual_summary
+        };
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&new_summary, &mut buf)?;
+        if buf.spilled() {
+            // The code in ImageLayerWriterInner just warn!()s for this.
+            // It should probably error out as well.
+            anyhow::bail!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf).await?;
+        Ok(())
+    }
+}
+
 impl DeltaLayerInner {
     pub(super) async fn load(
         path: &Utf8Path,
