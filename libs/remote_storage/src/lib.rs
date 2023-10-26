@@ -14,13 +14,7 @@ mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
 
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -36,12 +30,6 @@ pub use self::{
 };
 use s3_bucket::RequestKind;
 
-/// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
-/// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
-/// during start (where local and remote timelines are compared and initial sync tasks are scheduled) and timeline attach.
-/// Both cases may trigger timeline download, that might download a lot of layers. This concurrency is limited by the clients internally, if needed.
-pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS: usize = 50;
-pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
@@ -443,10 +431,6 @@ pub struct StorageMetadata(HashMap<String, String>);
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteStorageConfig {
-    /// Max allowed number of concurrent sync operations between the API user and the remote storage.
-    pub max_concurrent_syncs: NonZeroUsize,
-    /// Max allowed errors before the sync task is considered failed and evicted.
-    pub max_sync_errors: NonZeroU32,
     /// The storage connection configuration.
     pub storage: RemoteStorageKind,
 }
@@ -542,18 +526,6 @@ impl RemoteStorageConfig {
 
         let use_azure = container_name.is_some() && container_region.is_some();
 
-        let max_concurrent_syncs = NonZeroUsize::new(
-            parse_optional_integer("max_concurrent_syncs", toml)?
-                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS),
-        )
-        .context("Failed to parse 'max_concurrent_syncs' as a positive integer")?;
-
-        let max_sync_errors = NonZeroU32::new(
-            parse_optional_integer("max_sync_errors", toml)?
-                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
-        )
-        .context("Failed to parse 'max_sync_errors' as a positive integer")?;
-
         let default_concurrency_limit = if use_azure {
             DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
         } else {
@@ -635,11 +607,7 @@ impl RemoteStorageConfig {
             }
         };
 
-        Ok(Some(RemoteStorageConfig {
-            max_concurrent_syncs,
-            max_sync_errors,
-            storage,
-        }))
+        Ok(Some(RemoteStorageConfig { storage }))
     }
 }
 
