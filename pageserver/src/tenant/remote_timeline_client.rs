@@ -168,36 +168,14 @@
 //!   - create `Timeline` struct and a `RemoteTimelineClient`
 //!   - initialize the client's upload queue with its `IndexPart`
 //!   - schedule uploads for layers that are only present locally.
-//!   - if the remote `IndexPart`'s metadata was newer than the metadata in
-//!     the local filesystem, write the remote metadata to the local filesystem
 //! - After the above is done for each timeline, open the tenant for business by
 //!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
 //!   This starts the timelines' WAL-receivers and the tenant's GC & Compaction loops.
-//!
-//! We keep track of the fact that a client is in `Attaching` state in a marker
-//! file on the local disk. This is critical because, when we restart the pageserver,
-//! we do not want to do the `List timelines` step for each tenant that has already
-//! been successfully attached (for performance & cost reasons).
-//! Instead, for a tenant without the attach marker file, we assume that the
-//! local state is in sync or ahead of the remote state. This includes the list
-//! of all of the tenant's timelines, which is particularly critical to be up-to-date:
-//! if there's a timeline on the remote that the pageserver doesn't know about,
-//! the GC will not consider its branch point, leading to data loss.
-//! So, for a tenant with the attach marker file, we know that we do not yet have
-//! persisted all the remote timeline's metadata files locally. To exclude the
-//! risk above, we re-run the procedure for such tenants
 //!
 //! # Operating Without Remote Storage
 //!
 //! If no remote storage configuration is provided, the [`RemoteTimelineClient`] is
 //! not created and the uploads are skipped.
-//! Theoretically, it should be ok to remove and re-add remote storage configuration to
-//! the pageserver config at any time, since it doesn't make a difference to
-//! [`Timeline::load_layer_map`].
-//! Of course, the remote timeline dir must not change while we have de-configured
-//! remote storage, i.e., the pageserver must remain the owner of the given prefix
-//! in remote storage.
-//! But note that we don't test any of this right now.
 //!
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
 //! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
@@ -468,7 +446,10 @@ impl RemoteTimelineClient {
     //
 
     /// Download index file
-    pub async fn download_index_file(&self) -> Result<MaybeDeletedIndexPart, DownloadError> {
+    pub async fn download_index_file(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<MaybeDeletedIndexPart, DownloadError> {
         let _unfinished_gauge_guard = self.metrics.call_begin(
             &RemoteOpFileKind::Index,
             &RemoteOpKind::Download,
@@ -482,6 +463,7 @@ impl RemoteTimelineClient {
             &self.tenant_id,
             &self.timeline_id,
             self.generation,
+            cancel,
         )
         .measure_remote_op(
             self.tenant_id,
@@ -1725,7 +1707,11 @@ mod tests {
         let client = timeline.remote_client.as_ref().unwrap();
 
         // Download back the index.json, and check that the list of files is correct
-        let initial_index_part = match client.download_index_file().await.unwrap() {
+        let initial_index_part = match client
+            .download_index_file(CancellationToken::new())
+            .await
+            .unwrap()
+        {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
             MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
@@ -1814,7 +1800,11 @@ mod tests {
         }
 
         // Download back the index.json, and check that the list of files is correct
-        let index_part = match client.download_index_file().await.unwrap() {
+        let index_part = match client
+            .download_index_file(CancellationToken::new())
+            .await
+            .unwrap()
+        {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
             MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
@@ -2013,7 +2003,7 @@ mod tests {
         let client = test_state.build_client(get_generation);
 
         let download_r = client
-            .download_index_file()
+            .download_index_file(CancellationToken::new())
             .await
             .expect("download should always succeed");
         assert!(matches!(download_r, MaybeDeletedIndexPart::IndexPart(_)));

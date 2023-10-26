@@ -60,6 +60,7 @@ from fixtures.utils import (
     allure_attach_from_dir,
     get_self_dir,
     subprocess_capture,
+    wait_until,
 )
 
 """
@@ -1678,6 +1679,40 @@ class NeonPageserver(PgProtocol):
             self.env.neon_cli.pageserver_stop(self.id, immediate)
             self.running = False
         return self
+
+    def restart(self, immediate: bool = False):
+        """
+        High level wrapper for restart: restarts the process, and waits for
+        tenant state to stabilize.
+        """
+        self.stop(immediate=immediate)
+        self.start()
+        self.quiesce_tenants()
+
+    def quiesce_tenants(self):
+        """
+        Wait for all tenants to enter a stable state (Active or Broken)
+
+        Call this after restarting the pageserver, or after attaching a tenant,
+        to ensure that it is ready for use.
+        """
+
+        stable_states = {"Active", "Broken"}
+
+        client = self.http_client()
+
+        def complete():
+            log.info("Checking tenants...")
+            tenants = client.tenant_list()
+            log.info(f"Tenant list: {tenants}...")
+            any_unstable = any((t["state"]["slug"] not in stable_states) for t in tenants)
+            if any_unstable:
+                for t in tenants:
+                    log.info(f"Waiting for tenant {t['id']} in state {t['state']['slug']}")
+            log.info(f"any_unstable={any_unstable}")
+            assert not any_unstable
+
+        wait_until(20, 0.5, complete)
 
     def __enter__(self) -> "NeonPageserver":
         return self

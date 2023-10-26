@@ -241,8 +241,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
     if check is Check.RETRY_WITH_RESTART:
-        env.pageserver.stop()
-        env.pageserver.start()
+        env.pageserver.restart()
 
         if failpoint in (
             "tenant-delete-before-shutdown",
