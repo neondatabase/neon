@@ -33,8 +33,7 @@ use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
-    TENANTS_SEGMENT_NAME, TENANT_ATTACHING_MARKER_FILENAME, TENANT_DELETED_MARKER_FILE_NAME,
-    TIMELINES_SEGMENT_NAME,
+    TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
@@ -631,11 +630,6 @@ impl PageServerConf {
 
     pub fn tenant_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenants_path().join(tenant_id.to_string())
-    }
-
-    pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id)
-            .join(TENANT_ATTACHING_MARKER_FILENAME)
     }
 
     pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {

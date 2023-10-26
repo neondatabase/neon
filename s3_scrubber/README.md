@@ -25,57 +25,64 @@ _This section is only relevant if using a command that requires access to Neon's
 
 ### Commands
 
-#### `tidy`
+#### `find-garbage`
 
-Iterate over S3 buckets for storage nodes, checking their contents and removing the data not present in the console. Node S3 data that's not removed is then further checked for discrepancies and, sometimes, validated.
-
-Unless the global `--delete` argument is provided, this command only dry-runs and logs
-what it would have deleted.
-
-```
-tidy --node-kind=<safekeeper|pageserver> [--depth=<tenant|timeline>] [--skip-validation]
-```
+Walk an S3 bucket and cross-reference the contents with the Console API to identify data for
+tenants or timelines that should no longer exist.
 
 - `--node-kind`: whether to inspect safekeeper or pageserver bucket prefix
 - `--depth`: whether to only search for deletable tenants, or also search for
   deletable timelines within active tenants. Default: `tenant`
-- `--skip-validation`: skip additional post-deletion checks. Default: `false`
+- `--output-path`: filename to write garbage list to.  Default `garbage.json`
 
-For a selected S3 path, the tool lists the S3 bucket given for either tenants or both tenants and timelines — for every found entry, console API is queried: any deleted or missing in the API entity is scheduled for deletion from S3.
+This command outputs a JSON file describing tenants and timelines to remove, for subsequent
+processing by the `purge-garbage` subcommand.
 
-If validation is enabled, only the non-deleted tenants' ones are checked.
-For pageserver, timelines' index_part.json on S3 is also checked for various discrepancies: no files are removed, even if there are "extra" S3 files not present in index_part.json: due to the way pageserver updates the remote storage, it's better to do such removals manually, stopping the corresponding tenant first.
+**Note that the garbage list format is not stable.  The output of `find-garbage` is only
+  intended for use by the exact same version of the tool running `purge-garbage`**
 
-Command examples:
+Example:
 
-`env SSO_ACCOUNT_ID=369495373322 REGION=eu-west-1 BUCKET=neon-dev-storage-eu-west-1 CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- tidy --node-kind=safekeeper`
+`env SSO_ACCOUNT_ID=123456 REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- find-garbage --node-kind=pageserver --depth=tenant --output-path=eu-west-1-garbage.json`
 
-`env SSO_ACCOUNT_ID=369495373322 REGION=us-east-2 BUCKET=neon-staging-storage-us-east-2 CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- tidy --node-kind=pageserver --depth=timeline`
+#### `purge-garbage`
 
-When dry run stats look satisfying, use `-- --delete` before the `tidy` command to
-disable dry run and run the binary with deletion enabled.
+Consume a garbage list from `find-garbage`, and delete the related objects in the S3 bucket.
 
-See these lines (and lines around) in the logs for the final stats:
+- `--input-path`: filename to read garbage list from.  Default `garbage.json`.
+- `--mode`: controls whether to purge only garbage that was specifically marked
+            deleted in the control plane (`deletedonly`), or also to purge tenants/timelines
+            that were not present in the control plane at all (`deletedandmissing`)
 
-- `Finished listing the bucket for tenants`
-- `Finished active tenant and timeline validation`
-- `Total tenant deletion stats`
-- `Total timeline deletion stats`
+This command learns region/bucket details from the garbage file, so it is not necessary
+to pass them on the command line
 
-## Current implementation details
+Example:
 
-- The tool does not have any peristent state currently: instead, it creates very verbose logs, with every S3 delete request logged, every tenant/timeline id check, etc.
-  Worse, any panic or early errored tasks might force the tool to exit without printing the final summary — all affected ids will still be in the logs though. The tool has retries inside it, so it's error-resistant up to some extent, and recent runs showed no traces of errors/panics.
+`env SSO_ACCOUNT_ID=123456 cargo run --release -- purge-garbage --node-kind=pageserver --depth=tenant --input-path=eu-west-1-garbage.json`
 
-- Instead of checking non-deleted tenants' timelines instantly, the tool attempts to create separate tasks (futures) for that,
-  complicating the logic and slowing down the process, this should be fixed and done in one "task".
+Add the `--delete` argument before `purge-garbage` to enable deletion.  This is intentionally
+not provided inline in the example above to avoid accidents.  Without the `--delete` flag
+the purge command will log all the keys that it would have deleted.
 
-- The tool does uses only publicly available remote resources (S3, console) and does not access pageserver/safekeeper nodes themselves.
-  Yet, its S3 set up should be prepared for running on any pageserver/safekeeper node, using node's S3 credentials, so the node API access logic could be implemented relatively simply on top.
+#### `scan-metadata`
 
-## Cleanup procedure:
+Walk objects in a pageserver S3 bucket, and report statistics on the contents.
 
-### Pageserver preparations
+```
+env SSO_ACCOUNT_ID=123456 REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- scan-metadata
+
+Timelines: 31106
+With errors: 3
+With warnings: 13942
+With garbage: 0
+Index versions: 2: 13942, 4: 17162
+Timeline size bytes: min 22413312, 1% 52133887, 10% 56459263, 50% 101711871, 90% 191561727, 99% 280887295, max 167535558656
+Layer size bytes: min 24576, 1% 36879, 10% 36879, 50% 61471, 90% 44695551, 99% 201457663, max 275324928
+Timeline layer count: min 1, 1% 3, 10% 6, 50% 16, 90% 25, 99% 39, max 1053
+```
+
+## Cleaning up running pageservers
 
 If S3 state is altered first manually, pageserver in-memory state will contain wrong data about S3 state, and tenants/timelines may get recreated on S3 (due to any layer upload due to compaction, pageserver restart, etc.). So before proceeding, for tenants/timelines which are already deleted in the console, we must remove these from pageservers.
 

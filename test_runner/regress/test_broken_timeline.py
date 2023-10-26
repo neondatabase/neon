@@ -15,12 +15,12 @@ from fixtures.types import TenantId, TimelineId
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
+def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*Failed to load delta layer.*",
+            ".*layer loading failed:.*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
@@ -69,25 +69,20 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.start()
 
-    # Tenant 0 should still work
+    # Un-damaged tenant works
     pg0.start()
     assert pg0.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
-    # But all others are broken
-
-    # First timeline would not get loaded into pageserver due to corrupt metadata file
-    with pytest.raises(
-        Exception, match=f"Tenant {tenant1} will not become active. Current state: Broken"
-    ) as err:
-        pg1.start()
-    log.info(
-        f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
-    )
+    # Tenant with corrupt local metadata works: remote storage is authoritative for metadata
+    pg1.start()
+    assert pg1.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
     # Second timeline will fail during basebackup, because the local layer file is corrupt.
     # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
-    with pytest.raises(Exception, match="Failed to load delta layer") as err:
+    #
+    # This will change when we implement checksums for layers
+    with pytest.raises(Exception, match="layer loading failed:") as err:
         pg2.start()
     log.info(
         f"As expected, compute startup failed for timeline {tenant2}/{timeline2} with corrupt layers: {err}"
@@ -133,8 +128,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
         _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
 
     # Restart the page server
-    env.pageserver.stop(immediate=True)
-    env.pageserver.start()
+    env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)

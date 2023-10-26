@@ -12,7 +12,7 @@ use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::completion;
+use utils::{backoff, completion};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| {
@@ -139,7 +139,10 @@ pub fn start_background_loops(
 /// Compaction task's main loop
 ///
 async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    let wait_duration = Duration::from_secs(2);
+    const MAX_BACKOFF_SECS: f64 = 300.0;
+    // How many errors we have seen consequtively
+    let mut error_run_count = 0;
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
@@ -159,11 +162,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             // TODO: we shouldn't need to await to find tenant and this could be moved outside of
             // loop, #3501. There are also additional "allowed_errors" in tests.
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
-                }
+            if first && random_init_delay(period, &cancel).await.is_err() {
+                break;
             }
 
             let started_at = Instant::now();
@@ -176,14 +176,33 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             } else {
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
-                    error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
-                    wait_duration
+                    let wait_duration = backoff::exponential_backoff_duration_seconds(
+                        error_run_count,
+                        1.0,
+                        MAX_BACKOFF_SECS,
+                    );
+                    error_run_count += 1;
+                    error!(
+                        "Compaction failed {error_run_count} times, retrying in {:?}: {e:?}",
+                        wait_duration
+                    );
+                    Duration::from_secs_f64(wait_duration)
                 } else {
+                    error_run_count = 0;
                     period
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+            if !first {
+                // The first iteration is typically much slower, because all tenants compete for the
+                // compaction sempahore to run, and because of concurrent startup work like initializing
+                // logical sizes.  To avoid routinely spamming warnings, we suppress this log on first iteration.
+                warn_when_period_overrun(
+                    started_at.elapsed(),
+                    period,
+                    BackgroundLoopKind::Compaction,
+                );
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -192,6 +211,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+
+            first = false;
         }
     }
     .await;
@@ -202,7 +223,10 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 /// GC task's main loop
 ///
 async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    let wait_duration = Duration::from_secs(2);
+    const MAX_BACKOFF_SECS: f64 = 300.0;
+    // How many errors we have seen consequtively
+    let mut error_run_count = 0;
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         // GC might require downloading, to find the cutoff LSN that corresponds to the
@@ -223,11 +247,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             let period = tenant.get_gc_period();
 
-            if first {
-                first = false;
-                if random_init_delay(period, &cancel).await.is_err() {
-                    break;
-                }
+            if first && random_init_delay(period, &cancel).await.is_err() {
+                break;
             }
 
             let started_at = Instant::now();
@@ -244,14 +265,29 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx)
                     .await;
                 if let Err(e) = res {
-                    error!("Gc failed, retrying in {:?}: {e:?}", wait_duration);
-                    wait_duration
+                    let wait_duration = backoff::exponential_backoff_duration_seconds(
+                        error_run_count,
+                        1.0,
+                        MAX_BACKOFF_SECS,
+                    );
+                    error_run_count += 1;
+                    error!(
+                        "Gc failed {error_run_count} times, retrying in {:?}: {e:?}",
+                        wait_duration
+                    );
+                    Duration::from_secs_f64(wait_duration)
                 } else {
+                    error_run_count = 0;
                     period
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
+            if !first {
+                // The first iteration is typically much slower, because all tenants compete for the
+                // compaction sempahore to run, and because of concurrent startup work like initializing
+                // logical sizes.  To avoid routinely spamming warnings, we suppress this log on first iteration.
+                warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
+            }
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -260,6 +296,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             {
                 break;
             }
+
+            first = false;
         }
     }
     .await;

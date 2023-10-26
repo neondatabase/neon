@@ -60,6 +60,7 @@ from fixtures.utils import (
     allure_attach_from_dir,
     get_self_dir,
     subprocess_capture,
+    wait_until,
 )
 
 """
@@ -1465,6 +1466,20 @@ class NeonCli(AbstractNeonCli):
         res.check_returncode()
         return res
 
+    def endpoint_reconfigure(
+        self,
+        endpoint_id: str,
+        tenant_id: Optional[TenantId] = None,
+        pageserver_id: Optional[int] = None,
+        check_return_code=True,
+    ) -> "subprocess.CompletedProcess[str]":
+        args = ["endpoint", "reconfigure", endpoint_id]
+        if tenant_id is not None:
+            args.extend(["--tenant-id", str(tenant_id)])
+        if pageserver_id is not None:
+            args.extend(["--pageserver-id", str(pageserver_id)])
+        return self.raw_cli(args, check_return_code=check_return_code)
+
     def endpoint_stop(
         self,
         endpoint_id: str,
@@ -1637,22 +1652,21 @@ class NeonPageserver(PgProtocol):
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
-            ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*compaction_loop.*Compaction failed.*, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             ".*task iteration took longer than the configured period.*",
             # this is until #3501
-            ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
+            ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
             # these can happen anytime we do compactions from background task and shutdown pageserver
             r".*ERROR.*ancestor timeline \S+ is being stopped",
             # this is expected given our collaborative shutdown approach for the UploadQueue
-            ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
+            ".*Compaction failed.*, retrying in .*: queue is in state Stopped.*",
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
-            '.*registered custom resource manager \\\\"neon\\\\".*',
             # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
             # and it is not a failure of our code when it happens.
             ".*DeleteObjects.*We encountered an internal error. Please try again.*",
@@ -1701,6 +1715,40 @@ class NeonPageserver(PgProtocol):
             self.running = False
         return self
 
+    def restart(self, immediate: bool = False):
+        """
+        High level wrapper for restart: restarts the process, and waits for
+        tenant state to stabilize.
+        """
+        self.stop(immediate=immediate)
+        self.start()
+        self.quiesce_tenants()
+
+    def quiesce_tenants(self):
+        """
+        Wait for all tenants to enter a stable state (Active or Broken)
+
+        Call this after restarting the pageserver, or after attaching a tenant,
+        to ensure that it is ready for use.
+        """
+
+        stable_states = {"Active", "Broken"}
+
+        client = self.http_client()
+
+        def complete():
+            log.info("Checking tenants...")
+            tenants = client.tenant_list()
+            log.info(f"Tenant list: {tenants}...")
+            any_unstable = any((t["state"]["slug"] not in stable_states) for t in tenants)
+            if any_unstable:
+                for t in tenants:
+                    log.info(f"Waiting for tenant {t['id']} in state {t['state']['slug']}")
+            log.info(f"any_unstable={any_unstable}")
+            assert not any_unstable
+
+        wait_until(20, 0.5, complete)
+
     def __enter__(self) -> "NeonPageserver":
         return self
 
@@ -1740,6 +1788,11 @@ class NeonPageserver(PgProtocol):
                 break
 
             if error_or_warn.search(line):
+                # Is this a torn log line?  This happens when force-killing a process and restarting
+                # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+                if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                    continue
+
                 # It's an ERROR or WARN. Is it in the allow-list?
                 for a in self.allowed_errors:
                     if re.match(a, line):
@@ -2515,6 +2568,10 @@ class Endpoint(PgProtocol):
                 conf.write("\n")
 
         return self
+
+    def reconfigure(self, pageserver_id: Optional[int] = None):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
 
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""

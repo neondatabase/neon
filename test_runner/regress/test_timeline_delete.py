@@ -280,13 +280,6 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
                 assert (
                     m.query_one(
                         "remote_storage_s3_request_seconds_count",
-                        filter={"request_type": "get_object", "result": "err"},
-                    ).value
-                    == 2  # One is missing tenant deletion mark, second is missing index part
-                )
-                assert (
-                    m.query_one(
-                        "remote_storage_s3_request_seconds_count",
                         filter={"request_type": "get_object", "result": "ok"},
                     ).value
                     == 1  # index part for initial timeline

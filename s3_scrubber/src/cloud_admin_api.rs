@@ -1,11 +1,18 @@
 #![allow(unused)]
 
+use std::str::FromStr;
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
-use reqwest::{header, Client, Url};
+use hex::FromHex;
+use reqwest::{header, Client, StatusCode, Url};
+use serde::Deserialize;
 use tokio::sync::Semaphore;
 
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+
+use crate::ConsoleConfig;
 
 #[derive(Debug)]
 pub struct Error {
@@ -34,6 +41,9 @@ impl std::fmt::Display for Error {
                     self.context, e
                 )
             }
+            ErrorKind::ResponseStatus(status) => {
+                write!(f, "Bad response status {}: {}", status, self.context)
+            }
             ErrorKind::UnexpectedState => write!(f, "Unexpected state: {}", self.context),
         }
     }
@@ -53,6 +63,7 @@ impl std::error::Error for Error {}
 pub enum ErrorKind {
     RequestSend(reqwest::Error),
     BodyRead(reqwest::Error),
+    ResponseStatus(StatusCode),
     UnexpectedState,
 }
 
@@ -100,7 +111,23 @@ pub struct SafekeeperData {
     pub availability_zone_id: String,
 }
 
-#[serde_with::serde_as]
+/// For ID fields, the Console API does not always return a value or null.  It will
+/// sometimes return an empty string.  Our native Id type does not consider this acceptable
+/// (nor should it), so we use a wrapper for talking to the Console API.
+fn from_nullable_id<'de, D>(deserializer: D) -> Result<TenantId, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let id_str = String::deserialize(deserializer)?;
+    if id_str.is_empty() {
+        // This is a bogus value, but for the purposes of the scrubber all that
+        // matters is that it doesn't collide with any real IDs.
+        Ok(TenantId::from([0u8; 16]))
+    } else {
+        TenantId::from_hex(&id_str).map_err(|e| serde::de::Error::custom(format!("{e}")))
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProjectData {
     pub id: ProjectId,
@@ -109,7 +136,7 @@ pub struct ProjectData {
     pub platform_id: String,
     pub user_id: String,
     pub pageserver_id: u64,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
+    #[serde(deserialize_with = "from_nullable_id")]
     pub tenant: TenantId,
     pub safekeepers: Vec<SafekeeperData>,
     pub deleted: bool,
@@ -148,11 +175,27 @@ pub struct BranchData {
     pub written_size: Option<u64>,
 }
 
+pub trait MaybeDeleted {
+    fn is_deleted(&self) -> bool;
+}
+
+impl MaybeDeleted for ProjectData {
+    fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+}
+
+impl MaybeDeleted for BranchData {
+    fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+}
+
 impl CloudAdminApiClient {
-    pub fn new(token: String, base_url: Url) -> Self {
+    pub fn new(config: ConsoleConfig) -> Self {
         Self {
-            token,
-            base_url,
+            token: config.token,
+            base_url: config.base_url,
             request_limiter: Semaphore::new(200),
             http_client: Client::new(), // TODO timeout configs at least
         }
@@ -206,6 +249,81 @@ impl CloudAdminApiClient {
                 ErrorKind::UnexpectedState,
             )),
         }
+    }
+
+    pub async fn list_projects(&self, region_id: String) -> Result<Vec<ProjectData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
+        let mut pagination_offset = 0;
+        const PAGINATION_LIMIT: usize = 512;
+        let mut result: Vec<ProjectData> = Vec::with_capacity(PAGINATION_LIMIT);
+        loop {
+            let response = self
+                .http_client
+                .get(self.append_url("/projects"))
+                .query(&[
+                    ("show_deleted", "false".to_string()),
+                    ("limit", format!("{PAGINATION_LIMIT}")),
+                    ("offset", format!("{pagination_offset}")),
+                ])
+                .header(header::ACCEPT, "application/json")
+                .bearer_auth(&self.token)
+                .send()
+                .await
+                .map_err(|e| {
+                    Error::new(
+                        "List active projects".to_string(),
+                        ErrorKind::RequestSend(e),
+                    )
+                })?;
+
+            match response.status() {
+                StatusCode::OK => {}
+                StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                status => {
+                    return Err(Error::new(
+                        "List active projects".to_string(),
+                        ErrorKind::ResponseStatus(response.status()),
+                    ))
+                }
+            }
+
+            let response_bytes = response.bytes().await.map_err(|e| {
+                Error::new("List active projects".to_string(), ErrorKind::BodyRead(e))
+            })?;
+
+            let decode_result =
+                serde_json::from_slice::<AdminApiResponse<Vec<ProjectData>>>(&response_bytes);
+
+            let mut response = match decode_result {
+                Ok(r) => r,
+                Err(decode) => {
+                    tracing::error!(
+                        "Failed to decode response body: {}\n{}",
+                        decode,
+                        String::from_utf8(response_bytes.to_vec()).unwrap()
+                    );
+                    panic!("we out");
+                }
+            };
+
+            pagination_offset += response.data.len();
+
+            result.extend(response.data.drain(..).filter(|t| t.region_id == region_id));
+
+            if pagination_offset >= response.total.unwrap_or(0) {
+                break;
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn find_timeline_branch(

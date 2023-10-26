@@ -201,6 +201,16 @@ WalRedoMain(int argc, char *argv[])
 #endif
 
 	am_wal_redo_postgres = true;
+	/*
+	 * Pageserver treats any output to stderr as an ERROR, so we must
+	 * set the log level as early as possible to only log FATAL and 
+	 * above during WAL redo (note that loglevel ERROR also logs LOG,
+	 * which is super strange but that's not something we can solve
+	 * for here. ¯\_(-_-)_/¯
+	 */
+	SetConfigOption("log_min_messages", "FATAL", PGC_SUSET, PGC_S_OVERRIDE);
+	SetConfigOption("client_min_messages", "ERROR", PGC_SUSET,
+					PGC_S_OVERRIDE);
 
 	/*
 	 * WAL redo does not need a large number of buffers. And speed of

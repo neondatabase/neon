@@ -333,16 +333,30 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
     env = neon_env_builder.init_configs()
     env.start()
 
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*Failed to load index_part from remote storage.*",
+            # On a fast restart, there may be an initdb still running in a basebackup...__temp directory
+            ".*Failed to purge.*Directory not empty.*",
+        ]
     )
     ps_http = env.pageserver.http_client()
 
     # pause all uploads
-    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
     ps_http.tenant_create(env.initial_tenant)
 
+    # Create a timeline whose creation will succeed.  The tenant will need at least one
+    # timeline to be loadable.
+    success_timeline = TimelineId.generate()
+    log.info(f"Creating timeline {success_timeline}")
+    ps_http.timeline_create(env.pg_version, env.initial_tenant, success_timeline, timeout=60)
+
+    # Create a timeline whose upload to remote storage will be blocked
+    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
+
     def start_creating_timeline():
+        log.info(f"Creating (expect failure) timeline {env.initial_timeline}")
         with pytest.raises(RequestException):
             ps_http.timeline_create(
                 env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
@@ -365,6 +379,9 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
 
     with pytest.raises(PageserverApiException, match="not found"):
         ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    # The one successfully created timeline should still be there.
+    assert len(ps_http.timeline_list(tenant_id=env.initial_tenant)) == 1
 
 
 def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):

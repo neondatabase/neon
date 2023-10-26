@@ -90,7 +90,11 @@ pub mod errors {
                     status: http::StatusCode::LOCKED,
                     ref text,
                 } => {
-                    !text.contains("written data quota exceeded")
+                    // written data quota exceeded
+                    // data transfer quota exceeded
+                    // compute time quota exceeded
+                    // logical size quota exceeded
+                    !text.contains("quota exceeded")
                         && !text.contains("the limit for current plan reached")
                 }
                 // retry server errors

@@ -294,6 +294,7 @@ async fn cleanup_remaining_timeline_fs_traces(
     // Remove delete mark
     tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_id, timeline_id))
         .await
+        .or_else(fs_ext::ignore_not_found)
         .context("remove delete mark")
 }
 
