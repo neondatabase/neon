@@ -340,37 +340,55 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+
+        // This is a search budget to not make the search too expensive
+        let mut budget = 1000u16;
         while low < high {
             // cannot overflow, high and low are both smaller than u64::MAX / 2
-            let mid = (high + low) / 2;
+            // this always holds: low <= mid_start < high
+            let mid_start = (high + low) / 2;
+            let mut mid = mid_start;
 
-            let cmp = self
-                .is_latest_commit_timestamp_ge_than(
-                    search_timestamp,
-                    Lsn(mid * 8),
-                    &mut found_smaller,
-                    &mut found_larger,
-                    ctx,
-                )
-                .await?;
+            let mut max = None;
 
-            if !cmp {
-                // We either 1) found commit with timestamp **before** `search_timestamp`;
-                // or 2) we haven't found any commit records at all.
-                // Search with a larger LSN. In case 1), to try to find a more recent commit
-                // (but still **before** target timestamp). In case 2), to fetch more
-                // SLRU segments for `clog`.
-                low = mid + 1;
+            // Linear search for an lsn that has a commit timestamp.
+            // We don't do an explosive search as we want to prove that
+            // every single lsn up to high is giving inconclusive results.
+            // This can only be done by trying all lsns.
+            while max.is_none() && mid < high {
+                // Do some limiting to make sure the query does not become too expensive.
+                if let Some(new_budget) = budget.checked_sub(1) {
+                    budget = new_budget;
+                } else {
+                    return Ok(LsnForTimestamp::NoData(min_lsn));
+                }
+                // Do the query for mid + 1 instead of mid so that we can make definite statements
+                // about low (low's invariant: always points to commit before or at search_timestamp).
+                max = self
+                    .get_max_timestamp_for_lsn(Lsn((mid + 1) * 8), ctx)
+                    .await?;
+                mid += 1;
+            }
+
+            if let Some(max) = max {
+                if max <= search_timestamp {
+                    found_smaller = true;
+                    // We found a commit with timestamp before (or at) `search_timestamp`.
+                    // set low to mid + 1
+                    low = mid + 1;
+                } else {
+                    found_larger = true;
+                    high = mid;
+                }
             } else {
-                // We found only more recent commits, search in the older range.
-                high = mid;
+                // max is None so we have proof of a chain of None's from mid_start all up to high.
+                // Thus we can safely set high to mid
+                high = mid_start;
             }
         }
-        // If `found_smaller == true`, `low` is the LSN of the first commit record
-        // **before** `search_timestamp` + 1 (otherwise the while loop exit condition
-        // wouldn't be hit).
-        // Subtract 1 to get back the exact commit LSN.
-        let commit_lsn = Lsn((low - 1) * 8);
+        // If `found_smaller == true`, `low` is the LSN of the last commit record
+        // before or at `search_timestamp`
+        let commit_lsn = Lsn(low * 8);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
@@ -392,36 +410,10 @@ impl Timeline {
         }
     }
 
-    /// Subroutine of `find_lsn_for_timestamp()`. Returns `true`, if there are any
-    /// commits that committed after `search_timestamp`, at LSN `probe_lsn`.
+    /// Obtain the timestamp for the given lsn.
     ///
-    /// Additionally, sets `found_smaller` / `found_larger`, if encounters any commits
-    /// with a smaller / larger timestamp.
-    ///
-    pub async fn is_latest_commit_timestamp_ge_than(
-        &self,
-        search_timestamp: TimestampTz,
-        probe_lsn: Lsn,
-        found_smaller: &mut bool,
-        found_larger: &mut bool,
-        ctx: &RequestContext,
-    ) -> Result<bool, PageReconstructError> {
-        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
-            if timestamp >= search_timestamp {
-                *found_larger = true;
-                return ControlFlow::Break(true);
-            } else {
-                *found_smaller = true;
-            }
-            ControlFlow::Continue(())
-        })
-        .await
-    }
-
-    /// Obtain the possible timestamp range for the given lsn.
-    ///
-    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
-    pub async fn get_timestamp_for_lsn(
+    /// If the lsn has no timestamps, returns None. Returns the maximum such timestamp otherwise.
+    pub async fn get_max_timestamp_for_lsn(
         &self,
         probe_lsn: Lsn,
         ctx: &RequestContext,

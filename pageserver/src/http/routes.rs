@@ -542,7 +542,7 @@ async fn get_timestamp_of_lsn_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
+    let result = timeline.get_max_timestamp_for_lsn(lsn, &ctx).await?;
 
     match result {
         Some(time) => {
