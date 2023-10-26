@@ -1445,6 +1445,20 @@ class NeonCli(AbstractNeonCli):
         res.check_returncode()
         return res
 
+    def endpoint_reconfigure(
+        self,
+        endpoint_id: str,
+        tenant_id: Optional[TenantId] = None,
+        pageserver_id: Optional[int] = None,
+        check_return_code=True,
+    ) -> "subprocess.CompletedProcess[str]":
+        args = ["endpoint", "reconfigure", endpoint_id]
+        if tenant_id is not None:
+            args.extend(["--tenant-id", str(tenant_id)])
+        if pageserver_id is not None:
+            args.extend(["--pageserver-id", str(pageserver_id)])
+        return self.raw_cli(args, check_return_code=check_return_code)
+
     def endpoint_stop(
         self,
         endpoint_id: str,
@@ -2533,6 +2547,10 @@ class Endpoint(PgProtocol):
                 conf.write("\n")
 
         return self
+
+    def reconfigure(self, pageserver_id: Optional[int] = None):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
 
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""
