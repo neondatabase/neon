@@ -214,6 +214,7 @@ where
     }
 }
 
+/// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn flush<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,
@@ -230,6 +231,7 @@ async fn flush<S: AsyncWrite + Unpin>(
     stream.flush().await
 }
 
+/// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn shutdown<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,

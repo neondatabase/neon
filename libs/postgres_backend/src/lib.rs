@@ -242,6 +242,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         }
     }
 
+    /// Cancellation safe as long as the underlying IO is cancellation safe.
     async fn shutdown(&mut self) -> io::Result<()> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.shutdown().await,
