@@ -106,8 +106,11 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 pub struct LatencyTimer {
-    start: Instant,
-    extra: std::time::Duration,
+    // time since the stopwatch was started
+    start: Option<Instant>,
+    // accumulated time on the stopwatch
+    accumulated: std::time::Duration,
+    // label data
     protocol: &'static str,
     cache_miss: bool,
     pool_miss: bool,
@@ -121,8 +124,8 @@ pub struct LatencyTimerPause<'a> {
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
-            start: Instant::now(),
-            extra: std::time::Duration::ZERO,
+            start: Some(Instant::now()),
+            accumulated: std::time::Duration::ZERO,
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -133,9 +136,9 @@ impl LatencyTimer {
     }
 
     pub fn pause(&mut self) -> LatencyTimerPause<'_> {
-        let now = Instant::now();
-        self.extra += now - self.start;
-        self.start = now;
+        // stop the stopwatch and record the time that we have accumulated
+        let start = self.start.take().expect("latency timer should be started");
+        self.accumulated += start.elapsed();
         LatencyTimerPause { timer: self }
     }
 
@@ -154,13 +157,15 @@ impl LatencyTimer {
 
 impl Drop for LatencyTimerPause<'_> {
     fn drop(&mut self) {
-        self.timer.start = Instant::now();
+        // start the stopwatch again
+        self.timer.start = Some(Instant::now());
     }
 }
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
-        let duration = self.start.elapsed() + self.extra;
+        let duration =
+            self.start.map(|start| start.elapsed()).unwrap_or_default() + self.accumulated;
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
