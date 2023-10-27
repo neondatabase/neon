@@ -563,18 +563,15 @@ impl LayerInner {
 
         let mut rx = self.status.subscribe();
 
-        let res =
-            self.wanted_evicted
-                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed);
+        self.wanted_evicted.store(true, Ordering::Relaxed);
 
-        if res.is_ok() {
+        let was_first = match self.inner.get() {
+            Some(mut either) => either.downgrade(),
+            None => return Err(EvictionError::NotFound),
+        };
+
+        if was_first {
             LAYER_IMPL_METRICS.inc_started_evictions();
-        }
-
-        if self.get().is_none() {
-            // it was not evictable in the first place
-            // our store to the wanted_evicted does not matter; it will be reset by next download
-            return Err(EvictionError::NotFound);
         }
 
         match rx.recv().await {
@@ -590,7 +587,7 @@ impl LayerInner {
                 //
                 // use however late (compared to the initial expressing of wanted) as the
                 // "outcome" now
-                match self.get() {
+                match self.inner.get() {
                     Some(_) => Err(EvictionError::Downloaded),
                     None => Ok(()),
                 }
@@ -605,6 +602,8 @@ impl LayerInner {
         allow_download: bool,
         ctx: Option<&RequestContext>,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
+        let mut permit = None;
+
         loop {
             let download = move || async move {
                 // disable any scheduled but not yet running eviction deletions for this
@@ -670,16 +669,34 @@ impl LayerInner {
                 Ok(ResidentOrWantedEvicted::Resident(res))
             };
 
-            let locked = self.inner.get_or_init(download).await?;
+            let (weak, _permit) = {
+                // should we be able to give the permit to the `get_or_init`? would make sense.
+                drop(permit.take());
+                let mut locked = self.inner.get_or_init(download).await?;
 
-            if let Some(strong) = Self::get_or_apply_evictedness(Some(locked), &self.wanted_evicted)
-            {
-                return Ok(strong);
-            }
+                if let Some(strong) = locked.get() {
+                    return Ok(strong);
+                } else {
+                    // path to here:
+                    // 1. the on_downloaded_layer_drop is stuck on spawn_blocking queue
+                    // 2. is there something else?
+                    //
+                    // reset the contents, deactivating the eviction and causing a
+                    // EvictionCancelled::LostToDownload.
+                    locked.take_and_deinit()
+                }
+            };
 
-            // the situation in which we might need to retry is that our init was ready
-            // immediatedly, but the DownloadedLayer had been dropped BUT failed to complete
-            // Self::evict_blocking
+            // unlock first, then drop the weak, but because upgrade failed, we
+            // know it cannot be a problem.
+
+            assert!(
+                matches!(weak, ResidentOrWantedEvicted::WantedEvicted(..)),
+                "unexpected {weak:?}, ResidentOrWantedEvicted::get has a bug"
+            );
+
+            permit = Some(_permit);
+
             LAYER_IMPL_METRICS.inc_retried_get_or_maybe_download();
         }
     }
@@ -812,33 +829,6 @@ impl LayerInner {
         }
     }
 
-    /// Access the current state without waiting for the file to be downloaded.
-    ///
-    /// Requires that we've initialized to state which is respective to the
-    /// actual residency state.
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
-        let locked = self.inner.get();
-        Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
-    }
-
-    fn get_or_apply_evictedness(
-        guard: Option<heavier_once_cell::Guard<'_, ResidentOrWantedEvicted>>,
-        wanted_evicted: &AtomicBool,
-    ) -> Option<Arc<DownloadedLayer>> {
-        if let Some(mut x) = guard {
-            if let Some(won) = x.get() {
-                // there are no guarantees that we will always get to observe a concurrent call
-                // to evict
-                if wanted_evicted.load(Ordering::Acquire) {
-                    x.downgrade();
-                }
-                return Some(won);
-            }
-        }
-
-        None
-    }
-
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
         match tokio::fs::metadata(&self.path).await {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
@@ -872,7 +862,7 @@ impl LayerInner {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
-        let remote = self.get().is_none();
+        let remote = self.inner.get().is_none();
 
         let access_stats = self.access_stats.as_api_model(reset);
 
