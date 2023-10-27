@@ -1,4 +1,4 @@
-use super::{AuthSuccess, ComputeCredentials, ComputeUserInfo};
+use super::{ComputeCredentials, ComputeUserInfo};
 use crate::{
     auth::{self, backend::ComputeCredentialKeys, AuthFlow},
     compute,
@@ -8,6 +8,7 @@ use crate::{
     sasl,
     stream::{PqStream, Stream},
 };
+use pq_proto::BeMessage as Be;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
@@ -17,7 +18,7 @@ pub(super) async fn authenticate<'a>(
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<AuthSuccess<ComputeCredentials<'a>>> {
+) -> auth::Result<ComputeCredentials<'a>> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
         AuthSecret::Md5(_) => {
@@ -64,13 +65,12 @@ pub(super) async fn authenticate<'a>(
         }
     };
 
-    Ok(AuthSuccess {
-        reported_auth_ok: false,
-        value: ComputeCredentials {
-            info: creds,
-            keys: ComputeCredentialKeys::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
-                scram_keys,
-            )),
-        },
+    client.write_message_noflush(&Be::AuthenticationOk)?;
+
+    Ok(ComputeCredentials {
+        info: creds,
+        keys: ComputeCredentialKeys::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
+            scram_keys,
+        )),
     })
 }

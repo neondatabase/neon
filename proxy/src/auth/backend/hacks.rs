@@ -1,9 +1,10 @@
-use super::{AuthSuccess, ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
+use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::{
     auth::{self, backend::ComputeCredentialKeys, AuthFlow},
     proxy::LatencyTimer,
     stream::{self, Stream},
 };
+use pq_proto::BeMessage as Be;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
@@ -15,7 +16,7 @@ pub async fn cleartext_hack<'a>(
     info: ComputeUserInfo<'a>,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<AuthSuccess<ComputeCredentials<'a>>> {
+) -> auth::Result<ComputeCredentials<'a>> {
     warn!("cleartext auth flow override is enabled, proceeding");
 
     // pause the timer while we communicate with the client
@@ -27,13 +28,12 @@ pub async fn cleartext_hack<'a>(
         .authenticate()
         .await?;
 
+    client.write_message_noflush(&Be::AuthenticationOk)?;
+
     // Report tentative success; compute node will check the password anyway.
-    Ok(AuthSuccess {
-        reported_auth_ok: false,
-        value: ComputeCredentials {
-            info,
-            keys: ComputeCredentialKeys::Password(password),
-        },
+    Ok(ComputeCredentials {
+        info,
+        keys: ComputeCredentialKeys::Password(password),
     })
 }
 
@@ -56,6 +56,8 @@ pub async fn password_hack<'a>(
         .await?;
 
     info!(project = &payload.endpoint, "received missing parameter");
+
+    client.write_message_noflush(&Be::AuthenticationOk)?;
 
     // Report tentative success; compute node will check the password anyway.
     Ok(ComputeCredentials {

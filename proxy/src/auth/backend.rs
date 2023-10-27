@@ -30,26 +30,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
-/// A product of successful authentication.
-pub struct AuthSuccess<T> {
-    /// Did we send [`pq_proto::BeMessage::AuthenticationOk`] to client?
-    pub reported_auth_ok: bool,
-    /// Something to be considered a positive result.
-    pub value: T,
-}
-
-impl<T> AuthSuccess<T> {
-    /// Very similar to [`std::option::Option::map`].
-    /// Maps [`AuthSuccess<T>`] to [`AuthSuccess<R>`] by applying
-    /// a function to a contained value.
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> AuthSuccess<R> {
-        AuthSuccess {
-            reported_auth_ok: self.reported_auth_ok,
-            value: f(self.value),
-        }
-    }
-}
-
 /// This type serves two purposes:
 ///
 /// * When `T` is `()`, it's just a regular auth backend selector
@@ -182,7 +162,7 @@ async fn auth_quirks_creds<'a>(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<AuthSuccess<ComputeCredentials<'a>>> {
+) -> auth::Result<ComputeCredentials<'a>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -214,12 +194,9 @@ async fn auth_quirks_creds<'a>(
     });
 
     if let Some(success) = maybe_success {
-        return Ok(AuthSuccess {
-            reported_auth_ok: false,
-            value: ComputeCredentials {
-                info,
-                keys: success,
-            },
+        return Ok(ComputeCredentials {
+            info,
+            keys: success,
         });
     }
 
@@ -244,7 +221,7 @@ async fn auth_quirks<'a>(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<AuthSuccess<(CachedNodeInfo, ComputeUserInfo<'a>)>> {
+) -> auth::Result<(CachedNodeInfo, ComputeUserInfo<'a>)> {
     let compute_credentials = auth_quirks_creds(
         api,
         extra,
@@ -258,9 +235,7 @@ async fn auth_quirks<'a>(
 
     let mut num_retries = 0;
     let mut node = loop {
-        let wake_res = api
-            .wake_compute(extra, &compute_credentials.value.info)
-            .await;
+        let wake_res = api.wake_compute(extra, &compute_credentials.info).await;
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
@@ -277,15 +252,12 @@ async fn auth_quirks<'a>(
         tokio::time::sleep(wait_duration).await;
     };
 
-    match compute_credentials.value.keys {
+    match compute_credentials.keys {
         ComputeCredentialKeys::Password(password) => node.config.password(password),
         ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
     };
 
-    Ok(AuthSuccess {
-        reported_auth_ok: compute_credentials.reported_auth_ok,
-        value: (node, compute_credentials.value.info),
-    })
+    Ok((node, compute_credentials.info))
 }
 
 impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
@@ -324,7 +296,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         latency_timer: &mut LatencyTimer,
-    ) -> auth::Result<AuthSuccess<(CachedNodeInfo, BackendType<'a, ComputeUserInfo<'b>>)>> {
+    ) -> auth::Result<(CachedNodeInfo, BackendType<'a, ComputeUserInfo<'b>>)> {
         use BackendType::*;
 
         let res = match self {
@@ -345,10 +317,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                     latency_timer,
                 )
                 .await?;
-                AuthSuccess {
-                    reported_auth_ok: success.reported_auth_ok,
-                    value: (success.value.0, BackendType::Console(api, success.value.1)),
-                }
+                (success.0, BackendType::Console(api, success.1))
             }
             Postgres(api, creds) => {
                 info!(
@@ -367,23 +336,18 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                     latency_timer,
                 )
                 .await?;
-                AuthSuccess {
-                    reported_auth_ok: success.reported_auth_ok,
-                    value: (success.value.0, BackendType::Postgres(api, success.value.1)),
-                }
+                (success.0, BackendType::Postgres(api, success.1))
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
                 info!("performing link authentication");
 
-                let success = link::authenticate(&url, client)
-                    .await?
-                    .map(CachedNodeInfo::new_uncached);
+                let node_info = link::authenticate(&url, client).await?;
 
-                AuthSuccess {
-                    reported_auth_ok: success.reported_auth_ok,
-                    value: (success.value, BackendType::Link(url)),
-                }
+                (
+                    CachedNodeInfo::new_uncached(node_info),
+                    BackendType::Link(url),
+                )
             }
             #[cfg(test)]
             Test(_) => {
@@ -406,6 +370,7 @@ impl BackendType<'_, ComputeUserInfo<'_>> {
             Console(api, creds) => api.get_allowed_ips(extra, creds).await,
             Postgres(api, creds) => api.get_allowed_ips(extra, creds).await,
             Link(_) => Ok(Arc::new(vec![])),
+            #[cfg(test)]
             Test(x) => x.get_allowed_ips(),
         }
     }

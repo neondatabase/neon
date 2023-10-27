@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::{
-    auth::{self, backend::AuthSuccess},
+    auth,
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
@@ -839,20 +839,12 @@ pub fn retry_after(num_retries: u32) -> time::Duration {
 #[tracing::instrument(skip_all)]
 async fn prepare_client_connection(
     node: &compute::PostgresConnection,
-    reported_auth_ok: bool,
     session: cancellation::Session<'_>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> anyhow::Result<()> {
     // Register compute's query cancellation token and produce a new, unique one.
     // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
-
-    // Report authentication success if we haven't done this already.
-    // Note that we do this only (for the most part) after we've connected
-    // to a compute (see above) which performs its own authentication.
-    if !reported_auth_ok {
-        stream.write_message_noflush(&Be::AuthenticationOk)?;
-    }
 
     // Forward all postgres connection params to the client.
     // Right now the implementation is very hacky and inefficent (ideally,
@@ -1000,10 +992,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         };
 
-        let AuthSuccess {
-            reported_auth_ok,
-            value: (mut node_info, creds),
-        } = auth_result;
+        let (mut node_info, creds) = auth_result;
 
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
@@ -1026,7 +1015,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
         }
 
-        prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+        prepare_client_connection(&node, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the
         // PqStream input buffer. Normally there is none, but our serverless npm
         // driver in pipeline mode sends startup, password and first query
