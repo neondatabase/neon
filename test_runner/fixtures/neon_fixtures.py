@@ -1554,8 +1554,8 @@ class NeonAttachmentService:
 
     def attach_hook(self, tenant_id: TenantId, pageserver_id: int) -> int:
         response = requests.post(
-            f"{self.env.control_plane_api}/attach_hook",
-            json={"tenant_id": str(tenant_id), "pageserver_id": pageserver_id},
+            f"{self.env.control_plane_api}/attach-hook",
+            json={"tenant_id": str(tenant_id), "node_id": pageserver_id},
         )
         response.raise_for_status()
         gen = response.json()["gen"]
