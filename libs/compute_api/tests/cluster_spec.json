@@ -12,29 +12,41 @@
             {
                 "name": "postgres",
                 "encrypted_password": "6b1d16b78004bbd51fa06af9eda75972",
+				"replication": false,
+				"bypassrls": false,
                 "options": null
             },
             {
                 "name": "alexk",
                 "encrypted_password": null,
+				"replication": false,
+				"bypassrls": false,
                 "options": null
             },
             {
                 "name": "zenith \"new\"",
                 "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
+				"replication": true,
+				"bypassrls": true,
                 "options": null
             },
             {
                 "name": "zen",
-                "encrypted_password": "9b1d16b78004bbd51fa06af9eda75972"
+                "encrypted_password": "9b1d16b78004bbd51fa06af9eda75972",
+				"replication": false,
+				"bypassrls": false
             },
             {
                 "name": "\"name\";\\n select 1;",
-                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972"
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
+				"replication": false,
+				"bypassrls": false
             },
             {
                 "name": "MyRole",
-                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972"
+                "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
+				"replication": false,
+				"bypassrls": false,
             }
         ],
         "databases": [
