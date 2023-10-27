@@ -1,12 +1,16 @@
 /// An exhausting, injective counter with exponential search properties
 ///
-/// The type implements an `Iterator` that yields numbers from the range
+/// The type implements an [`Iterator`] that yields numbers from the range
 /// from 0 to a pre-defined maximum.
 ///
 /// * It is *exhausting* in that it visits all numbers between 0 and `max`.
 /// * It is *injective* in that all numbers are visited only once.
 /// * It has *exponential search properties* in that it iterates over the
 ///   number range in a fractal pattern.
+///
+/// This iterator is well suited for finding a pivot in algorithms that
+/// require centered pivots: its output is heavily biased towards starting
+/// with small numbers.
 pub struct ExpCounter {
     /// The (exclusive) upper limit of our search
     max: u64,
@@ -97,9 +101,30 @@ mod test {
     }
 
     #[test]
-    fn to_hundred() {
+    fn to_64() {
+        let max = 64;
+        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
+    }
+
+    #[test]
+    fn to_100() {
         let max = 100;
         let mut list = ExpCounter::new(max).collect::<Vec<_>>();
-        assert_eq!(dupes_and_missing(&mut list, 100), (0, 0));
+        assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
+    }
+
+    #[test]
+    fn to_127() {
+        let max = 127;
+        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
+    }
+
+    #[test]
+    fn to_12345() {
+        let max = 12345;
+        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
     }
 }
