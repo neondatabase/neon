@@ -747,7 +747,7 @@ pub(crate) async fn upsert_location(
     // existng tenant.
     {
         let locked = TENANTS.read().unwrap();
-        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id)?;
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, false)?;
         match (&new_location_config.mode, peek_slot) {
             (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
                 if attach_conf.generation == tenant.generation {
@@ -875,6 +875,10 @@ pub(crate) enum GetTenantError {
     /// is a stuck error state
     #[error("Tenant is broken: {0}")]
     Broken(String),
+
+    // Initializing or shutting down: cannot authoritatively say whether we have this tenant
+    #[error("Tenant map is not available: {0}")]
+    MapState(#[from] TenantMapError),
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
@@ -885,24 +889,26 @@ pub(crate) fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
-    let m = TENANTS.read().unwrap();
-    let tenant = m
-        .get(&tenant_id)
-        .ok_or(GetTenantError::NotFound(tenant_id))?;
+    let locked = TENANTS.read().unwrap();
+    let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, true)?;
 
-    match tenant.current_state() {
-        TenantState::Broken {
-            reason,
-            backtrace: _,
-        } if active_only => Err(GetTenantError::Broken(reason)),
-        TenantState::Active => Ok(Arc::clone(tenant)),
-        _ => {
-            if active_only {
-                Err(GetTenantError::NotActive(tenant_id))
-            } else {
-                Ok(Arc::clone(tenant))
+    match peek_slot {
+        Some(TenantSlot::Attached(tenant)) => match tenant.current_state() {
+            TenantState::Broken {
+                reason,
+                backtrace: _,
+            } if active_only => Err(GetTenantError::Broken(reason)),
+            TenantState::Active => Ok(Arc::clone(tenant)),
+            _ => {
+                if active_only {
+                    Err(GetTenantError::NotActive(tenant_id))
+                } else {
+                    Ok(Arc::clone(tenant))
+                }
             }
-        }
+        },
+        Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_id)),
+        None | Some(TenantSlot::Secondary) => Err(GetTenantError::NotFound(tenant_id)),
     }
 }
 
@@ -1373,13 +1379,24 @@ impl Drop for SlotGuard {
     }
 }
 
+/// `allow_shutdown=true` is appropriate for read-only APIs that should stay working while
+/// the pageserver is shutting down.  Otherwise, set it to false to refuse attempts to
+/// operate on a slot while we are shutting down.
+///
 fn tenant_map_peek_slot<'a>(
     tenants: &'a std::sync::RwLockReadGuard<'a, TenantsMap>,
     tenant_id: &TenantId,
+    allow_shutdown: bool,
 ) -> Result<Option<&'a TenantSlot>, TenantMapError> {
     let m = match tenants.deref() {
         TenantsMap::Initializing => return Err(TenantMapError::StillInitializing),
-        TenantsMap::ShuttingDown(_) => return Err(TenantMapError::ShuttingDown),
+        TenantsMap::ShuttingDown(m) => {
+            if allow_shutdown {
+                return Err(TenantMapError::ShuttingDown);
+            } else {
+                m
+            }
+        }
         TenantsMap::Open(m) => m,
     };
 

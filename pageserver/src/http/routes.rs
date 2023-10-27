@@ -222,6 +222,7 @@ impl From<GetTenantError> for ApiError {
                 // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
                 ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
+            GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
         }
     }
 }
