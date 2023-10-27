@@ -62,3 +62,10 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
 
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
+
+    # Try failing back, and this time we will stop the current pageserver before reconfiguring
+    # the endpoint.  Whereas the previous reconfiguration was like a healthy migration, this
+    # is more like what happens in an unexpected  pageserver failure.
+    env.pageservers[0].start()
+    env.pageservers[1].stop()
+    endpoint.reconfigure(env.pageservers[0].id)
