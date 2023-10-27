@@ -1323,6 +1323,9 @@ async fn get_active_tenant_with_timeout(
         Err(GetTenantError::Broken(_)) => {
             unreachable!("we're calling get_tenant with active_only=false")
         }
+        Err(GetTenantError::MapState(_)) => {
+            unreachable!("TenantManager is initialized before page service starts")
+        }
     };
     let wait_time = Duration::from_secs(30);
     match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
