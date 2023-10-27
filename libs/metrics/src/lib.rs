@@ -89,14 +89,14 @@ pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
     0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
 ];
 
-pub fn set_build_info_metric(revision: &str) {
+pub fn set_build_info_metric(revision: &str, build_tag: &str) {
     let metric = register_int_gauge_vec!(
         "libmetrics_build_info",
         "Build/version information",
-        &["revision"]
+        &["revision", "build_tag"]
     )
     .expect("Failed to register build info metric");
-    metric.with_label_values(&[revision]).set(1);
+    metric.with_label_values(&[revision, build_tag]).set(1);
 }
 
 // Records I/O stats in a "cross-platform" way.
