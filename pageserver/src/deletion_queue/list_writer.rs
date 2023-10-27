@@ -349,7 +349,7 @@ impl ListWriter {
         info!("Started deletion frontend worker");
 
         // Synchronous, but we only do it once per process lifetime so it's tolerable
-        if let Err(e) = create_dir_all(&self.conf.deletion_prefix()) {
+        if let Err(e) = create_dir_all(self.conf.deletion_prefix()) {
             tracing::error!(
                 "Failed to create deletion list directory {}, deletions will not be executed ({e})",
                 self.conf.deletion_prefix(),
