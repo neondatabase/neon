@@ -1860,16 +1860,16 @@ impl Timeline {
         };
 
         tokio::select! {
-            res = &mut calculation => { return res }
+            res = &mut calculation => { res }
             reason = timeline_state_cancellation => {
                 debug!(reason = reason, "cancelling calculation");
                 cancel.cancel();
-                return calculation.await;
+                calculation.await
             }
             reason = taskmgr_shutdown_cancellation => {
                 debug!(reason = reason, "cancelling calculation");
                 cancel.cancel();
-                return calculation.await;
+                calculation.await
             }
         }
     }
