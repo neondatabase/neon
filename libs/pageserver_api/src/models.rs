@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use strum_macros;
 use utils::{
-    completion,
     generation::Generation,
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
@@ -78,12 +77,7 @@ pub enum TenantState {
     /// system is being shut down.
     ///
     /// Transitions out of this state are possible through `set_broken()`.
-    Stopping {
-        // Because of https://github.com/serde-rs/serde/issues/2105 this has to be a named field,
-        // otherwise it will not be skipped during deserialization
-        #[serde(skip)]
-        progress: completion::Barrier,
-    },
+    Stopping,
     /// The tenant is recognized by the pageserver, but can no longer be used for
     /// any operations.
     ///
@@ -993,13 +987,7 @@ mod tests {
                 "Activating",
             ),
             (line!(), TenantState::Active, "Active"),
-            (
-                line!(),
-                TenantState::Stopping {
-                    progress: utils::completion::Barrier::default(),
-                },
-                "Stopping",
-            ),
+            (line!(), TenantState::Stopping {}, "Stopping"),
             (
                 line!(),
                 TenantState::Broken {

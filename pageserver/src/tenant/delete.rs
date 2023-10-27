@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, warn, Instrument, Span};
 
 use utils::{
-    backoff, completion, crashsafe, fs_ext,
+    backoff, crashsafe, fs_ext,
     id::{TenantId, TimelineId},
 };
 
@@ -391,10 +391,8 @@ impl DeleteTenantFlow {
         init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
-        let (_, progress) = completion::channel();
-
         tenant
-            .set_stopping(progress, false, true)
+            .set_stopping(false, true)
             .await
             .expect("cant be stopping or broken");
 
@@ -434,16 +432,13 @@ impl DeleteTenantFlow {
             Err(anyhow::anyhow!("failpoint: tenant-delete-before-shutdown"))?
         });
 
-        // make pageserver shutdown not to wait for our completion
-        let (_, progress) = completion::channel();
-
         // It would be good to only set stopping here and continue shutdown in the background, but shutdown is not idempotent.
         // i e it is an error to do:
         // tenant.set_stopping
         // tenant.shutdown
         // Its also bad that we're holding tenants.read here.
         // TODO relax set_stopping to be idempotent?
-        if tenant.shutdown(progress, false).await.is_err() {
+        if tenant.shutdown(false).await.is_err() {
             return Err(DeleteTenantError::Other(anyhow::anyhow!(
                 "tenant shutdown is already in progress"
             )));

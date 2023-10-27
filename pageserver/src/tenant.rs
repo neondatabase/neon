@@ -352,14 +352,14 @@ impl Debug for DeleteTimelineError {
 }
 
 pub enum SetStoppingError {
-    AlreadyStopping(completion::Barrier),
+    AlreadyStopping,
     Broken,
 }
 
 impl Debug for SetStoppingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyStopping(_) => f.debug_tuple("AlreadyStopping").finish(),
+            Self::AlreadyStopping => f.debug_tuple("AlreadyStopping").finish(),
             Self::Broken => write!(f, "Broken"),
         }
     }
@@ -413,6 +413,11 @@ struct TenantDirectoryScan {
 enum CreateTimelineCause {
     Load,
     Delete,
+}
+
+#[derive(Debug)]
+enum ShutdownError {
+    AlreadyStopping,
 }
 
 impl Tenant {
@@ -1803,16 +1808,7 @@ impl Tenant {
     /// - detach + ignore (freeze_and_flush == false)
     ///
     /// This will attempt to shutdown even if tenant is broken.
-    ///
-    /// `shutdown_progress` is a [`completion::Barrier`] for the shutdown initiated by this call.
-    /// If the tenant is already shutting down, we return a clone of the first shutdown call's
-    /// `Barrier` as an `Err`. This not-first caller can use the returned barrier to join with
-    /// the ongoing shutdown.
-    async fn shutdown(
-        &self,
-        shutdown_progress: completion::Barrier,
-        freeze_and_flush: bool,
-    ) -> Result<(), completion::Barrier> {
+    async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
         span::debug_assert_current_span_has_tenant_id();
         // Set tenant (and its timlines) to Stoppping state.
         //
@@ -1832,15 +1828,17 @@ impl Tenant {
         // It's mesed up.
         // we just ignore the failure to stop
 
-        match self.set_stopping(shutdown_progress, false, false).await {
+        match self.set_stopping(false, false).await {
             Ok(()) => {}
             Err(SetStoppingError::Broken) => {
                 // assume that this is acceptable
             }
-            Err(SetStoppingError::AlreadyStopping(other)) => {
-                // give caller the option to wait for this this shutdown
-                info!("Tenant::shutdown: AlreadyStopping");
-                return Err(other);
+            Err(SetStoppingError::AlreadyStopping) => {
+                // This should not happen: individual tenant shutdowns are guarded by
+                // `[TenantSlot::InProgress]`, and when we shutdown all tenants during
+                // process shutdown, we just wait for those InProgress ones to finish.
+                error!("Called Tenant::shutdown while already stopping");
+                return Err(ShutdownError::AlreadyStopping);
             }
         };
 
@@ -1881,7 +1879,6 @@ impl Tenant {
     /// `allow_transition_from_attaching` is needed for the special case of attaching deleted tenant.
     async fn set_stopping(
         &self,
-        progress: completion::Barrier,
         allow_transition_from_loading: bool,
         allow_transition_from_attaching: bool,
     ) -> Result<(), SetStoppingError> {
@@ -1898,7 +1895,7 @@ impl Tenant {
                 false
             }
             TenantState::Loading => allow_transition_from_loading,
-            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => true,
         })
         .await
         .expect("cannot drop self.state while on a &self method");
@@ -1913,21 +1910,21 @@ impl Tenant {
                 if !allow_transition_from_attaching {
                     unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
                 };
-                *current_state = TenantState::Stopping { progress };
+                *current_state = TenantState::Stopping;
                 true
             }
             TenantState::Loading => {
                 if !allow_transition_from_loading {
                     unreachable!("3we ensured above that we're done with activation, and, there is no re-activation")
                 };
-                *current_state = TenantState::Stopping { progress };
+                *current_state = TenantState::Stopping;
                 true
             }
             TenantState::Active => {
                 // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
                 // are created after the transition to Stopping. That's harmless, as the Timelines
                 // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
-                *current_state = TenantState::Stopping { progress };
+                *current_state = TenantState::Stopping;
                 // Continue stopping outside the closure. We need to grab timelines.lock()
                 // and we plan to turn it into a tokio::sync::Mutex in a future patch.
                 true
@@ -1939,9 +1936,9 @@ impl Tenant {
                 err = Some(SetStoppingError::Broken);
                 false
             }
-            TenantState::Stopping { progress } => {
+            TenantState::Stopping  => {
                 info!("Tenant is already in Stopping state");
-                err = Some(SetStoppingError::AlreadyStopping(progress.clone()));
+                err = Some(SetStoppingError::AlreadyStopping);
                 false
             }
         });
@@ -4128,7 +4125,7 @@ mod tests {
             make_some_layers(tline.as_ref(), Lsn(0x8000), &ctx).await?;
             // so that all uploads finish & we can call harness.load() below again
             tenant
-                .shutdown(Default::default(), true)
+                .shutdown(true)
                 .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
                 .await
                 .ok()
@@ -4169,7 +4166,7 @@ mod tests {
 
             // so that all uploads finish & we can call harness.load() below again
             tenant
-                .shutdown(Default::default(), true)
+                .shutdown(true)
                 .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
                 .await
                 .ok()
@@ -4231,7 +4228,7 @@ mod tests {
         drop(tline);
         // so that all uploads finish & we can call harness.try_load() below again
         tenant
-            .shutdown(Default::default(), true)
+            .shutdown(true)
             .instrument(info_span!("test_shutdown", tenant_id=%tenant.tenant_id))
             .await
             .ok()

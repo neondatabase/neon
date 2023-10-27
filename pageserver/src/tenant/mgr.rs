@@ -27,7 +27,9 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{create_tenant_files, AttachedTenantConf, SpawnMode, Tenant, TenantState};
+use crate::tenant::{
+    create_tenant_files, AttachedTenantConf, ShutdownError, SpawnMode, Tenant, TenantState,
+};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -532,8 +534,6 @@ pub(crate) async fn shutdown_all_tenants() {
 }
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
-    use utils::completion;
-
     // Under write lock (prevent any new tenants being created), extract the list
     // of tenants to shut down.
     let (in_progress_ops, tenants_to_shut_down) = {
@@ -597,14 +597,15 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
             async move {
                 let freeze_and_flush = true;
 
-                let res = {
-                    let (_guard, shutdown_progress) = completion::channel();
-                    tenant.shutdown(shutdown_progress, freeze_and_flush).await
-                };
-
-                if let Err(other_progress) = res {
-                    // join the another shutdown in progress
-                    other_progress.wait().await;
+                let res = { tenant.shutdown(freeze_and_flush).await };
+                if let Err(e) = res {
+                    match e {
+                        ShutdownError::AlreadyStopping => {
+                            // TODO: to ensure this can _never_ happen, we need to get rid of
+                            // the horrible DeleteTenantFlow::should_resume_deletion
+                            tracing::warn!(%tenant_id, "Tenant already stopping during shutdown");
+                        }
+                    }
                 }
 
                 // we cannot afford per tenant logging here, because if s3 is degraded, we are
@@ -785,8 +786,6 @@ pub(crate) async fn upsert_location(
         // for Attached->Attached transitions in the same generation.  By this point,
         // if we see an attached tenant we know it will be discarded and should be
         // shut down.
-        let (_guard, progress) = utils::completion::channel();
-
         match tenant.get_attach_mode() {
             AttachmentMode::Single | AttachmentMode::Multi => {
                 // Before we leave our state as the presumed holder of the latest generation,
@@ -799,11 +798,11 @@ pub(crate) async fn upsert_location(
         };
 
         info!("Shutting down attached tenant");
-        match tenant.shutdown(progress, false).await {
+        match tenant.shutdown(false).await {
             Ok(()) => {}
-            Err(barrier) => {
-                info!("Shutdown already in progress, waiting for it to complete");
-                barrier.wait().await;
+            Err(ShutdownError::AlreadyStopping) => {
+                // This shouldn't have happened, we are guarded by TenantSlot::InProgress
+                warn!("Shutdown unexpectedly already in progress");
             }
         }
     }
@@ -1472,8 +1471,6 @@ async fn remove_tenant_from_memory<V, F>(
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
-    use utils::completion;
-
     let mut tenant_guard = tenant_map_acquire_slot_impl(&tenant_id, tenants, Some(true))?;
     let tenant_slot = tenant_guard.take_value();
 
@@ -1484,9 +1481,6 @@ where
         _ => None,
     };
 
-    // allow pageserver shutdown to await for our completion
-    let (_guard, progress) = completion::channel();
-
     // If the tenant was attached, shut it down gracefully.  For secondary
     // locations this part is not necessary
     match &attached_tenant {
@@ -1496,11 +1490,12 @@ where
 
             // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
             // that we can continue safely to cleanup.
-            match attached_tenant.shutdown(progress, freeze_and_flush).await {
+            match attached_tenant.shutdown(freeze_and_flush).await {
                 Ok(()) => {}
-                Err(_other) => {
-                    // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
-                    // wait for it but return an error right away because these are distinct requests.
+                Err(ShutdownError::AlreadyStopping) => {
+                    // This is unexpected: fail whatever operation has encountered this
+                    // buggy state.
+                    warn!(%tenant_id, "Tenant already stopping while trying to shut down");
                     return Err(TenantStateError::IsStopping(tenant_id));
                 }
             }
