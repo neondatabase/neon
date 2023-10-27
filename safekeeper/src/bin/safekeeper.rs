@@ -152,6 +152,10 @@ struct Args {
     /// useful for debugging.
     #[arg(long)]
     current_thread_runtime: bool,
+    /// Disable task to push messages to broker every second. Supposed to
+    /// be used in tests.
+    #[arg(long)]
+    disable_periodic_broker_push: bool,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -279,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
         pg_tenant_only_auth,
         http_auth,
         current_thread_runtime: args.current_thread_runtime,
+        disable_periodic_broker_push: args.disable_periodic_broker_push,
     };
 
     // initialize sentry if SENTRY_DSN is provided

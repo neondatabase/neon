@@ -31,6 +31,12 @@ const PUSH_INTERVAL_MSEC: u64 = 1000;
 
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
+    if conf.disable_periodic_broker_push {
+        info!("broker push_loop is disabled, doing nothing...");
+        futures::future::pending::<()>().await; // sleep forever
+        return Ok(());
+    }
+
     let mut client =
         storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);

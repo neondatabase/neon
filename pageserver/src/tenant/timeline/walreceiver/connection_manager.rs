@@ -914,6 +914,7 @@ mod tests {
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
                 http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
+                is_discovery: false,
             },
             latest_update,
         }

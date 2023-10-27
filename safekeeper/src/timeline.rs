@@ -267,6 +267,7 @@ impl SharedState {
             backup_lsn: self.sk.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
+            is_discovery: false,
         }
     }
 

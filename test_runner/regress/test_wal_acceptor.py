@@ -1635,7 +1635,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_sk_auth_restart_endpoint")
+    timeline_id = env.neon_cli.create_branch("test_idle_reconnections")
 
     def collect_stats() -> Dict[str, float]:
         # we need to collect safekeeper_pg_queries_received_total metric from all safekeepers
@@ -1686,3 +1686,42 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     assert final_stats.get("START_REPLICATION", 0) >= 1
     # walproposer should connect to each safekeeper at least once
     assert final_stats.get("START_WAL_PUSH", 0) >= 3
+
+def test_broker_pings(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("test_broker_pings")
+
+    endpoint = env.endpoints.create_start(
+        "test_broker_pings",
+        config_lines=["shared_buffers=1MB"],
+    )
+    endpoint.safe_psql("create table t(i int, payload text)")
+    # Install extension containing function needed to clear buffer
+    endpoint.safe_psql("CREATE EXTENSION neon_test_utils")
+
+    def do_something():
+        time.sleep(1)
+        # generate some data to commit WAL on safekeepers
+        endpoint.safe_psql("insert into t select generate_series(1,100), 'action'")
+        # clear the buffers
+        endpoint.safe_psql("select clear_buffer_cache()")
+        # read data to fetch pages from pageserver
+        endpoint.safe_psql("select sum(i) from t")
+
+    do_something()
+    do_something()
+
+    for sk in env.safekeepers:
+        # Disable periodic broker push, so pageserver won't be able to discover
+        # safekeepers without pings
+        sk.stop().start(extra_opts=["--disable-periodic-broker-push"])
+
+    do_something()
+    do_something()
+
+    # restart pageserver and check how everything works
+    env.pageserver.stop().start()
+    do_something()

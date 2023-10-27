@@ -38,7 +38,10 @@ use metrics::{Encoder, TextEncoder};
 use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
-use storage_broker::proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
+use storage_broker::proto::{
+    DiscoveryRequest, SafekeeperTimelineInfo, SubscribeDiscoveryRequest,
+    SubscribeSafekeeperInfoRequest,
+};
 use storage_broker::{
     parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
 };
@@ -262,6 +265,27 @@ impl Registry {
             subscriber.id, subscriber.key, subscriber.remote_addr
         );
     }
+
+    pub fn send_msg(&self, msg: &SafekeeperTimelineInfo) -> Result<(), Status> {
+        // send message to subscribers for everything
+        let shared_state = self.shared_state.read();
+        // Err means there is no subscribers, it is fine.
+        shared_state.chan_to_all_subs.send(msg.clone()).ok();
+
+        // send message to per timeline subscribers
+        let ttid =
+            parse_proto_ttid(msg.tenant_timeline_id.as_ref().ok_or_else(|| {
+                Status::new(Code::InvalidArgument, "missing tenant_timeline_id")
+            })?)?;
+        if let Some(subs) = shared_state.chans_to_timeline_subs.get(&ttid) {
+            // Err can't happen here, as tx is destroyed only after removing
+            // from the map the last subscriber along with tx.
+            subs.chan
+                .send(msg.clone())
+                .expect("rx is still in the map with zero subscribers");
+        }
+        Ok(())
+    }
 }
 
 // Private subscriber state.
@@ -293,24 +317,7 @@ struct Publisher {
 impl Publisher {
     // Send msg to relevant subscribers.
     pub fn send_msg(&mut self, msg: &SafekeeperTimelineInfo) -> Result<(), Status> {
-        // send message to subscribers for everything
-        let shared_state = self.registry.shared_state.read();
-        // Err means there is no subscribers, it is fine.
-        shared_state.chan_to_all_subs.send(msg.clone()).ok();
-
-        // send message to per timeline subscribers
-        let ttid =
-            parse_proto_ttid(msg.tenant_timeline_id.as_ref().ok_or_else(|| {
-                Status::new(Code::InvalidArgument, "missing tenant_timeline_id")
-            })?)?;
-        if let Some(subs) = shared_state.chans_to_timeline_subs.get(&ttid) {
-            // Err can't happen here, as tx is destroyed only after removing
-            // from the map the last subscriber along with tx.
-            subs.chan
-                .send(msg.clone())
-                .expect("rx is still in the map with zero subscribers");
-        }
-        Ok(())
+        self.registry.send_msg(msg)
     }
 }
 
@@ -391,6 +398,44 @@ impl BrokerService for Broker {
         Ok(Response::new(
             Box::pin(output) as Self::SubscribeSafekeeperInfoStream
         ))
+    }
+
+    type SubscribeDiscoveryStream =
+        Pin<Box<dyn Stream<Item = Result<DiscoveryRequest, Status>> + Send + 'static>>;
+
+    async fn subscribe_discovery(
+        &self,
+        request: Request<SubscribeDiscoveryRequest>,
+    ) -> Result<Response<Self::SubscribeDiscoveryStream>, Status> {
+        todo!()
+    }
+
+    async fn send_discovery(
+        &self,
+        request: Request<DiscoveryRequest>,
+    ) -> Result<Response<()>, Status> {
+        let ttid = request.into_inner().tenant_timeline_id;
+        info!("discovery request {:?}", ttid);
+
+        let sk_info = SafekeeperTimelineInfo {
+            safekeeper_id: 0,
+            tenant_timeline_id: ttid,
+            term: 0,
+            last_log_term: 0,
+            flush_lsn: 0,
+            commit_lsn: 0,
+            backup_lsn: 0,
+            remote_consistent_lsn: 0,
+            peer_horizon_lsn: 0,
+            local_start_lsn: 0,
+            safekeeper_connstr: String::new(),
+            http_connstr: String::new(),
+            availability_zone: None,
+            is_discovery: true,
+        };
+        self.registry.send_msg(&sk_info)?;
+
+        Ok(Response::new(()))
     }
 }
 
@@ -532,6 +577,7 @@ mod tests {
             http_connstr: "neon-1-sk-1.local:7677".to_owned(),
             local_start_lsn: 0,
             availability_zone: None,
+            is_discovery: false,
         }
     }
 
