@@ -110,35 +110,6 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
     Ok(())
 }
 
-// We delete local files first, so if pageserver restarts after local files deletion then remote deletion is not continued.
-// This can be solved with inversion of these steps. But even if these steps are inverted then, when index_part.json
-// gets deleted there is no way to distinguish between "this timeline is good, we just didnt upload it to remote"
-// and "this timeline is deleted we should continue with removal of local state". So to avoid the ambiguity we use a mark file.
-// After index part is deleted presence of this mark file indentifies that it was a deletion intention.
-// So we can just remove the mark file.
-async fn create_delete_mark(
-    conf: &PageServerConf,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> Result<(), DeleteTimelineError> {
-    fail::fail_point!("timeline-delete-before-delete-mark", |_| {
-        Err(anyhow::anyhow!(
-            "failpoint: timeline-delete-before-delete-mark"
-        ))?
-    });
-    let marker_path = conf.timeline_delete_mark_file_path(tenant_id, timeline_id);
-
-    // Note: we're ok to replace existing file.
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&marker_path)
-        .with_context(|| format!("could not create delete marker file {marker_path:?}"))?;
-
-    crashsafe::fsync_file_and_parent(&marker_path).context("sync_mark")?;
-    Ok(())
-}
-
 /// Grab the layer_removal_cs lock, and actually perform the deletion.
 ///
 /// This lock prevents prevents GC or compaction from running at the same time.
@@ -311,6 +282,8 @@ async fn cleanup_remaining_timeline_fs_traces(
         .context("fsync_pre_mark_remove")?;
 
     // Remove delete mark
+    // TODO: once we are confident that no more exist in the field, remove this
+    // line.  It cleans up a legacy marker file that might in rare cases be present.
     tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_id, timeline_id))
         .await
         .or_else(fs_ext::ignore_not_found)
@@ -391,8 +364,6 @@ impl DeleteTimelineFlow {
 
         set_deleted_in_remote_index(&timeline).await?;
 
-        create_delete_mark(tenant.conf, timeline.tenant_id, timeline.timeline_id).await?;
-
         fail::fail_point!("timeline-delete-before-schedule", |_| {
             Err(anyhow::anyhow!(
                 "failpoint: timeline-delete-before-schedule"
@@ -463,10 +434,6 @@ impl DeleteTimelineFlow {
         }
 
         guard.mark_in_progress()?;
-
-        // Note that delete mark can be missing on resume
-        // because we create delete mark after we set deleted_at in the index part.
-        create_delete_mark(tenant.conf, tenant.tenant_id, timeline_id).await?;
 
         Self::schedule_background(guard, tenant.conf, tenant, timeline);
 
