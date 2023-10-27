@@ -65,6 +65,7 @@ pub enum BackendType<'a, T> {
     Postgres(Cow<'a, console::provider::mock::Api>, T),
     /// Authentication via a web browser.
     Link(Cow<'a, url::ApiUrl>),
+    #[cfg(test)]
     /// Test backend.
     Test(&'a dyn TestBackend),
 }
@@ -81,6 +82,7 @@ impl std::fmt::Display for BackendType<'_, ()> {
             Console(endpoint, _) => fmt.debug_tuple("Console").field(&endpoint.url()).finish(),
             Postgres(endpoint, _) => fmt.debug_tuple("Postgres").field(&endpoint.url()).finish(),
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            #[cfg(test)]
             Test(_) => fmt.debug_tuple("Test").finish(),
         }
     }
@@ -95,6 +97,7 @@ impl<T> BackendType<'_, T> {
             Console(c, x) => Console(Cow::Borrowed(c), x),
             Postgres(c, x) => Postgres(Cow::Borrowed(c), x),
             Link(c) => Link(Cow::Borrowed(c)),
+            #[cfg(test)]
             Test(x) => Test(*x),
         }
     }
@@ -110,6 +113,7 @@ impl<'a, T> BackendType<'a, T> {
             Console(c, x) => Console(c, f(x)),
             Postgres(c, x) => Postgres(c, f(x)),
             Link(c) => Link(c),
+            #[cfg(test)]
             Test(x) => Test(x),
         }
     }
@@ -124,6 +128,7 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
             Console(c, x) => x.map(|x| Console(c, x)),
             Postgres(c, x) => x.map(|x| Postgres(c, x)),
             Link(c) => Ok(Link(c)),
+            #[cfg(test)]
             Test(x) => Ok(Test(x)),
         }
     }
@@ -292,6 +297,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
             Console(_, creds) => creds.project.clone(),
             Postgres(_, creds) => creds.project.clone(),
             Link(_) => Some("link".to_owned()),
+            #[cfg(test)]
             Test(_) => Some("test".to_owned()),
         }
     }
@@ -304,6 +310,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
             Console(_, creds) => creds.user,
             Postgres(_, creds) => creds.user,
             Link(_) => "link",
+            #[cfg(test)]
             Test(_) => "test",
         }
     }
@@ -378,6 +385,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                     value: (success.value, BackendType::Link(url)),
                 }
             }
+            #[cfg(test)]
             Test(_) => {
                 unreachable!("this function should never be called in the test backend")
             }
@@ -414,6 +422,7 @@ impl BackendType<'_, ComputeUserInfo<'_>> {
             Console(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
             Postgres(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
             Link(_) => Ok(None),
+            #[cfg(test)]
             Test(x) => x.wake_compute().map(Some),
         }
     }

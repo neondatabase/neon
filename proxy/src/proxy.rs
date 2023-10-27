@@ -700,6 +700,7 @@ where
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend
+            #[cfg(test)]
             auth::BackendType::Test(x) => x.wake_compute(),
         };
 
