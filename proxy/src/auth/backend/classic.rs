@@ -4,6 +4,7 @@ use crate::{
     compute,
     config::AuthenticationConfig,
     console::{self, AuthInfo, ConsoleReqExtra},
+    proxy::LatencyTimer,
     sasl, scram,
     stream::PqStream,
 };
@@ -16,6 +17,7 @@ pub(super) async fn authenticate(
     creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     info!("fetching user's authentication info");
     let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
@@ -36,24 +38,26 @@ pub(super) async fn authenticate(
             info!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret);
 
-            let auth_flow = flow.begin(scram).await.map_err(|error| {
-                warn!(?error, "error sending scram acknowledgement");
-                error
-            })?;
-
             let auth_outcome = tokio::time::timeout(
                 config.scram_protocol_timeout,
-                auth_flow.authenticate(),
+                async {
+                    // pause the timer while we communicate with the client
+                    let _paused = latency_timer.pause();
+
+                    flow.begin(scram).await.map_err(|error| {
+                        warn!(?error, "error sending scram acknowledgement");
+                        error
+                    })?.authenticate().await.map_err(|error| {
+                        warn!(?error, "error processing scram messages");
+                        error
+                    })
+                }
             )
             .await
             .map_err(|error| {
                 warn!("error processing scram messages error = authentication timed out, execution time exeeded {} seconds", config.scram_protocol_timeout.as_secs());
                 auth::io::Error::new(auth::io::ErrorKind::TimedOut, error)
-            })?
-            .map_err(|error| {
-                warn!(?error, "error processing scram messages");
-                error
-            })?;
+            })??;
 
             let client_key = match auth_outcome {
                 sasl::Outcome::Success(key) => key,

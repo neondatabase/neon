@@ -106,17 +106,26 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 pub struct LatencyTimer {
-    start: Instant,
+    // time since the stopwatch was started
+    start: Option<Instant>,
+    // accumulated time on the stopwatch
+    accumulated: std::time::Duration,
+    // label data
     protocol: &'static str,
     cache_miss: bool,
     pool_miss: bool,
     outcome: &'static str,
 }
 
+pub struct LatencyTimerPause<'a> {
+    timer: &'a mut LatencyTimer,
+}
+
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
-            start: Instant::now(),
+            start: Some(Instant::now()),
+            accumulated: std::time::Duration::ZERO,
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -124,6 +133,13 @@ impl LatencyTimer {
             // assume failed unless otherwise specified
             outcome: "failed",
         }
+    }
+
+    pub fn pause(&mut self) -> LatencyTimerPause<'_> {
+        // stop the stopwatch and record the time that we have accumulated
+        let start = self.start.take().expect("latency timer should be started");
+        self.accumulated += start.elapsed();
+        LatencyTimerPause { timer: self }
     }
 
     pub fn cache_miss(&mut self) {
@@ -139,9 +155,17 @@ impl LatencyTimer {
     }
 }
 
+impl Drop for LatencyTimerPause<'_> {
+    fn drop(&mut self) {
+        // start the stopwatch again
+        self.timer.start = Some(Instant::now());
+    }
+}
+
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
-        let duration = self.start.elapsed().as_secs_f64();
+        let duration =
+            self.start.map(|start| start.elapsed()).unwrap_or_default() + self.accumulated;
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
@@ -149,7 +173,7 @@ impl Drop for LatencyTimer {
                 bool_to_str(self.pool_miss),
                 self.outcome,
             ])
-            .observe(duration)
+            .observe(duration.as_secs_f64())
     }
 }
 
@@ -862,10 +886,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             application_name: params.get("application_name"),
         };
 
-        let latency_timer = LatencyTimer::new(mode.protocol_label());
+        let mut latency_timer = LatencyTimer::new(mode.protocol_label());
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, mode.allow_cleartext(), config)
+            .authenticate(
+                &extra,
+                &mut stream,
+                mode.allow_cleartext(),
+                config,
+                &mut latency_timer,
+            )
             .await
         {
             Ok(auth_result) => auth_result,
