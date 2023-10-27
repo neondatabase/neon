@@ -23,6 +23,7 @@ pub struct ExpCounter {
 }
 
 impl ExpCounter {
+    /// Creates a new `ExpCounter` instance that counts to the (exclusive) maximum
     pub fn with_max(max: u64) -> Self {
         Self {
             max,

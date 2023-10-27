@@ -343,7 +343,7 @@ impl Timeline {
         let mut found_larger = false;
 
         // This is a search budget to not make the search too expensive
-        let mut budget = 10_000u16;
+        let mut budget = 1_000_000u32;
         while low < high {
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             // this always holds: low <= mid_start < high
@@ -380,17 +380,17 @@ impl Timeline {
 
             if let Some(max) = max {
                 if max <= search_timestamp {
-                    found_smaller = true;
                     // We found a commit with timestamp before (or at) `search_timestamp`.
-                    // set low to mid + 1
+                    found_smaller = true;
                     low = mid + 1;
                 } else {
+                    // We found a commit with timestamp after `search_timestamp`.
                     found_larger = true;
                     high = mid;
                 }
             } else {
                 // max is None so we have proof of a chain of None's from mid_start all up to high.
-                // Thus we can safely set high to mid
+                // Thus we can safely set high to mid_start
                 high = mid_start;
             }
         }
