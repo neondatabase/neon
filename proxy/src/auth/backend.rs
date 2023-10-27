@@ -5,7 +5,7 @@ mod link;
 pub use link::LinkAuthError;
 use tokio_postgres::config::AuthKeys;
 
-use crate::proxy::{handle_try_wake, retry_after};
+use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
 use crate::{
     auth::{self, ClientCredentials},
     config::AuthenticationConfig,
@@ -134,13 +134,14 @@ async fn auth_quirks_creds(
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
     if creds.project.is_none() {
         // Password will be checked by the compute node later.
-        return hacks::password_hack(creds, client).await;
+        return hacks::password_hack(creds, client, latency_timer).await;
     }
 
     // Password hack should set the project name.
@@ -151,11 +152,11 @@ async fn auth_quirks_creds(
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
         // Password will be checked by the compute node later.
-        return hacks::cleartext_hack(client).await;
+        return hacks::cleartext_hack(client, latency_timer).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
-    classic::authenticate(api, extra, creds, client, config).await
+    classic::authenticate(api, extra, creds, client, config, latency_timer).await
 }
 
 /// True to its name, this function encapsulates our current auth trade-offs.
@@ -167,8 +168,18 @@ async fn auth_quirks(
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
-    let auth_stuff = auth_quirks_creds(api, extra, creds, client, allow_cleartext, config).await?;
+    let auth_stuff = auth_quirks_creds(
+        api,
+        extra,
+        creds,
+        client,
+        allow_cleartext,
+        config,
+        latency_timer,
+    )
+    .await?;
 
     let mut num_retries = 0;
     let mut node = loop {
@@ -233,6 +244,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
+        latency_timer: &mut LatencyTimer,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
 
@@ -245,7 +257,16 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 let api = api.as_ref();
-                auth_quirks(api, extra, creds, client, allow_cleartext, config).await?
+                auth_quirks(
+                    api,
+                    extra,
+                    creds,
+                    client,
+                    allow_cleartext,
+                    config,
+                    latency_timer,
+                )
+                .await?
             }
             Postgres(api, creds) => {
                 info!(
@@ -255,7 +276,16 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 let api = api.as_ref();
-                auth_quirks(api, extra, creds, client, allow_cleartext, config).await?
+                auth_quirks(
+                    api,
+                    extra,
+                    creds,
+                    client,
+                    allow_cleartext,
+                    config,
+                    latency_timer,
+                )
+                .await?
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
