@@ -1,6 +1,6 @@
-use super::{AuthSuccess, ComputeCredentials};
+use super::{AuthSuccess, ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::{
-    auth::{self, AuthFlow, ClientCredentials},
+    auth::{self, backend::ComputeCredentialKeys, AuthFlow},
     proxy::LatencyTimer,
     stream::{self, Stream},
 };
@@ -11,10 +11,11 @@ use tracing::{info, warn};
 /// one round trip and *expensive* computations (>= 4096 HMAC iterations).
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
-pub async fn cleartext_hack(
+pub async fn cleartext_hack<'a>(
+    info: ComputeUserInfo<'a>,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<AuthSuccess<ComputeCredentials>> {
+) -> auth::Result<AuthSuccess<ComputeCredentials<'a>>> {
     warn!("cleartext auth flow override is enabled, proceeding");
 
     // pause the timer while we communicate with the client
@@ -29,17 +30,20 @@ pub async fn cleartext_hack(
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: ComputeCredentials::Password(password),
+        value: ComputeCredentials {
+            info,
+            keys: ComputeCredentialKeys::Password(password),
+        },
     })
 }
 
 /// Workaround for clients which don't provide an endpoint (project) name.
 /// Very similar to [`cleartext_hack`], but there's a specific password format.
-pub async fn password_hack(
-    creds: &mut ClientCredentials<'_>,
+pub async fn password_hack<'a>(
+    info: ComputeUserInfoNoEndpoint<'a>,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<AuthSuccess<ComputeCredentials>> {
+) -> auth::Result<ComputeCredentials<'a>> {
     warn!("project not specified, resorting to the password hack auth flow");
 
     // pause the timer while we communicate with the client
@@ -52,11 +56,13 @@ pub async fn password_hack(
         .await?;
 
     info!(project = &payload.endpoint, "received missing parameter");
-    creds.project = Some(payload.endpoint);
 
     // Report tentative success; compute node will check the password anyway.
-    Ok(AuthSuccess {
-        reported_auth_ok: false,
-        value: ComputeCredentials::Password(payload.password),
+    Ok(ComputeCredentials {
+        info: ComputeUserInfo {
+            inner: info,
+            endpoint: payload.endpoint,
+        },
+        keys: ComputeCredentialKeys::Password(payload.password),
     })
 }

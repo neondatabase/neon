@@ -3,7 +3,7 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::ClientCredentials,
+    auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
@@ -247,20 +247,20 @@ pub trait Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 

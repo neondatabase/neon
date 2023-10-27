@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::poll_fn;
@@ -9,7 +9,7 @@ use pbkdf2::{
 };
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -22,7 +22,7 @@ use tokio::time;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
-    auth::{self, check_peer_addr_is_in_list},
+    auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
     proxy::{
         neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
@@ -146,7 +146,7 @@ impl GlobalConnPool {
         conn_info: &ConnInfo,
         force_new: bool,
         session_id: uuid::Uuid,
-        peer_addr: SocketAddr,
+        peer_addr: IpAddr,
     ) -> anyhow::Result<Client> {
         let mut client: Option<ClientInner> = None;
         let mut latency_timer = LatencyTimer::new("http");
@@ -406,7 +406,7 @@ async fn connect_to_compute(
     conn_id: uuid::Uuid,
     session_id: uuid::Uuid,
     latency_timer: LatencyTimer,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -423,6 +423,9 @@ async fn connect_to_compute(
         common_names,
         peer_addr,
     )?;
+
+    let creds =
+        ComputeUserInfo::try_from(creds).map_err(|_| anyhow!("missing endpoint identifier"))?;
     let backend = config.auth_backend.as_ref().map(|_| creds);
 
     let console_options = neon_options(&params);
@@ -435,7 +438,7 @@ async fn connect_to_compute(
     // TODO(anna): this is a bit hacky way, consider using console notification listener.
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(&extra).await?;
-        if !check_peer_addr_is_in_list(&peer_addr.ip(), &allowed_ips) {
+        if !check_peer_addr_is_in_list(&peer_addr, &allowed_ips) {
             return Err(auth::AuthError::ip_address_not_allowed().into());
         }
     }

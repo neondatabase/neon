@@ -3,8 +3,7 @@
 mod mitm;
 
 use super::*;
-use crate::auth::backend::TestBackend;
-use crate::auth::ClientCredentials;
+use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
 use crate::{auth, http, sasl, scram};
@@ -486,7 +485,7 @@ fn helper_create_connect_info(
 ) -> (
     CachedNodeInfo,
     console::ConsoleReqExtra<'static>,
-    auth::BackendType<'_, ClientCredentials<'static>>,
+    auth::BackendType<'_, ComputeUserInfo<'static>>,
 ) {
     let cache = helper_create_cached_node_info();
     let extra = console::ConsoleReqExtra {

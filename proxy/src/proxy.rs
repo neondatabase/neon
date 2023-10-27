@@ -24,7 +24,7 @@ use prometheus::{
     IntGaugeVec,
 };
 use regex::Regex;
-use std::{error::Error, io, net::SocketAddr, ops::ControlFlow, sync::Arc, time::Instant};
+use std::{error::Error, io, net::IpAddr, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -318,7 +318,7 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr).await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr.ip()).await
                     }
                     .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
@@ -408,7 +408,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -666,7 +666,7 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+    creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo<'_>>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
@@ -962,7 +962,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
-            mut creds,
+            creds,
             params,
             session_id,
             allow_self_signed_compute,
@@ -978,6 +978,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
 
+        let user = creds.get_user().to_owned();
         let auth_result = match creds
             .authenticate(
                 &extra,
@@ -990,7 +991,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         {
             Ok(auth_result) => auth_result,
             Err(e) => {
-                let user = creds.get_user();
                 let db = params.get("database");
                 let app = params.get("application_name");
                 let params_span = tracing::info_span!("", ?user, ?db, ?app);
@@ -1001,7 +1001,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let AuthSuccess {
             reported_auth_ok,
-            value: mut node_info,
+            value: (mut node_info, creds),
         } = auth_result;
 
         node_info.allow_self_signed_compute = allow_self_signed_compute;

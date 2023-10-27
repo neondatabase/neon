@@ -11,7 +11,7 @@ use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
 
 use std::{
-    net::SocketAddr,
+    net::IpAddr,
     pin::Pin,
     task::{ready, Context, Poll},
 };
@@ -133,7 +133,7 @@ pub async fn serve_websocket(
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
     hostname: Option<String>,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     handle_client(
