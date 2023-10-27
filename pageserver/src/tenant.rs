@@ -51,10 +51,9 @@ use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
 use self::config::LocationConf;
 use self::config::TenantConf;
-use self::delete::DeleteTenantFlow;
+use self::delete::should_resume_deletion;
 use self::metadata::LoadMetadataError;
 use self::metadata::TimelineMetadata;
-use self::mgr::TenantsMap;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
@@ -250,8 +249,6 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
-
-    pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -537,8 +534,8 @@ impl Tenant {
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
         init_order: Option<InitializationOrder>,
-        tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
+        resume_deletion_upcall: Option<tokio::sync::mpsc::Sender<Arc<Tenant>>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
@@ -625,67 +622,48 @@ impl Tenant {
                 // Remote preload is complete.
                 drop(remote_load_completion);
 
-                let pending_deletion = {
-                    match DeleteTenantFlow::should_resume_deletion(
-                        conf,
-                        preload.as_ref().map(|p| p.deleting).unwrap_or(false),
-                        &tenant_clone,
-                    )
-                    .await
-                    {
-                        Ok(should_resume_deletion) => should_resume_deletion,
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
+                let resume_deletion = should_resume_deletion(conf, preload.as_ref().map(|p| p.deleting).unwrap_or(false), &tenant_id).await?;
+                if resume_deletion {
+                    // We will wait until the background 
+                    info!("Tenant is partially deleted, will resume");
+
+                    // Put the Tenant into a Stopping state so that it will not try to serve any I/O
+                    tenant_clone
+                        .set_stopping(false, true)
+                        .await
+                        .expect("cant be stopping or broken");
+
+                    // Proceed with attaching the tenant to load the metadata we will use for remote deletion
+                    match tenant_clone.attach(init_order, preload, &ctx).await {
+                        Ok(()) => {
+                            info!("attach finished, deletion will resume");
+                        }
+                        Err(e) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(e));
+                        }
+                    }
+
+                    if let Some(resume_deletion_upcall) = resume_deletion_upcall {
+                        // If this send() fails it means we're shutting down, so just drop it on the floor
+                        resume_deletion_upcall.send(tenant_clone).await.ok();
+                    } else {
+                        make_broken(&tenant_clone, anyhow::anyhow!(
+                            "Attemped to attach a partially deleted tenant outside of pageserver startup"
+                        ));
+                    }
+                } else {
+                    // Normal case: load all the metadata for the tenant.
+                    match tenant_clone.attach(init_order, preload, &ctx).await {
+                        Ok(()) => {
+                            info!("attach finished, activating");
+                            tenant_clone.activate(broker_client, None, &ctx);
+                        }
+                        Err(e) => {
+                            make_broken(&tenant_clone, anyhow::anyhow!(e));
                         }
                     }
                 };
 
-                info!("pending_deletion {}", pending_deletion.is_some());
-
-                if let Some(deletion) = pending_deletion {
-                    // as we are no longer loading, signal completion by dropping
-                    // the completion while we resume deletion
-                    drop(_completion);
-                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
-                    let _ = init_order
-                        .as_mut()
-                        .and_then(|x| x.initial_logical_size_attempt.take());
-                    let background_jobs_can_start =
-                        init_order.as_ref().map(|x| &x.background_jobs_can_start);
-                    if let Some(background) = background_jobs_can_start {
-                        info!("waiting for backgound jobs barrier");
-                        background.clone().wait().await;
-                        info!("ready for backgound jobs barrier");
-                    }
-
-                    match DeleteTenantFlow::resume_from_attach(
-                        deletion,
-                        &tenant_clone,
-                        preload,
-                        tenants,
-                        init_order,
-                        &ctx,
-                    )
-                    .await
-                    {
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
-                        }
-                        Ok(()) => return Ok(()),
-                    }
-                }
-
-                match tenant_clone.attach(init_order, preload, &ctx).await {
-                    Ok(()) => {
-                        info!("attach finished, activating");
-                        tenant_clone.activate(broker_client, None, &ctx);
-                    }
-                    Err(e) => {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e));
-                    }
-                }
                 Ok(())
             }
             .instrument({
@@ -2362,7 +2340,6 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
-            delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
         }
     }
 

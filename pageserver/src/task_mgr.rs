@@ -291,6 +291,9 @@ pub enum TaskKind {
     // A request that comes in via the pageserver HTTP API.
     MgmtRequest,
 
+    // Tenant Manager servicing a channel that enables upcalls from Tenant
+    TenantManagerUpcall,
+
     DebugTool,
 
     #[cfg(test)]

@@ -410,7 +410,7 @@ impl DeleteTimelineFlow {
     }
 
     /// Shortcut to create Timeline in stopping state and spawn deletion task.
-    /// See corresponding parts of [`crate::tenant::delete::DeleteTenantFlow`]
+    /// See corresponding parts of [`crate::tenant::timeline::delete::DeleteTimelineFlow`]
     #[instrument(skip_all, fields(%timeline_id))]
     pub async fn resume_deletion(
         tenant: Arc<Tenant>,

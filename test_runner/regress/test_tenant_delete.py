@@ -116,8 +116,6 @@ FAILPOINTS = [
     "tenant-delete-before-create-local-mark",
     "tenant-delete-before-background",
     "tenant-delete-before-polling-ongoing-deletions",
-    "tenant-delete-before-cleanup-remaining-fs-traces",
-    "tenant-delete-before-remove-timelines-dir",
     "tenant-delete-before-remove-deleted-mark",
     "tenant-delete-before-remove-tenant-dir",
     # Some failpoints from timeline deletion
@@ -129,7 +127,6 @@ FAILPOINTS = [
 
 FAILPOINTS_BEFORE_BACKGROUND = [
     "timeline-delete-before-schedule",
-    "tenant-delete-before-shutdown",
     "tenant-delete-before-create-remote-mark",
     "tenant-delete-before-create-local-mark",
     "tenant-delete-before-background",
@@ -243,10 +240,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.restart()
 
-        if failpoint in (
-            "tenant-delete-before-shutdown",
-            "tenant-delete-before-create-remote-mark",
-        ):
+        if failpoint in ("tenant-delete-before-create-remote-mark",):
             wait_until_tenant_active(
                 ps_http, tenant_id=tenant_id, iterations=iterations, period=0.25
             )

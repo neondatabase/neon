@@ -26,7 +26,6 @@ use crate::control_plane_client::{
 use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
-use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::{
     create_tenant_files, AttachedTenantConf, ShutdownError, SpawnMode, Tenant, TenantState,
 };
@@ -37,7 +36,7 @@ use utils::fs_ext::PathExt;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
-use super::delete::DeleteTenantError;
+use super::delete::{delete_tenant_background, delete_tenant_foreground, DeleteTenantError};
 use super::timeline::delete::DeleteTimelineFlow;
 use super::TenantSharedResources;
 
@@ -104,13 +103,6 @@ impl TenantsMap {
             }
         }
     }
-
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<TenantSlot> {
-        match self {
-            TenantsMap::Initializing => None,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.remove(tenant_id),
-        }
-    }
 }
 
 /// This is "safe" in that that it won't leave behind a partially deleted directory
@@ -119,12 +111,14 @@ impl TenantsMap {
 ///
 /// This is pageserver-specific, as it relies on future processes after a crash to check
 /// for TEMP_FILE_SUFFIX when loading things.
-async fn safe_remove_tenant_dir_all(path: impl AsRef<Utf8Path>) -> std::io::Result<()> {
+pub(crate) async fn safe_remove_tenant_dir_all(path: impl AsRef<Utf8Path>) -> std::io::Result<()> {
     let tmp_path = safe_rename_tenant_dir(path).await?;
     fs::remove_dir_all(tmp_path).await
 }
 
-async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<Utf8PathBuf> {
+pub(crate) async fn safe_rename_tenant_dir(
+    path: impl AsRef<Utf8Path>,
+) -> std::io::Result<Utf8PathBuf> {
     let parent = path
         .as_ref()
         .parent()
@@ -370,6 +364,10 @@ pub async fn init_tenant_mgr(
     let tenant_generations =
         init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
 
+    // Tenants may send into this channel if they discover that they are in a partially
+    // deleted state.
+    let (deletion_upcall_tx, deletion_upcall_rx) = tokio::sync::mpsc::channel::<Arc<Tenant>>(128);
+
     // Construct `Tenant` objects and start them running
     for (tenant_id, location_conf) in tenant_configs {
         let tenant_dir_path = conf.tenant_path(&tenant_id);
@@ -441,8 +439,8 @@ pub async fn init_tenant_mgr(
             resources.clone(),
             AttachedTenantConf::try_from(location_conf)?,
             Some(init_order.clone()),
-            &TENANTS,
             SpawnMode::Normal,
+            Some(deletion_upcall_tx.clone()),
             &ctx,
         ) {
             Ok(tenant) => {
@@ -459,7 +457,39 @@ pub async fn init_tenant_mgr(
     let mut tenants_map = TENANTS.write().unwrap();
     assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
     *tenants_map = TenantsMap::Open(tenants);
+
+    spawn_handle_upcalls_task(conf, &resources.remote_storage, deletion_upcall_rx);
+
     Ok(())
+}
+
+/// For some edge cases, like resuming their own deletion on attach, tenants
+/// may submit mgr-level operations into a queue.
+fn spawn_handle_upcalls_task(
+    conf: &'static PageServerConf,
+    remote_storage: &Option<GenericRemoteStorage>,
+    mut deletion_upcall_rx: tokio::sync::mpsc::Receiver<Arc<Tenant>>,
+) {
+    let remote_storage = remote_storage.clone();
+    task_mgr::spawn(
+        task_mgr::BACKGROUND_RUNTIME.handle(),
+        TaskKind::TenantManagerUpcall,
+        None,
+        None,
+        "tenant manager upcall",
+        false,
+        async move {
+            while let Some(tenant) = deletion_upcall_rx.recv().await {
+                if let Err(e) =
+                    delete_tenant(conf, remote_storage.clone(), tenant.tenant_id, true).await
+                {
+                    error!(tenant_id = %tenant.get_tenant_id(), "Failed to complete deletion of tenant: {e}");
+                }
+            }
+
+            Ok(())
+        },
+    );
 }
 
 /// Wrapper for Tenant::spawn that checks invariants before running, and inserts
@@ -472,8 +502,8 @@ pub(crate) fn tenant_spawn(
     resources: TenantSharedResources,
     location_conf: AttachedTenantConf,
     init_order: Option<InitializationOrder>,
-    tenants: &'static std::sync::RwLock<TenantsMap>,
     mode: SpawnMode,
+    resume_deletion_upcall: Option<tokio::sync::mpsc::Sender<Arc<Tenant>>>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -504,8 +534,8 @@ pub(crate) fn tenant_spawn(
         resources,
         location_conf,
         init_order,
-        tenants,
         mode,
+        resume_deletion_upcall,
         ctx,
     ) {
         Ok(tenant) => tenant,
@@ -601,8 +631,6 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                 if let Err(e) = res {
                     match e {
                         ShutdownError::AlreadyStopping => {
-                            // TODO: to ensure this can _never_ happen, we need to get rid of
-                            // the horrible DeleteTenantFlow::should_resume_deletion
                             tracing::warn!(%tenant_id, "Tenant already stopping during shutdown");
                         }
                     }
@@ -684,8 +712,8 @@ pub(crate) async fn create_tenant(
         resources,
         AttachedTenantConf::try_from(location_conf)?,
         None,
-        &TENANTS,
         SpawnMode::Create,
+        None,
         ctx,
     )?;
     // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
@@ -849,8 +877,8 @@ pub(crate) async fn upsert_location(
                 },
                 AttachedTenantConf::try_from(new_location_config)?,
                 None,
-                &TENANTS,
                 SpawnMode::Normal,
+                None,
                 ctx,
             )?;
 
@@ -915,18 +943,11 @@ pub(crate) async fn delete_tenant(
     conf: &'static PageServerConf,
     remote_storage: Option<GenericRemoteStorage>,
     tenant_id: TenantId,
+    resume: bool,
 ) -> Result<(), DeleteTenantError> {
     // We acquire a SlotGuard during this function to protect against concurrent
-    // changes while the ::prepare phase of DeleteTenantFlow executes, but then
-    // have to return the Tenant to the map while the background deletion runs.
-    //
-    // TODO: refactor deletion to happen outside the lifetime of a Tenant.
-    // Currently, deletion requires a reference to the tenants map in order to
-    // keep the Tenant in the map until deletion is complete, and then remove
-    // it at the end.
-    //
-    // See https://github.com/neondatabase/neon/issues/5080
-
+    // operations, but also to ensure we do not permit re-creation of the same
+    // tenant ID until we are done with the deletion.
     let mut slot_guard = tenant_map_acquire_slot(&tenant_id, Some(true))?;
 
     // unwrap is safe because we used expect_exist=true when acquiring the slot
@@ -940,11 +961,51 @@ pub(crate) async fn delete_tenant(
         }
     };
 
-    let result = DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant).await;
+    // Do the foreground part of deletion: if it fails, set the tenant broken
+    // and leave it in the tenants map
+    if let Err(e) =
+        delete_tenant_foreground(conf, remote_storage.clone(), &tenant, resume, &slot_guard).await
+    {
+        tenant.set_broken(format!("{e:#}")).await;
+        slot_guard.upsert(TenantSlot::Attached(tenant))?;
+        return Err(e);
+    }
 
-    // Replace our InProgress marker with the Tenant in attached state, after the prepare phase of deletion is done
-    slot_guard.upsert(slot)?;
-    result
+    // Do the actual deletion in the background, while holding the SlotGuard
+    task_mgr::spawn(
+        task_mgr::BACKGROUND_RUNTIME.handle(),
+        TaskKind::MgmtRequest,
+        None, // This task runs without the tenant_id, as it should not be caught by Tenant::shutdown
+        None,
+        "delete_tenant_background",
+        false,
+        async move {
+            match delete_tenant_background(
+                conf,
+                remote_storage,
+                tenant_id,
+                &tenant,
+                resume,
+                &slot_guard,
+            )
+            .instrument(info_span!("delete_tenant_background", %tenant_id))
+            .await
+            {
+                Ok(()) => {
+                    info!(%tenant_id, "Tenant deletion complete");
+                }
+                Err(e) => {
+                    warn!(% tenant_id, "Tenant deletion failed: {e:#}");
+                    tenant.set_broken(format!("{e:#}")).await;
+                    slot_guard.upsert(TenantSlot::Attached(tenant))?;
+                }
+            }
+
+            Ok(())
+        },
+    );
+
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1093,8 +1154,8 @@ pub(crate) async fn load_tenant(
         resources,
         AttachedTenantConf::try_from(location_conf)?,
         None,
-        &TENANTS,
         SpawnMode::Normal,
+        None,
         ctx,
     )
     .with_context(|| format!("Failed to schedule tenant processing in path {tenant_path:?}"))?;
@@ -1172,15 +1233,17 @@ pub(crate) async fn attach_tenant(
     // TODO: tenant directory remains on disk if we bail out from here on.
     //       See https://github.com/neondatabase/neon/issues/4233
 
+    let (deletion_upcall_tx, deletion_upcall_rx) = tokio::sync::mpsc::channel::<Arc<Tenant>>(128);
+
     let attached_tenant = tenant_spawn(
         conf,
         tenant_id,
         &tenant_dir,
-        resources,
+        resources.clone(),
         AttachedTenantConf::try_from(location_conf)?,
         None,
-        &TENANTS,
         SpawnMode::Normal,
+        Some(deletion_upcall_tx),
         ctx,
     )?;
     // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
@@ -1192,6 +1255,8 @@ pub(crate) async fn attach_tenant(
             "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
         )));
     }
+
+    spawn_handle_upcalls_task(conf, &resources.remote_storage, deletion_upcall_rx);
 
     tenant_guard.upsert(TenantSlot::Attached(attached_tenant))?;
     Ok(())
@@ -1260,7 +1325,7 @@ pub enum TenantMapError {
 /// structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
 /// for this tenant, which acts as a marker for any operations targeting
 /// this tenant to retry later, or wait for the InProgress state to end.
-pub struct SlotGuard {
+pub(crate) struct SlotGuard {
     tenant_id: TenantId,
     old_value: Option<TenantSlot>,
     upserted: bool,
