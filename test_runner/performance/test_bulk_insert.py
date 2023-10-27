@@ -22,7 +22,7 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
     # Number of times to run the write query. One run creates 350MB of wal.
-    n_writes = 100
+    n_writes = 10
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:

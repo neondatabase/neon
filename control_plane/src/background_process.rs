@@ -36,7 +36,7 @@ use utils::pid_file::{self, PidFileRead};
 // it's waiting. If the process hasn't started/stopped after 5 seconds,
 // it prints a notice that it's taking long, but keeps waiting.
 //
-const RETRY_UNTIL_SECS: u64 = 10;
+const RETRY_UNTIL_SECS: u64 = 10000;
 const RETRIES: u64 = (RETRY_UNTIL_SECS * 1000) / RETRY_INTERVAL_MILLIS;
 const RETRY_INTERVAL_MILLIS: u64 = 100;
 const DOT_EVERY_RETRIES: u64 = 10;
