@@ -27,7 +27,7 @@
                 "name": "zenith \"new\"",
                 "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
 				"replication": true,
-				"bypassrls": true,
+				"bypassrls": true
                 "options": null
             },
             {
@@ -46,7 +46,7 @@
                 "name": "MyRole",
                 "encrypted_password": "5b1d16b78004bbd51fa06af9eda75972",
 				"replication": false,
-				"bypassrls": false,
+				"bypassrls": false
             }
         ],
         "databases": [
