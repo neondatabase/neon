@@ -23,7 +23,7 @@ pub struct ExpCounter {
 }
 
 impl ExpCounter {
-    pub fn new(max: u64) -> Self {
+    pub fn with_max(max: u64) -> Self {
         Self {
             max,
             base: 0,
@@ -103,28 +103,28 @@ mod test {
     #[test]
     fn to_64() {
         let max = 64;
-        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        let mut list = ExpCounter::with_max(max).collect::<Vec<_>>();
         assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
     }
 
     #[test]
     fn to_100() {
         let max = 100;
-        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        let mut list = ExpCounter::with_max(max).collect::<Vec<_>>();
         assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
     }
 
     #[test]
     fn to_127() {
         let max = 127;
-        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        let mut list = ExpCounter::with_max(max).collect::<Vec<_>>();
         assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
     }
 
     #[test]
     fn to_12345() {
         let max = 12345;
-        let mut list = ExpCounter::new(max).collect::<Vec<_>>();
+        let mut list = ExpCounter::with_max(max).collect::<Vec<_>>();
         assert_eq!(dupes_and_missing(&mut list, max), (0, 0));
     }
 }

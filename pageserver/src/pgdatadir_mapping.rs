@@ -23,6 +23,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
+use utils::exp_counter::ExpCounter;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 /// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
@@ -342,7 +343,7 @@ impl Timeline {
         let mut found_larger = false;
 
         // This is a search budget to not make the search too expensive
-        let mut budget = 1000u16;
+        let mut budget = 10_000u16;
         while low < high {
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             // this always holds: low <= mid_start < high
@@ -351,23 +352,30 @@ impl Timeline {
 
             let mut max = None;
 
-            // Linear search for an lsn that has a commit timestamp.
+            // Search for an lsn that has a commit timestamp.
+            // The search with `ExpCounter` will eventually try all LSNs
+            // in the range between mid_start and high, which is important
+            // when we set high to mid if we have exhausted all possibilities.
             // We don't do an explosive search as we want to prove that
             // every single lsn up to high is giving inconclusive results.
             // This can only be done by trying all lsns.
-            while max.is_none() && mid < high {
+            for offs in ExpCounter::with_max(high - mid_start) {
+                mid = offs + mid_start;
+
+                // Do the query for mid + 1 instead of mid so that we can make definite statements
+                // about low (low's invariant: always points to commit before or at search_timestamp).
+                max = self
+                    .get_max_timestamp_for_lsn(Lsn((mid + 1) * 8), ctx)
+                    .await?;
+                if max.is_some() {
+                    break;
+                }
                 // Do some limiting to make sure the query does not become too expensive.
                 if let Some(new_budget) = budget.checked_sub(1) {
                     budget = new_budget;
                 } else {
                     return Ok(LsnForTimestamp::NoData(min_lsn));
                 }
-                // Do the query for mid + 1 instead of mid so that we can make definite statements
-                // about low (low's invariant: always points to commit before or at search_timestamp).
-                max = self
-                    .get_max_timestamp_for_lsn(Lsn((mid + 1) * 8), ctx)
-                    .await?;
-                mid += 1;
             }
 
             if let Some(max) = max {
