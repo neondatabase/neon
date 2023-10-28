@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use hex::FromHex;
+use pageserver::tenant::Tenant;
 use reqwest::{header, Client, StatusCode, Url};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
@@ -118,13 +119,18 @@ fn from_nullable_id<'de, D>(deserializer: D) -> Result<TenantId, D::Error>
 where
     D: serde::de::Deserializer<'de>,
 {
-    let id_str = String::deserialize(deserializer)?;
-    if id_str.is_empty() {
-        // This is a bogus value, but for the purposes of the scrubber all that
-        // matters is that it doesn't collide with any real IDs.
-        Ok(TenantId::from([0u8; 16]))
+    if deserializer.is_human_readable() {
+        let id_str = String::deserialize(deserializer)?;
+        if id_str.is_empty() {
+            // This is a bogus value, but for the purposes of the scrubber all that
+            // matters is that it doesn't collide with any real IDs.
+            Ok(TenantId::from([0u8; 16]))
+        } else {
+            TenantId::from_hex(&id_str).map_err(|e| serde::de::Error::custom(format!("{e}")))
+        }
     } else {
-        TenantId::from_hex(&id_str).map_err(|e| serde::de::Error::custom(format!("{e}")))
+        let id_arr = <[u8; 16]>::deserialize(deserializer)?;
+        Ok(TenantId::from(id_arr))
     }
 }
 
