@@ -443,7 +443,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
+        decoded: &DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -749,7 +749,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
+        decoded: &DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
