@@ -405,7 +405,7 @@ impl BrokerService for Broker {
 
     async fn subscribe_discovery(
         &self,
-        request: Request<SubscribeDiscoveryRequest>,
+        _request: Request<SubscribeDiscoveryRequest>,
     ) -> Result<Response<Self::SubscribeDiscoveryStream>, Status> {
         todo!()
     }

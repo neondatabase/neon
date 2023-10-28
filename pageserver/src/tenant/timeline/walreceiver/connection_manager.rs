@@ -23,10 +23,11 @@ use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
-use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::{BrokerClientChannel, Code, Streaming};
+use storage_broker::proto::{DiscoveryRequest, SafekeeperTimelineInfo};
+use storage_broker::{BrokerClientChannel, Code};
+use storage_broker::Streaming;
 use tokio::select;
 use tracing::*;
 
@@ -198,6 +199,13 @@ pub(super) async fn connection_manager_loop_step(
                     },
                     None => {
                         debug!("No candidates to retry, waiting indefinitely for the broker events");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let tenant_timeline_id = Some(ProtoTenantTimelineId {
+                            tenant_id: id.tenant_id.as_ref().to_owned(),
+                            timeline_id: id.timeline_id.as_ref().to_owned(),
+                        });
+                        let request = DiscoveryRequest { tenant_timeline_id };
+                        let _ = broker_client.send_discovery(request).await;
                         None
                     }
                 }

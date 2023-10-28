@@ -82,6 +82,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 
 /// Subscribe and fetch all the interesting data from the broker.
 async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
+    let discovery_conf = conf.clone();
     let mut client = storage_broker::connect(conf.broker_endpoint, conf.broker_keepalive_interval)?;
 
     // TODO: subscribe only to local timelines instead of all
@@ -105,10 +106,22 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow!("missing tenant_timeline_id"))?;
         let ttid = parse_proto_ttid(proto_ttid)?;
+
         if let Ok(tli) = GlobalTimelines::get(ttid) {
             // Note that we also receive *our own* info. That's
             // important, as it is used as an indication of live
             // connection to the broker.
+
+            if msg.is_discovery {
+                let mut client = client.clone();
+                let sk_info = tli.get_safekeeper_info(&discovery_conf).await;
+                let stream = async_stream::stream! {
+                    yield sk_info;
+                };
+                tokio::spawn(async move {
+                    let _ = client.publish_safekeeper_info(stream).await;
+                });
+            }
 
             // note: there are blocking operations below, but it's considered fine for now
             let res = tli.record_safekeeper_info(msg).await;
