@@ -1086,9 +1086,8 @@ impl Timeline {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
 
-        let cancel = CancellationToken::new();
         let results = self
-            .evict_layer_batch(remote_client, &[local_layer], &cancel)
+            .evict_layer_batch(remote_client, &[local_layer])
             .await?;
         assert_eq!(results.len(), 1);
         let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
@@ -1103,7 +1102,6 @@ impl Timeline {
     pub(crate) async fn evict_layers(
         &self,
         layers_to_evict: &[Layer],
-        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         let _gate = self
             .gate
@@ -1115,8 +1113,7 @@ impl Timeline {
             .as_ref()
             .context("timeline must have RemoteTimelineClient")?;
 
-        self.evict_layer_batch(remote_client, layers_to_evict, cancel)
-            .await
+        self.evict_layer_batch(remote_client, layers_to_evict).await
     }
 
     /// Evict multiple layers at once, continuing through errors.
@@ -1137,7 +1134,6 @@ impl Timeline {
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Layer],
-        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
@@ -1185,7 +1181,7 @@ impl Timeline {
         };
 
         tokio::select! {
-            _ = cancel.cancelled() => {},
+            _ = self.cancel.cancelled() => {},
             _ = join => {}
         }
 
@@ -4404,25 +4400,10 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let cancel = tokio_util::sync::CancellationToken::new();
         let batch = [layer];
 
-        let first = {
-            let cancel = cancel.child_token();
-            async {
-                let cancel = cancel;
-                timeline
-                    .evict_layer_batch(&rc, &batch, &cancel)
-                    .await
-                    .unwrap()
-            }
-        };
-        let second = async {
-            timeline
-                .evict_layer_batch(&rc, &batch, &cancel)
-                .await
-                .unwrap()
-        };
+        let first = { async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() } };
+        let second = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
 
         let (first, second) = tokio::join!(first, second);
 
