@@ -61,3 +61,10 @@ tokio-stream.workspace = true
 utils.workspace = true
 
 workspace_hack.workspace = true
+
+[dev-dependencies]
+walproposer.workspace = true
+rand.workspace = true
+slowsim.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }

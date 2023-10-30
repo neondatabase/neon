@@ -70,7 +70,11 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn conn_async_read(&self, _sk: &mut Safekeeper) -> (&[u8], crate::bindings::PGAsyncReadResult) {
+    fn conn_async_read(
+        &self,
+        _sk: &mut Safekeeper,
+        _vec: &mut Vec<u8>,
+    ) -> crate::bindings::PGAsyncReadResult {
         todo!()
     }
 
@@ -151,6 +155,7 @@ pub trait ApiImpl {
     }
 }
 
+#[derive(Debug)]
 pub enum WaitResult {
     Latch,
     Timeout,
@@ -344,14 +349,13 @@ mod tests {
         fn conn_async_read(
             &self,
             _: &mut crate::bindings::Safekeeper,
-        ) -> (&[u8], crate::bindings::PGAsyncReadResult) {
+            vec: &mut Vec<u8>,
+        ) -> crate::bindings::PGAsyncReadResult {
             println!("conn_async_read");
             let reply = self.next_safekeeper_reply();
             println!("conn_async_read result: {:?}", reply);
-            (
-                reply,
-                crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS,
-            )
+            vec.extend_from_slice(reply);
+            crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS
         }
 
         fn conn_blocking_write(&self, _: &mut crate::bindings::Safekeeper, buf: &[u8]) -> bool {

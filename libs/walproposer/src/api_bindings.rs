@@ -134,19 +134,18 @@ extern "C" fn conn_async_read(
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        let (res, result) = (*api).conn_async_read(&mut (*sk));
 
         // This function has guarantee that returned buf will be valid until
         // the next call. So we can store a Vec in each Safekeeper and reuse
         // it on the next call.
         let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or_default();
-
         inbuf.clear();
-        inbuf.extend_from_slice(res);
+
+        let result = (*api).conn_async_read(&mut (*sk), &mut inbuf);
 
         // Put a Vec back to sk->inbuf and return data ptr.
+        *amount = inbuf.len() as i32;
         *buf = store_vec_u8(&mut (*sk).inbuf, inbuf);
-        *amount = res.len() as i32;
 
         result
     }
