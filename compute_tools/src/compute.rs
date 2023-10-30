@@ -710,8 +710,12 @@ impl ComputeNode {
     // `pg_ctl` for start / stop, so this just seems much easier to do as we already
     // have opened connection to Postgres and superuser access.
     #[instrument(skip_all)]
-    fn pg_reload_conf(&self, client: &mut Client) -> Result<()> {
-        client.simple_query("SELECT pg_reload_conf()")?;
+    fn pg_reload_conf(&self) -> Result<()> {
+        let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
+        Command::new(pgctl_bin)
+            .args(["reload", "-D", &self.pgdata])
+            .output()
+            .expect("cannot run pg_ctl process");
         Ok(())
     }
 
@@ -724,9 +728,9 @@ impl ComputeNode {
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
+        self.pg_reload_conf()?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
-        self.pg_reload_conf(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
         // Disable DDL forwarding because control plane already knows about these roles/databases.

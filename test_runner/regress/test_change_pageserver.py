@@ -68,4 +68,7 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     # is more like what happens in an unexpected  pageserver failure.
     env.pageservers[0].start()
     env.pageservers[1].stop()
-    endpoint.reconfigure(env.pageservers[0].id)
+    endpoint.reconfigure(pageserver_id=env.pageservers[0].id)
+
+    cur.execute("SELECT count(*) FROM foo")
+    assert cur.fetchone() == (100000,)
