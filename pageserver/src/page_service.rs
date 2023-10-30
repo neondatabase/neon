@@ -377,10 +377,6 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // NOTE: pagerequests handler exits when connection is closed,
-        //       so there is no need to reset the association
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
-
         // Make request tracer if needed
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
         let mut tracer = if tenant.get_trace_read_requests() {
@@ -520,7 +516,6 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
@@ -580,7 +575,6 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
         let last_record_lsn = timeline.get_last_record_lsn();
