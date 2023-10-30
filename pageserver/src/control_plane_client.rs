@@ -144,7 +144,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
         Ok(response
             .tenants
             .into_iter()
-            .map(|t| (t.id, Generation::new(t.generation)))
+            .map(|t| (t.id, Generation::new(t.gen)))
             .collect::<HashMap<_, _>>())
     }
 

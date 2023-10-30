@@ -409,7 +409,7 @@ impl TestBackend for TestConnectMechanism {
             }
             ConnectAction::WakeRetry => {
                 let err = console::errors::ApiError::Console {
-                    status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                    status: http::StatusCode::BAD_REQUEST,
                     text: "TEST".into(),
                 };
                 assert!(err.could_retry());

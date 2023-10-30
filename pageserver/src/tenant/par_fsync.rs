@@ -57,8 +57,7 @@ pub fn par_fsync(paths: &[Utf8PathBuf]) -> io::Result<()> {
     fsync_in_thread_pool(paths)
 }
 
-/// Parallel fsync asynchronously. If number of files are less than PARALLEL_PATH_THRESHOLD, fsync is done in the current
-/// execution thread. Otherwise, we will spawn_blocking and run it in tokio.
+/// Parallel fsync asynchronously.
 pub async fn par_fsync_async(paths: &[Utf8PathBuf]) -> io::Result<()> {
     const MAX_CONCURRENT_FSYNC: usize = 64;
     let mut next = paths.iter().peekable();

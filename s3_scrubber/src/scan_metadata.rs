@@ -1,17 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use crate::checks::{
     branch_cleanup_and_check_errors, list_timeline_blobs, BlobDataParseResult, S3TimelineBlobData,
     TimelineAnalysis,
 };
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_logging, init_s3_client, BucketConfig, RootTarget, S3Target, CLI_NAME};
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget};
 use aws_sdk_s3::Client;
-use aws_types::region::Region;
 use futures_util::{pin_mut, StreamExt, TryStreamExt};
 use histogram::Histogram;
-use pageserver::tenant::{IndexPart, TENANTS_SEGMENT_NAME};
+use pageserver::tenant::IndexPart;
 use utils::id::TenantTimelineId;
 
 pub struct MetadataSummary {
@@ -175,25 +173,7 @@ Timeline layer count: {6}
 
 /// Scan the pageserver metadata in an S3 bucket, reporting errors and statistics.
 pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<MetadataSummary> {
-    let file_name = format!(
-        "{}_scan_metadata_{}_{}.log",
-        CLI_NAME,
-        bucket_config.bucket,
-        chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
-    );
-
-    let _guard = init_logging(&file_name);
-
-    let s3_client = Arc::new(init_s3_client(
-        bucket_config.sso_account_id,
-        Region::new(bucket_config.region),
-    ));
-    let delimiter = "/";
-    let target = RootTarget::Pageserver(S3Target {
-        bucket_name: bucket_config.bucket.to_string(),
-        prefix_in_bucket: ["pageserver", "v1", TENANTS_SEGMENT_NAME, ""].join(delimiter),
-        delimiter: delimiter.to_string(),
-    });
+    let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver)?;
 
     let tenants = stream_tenants(&s3_client, &target);
 

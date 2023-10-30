@@ -1,12 +1,14 @@
 use futures::future::Either;
 use proxy::auth;
+use proxy::config::AuthenticationConfig;
 use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
-use proxy::metrics;
+use proxy::usage_metrics;
 
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
+use proxy::serverless;
 use std::pin::pin;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -14,9 +16,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
-use utils::{project_git_version, sentry_init::init_sentry};
+use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 use clap::{Parser, ValueEnum};
 
@@ -83,7 +86,9 @@ struct ProxyCliArgs {
     /// timeout for http connections
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     sql_over_http_timeout: tokio::time::Duration,
-
+    /// timeout for scram authentication protocol
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    scram_protocol_timeout: tokio::time::Duration,
     /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
@@ -96,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     info!("Version: {GIT_VERSION}");
-    ::metrics::set_build_info_metric(GIT_VERSION);
+    info!("Build_tag: {BUILD_TAG}");
+    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
@@ -126,14 +132,16 @@ async fn main() -> anyhow::Result<()> {
         cancellation_token.clone(),
     ));
 
-    if let Some(wss_address) = args.wss {
-        let wss_address: SocketAddr = wss_address.parse()?;
-        info!("Starting wss on {wss_address}");
-        let wss_listener = TcpListener::bind(wss_address).await?;
+    // TODO: rename the argument to something like serverless.
+    // It now covers more than just websockets, it also covers SQL over HTTP.
+    if let Some(serverless_address) = args.wss {
+        let serverless_address: SocketAddr = serverless_address.parse()?;
+        info!("Starting wss on {serverless_address}");
+        let serverless_listener = TcpListener::bind(serverless_address).await?;
 
-        client_tasks.spawn(http::websocket::task_main(
+        client_tasks.spawn(serverless::task_main(
             config,
-            wss_listener,
+            serverless_listener,
             cancellation_token.clone(),
         ));
     }
@@ -141,11 +149,11 @@ async fn main() -> anyhow::Result<()> {
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
-    maintenance_tasks.spawn(http::server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
-        maintenance_tasks.spawn(metrics::task_main(metrics_config));
+        maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
     let maintenance = loop {
@@ -231,12 +239,16 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let http_config = HttpConfig {
         sql_over_http_timeout: args.sql_over_http_timeout,
     };
+    let authentication_config = AuthenticationConfig {
+        scram_protocol_timeout: args.scram_protocol_timeout,
+    };
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
+        authentication_config,
         require_client_ip: args.require_client_ip,
     }));
 

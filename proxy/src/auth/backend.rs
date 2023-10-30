@@ -3,9 +3,12 @@ mod hacks;
 mod link;
 
 pub use link::LinkAuthError;
+use tokio_postgres::config::AuthKeys;
 
+use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
 use crate::{
     auth::{self, ClientCredentials},
+    config::AuthenticationConfig,
     console::{
         self,
         provider::{CachedNodeInfo, ConsoleReqExtra},
@@ -15,8 +18,9 @@ use crate::{
 };
 use futures::TryFutureExt;
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{error, info, warn};
 
 /// A product of successful authentication.
 pub struct AuthSuccess<T> {
@@ -116,21 +120,28 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
+pub enum ComputeCredentials {
+    Password(Vec<u8>),
+    AuthKeys(AuthKeys),
+}
+
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
-async fn auth_quirks(
+async fn auth_quirks_creds(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     allow_cleartext: bool,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
     if creds.project.is_none() {
         // Password will be checked by the compute node later.
-        return hacks::password_hack(api, extra, creds, client).await;
+        return hacks::password_hack(creds, client, latency_timer).await;
     }
 
     // Password hack should set the project name.
@@ -141,11 +152,63 @@ async fn auth_quirks(
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
         // Password will be checked by the compute node later.
-        return hacks::cleartext_hack(api, extra, creds, client).await;
+        return hacks::cleartext_hack(client, latency_timer).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
-    classic::authenticate(api, extra, creds, client).await
+    classic::authenticate(api, extra, creds, client, config, latency_timer).await
+}
+
+/// True to its name, this function encapsulates our current auth trade-offs.
+/// Here, we choose the appropriate auth flow based on circumstances.
+async fn auth_quirks(
+    api: &impl console::Api,
+    extra: &ConsoleReqExtra<'_>,
+    creds: &mut ClientCredentials<'_>,
+    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    allow_cleartext: bool,
+    config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
+) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    let auth_stuff = auth_quirks_creds(
+        api,
+        extra,
+        creds,
+        client,
+        allow_cleartext,
+        config,
+        latency_timer,
+    )
+    .await?;
+
+    let mut num_retries = 0;
+    let mut node = loop {
+        let wake_res = api.wake_compute(extra, creds).await;
+        match handle_try_wake(wake_res, num_retries) {
+            Err(e) => {
+                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
+                return Err(e.into());
+            }
+            Ok(ControlFlow::Continue(e)) => {
+                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
+            }
+            Ok(ControlFlow::Break(n)) => break n,
+        }
+
+        let wait_duration = retry_after(num_retries);
+        num_retries += 1;
+        tokio::time::sleep(wait_duration).await;
+    };
+
+    match auth_stuff.value {
+        ComputeCredentials::Password(password) => node.config.password(password),
+        ComputeCredentials::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
+    };
+
+    Ok(AuthSuccess {
+        reported_auth_ok: auth_stuff.reported_auth_ok,
+        value: node,
+    })
 }
 
 impl BackendType<'_, ClientCredentials<'_>> {
@@ -180,6 +243,8 @@ impl BackendType<'_, ClientCredentials<'_>> {
         extra: &ConsoleReqExtra<'_>,
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
         allow_cleartext: bool,
+        config: &'static AuthenticationConfig,
+        latency_timer: &mut LatencyTimer,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
 
@@ -192,7 +257,16 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 let api = api.as_ref();
-                auth_quirks(api, extra, creds, client, allow_cleartext).await?
+                auth_quirks(
+                    api,
+                    extra,
+                    creds,
+                    client,
+                    allow_cleartext,
+                    config,
+                    latency_timer,
+                )
+                .await?
             }
             Postgres(api, creds) => {
                 info!(
@@ -202,7 +276,16 @@ impl BackendType<'_, ClientCredentials<'_>> {
                 );
 
                 let api = api.as_ref();
-                auth_quirks(api, extra, creds, client, allow_cleartext).await?
+                auth_quirks(
+                    api,
+                    extra,
+                    creds,
+                    client,
+                    allow_cleartext,
+                    config,
+                    latency_timer,
+                )
+                .await?
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {

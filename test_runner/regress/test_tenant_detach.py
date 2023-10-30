@@ -66,10 +66,6 @@ def test_tenant_reattach(
     env.pageserver.allowed_errors.append(
         f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
     )
-    # Thats because of UnreliableWrapper's injected failures
-    env.pageserver.allowed_errors.append(
-        f".*failed to fetch tenant deletion mark at tenants/({tenant_id}|{env.initial_tenant})/deleted attempt 1.*"
-    )
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
@@ -116,7 +112,7 @@ def test_tenant_reattach(
             assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
         # Check that we had to retry the downloads
-        assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*list timelines.*failed, will retry.*")
         assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 
@@ -643,47 +639,6 @@ def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder
     ensure_test_data(data_id, data_secret, endpoint)
 
 
-# Tests that it's possible to `load` broken tenants:
-# * `ignore` a tenant
-# * removes its `metadata` file locally
-# * `load` the same tenant
-# * ensure that it's status is `Broken`
-def test_ignored_tenant_stays_broken_without_metadata(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-    env.endpoints.create_start("main")
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
-    env.pageserver.allowed_errors.append(
-        f".*Tenant {tenant_id} will not become active\\. Current state: (Broken|Stopping).*"
-    )
-
-    # ignore the tenant and remove its metadata
-    pageserver_http.tenant_ignore(tenant_id)
-    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
-    metadata_removed = False
-    for dir_entry in timeline_dir.iterdir():
-        if dir_entry.name == "metadata":
-            # Looks like a layer file. Remove it
-            dir_entry.unlink()
-            metadata_removed = True
-    assert metadata_removed, f"Failed to find metadata file in {timeline_dir}"
-
-    env.pageserver.allowed_errors.append(
-        f".*{tenant_id}.*: load failed.*: failed to load metadata.*"
-    )
-
-    # now, load it from the local files and expect it to be broken due to inability to load tenant files into memory
-    pageserver_http.tenant_load(tenant_id=tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 5)
-
-
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
 # Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
 def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
@@ -778,7 +733,8 @@ def test_ignore_while_attaching(
         tenants_before_ignore
     ), "Only ignored tenant should be missing"
 
-    # But can load it from local files, that will restore attach.
+    # Calling load will bring the tenant back online
+    pageserver_http.configure_failpoints([("attach-before-activate", "off")])
     pageserver_http.tenant_load(tenant_id)
 
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)

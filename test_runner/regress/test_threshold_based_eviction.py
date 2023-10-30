@@ -70,8 +70,7 @@ def test_threshold_based_eviction(
     }
 
     # restart because changing tenant config is not instant
-    env.pageserver.stop()
-    env.pageserver.start()
+    env.pageserver.restart()
 
     assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",

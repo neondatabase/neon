@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
 use utils::logging::{self, LogFormat};
+use utils::signals::{ShutdownSignals, Signal};
 
 use utils::{
     http::{
@@ -170,7 +171,7 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
             state.generation += 1;
             response.tenants.push(ReAttachResponseTenant {
                 id: *t,
-                generation: state.generation,
+                gen: state.generation,
             });
         }
     }
@@ -216,14 +217,14 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
         .tenants
         .entry(attach_req.tenant_id)
         .or_insert_with(|| TenantState {
-            pageserver: attach_req.pageserver_id,
+            pageserver: attach_req.node_id,
             generation: 0,
         });
 
-    if attach_req.pageserver_id.is_some() {
+    if attach_req.node_id.is_some() {
         tenant_state.generation += 1;
     }
-    tenant_state.pageserver = attach_req.pageserver_id;
+    tenant_state.pageserver = attach_req.node_id;
     let generation = tenant_state.generation;
 
     locked.save().await.map_err(ApiError::InternalServerError)?;
@@ -231,7 +232,7 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
     json_response(
         StatusCode::OK,
         AttachHookResponse {
-            gen: attach_req.pageserver_id.map(|_| generation),
+            gen: attach_req.node_id.map(|_| generation),
         },
     )
 }
@@ -241,7 +242,7 @@ fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, 
         .data(Arc::new(State::new(persistent_state)))
         .post("/re-attach", handle_re_attach)
         .post("/validate", handle_validate)
-        .post("/attach_hook", handle_attach_hook)
+        .post("/attach-hook", handle_attach_hook)
 }
 
 #[tokio::main]
@@ -268,7 +269,16 @@ async fn main() -> anyhow::Result<()> {
     let server = hyper::Server::from_tcp(http_listener)?.serve(service);
 
     tracing::info!("Serving on {0}", args.listen);
-    server.await?;
+
+    tokio::task::spawn(server);
+
+    ShutdownSignals::handle(|signal| match signal {
+        Signal::Interrupt | Signal::Terminate | Signal::Quit => {
+            tracing::info!("Got {}. Terminating", signal.name());
+            // We're just a test helper: no graceful shutdown.
+            std::process::exit(0);
+        }
+    })?;
 
     Ok(())
 }

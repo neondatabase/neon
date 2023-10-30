@@ -156,6 +156,7 @@ fn main() -> Result<()> {
                 let path = Path::new(sp);
                 let file = File::open(path)?;
                 spec = Some(serde_json::from_reader(file)?);
+                live_config_allowed = true;
             } else if let Some(id) = compute_id {
                 if let Some(cp_base) = control_plane_uri {
                     live_config_allowed = true;

@@ -3,7 +3,7 @@
 //
 use anyhow::{bail, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
@@ -42,7 +42,7 @@ use utils::auth::{JwtAuth, Scope};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version,
+    project_build_tag, project_git_version,
     sentry_init::init_sentry,
     tcp_listener,
 };
@@ -51,6 +51,7 @@ const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const ABOUT: &str = r#"
 A fleet of safekeepers is responsible for reliably storing WAL received from
@@ -105,6 +106,9 @@ struct Args {
     /// it during this period passed as a human readable duration.
     #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT, verbatim_doc_comment)]
     heartbeat_timeout: Duration,
+    /// Enable/disable peer recovery.
+    #[arg(long, default_value = "false", action=ArgAction::Set)]
+    peer_recovery: bool,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
     ///   {"max_concurrent_syncs" = 17, "max_sync_errors": 13, "bucket_name": "<BUCKETNAME>", "bucket_region":"<REGION>", "concurrency_limit": 119}
@@ -201,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
+    info!("buld_tag: {BUILD_TAG}");
 
     let args_workdir = &args.datadir;
     let workdir = args_workdir.canonicalize_utf8().with_context(|| {
@@ -265,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         broker_endpoint: args.broker_endpoint,
         broker_keepalive_interval: args.broker_keepalive_interval,
         heartbeat_timeout: args.heartbeat_timeout,
+        peer_recovery_enabled: args.peer_recovery,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
         wal_backup_enabled: !args.disable_wal_backup,
@@ -419,7 +425,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .map(|res| ("WAL remover".to_owned(), res));
     tasks_handles.push(Box::pin(wal_remover_handle));
 
-    set_build_info_metric(GIT_VERSION);
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // TODO: update tokio-stream, convert to real async Stream with
     // SignalStream, map it to obtain missing signal name, combine streams into

@@ -30,8 +30,8 @@ use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, RemotePath, RemoteStorage, S3Config,
-    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -299,13 +299,13 @@ impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    /// See the doc for `RemoteStorage::list_prefixes`
-    /// Note: it wont include empty "directories"
-    async fn list_prefixes(
+    async fn list(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
+        let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -314,13 +314,13 @@ impl RemoteStorage for S3Bucket {
             .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
                     p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
                 p
             });
-
-        let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
 
@@ -328,14 +328,19 @@ impl RemoteStorage for S3Bucket {
             let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
-            let fetch_response = self
+            let mut request = self
                 .client
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
-                .set_max_keys(self.max_keys_per_list_response)
+                .set_max_keys(self.max_keys_per_list_response);
+
+            if let ListingMode::WithDelimiter = mode {
+                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+            }
+
+            let response = request
                 .send()
                 .await
                 .context("Failed to list S3 prefixes")
@@ -345,71 +350,35 @@ impl RemoteStorage for S3Bucket {
 
             metrics::BUCKET_METRICS
                 .req_seconds
-                .observe_elapsed(kind, &fetch_response, started_at);
+                .observe_elapsed(kind, &response, started_at);
 
-            let fetch_response = fetch_response?;
+            let response = response?;
 
-            document_keys.extend(
-                fetch_response
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
+            let keys = response.contents().unwrap_or_default();
+            let empty = Vec::new();
+            let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
+
+            tracing::info!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+
+            for object in keys {
+                let object_path = object.key().expect("response does not contain a key");
+                let remote_path = self.s3_object_to_relative_path(object_path);
+                result.keys.push(remote_path);
+            }
+
+            result.prefixes.extend(
+                prefixes
+                    .iter()
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            continuation_token = match fetch_response.next_continuation_token {
+            continuation_token = match response.next_continuation_token {
                 Some(new_token) => Some(new_token),
                 None => break,
             };
         }
 
-        Ok(document_keys)
-    }
-
-    /// See the doc for `RemoteStorage::list_files`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let kind = RequestKind::List;
-
-        let folder_name = folder
-            .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone());
-
-        // AWS may need to break the response into several parts
-        let mut continuation_token = None;
-        let mut all_files = vec![];
-        loop {
-            let _guard = self.permit(kind).await;
-            let started_at = start_measuring_requests(kind);
-
-            let response = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(folder_name.clone())
-                .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response)
-                .send()
-                .await
-                .context("Failed to list files in S3 bucket");
-
-            let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &response, started_at);
-
-            let response = response?;
-
-            for object in response.contents().unwrap_or_default() {
-                let object_path = object.key().expect("response does not contain a key");
-                let remote_path = self.s3_object_to_relative_path(object_path);
-                all_files.push(remote_path);
-            }
-            match response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-        Ok(all_files)
+        Ok(result)
     }
 
     async fn upload(
