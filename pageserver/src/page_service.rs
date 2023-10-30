@@ -405,6 +405,11 @@ impl PageServerHandler {
             .get_timeline(timeline_id, true)
             .map_err(|e| anyhow::anyhow!(e))?;
 
+        // Avoid starting new requests if the timeline has already started shutting down,
+        // and block timeline shutdown until this request is complete, or drops out due
+        // to cancellation.
+        let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown);
+
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         self.flush_cancellable(pgb).await?;
