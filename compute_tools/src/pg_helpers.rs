@@ -201,8 +201,8 @@ pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
         .map(|row| Role {
             name: row.get("rolname"),
             encrypted_password: row.get("rolpassword"),
-            replication: row.get("rolreplication"),
-            bypassrls: row.get("rolbypassrls"),
+            replication: Some(row.get("rolreplication")),
+            bypassrls: Some(row.get("rolbypassrls")),
             options: None,
         })
         .collect();

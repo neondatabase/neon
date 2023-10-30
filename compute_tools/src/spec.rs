@@ -265,8 +265,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         let action = if let Some(r) = pg_role {
             if (r.encrypted_password.is_none() && role.encrypted_password.is_some())
                 || (r.encrypted_password.is_some() && role.encrypted_password.is_none())
-                || !r.bypassrls
-                || !r.replication
+                || !r.bypassrls.unwrap_or(false)
+                || !r.replication.unwrap_or(false)
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {

@@ -12,8 +12,6 @@
             {
                 "name": "cloud_admin",
                 "encrypted_password": "b093c0d3b281ba6da1eacc608620abd8",
-				"replication": false,
-				"bypassrls": false,
                 "options": null
             }
         ],
