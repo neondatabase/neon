@@ -404,6 +404,8 @@ pub enum CreateTimelineError {
     AncestorLsn(anyhow::Error),
     #[error("ancestor timeline is not active")]
     AncestorNotActive,
+    #[error("tenant shutting down")]
+    ShuttingDown,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -1532,6 +1534,11 @@ impl Tenant {
                 "Cannot create timelines on inactive tenant"
             )));
         }
+
+        let _gate = self
+            .gate
+            .enter()
+            .map_err(|_| CreateTimelineError::ShuttingDown)?;
 
         if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
             debug!("timeline {new_timeline_id} already exists");
