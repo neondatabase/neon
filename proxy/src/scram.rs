@@ -19,7 +19,6 @@ pub use exchange::Exchange;
 pub use key::ScramKey;
 pub use secret::ServerSecret;
 
-
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
