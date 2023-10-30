@@ -28,6 +28,7 @@ impl fmt::Debug for GetRoleSecret {
 pub struct WakeCompute {
     pub address: Box<str>,
     pub aux: MetricsAuxInfo,
+    pub allowed_ips: Option<Vec<Box<str>>>,
 }
 
 /// Async response which concludes the link auth flow.
@@ -184,6 +185,25 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_wake_compute() -> anyhow::Result<()> {
+        // Empty `allowed_ips` field.
+        let json = json!({
+            "address": "0.0.0.0",
+            "aux": dummy_aux(),
+        });
+        let _: WakeCompute = serde_json::from_str(&json.to_string())?;
+        // Empty `allowed_ips` field.
+        let json = json!({
+            "address": "0.0.0.0",
+            "aux": dummy_aux(),
+            "allowed_ips": ["8.8.8.8"],
+        });
+        let _: WakeCompute = serde_json::from_str(&json.to_string())?;
 
         Ok(())
     }
