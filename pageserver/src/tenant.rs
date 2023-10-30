@@ -26,6 +26,7 @@ use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
+use utils::gate::Gate;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -252,6 +253,14 @@ pub struct Tenant {
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
+
+    // Cancellation token fires when we have entered shutdown().  This is a parent of
+    // Timelines' cancellation token.
+    pub(crate) cancel: CancellationToken,
+
+    // Users of the Tenant such as the page service must take this Gate to avoid
+    // trying to use a Tenant which is shutting down.
+    pub(crate) gate: Gate,
 }
 
 pub(crate) enum WalRedoManager {
@@ -1808,6 +1817,7 @@ impl Tenant {
         freeze_and_flush: bool,
     ) -> Result<(), completion::Barrier> {
         span::debug_assert_current_span_has_tenant_id();
+
         // Set tenant (and its timlines) to Stoppping state.
         //
         // Since we can only transition into Stopping state after activation is complete,
@@ -1846,6 +1856,7 @@ impl Tenant {
                 js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
             })
         };
+        tracing::info!("Waiting for timelines...");
         while let Some(res) = js.join_next().await {
             match res {
                 Ok(()) => {}
@@ -1855,11 +1866,20 @@ impl Tenant {
             }
         }
 
+        // We cancel the Tenant's cancellation token _after_ the timelines have all shut down.  This permits
+        // them to continue to do work during their shutdown methods, e.g. flushing data.
+        tracing::info!("Cancelling CancellationToken");
+        self.cancel.cancel();
+
         // shutdown all tenant and timeline tasks: gc, compaction, page service
         // No new tasks will be started for this tenant because it's in `Stopping` state.
         //
         // this will additionally shutdown and await all timeline tasks.
+        tracing::info!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
+
+        // Wait for any in-flight operations to complete
+        self.gate.close().await;
 
         Ok(())
     }
@@ -2267,6 +2287,7 @@ impl Tenant {
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned().flatten(),
             state,
+            self.cancel.child_token(),
         );
 
         Ok(timeline)
@@ -2356,6 +2377,8 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
+            cancel: CancellationToken::default(),
+            gate: Gate::new(format!("Tenant<{tenant_id}>")),
         }
     }
 

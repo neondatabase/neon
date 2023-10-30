@@ -23,7 +23,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::id::TenantTimelineId;
+use utils::{gate::Gate, id::TenantTimelineId};
 
 use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -310,6 +310,13 @@ pub struct Timeline {
     /// Load or creation time information about the disk_consistent_lsn and when the loading
     /// happened. Used for consumption metrics.
     pub(crate) loaded_at: (Lsn, SystemTime),
+
+    /// Gate to prevent shutdown completing while I/O is still happening to this timeline's data
+    pub(crate) gate: Gate,
+
+    /// Cancellation token scoped to this timeline: anything doing long-running work relating
+    /// to the timeline should drop out when this token fires.
+    pub(crate) cancel: CancellationToken,
 }
 
 pub struct WalReceiverInfo {
@@ -884,7 +891,12 @@ impl Timeline {
     pub async fn shutdown(self: &Arc<Self>, freeze_and_flush: bool) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
+        // Signal any subscribers to our cancellation token to drop out
+        tracing::info!("Cancelling CancellationToken");
+        self.cancel.cancel();
+
         // prevent writes to the InMemoryLayer
+        tracing::info!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
             Some(self.tenant_id),
@@ -920,6 +932,12 @@ impl Timeline {
                 warn!("failed to await for frozen and flushed uploads: {e:#}");
             }
         }
+
+        tracing::info!("Waiting for tasks...");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
+
+        // Finally wait until any gate-holders are complete
+        self.gate.close().await;
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -1267,6 +1285,7 @@ impl Timeline {
         initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
         state: TimelineState,
+        cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
         let (state, _) = watch::channel(state);
@@ -1367,6 +1386,8 @@ impl Timeline {
 
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
+                cancel,
+                gate: Gate::new(format!("Timeline<{tenant_id}/{timeline_id}>")),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
