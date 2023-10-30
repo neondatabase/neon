@@ -424,6 +424,7 @@ fn helper_create_cached_node_info() -> CachedNodeInfo {
     let node = NodeInfo {
         config: compute::ConnCfg::new(),
         aux: Default::default(),
+        allowed_ips: Default::default(),
         allow_self_signed_compute: false,
     };
     CachedNodeInfo::new_uncached(node)

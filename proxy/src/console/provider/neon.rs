@@ -123,6 +123,7 @@ impl Api {
             let node = NodeInfo {
                 config,
                 aux: body.aux.into(),
+                allowed_ips: body.allowed_ips.unwrap_or_default(),
                 allow_self_signed_compute: false,
             };
 
@@ -163,6 +164,7 @@ impl super::Api for Api {
         }
 
         let node = self.do_wake_compute(extra, creds).await?;
+        info!("node: {:?}", node.allowed_ips);
         let (_, cached) = self.caches.node_info.insert(key.into(), node);
         info!(key = key, "created a cache entry for compute node info");
 

@@ -107,6 +107,7 @@ pub(super) async fn authenticate(
         value: NodeInfo {
             config,
             aux: db_info.aux.into(),
+            allowed_ips: vec![], // By default, all IPs are allowed.
             allow_self_signed_compute: false, // caller may override
         },
     })
