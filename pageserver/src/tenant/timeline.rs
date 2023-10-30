@@ -2051,6 +2051,10 @@ impl Timeline {
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
         'outer: loop {
+            if self.cancel.is_cancelled() {
+                return Err(PageReconstructError::Cancelled);
+            }
+
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
