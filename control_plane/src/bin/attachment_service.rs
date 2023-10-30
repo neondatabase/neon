@@ -12,6 +12,7 @@ use hyper::{Body, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
+use utils::http::endpoint::request_span;
 use utils::logging::{self, LogFormat};
 use utils::signals::{ShutdownSignals, Signal};
 
@@ -257,9 +258,9 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
 fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, ApiError> {
     endpoint::make_router()
         .data(Arc::new(State::new(persistent_state)))
-        .post("/re-attach", handle_re_attach)
-        .post("/validate", handle_validate)
-        .post("/attach_hook", handle_attach_hook)
+        .post("/re-attach", |r| request_span(r, handle_re_attach))
+        .post("/validate", |r| request_span(r, handle_validate))
+        .post("/attach_hook", |r| request_span(r, handle_attach_hook))
 }
 
 #[tokio::main]
