@@ -1066,6 +1066,11 @@ impl Timeline {
     /// Like [`evict_layer_batch`](Self::evict_layer_batch), but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        let _gate = self
+            .gate
+            .enter()
+            .map_err(|_| anyhow::anyhow!("Shutting down"))?;
+
         let Some(local_layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
@@ -1100,6 +1105,11 @@ impl Timeline {
         layers_to_evict: &[Layer],
         cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
+        let _gate = self
+            .gate
+            .enter()
+            .map_err(|_| anyhow::anyhow!("Shutting down"))?;
+
         let remote_client = self
             .remote_client
             .as_ref()
