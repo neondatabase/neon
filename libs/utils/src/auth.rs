@@ -102,7 +102,7 @@ impl JwtAuth {
             anyhow::bail!("path is neither a directory or a file")
         };
         if decoding_keys.is_empty() {
-            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests will be rejected.");
+            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected.");
         }
         Ok(Self::new(decoding_keys))
     }
