@@ -50,6 +50,9 @@ pub mod nonblock;
 pub mod sentry_init;
 pub mod signals;
 
+// Concurrency helper for clean shutdown
+pub mod gate;
+
 pub mod fs_ext;
 
 pub mod history_buffer;
