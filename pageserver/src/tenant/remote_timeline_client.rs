@@ -721,6 +721,17 @@ impl RemoteTimelineClient {
             })
             .collect();
 
+        #[cfg(feature = "testing")]
+        for (name, gen) in &with_generations {
+            if let Some(unexpected) = upload_queue.dangling_files.insert(name.to_owned(), *gen) {
+                if &unexpected == gen {
+                    tracing::error!("{name} was unlinked twice with same generation");
+                } else {
+                    tracing::error!("{name} was unlinked twice with different generations {gen:?} and {unexpected:?}");
+                }
+            }
+        }
+
         // after unlinking files from the upload_queue.latest_files we must always schedule an
         // index_part update, because that needs to be uploaded before we can actually delete the
         // files.
@@ -754,6 +765,19 @@ impl RemoteTimelineClient {
             info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
         }
 
+        #[cfg(feature = "testing")]
+        for (name, gen) in &with_generations {
+            match upload_queue.dangling_files.remove(name) {
+                Some(same) if &same == gen => { /* expected */ }
+                Some(other) => {
+                    tracing::error!("{name} was unlinked with {other:?} but deleted with {gen:?}");
+                }
+                None => {
+                    tracing::error!("{name} was unlinked but was not dangling");
+                }
+            }
+        }
+
         // schedule the actual deletions
         let op = UploadOp::Delete(Delete {
             layers: with_generations,
@@ -779,9 +803,7 @@ impl RemoteTimelineClient {
 
         let names = compacted_from.iter().map(|x| x.layer_desc().filename());
 
-        let with_generations =
-            self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
-        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
         self.launch_queued_tasks(upload_queue);
 
         Ok(())
@@ -1434,6 +1456,8 @@ impl RemoteTimelineClient {
                         num_inprogress_deletions: 0,
                         inprogress_tasks: HashMap::default(),
                         queued_operations: VecDeque::default(),
+                        #[cfg(feature = "testing")]
+                        dangling_files: HashMap::default(),
                     };
 
                     let upload_queue = std::mem::replace(

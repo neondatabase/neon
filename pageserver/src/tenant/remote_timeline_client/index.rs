@@ -98,7 +98,7 @@ impl IndexPart {
     const LATEST_VERSION: usize = 4;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &[usize] = &[1, 2, 3, 4];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 

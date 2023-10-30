@@ -16,9 +16,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
-use utils::{project_git_version, sentry_init::init_sentry};
+use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 use clap::{Parser, ValueEnum};
 
@@ -100,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     info!("Version: {GIT_VERSION}");
-    ::metrics::set_build_info_metric(GIT_VERSION);
+    info!("Build_tag: {BUILD_TAG}");
+    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
