@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     let mgmt_listener = TcpListener::bind(mgmt_address).await?;
 
     let proxy_address: SocketAddr = args.proxy.parse()?;
-    info!("Starting PROXY on {proxy_address}");
+    info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
