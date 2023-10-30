@@ -218,9 +218,27 @@ async fn page_service_conn_main(
     // no write timeout is used, because the kernel is assumed to error writes after some time.
     let mut socket = tokio_io_timeout::TimeoutReader::new(socket);
 
-    // timeout should be lower, but trying out multiple days for
-    // <https://github.com/neondatabase/neon/issues/4205>
-    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 60 * 24 * 3)));
+    let default_timeout_ms = 10 * 60 * 1000; // 10 minutes by default
+    let socket_timeout_ms = (|| {
+        fail::fail_point!("simulated-bad-compute-connection", |avg_timeout_ms| {
+            // Exponential distribution for simulating
+            // poor network conditions, expect about avg_timeout_ms to be around 15
+            // in tests
+            if let Some(avg_timeout_ms) = avg_timeout_ms {
+                let avg = avg_timeout_ms.parse::<i64>().unwrap() as f32;
+                let u = rand::random::<f32>();
+                ((1.0 - u).ln() / (-avg)) as u64
+            } else {
+                default_timeout_ms
+            }
+        });
+        default_timeout_ms
+    })();
+
+    // A timeout here does not mean the client died, it can happen if it's just idle for
+    // a while: we will tear down this PageServerHandler and instantiate a new one if/when
+    // they reconnect.
+    socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
     let socket = std::pin::pin!(socket);
 
     // XXX: pgbackend.run() should take the connection_ctx,
@@ -981,9 +999,13 @@ where
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
+        fail::fail_point!("simulated-bad-compute-connection", |_| {
+            info!("Hit failpoint for bad connection");
+            Err(QueryError::SimulatedConnectionError)
+        });
+
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
