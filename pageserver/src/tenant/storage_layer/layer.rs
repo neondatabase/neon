@@ -47,7 +47,16 @@ pub(crate) struct Layer(Arc<LayerInner>);
 
 impl std::fmt::Display for Layer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
+        if matches!(self.0.generation, Generation::Broken) {
+            write!(f, "{}-broken", self.layer_desc().short_id())
+        } else {
+            write!(
+                f,
+                "{}{}",
+                self.layer_desc().short_id(),
+                self.0.generation.get_suffix()
+            )
+        }
     }
 }
 
@@ -433,7 +442,7 @@ impl Drop for LayerInner {
             return;
         }
 
-        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id, layer = %self);
+        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();

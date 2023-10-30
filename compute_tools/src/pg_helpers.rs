@@ -193,11 +193,16 @@ impl Escaping for PgIdent {
 /// Build a list of existing Postgres roles
 pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
     let postgres_roles = xact
-        .query("SELECT rolname, rolpassword FROM pg_catalog.pg_authid", &[])?
+        .query(
+            "SELECT rolname, rolpassword, rolreplication, rolbypassrls FROM pg_catalog.pg_authid",
+            &[],
+        )?
         .iter()
         .map(|row| Role {
             name: row.get("rolname"),
             encrypted_password: row.get("rolpassword"),
+            replication: Some(row.get("rolreplication")),
+            bypassrls: Some(row.get("rolbypassrls")),
             options: None,
         })
         .collect();

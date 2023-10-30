@@ -188,7 +188,7 @@ impl PhysicalStorage {
     }
 
     /// Call fdatasync if config requires so.
-    async fn fdatasync_file(&mut self, file: &mut File) -> Result<()> {
+    async fn fdatasync_file(&mut self, file: &File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
                 .observe_flush_seconds(time_io_closure(file.sync_data()).await?);
@@ -197,7 +197,7 @@ impl PhysicalStorage {
     }
 
     /// Call fsync if config requires so.
-    async fn fsync_file(&mut self, file: &mut File) -> Result<()> {
+    async fn fsync_file(&mut self, file: &File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
                 .observe_flush_seconds(time_io_closure(file.sync_all()).await?);
@@ -231,7 +231,7 @@ impl PhysicalStorage {
                 .with_context(|| format!("Failed to open log file {:?}", &wal_file_path))?;
 
             write_zeroes(&mut file, self.wal_seg_size).await?;
-            self.fsync_file(&mut file).await?;
+            self.fsync_file(&file).await?;
             Ok((file, true))
         }
     }
@@ -255,7 +255,7 @@ impl PhysicalStorage {
 
         if xlogoff + buf.len() == self.wal_seg_size {
             // If we reached the end of a WAL segment, flush and close it.
-            self.fdatasync_file(&mut file).await?;
+            self.fdatasync_file(&file).await?;
 
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
@@ -277,8 +277,8 @@ impl PhysicalStorage {
     async fn write_exact(&mut self, pos: Lsn, mut buf: &[u8]) -> Result<()> {
         if self.write_lsn != pos {
             // need to flush the file before discarding it
-            if let Some(mut file) = self.file.take() {
-                self.fdatasync_file(&mut file).await?;
+            if let Some(file) = self.file.take() {
+                self.fdatasync_file(&file).await?;
             }
 
             self.write_lsn = pos;
@@ -367,8 +367,8 @@ impl Storage for PhysicalStorage {
             return Ok(());
         }
 
-        if let Some(mut unflushed_file) = self.file.take() {
-            self.fdatasync_file(&mut unflushed_file).await?;
+        if let Some(unflushed_file) = self.file.take() {
+            self.fdatasync_file(&unflushed_file).await?;
             self.file = Some(unflushed_file);
         } else {
             // We have unflushed data (write_lsn != flush_lsn), but no file.
@@ -410,8 +410,8 @@ impl Storage for PhysicalStorage {
         }
 
         // Close previously opened file, if any
-        if let Some(mut unflushed_file) = self.file.take() {
-            self.fdatasync_file(&mut unflushed_file).await?;
+        if let Some(unflushed_file) = self.file.take() {
+            self.fdatasync_file(&unflushed_file).await?;
         }
 
         let xlogoff = end_pos.segment_offset(self.wal_seg_size);
@@ -425,7 +425,7 @@ impl Storage for PhysicalStorage {
         // Fill end with zeroes
         file.seek(SeekFrom::Start(xlogoff as u64)).await?;
         write_zeroes(&mut file, self.wal_seg_size - xlogoff).await?;
-        self.fdatasync_file(&mut file).await?;
+        self.fdatasync_file(&file).await?;
 
         if !is_partial {
             // Make segment partial once again

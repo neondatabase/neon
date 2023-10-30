@@ -1859,19 +1859,17 @@ impl Timeline {
             "aborted because task_mgr shutdown requested".to_string()
         };
 
-        loop {
-            tokio::select! {
-                res = &mut calculation => { return res }
-                reason = timeline_state_cancellation => {
-                    debug!(reason = reason, "cancelling calculation");
-                    cancel.cancel();
-                    return calculation.await;
-                }
-                reason = taskmgr_shutdown_cancellation => {
-                    debug!(reason = reason, "cancelling calculation");
-                    cancel.cancel();
-                    return calculation.await;
-                }
+        tokio::select! {
+            res = &mut calculation => { res }
+            reason = timeline_state_cancellation => {
+                debug!(reason = reason, "cancelling calculation");
+                cancel.cancel();
+                calculation.await
+            }
+            reason = taskmgr_shutdown_cancellation => {
+                debug!(reason = reason, "cancelling calculation");
+                cancel.cancel();
+                calculation.await
             }
         }
     }

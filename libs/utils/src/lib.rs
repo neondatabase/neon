@@ -130,6 +130,21 @@ macro_rules! project_git_version {
     };
 }
 
+/// This is a shortcut to embed build tag into binaries and avoid copying the same build script to all packages
+#[macro_export]
+macro_rules! project_build_tag {
+    ($const_identifier:ident) => {
+        const $const_identifier: &::core::primitive::str = {
+            const __ARG: &[&::core::primitive::str; 2] = &match ::core::option_env!("BUILD_TAG") {
+                ::core::option::Option::Some(x) => ["build_tag-env:", x],
+                ::core::option::Option::None => ["build_tag:", ""],
+            };
+
+            $crate::__const_format::concatcp!(__ARG[0], __ARG[1])
+        };
+    };
+}
+
 /// Re-export for `project_git_version` macro
 #[doc(hidden)]
 pub use const_format as __const_format;

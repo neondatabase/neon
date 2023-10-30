@@ -1,178 +1,27 @@
-use std::collections::{hash_map, HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashSet;
 
 use anyhow::Context;
 use aws_sdk_s3::Client;
-use tokio::task::JoinSet;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, warn};
 
-use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectId};
-use crate::delete_batch_producer::DeleteProducerStats;
-use crate::{download_object_with_retries, list_objects_with_retries, RootTarget, MAX_RETRIES};
+use crate::cloud_admin_api::BranchData;
+use crate::{download_object_with_retries, list_objects_with_retries, RootTarget};
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
 use utils::id::TenantTimelineId;
 
-pub async fn validate_pageserver_active_tenant_and_timelines(
-    s3_client: Arc<Client>,
-    s3_root: RootTarget,
-    admin_client: Arc<CloudAdminApiClient>,
-    batch_producer_stats: DeleteProducerStats,
-) -> anyhow::Result<BranchCheckStats> {
-    let Some(timeline_stats) = batch_producer_stats.timeline_stats else {
-        info!("No tenant-only checks, exiting");
-        return Ok(BranchCheckStats::default());
-    };
-
-    let s3_active_projects = batch_producer_stats
-        .tenant_stats
-        .active_entries
-        .into_iter()
-        .map(|project| (project.id.clone(), project))
-        .collect::<HashMap<_, _>>();
-    info!("Validating {} active tenants", s3_active_projects.len());
-
-    let mut s3_active_branches_per_project = HashMap::<ProjectId, Vec<BranchData>>::new();
-    let mut s3_blob_data = HashMap::<TenantTimelineId, S3TimelineBlobData>::new();
-    for active_branch in timeline_stats.active_entries {
-        let active_project_id = active_branch.project_id.clone();
-        let active_branch_id = active_branch.id.clone();
-        let active_timeline_id = active_branch.timeline_id;
-
-        s3_active_branches_per_project
-            .entry(active_project_id.clone())
-            .or_default()
-            .push(active_branch);
-
-        let Some(active_project) = s3_active_projects.get(&active_project_id) else {
-            error!(
-                "Branch {:?} for project {:?} has no such project in the active projects",
-                active_branch_id, active_project_id
-            );
-            continue;
-        };
-
-        let id = TenantTimelineId::new(active_project.tenant, active_timeline_id);
-        s3_blob_data.insert(
-            id,
-            list_timeline_blobs(&s3_client, id, &s3_root)
-                .await
-                .with_context(|| format!("List timeline {id} blobs"))?,
-        );
-    }
-
-    let mut branch_checks = JoinSet::new();
-    for (_, s3_active_project) in s3_active_projects {
-        let project_id = &s3_active_project.id;
-        let tenant_id = s3_active_project.tenant;
-
-        let mut console_active_branches =
-            branches_for_project_with_retries(&admin_client, project_id)
-                .await
-                .with_context(|| {
-                    format!("Client API branches for project {project_id:?} retrieval")
-                })?
-                .into_iter()
-                .map(|branch| (branch.id.clone(), branch))
-                .collect::<HashMap<_, _>>();
-
-        let active_branches = s3_active_branches_per_project
-            .remove(project_id)
-            .unwrap_or_default();
-        info!(
-            "Spawning tasks for {} tenant {} active timelines",
-            active_branches.len(),
-            tenant_id
-        );
-        for s3_active_branch in active_branches {
-            let console_branch = console_active_branches.remove(&s3_active_branch.id);
-            let timeline_id = s3_active_branch.timeline_id;
-            let id = TenantTimelineId::new(tenant_id, timeline_id);
-            let s3_data = s3_blob_data.remove(&id);
-            let s3_root = s3_root.clone();
-            branch_checks.spawn(
-                async move {
-                    let check_errors = branch_cleanup_and_check_errors(
-                        &id,
-                        &s3_root,
-                        Some(&s3_active_branch),
-                        console_branch,
-                        s3_data,
-                    )
-                    .await;
-                    (id, check_errors)
-                }
-                .instrument(info_span!("check_timeline", id = %id)),
-            );
-        }
-    }
-
-    let mut total_stats = BranchCheckStats::default();
-    while let Some((id, analysis)) = branch_checks
-        .join_next()
-        .await
-        .transpose()
-        .context("branch check task join")?
-    {
-        total_stats.add(id, analysis.errors);
-    }
-    Ok(total_stats)
-}
-
-async fn branches_for_project_with_retries(
-    admin_client: &CloudAdminApiClient,
-    project_id: &ProjectId,
-) -> anyhow::Result<Vec<BranchData>> {
-    for _ in 0..MAX_RETRIES {
-        match admin_client.branches_for_project(project_id, false).await {
-            Ok(branches) => return Ok(branches),
-            Err(e) => {
-                error!("admin list branches for project {project_id:?} query failed: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-
-    anyhow::bail!("Failed to list branches for project {project_id:?} {MAX_RETRIES} times")
-}
-
-#[derive(Debug, Default)]
-pub struct BranchCheckStats {
-    pub timelines_with_errors: HashMap<TenantTimelineId, Vec<String>>,
-    pub normal_timelines: HashSet<TenantTimelineId>,
-}
-
-impl BranchCheckStats {
-    pub fn add(&mut self, id: TenantTimelineId, check_errors: Vec<String>) {
-        if check_errors.is_empty() {
-            if !self.normal_timelines.insert(id) {
-                panic!("Checking branch with timeline {id} more than once")
-            }
-        } else {
-            match self.timelines_with_errors.entry(id) {
-                hash_map::Entry::Occupied(_) => {
-                    panic!("Checking branch with timeline {id} more than once")
-                }
-                hash_map::Entry::Vacant(v) => {
-                    v.insert(check_errors);
-                }
-            }
-        }
-    }
-}
-
-pub struct TimelineAnalysis {
+pub(crate) struct TimelineAnalysis {
     /// Anomalies detected
-    pub errors: Vec<String>,
+    pub(crate) errors: Vec<String>,
 
     /// Healthy-but-noteworthy, like old-versioned structures that are readable but
     /// worth reporting for awareness that we must not remove that old version decoding
     /// yet.
-    pub warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 
-    /// Keys not referenced in metadata: candidates for removal
-    pub garbage_keys: Vec<String>,
+    /// Keys not referenced in metadata: candidates for removal, but NOT NECESSARILY: beware
+    /// of races between reading the metadata and reading the objects.
+    pub(crate) garbage_keys: Vec<String>,
 }
 
 impl TimelineAnalysis {
@@ -185,7 +34,7 @@ impl TimelineAnalysis {
     }
 }
 
-pub async fn branch_cleanup_and_check_errors(
+pub(crate) async fn branch_cleanup_and_check_errors(
     id: &TenantTimelineId,
     s3_root: &RootTarget,
     s3_active_branch: Option<&BranchData>,
@@ -320,13 +169,13 @@ pub async fn branch_cleanup_and_check_errors(
 }
 
 #[derive(Debug)]
-pub struct S3TimelineBlobData {
-    pub blob_data: BlobDataParseResult,
-    pub keys_to_remove: Vec<String>,
+pub(crate) struct S3TimelineBlobData {
+    pub(crate) blob_data: BlobDataParseResult,
+    pub(crate) keys_to_remove: Vec<String>,
 }
 
 #[derive(Debug)]
-pub enum BlobDataParseResult {
+pub(crate) enum BlobDataParseResult {
     Parsed {
         index_part: IndexPart,
         s3_layers: HashSet<LayerFileName>,
@@ -334,7 +183,7 @@ pub enum BlobDataParseResult {
     Incorrect(Vec<String>),
 }
 
-pub async fn list_timeline_blobs(
+pub(crate) async fn list_timeline_blobs(
     s3_client: &Client,
     id: TenantTimelineId,
     s3_root: &RootTarget,

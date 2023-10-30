@@ -242,6 +242,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
         }
     }
 
+    /// Cancellation safe as long as the underlying IO is cancellation safe.
     async fn shutdown(&mut self) -> io::Result<()> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.shutdown().await,
@@ -393,13 +394,23 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         shutdown_watcher: F,
     ) -> Result<(), QueryError>
     where
-        F: Fn() -> S,
+        F: Fn() -> S + Clone,
         S: Future,
     {
-        let ret = self.run_message_loop(handler, shutdown_watcher).await;
-        // socket might be already closed, e.g. if previously received error,
-        // so ignore result.
-        self.framed.shutdown().await.ok();
+        let ret = self
+            .run_message_loop(handler, shutdown_watcher.clone())
+            .await;
+
+        tokio::select! {
+            _ = shutdown_watcher() => {
+                // do nothing; we most likely got already stopped by shutdown and will log it next.
+            }
+            _ = self.framed.shutdown() => {
+                // socket might be already closed, e.g. if previously received error,
+                // so ignore result.
+            },
+        }
+
         match ret {
             Ok(()) => Ok(()),
             Err(QueryError::Shutdown) => {

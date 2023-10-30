@@ -296,8 +296,8 @@ impl GlobalTimelines {
         global_lock
             .timelines
             .values()
-            .cloned()
             .filter(|t| !t.is_cancelled())
+            .cloned()
             .collect()
     }
 

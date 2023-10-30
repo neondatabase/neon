@@ -106,17 +106,26 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 pub struct LatencyTimer {
-    start: Instant,
+    // time since the stopwatch was started
+    start: Option<Instant>,
+    // accumulated time on the stopwatch
+    accumulated: std::time::Duration,
+    // label data
     protocol: &'static str,
     cache_miss: bool,
     pool_miss: bool,
     outcome: &'static str,
 }
 
+pub struct LatencyTimerPause<'a> {
+    timer: &'a mut LatencyTimer,
+}
+
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
-            start: Instant::now(),
+            start: Some(Instant::now()),
+            accumulated: std::time::Duration::ZERO,
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -124,6 +133,13 @@ impl LatencyTimer {
             // assume failed unless otherwise specified
             outcome: "failed",
         }
+    }
+
+    pub fn pause(&mut self) -> LatencyTimerPause<'_> {
+        // stop the stopwatch and record the time that we have accumulated
+        let start = self.start.take().expect("latency timer should be started");
+        self.accumulated += start.elapsed();
+        LatencyTimerPause { timer: self }
     }
 
     pub fn cache_miss(&mut self) {
@@ -139,9 +155,17 @@ impl LatencyTimer {
     }
 }
 
+impl Drop for LatencyTimerPause<'_> {
+    fn drop(&mut self) {
+        // start the stopwatch again
+        self.timer.start = Some(Instant::now());
+    }
+}
+
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
-        let duration = self.start.elapsed().as_secs_f64();
+        let duration =
+            self.start.map(|start| start.elapsed()).unwrap_or_default() + self.accumulated;
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
@@ -149,7 +173,7 @@ impl Drop for LatencyTimer {
                 bool_to_str(self.pool_miss),
                 self.outcome,
             ])
-            .observe(duration)
+            .observe(duration.as_secs_f64())
     }
 }
 
@@ -171,11 +195,20 @@ static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+static NUM_BYTES_PROXIED_PER_CLIENT_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
         crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
+    )
+    .unwrap()
+});
+
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes",
+        "Number of bytes sent/received between all clients and backends.",
+        &["direction"],
     )
     .unwrap()
 });
@@ -764,24 +797,28 @@ pub async fn proxy_pass(
         branch_id: aux.branch_id.to_string(),
     });
 
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
+    let m_sent2 = NUM_BYTES_PROXIED_PER_CLIENT_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
+            m_sent2.inc_by(cnt as u64);
             usage.record_egress(cnt as u64);
         },
     );
 
-    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx"]);
+    let m_recv2 = NUM_BYTES_PROXIED_PER_CLIENT_COUNTER.with_label_values(&aux.traffic_labels("rx"));
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);
+            m_recv2.inc_by(cnt as u64);
         },
     );
 
@@ -849,10 +886,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             application_name: params.get("application_name"),
         };
 
-        let latency_timer = LatencyTimer::new(mode.protocol_label());
+        let mut latency_timer = LatencyTimer::new(mode.protocol_label());
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, mode.allow_cleartext(), config)
+            .authenticate(
+                &extra,
+                &mut stream,
+                mode.allow_cleartext(),
+                config,
+                &mut latency_timer,
+            )
             .await
         {
             Ok(auth_result) => auth_result,
