@@ -361,7 +361,7 @@ pub(crate) fn warn_when_period_overrun(
         // humantime does no significant digits clamping whereas Duration's debug is a bit more
         // intelligent. however it makes sense to keep the "configuration format" for period, even
         // though there's no way to output the actual config value.
-        warn!(
+        info!(
             ?elapsed,
             period = %humantime::format_duration(period),
             ?task,
