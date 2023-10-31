@@ -666,6 +666,18 @@ impl LayerInner {
                         return Err(DownloadError::DownloadRequired);
                     }
 
+                    // FIXME: in this case it will not work -- we might even do a short download:
+                    // T1: get_or_maybe_download
+                    // T2: get_or_maybe_download -- locked behind semaphore
+                    // T1: spawn_download_and_wait spawns T3
+                    // T3: do some downloading
+                    // T1: gets cancelled
+                    // T2: acquire semaphore
+                    // T2: spawn_download_and_wait spawns T4
+                    // T3 and T4 are misbehaving because they download over the same tempfile
+                    //
+                    // this probably needs some API using which we can move the semaphore permit to
+                    // a spawned task?
                     self.spawn_download_and_wait(timeline).await?;
                 } else {
                     // the file is present locally, probably by a previous but cancelled call to
@@ -758,6 +770,12 @@ impl LayerInner {
         let (tx, rx) = tokio::sync::oneshot::channel();
         // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
         // block tenant::mgr::remove_tenant_from_memory.
+        //
+        // also the localfs remote storage is not cancellation safe, and the download_layer_file
+        // uses a colliding file name for two or more concurrent invocations.
+        //
+        // FIXME: this needs to carry the initialization semaphore from heavier_once_cell::OnceCell
+        // into the task, and then out of it to avoid two concurrent downloads.
 
         let this: Arc<Self> = self.clone();
         crate::task_mgr::spawn(
