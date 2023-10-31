@@ -863,6 +863,8 @@ impl LayerInner {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
+        // this is not accurate: we could have the file locally but there was a cancellation
+        // and now we are not in sync, or we are currently downloading it.
         let remote = self.inner.get().is_none();
 
         let access_stats = self.access_stats.as_api_model(reset);
