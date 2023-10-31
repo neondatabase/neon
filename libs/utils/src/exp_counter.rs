@@ -11,6 +11,15 @@
 /// This iterator is well suited for finding a pivot in algorithms that
 /// require centered pivots: its output is heavily biased towards starting
 /// with small numbers.
+///
+/// If the specified maximum is close to an exponent
+/// of two we will quickly reach that exponent and therefore we will
+/// quickly close in on the maximum, contrary to the claim of the counter
+/// providing centered pivots. For most algorithms, this is not a problem
+/// though as long as this is only a limited number of times, which it does,
+/// as the next maximum will be an exponent of two, for which the next
+/// smaller one is precisely its half of. So we will be able to perform a
+/// binary search in all instances.
 pub struct ExpCounter {
     /// The (exclusive) upper limit of our search
     max: u64,
@@ -99,6 +108,17 @@ mod test {
             }
         }
         (dupes, missing)
+    }
+
+    #[test]
+    fn to_40() {
+        let max = 40;
+        let list = ExpCounter::with_max(max).collect::<Vec<_>>();
+        let expected = [
+            0, 1, 2, 4, 8, 16, 32, 3, 5, 9, 17, 33, 6, 10, 18, 34, 7, 11, 19, 35, 12, 20, 36, 13,
+            21, 37, 14, 22, 38, 15, 23, 39, 24, 25, 26, 27, 28, 29, 30, 31,
+        ];
+        assert_eq!(list, expected);
     }
 
     #[test]
