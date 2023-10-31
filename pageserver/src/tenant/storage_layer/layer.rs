@@ -792,6 +792,8 @@ impl LayerInner {
                     .as_ref()
                     .expect("checked above with have_remote_client");
 
+                // FIXME: restore logging
+
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
