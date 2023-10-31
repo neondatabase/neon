@@ -357,17 +357,21 @@ impl ResidentOrWantedEvicted {
 
     /// When eviction is first requested, drop down to holding a [`Weak`].
     ///
-    /// Returns `true` if this was the first time eviction was requested.
-    fn downgrade(&mut self) -> bool {
+    /// Returns `Some` if this was the first time eviction was requested. Care should be taken to
+    /// drop the possibly last strong reference outside of the mutex of
+    /// heavier_once_cell::OnceCell.
+    fn downgrade(&mut self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => {
                 let weak = Arc::downgrade(strong);
-                *self = ResidentOrWantedEvicted::WantedEvicted(weak, strong.version);
-                // returning the weak is not useful, because the drop could had already ran with
-                // the replacement above, and that will take care of cleaning the Option we are in
-                true
+                let mut temp = ResidentOrWantedEvicted::WantedEvicted(weak, strong.version);
+                std::mem::swap(self, &mut temp);
+                match temp {
+                    ResidentOrWantedEvicted::Resident(strong) => Some(strong),
+                    ResidentOrWantedEvicted::WantedEvicted(..) => unreachable!("just swapped"),
+                }
             }
-            ResidentOrWantedEvicted::WantedEvicted(..) => false,
+            ResidentOrWantedEvicted::WantedEvicted(..) => None,
         }
     }
 }
@@ -569,15 +573,19 @@ impl LayerInner {
 
         let mut rx = self.status.subscribe();
 
-        let was_first = match self.inner.get() {
-            Some(mut either) => {
-                self.wanted_evicted.store(true, Ordering::Relaxed);
-                either.downgrade()
+        let strong = {
+            match self.inner.get() {
+                Some(mut either) => {
+                    self.wanted_evicted.store(true, Ordering::Relaxed);
+                    either.downgrade()
+                }
+                None => return Err(EvictionError::NotFound),
             }
-            None => return Err(EvictionError::NotFound),
         };
 
-        if was_first {
+        if strong.is_some() {
+            // drop the DownloadedLayer outside of the holding the guard
+            drop(strong);
             LAYER_IMPL_METRICS.inc_started_evictions();
         }
 
