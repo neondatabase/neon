@@ -95,6 +95,8 @@ impl<T> OnceCell<T> {
     }
 
     /// Returns a guard to an existing initialized value, if any.
+    ///
+    /// FIXME: this should be called "get_mut"
     pub fn get(&self) -> Option<Guard<'_, T>> {
         let guard = self.inner.lock().unwrap();
         if guard.value.is_some() {
