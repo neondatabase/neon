@@ -587,6 +587,7 @@ impl LayerInner {
                 //
                 // use however late (compared to the initial expressing of wanted) as the
                 // "outcome" now
+                LAYER_IMPL_METRICS.inc_broadcast_lagged();
                 match self.inner.get() {
                     Some(_) => Err(EvictionError::Downloaded),
                     None => Ok(()),
@@ -1443,6 +1444,13 @@ impl LayerImplMetrics {
     fn inc_permanent_loading_failures(&self) {
         self.rare_counters
             .get_metric_with_label_values(&["permanent_loading_failure"])
+            .unwrap()
+            .inc();
+    }
+
+    fn inc_broadcast_lagged(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["broadcast_lagged"])
             .unwrap()
             .inc();
     }
