@@ -21,6 +21,7 @@ use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Row;
 use tokio_postgres::Transaction;
 use tracing::error;
+use tracing::info;
 use tracing::instrument;
 use url::Url;
 use utils::http::error::ApiError;
@@ -174,11 +175,23 @@ fn get_conn_info(
         }
     }
 
+    let pairs = connection_url.query_pairs();
+
+    let mut options = Option::None;
+
+    for (key, value) in pairs {
+        if key == "options" {
+            options = Some(value.to_string());
+            break;
+        }
+    }
+
     Ok(ConnInfo {
         username: username.to_owned(),
         dbname: dbname.to_owned(),
         hostname: hostname.to_owned(),
         password: password.to_owned(),
+        options,
     })
 }
 
