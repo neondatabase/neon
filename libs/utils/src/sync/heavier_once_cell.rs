@@ -262,10 +262,7 @@ mod tests {
             let cell = cell.clone();
             let deinitialization_started = deinitialization_started.clone();
             async move {
-                let (answer, _permit) = cell
-                    .get()
-                    .expect("initialized to value")
-                    .take_and_deinit();
+                let (answer, _permit) = cell.get().expect("initialized to value").take_and_deinit();
                 assert_eq!(answer, initial);
 
                 deinitialization_started.wait().await;
