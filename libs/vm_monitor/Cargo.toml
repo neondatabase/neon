@@ -19,7 +19,7 @@ inotify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
