@@ -1288,6 +1288,8 @@ XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 	int			startoff;
 	int			byteswritten;
 
+	XLogUpdateWalBuffers(buf, recptr, nbytes);
+
 	while (nbytes > 0)
 	{
 		int			segbytes;
