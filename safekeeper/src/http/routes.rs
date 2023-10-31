@@ -13,7 +13,6 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use utils::bin_ser::BeSer;
 use utils::http::endpoint::request_span;
 
 use crate::receive_wal::WalReceiverState;
@@ -478,8 +477,11 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     tokio::task::spawn_blocking(move || {
         let _span = span.entered();
 
+        let mut bytes: Vec<u8> = Vec::new();
+        serde_json::to_writer(&mut bytes, &resp).expect("failed to convert to bytes");
+
         let res = writer
-            .write_all(&resp.ser().unwrap())
+            .write_all(&bytes)
             .and_then(|_| writer.flush());
 
         match res {
