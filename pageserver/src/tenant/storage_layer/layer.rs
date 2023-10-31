@@ -692,12 +692,10 @@ impl LayerInner {
 
                     return Ok(strong);
                 } else {
-                    // path to here:
-                    // 1. the on_downloaded_layer_drop is stuck on spawn_blocking queue
-                    // 2. is there something else?
+                    // path to here: the evict_blocking is stuck on spawn_blocking queue.
                     //
                     // reset the contents, deactivating the eviction and causing a
-                    // EvictionCancelled::LostToDownload.
+                    // EvictionCancelled::LostToDownload or EvictionCancelled::VersionCheckFailed.
                     locked.take_and_deinit()
                 }
             };
@@ -707,7 +705,7 @@ impl LayerInner {
 
             assert!(
                 matches!(weak, ResidentOrWantedEvicted::WantedEvicted(..)),
-                "unexpected {weak:?}, ResidentOrWantedEvicted::get has a bug"
+                "unexpected {weak:?}, ResidentOrWantedEvicted::get_and_upgrade has a bug"
             );
 
             permit = Some(_permit);
