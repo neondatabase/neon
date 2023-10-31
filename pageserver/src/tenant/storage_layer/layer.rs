@@ -611,6 +611,7 @@ impl LayerInner {
 
     /// Should be cancellation safe, but cancellation is troublesome together with the spawned
     /// download.
+    #[tracing::instrument(skip_all, fields(layer=%self))]
     async fn get_or_maybe_download(
         self: &Arc<Self>,
         allow_download: bool,
@@ -654,8 +655,6 @@ impl LayerInner {
                         return Err(DownloadError::NoRemoteStorage);
                     }
 
-                    tracing::debug!(%reason, "downloading layer");
-
                     if let Some(ctx) = ctx {
                         self.check_expected_download(ctx)?;
                     }
@@ -665,6 +664,8 @@ impl LayerInner {
                         // internal once related state ...
                         return Err(DownloadError::DownloadRequired);
                     }
+
+                    tracing::info!(%reason, "downloading on-demand");
 
                     self.spawn_download_and_wait(timeline, permit).await?
                 } else {
@@ -747,7 +748,7 @@ impl LayerInner {
             Download => Ok(()),
             Warn | Error => {
                 tracing::warn!(
-                    "unexpectedly on-demand downloading remote layer {self} for task kind {:?}",
+                    "unexpectedly on-demand downloading for task kind {:?}",
                     ctx.task_kind()
                 );
                 crate::metrics::UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
@@ -779,6 +780,7 @@ impl LayerInner {
         // block tenant::mgr::remove_tenant_from_memory.
 
         let this: Arc<Self> = self.clone();
+
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
@@ -787,12 +789,11 @@ impl LayerInner {
             &task_name,
             false,
             async move {
+
                 let client = timeline
                     .remote_client
                     .as_ref()
                     .expect("checked above with have_remote_client");
-
-                // FIXME: restore logging
 
                 let result = client.download_layer_file(
                     &this.desc.filename(),
@@ -850,6 +851,7 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
+                tracing::info!("on-demand downloaded successfully");
 
                 Ok(permit)
             }
