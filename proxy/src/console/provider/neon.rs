@@ -99,6 +99,7 @@ impl Api {
                 .query(&[
                     ("application_name", extra.application_name),
                     ("project", Some(project)),
+                    ("options", extra.options),
                 ])
                 .build()?;
 

@@ -41,6 +41,7 @@ pub struct ConnInfo {
     pub dbname: String,
     pub hostname: String,
     pub password: String,
+    pub options: Option<String>,
 }
 
 impl ConnInfo {
@@ -421,6 +422,7 @@ async fn connect_to_compute(
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
         application_name: Some(APP_NAME),
+        options: conn_info.options.as_deref(),
     };
 
     let node_info = creds

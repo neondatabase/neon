@@ -273,12 +273,19 @@ impl ConnCfg {
     }
 }
 
+fn parse_neon_param(bytes: &str) -> Option<&str> {
+    bytes
+        .strip_prefix("lsn=")
+        .or_else(|| bytes.strip_prefix("timestamp="))
+        .or_else(|| bytes.strip_prefix("endpoint_type="))
+}
+
 /// Retrieve `options` from a startup message, dropping all proxy-secific flags.
 fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     #[allow(unstable_name_collisions)]
     let options: String = params
         .options_raw()?
-        .filter(|opt| parse_endpoint_param(opt).is_none())
+        .filter(|opt| parse_endpoint_param(opt).is_none() && parse_neon_param(opt).is_none())
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 

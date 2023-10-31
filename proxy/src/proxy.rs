@@ -884,6 +884,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
+            options: params.get("options"),
         };
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
