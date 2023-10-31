@@ -569,10 +569,11 @@ impl LayerInner {
 
         let mut rx = self.status.subscribe();
 
-        self.wanted_evicted.store(true, Ordering::Relaxed);
-
         let was_first = match self.inner.get() {
-            Some(mut either) => either.downgrade(),
+            Some(mut either) => {
+                self.wanted_evicted.store(true, Ordering::Relaxed);
+                either.downgrade()
+            }
             None => return Err(EvictionError::NotFound),
         };
 
