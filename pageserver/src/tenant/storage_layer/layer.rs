@@ -618,7 +618,7 @@ impl LayerInner {
         allow_download: bool,
         ctx: Option<&RequestContext>,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
-        let mut permit = None;
+        let mut init_permit = None;
 
         loop {
             let download = move || async move {
@@ -699,9 +699,18 @@ impl LayerInner {
                 Ok(ResidentOrWantedEvicted::Resident(res))
             };
 
-            let (weak, _permit) = {
-                // should we be able to give the permit to the `get_or_init`? would make sense.
-                drop(permit.take());
+            if let Some(init_permit) = init_permit.take() {
+                // use the already held initialization permit because it is impossible to hit the
+                // below paths anymore essentially limiting the max loop iterations to 2.
+                let value = download().await?;
+                let guard = self.inner.set(value, init_permit);
+                let strong = guard
+                    .get()
+                    .expect("init creates strong reference, we held the init permit");
+                return Ok(strong);
+            }
+
+            let (weak, permit) = {
                 let mut locked = self.inner.get_or_init(download).await?;
 
                 if let Some(strong) = locked.get_and_upgrade() {
@@ -728,7 +737,7 @@ impl LayerInner {
                 "unexpected {weak:?}, ResidentOrWantedEvicted::get_and_upgrade has a bug"
             );
 
-            permit = Some(_permit);
+            init_permit = Some(permit);
 
             LAYER_IMPL_METRICS.inc_retried_get_or_maybe_download();
         }
