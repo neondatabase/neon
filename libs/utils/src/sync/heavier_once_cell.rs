@@ -60,8 +60,8 @@ impl<T> OnceCell<T> {
     /// Initialization is panic-safe and cancellation-safe.
     pub async fn get_or_init<F, Fut, E>(&self, factory: F) -> Result<Guard<'_, T>, E>
     where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<T, E>>,
+        F: FnOnce(InitPermit) -> Fut,
+        Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
         let sem = {
             let guard = self.inner.lock().unwrap();
@@ -72,20 +72,24 @@ impl<T> OnceCell<T> {
         };
 
         let permit = sem.acquire_owned().await;
-        if permit.is_err() {
-            let guard = self.inner.lock().unwrap();
-            assert!(
-                guard.value.is_some(),
-                "semaphore got closed, must be initialized"
-            );
-            return Ok(Guard(guard));
-        } else {
-            // now we try
-            let value = factory().await?;
 
-            let guard = self.inner.lock().unwrap();
+        match permit {
+            Ok(permit) => {
+                let permit = InitPermit(permit);
+                let (value, _permit) = factory(permit).await?;
 
-            Ok(Self::set0(value, guard))
+                let guard = self.inner.lock().unwrap();
+
+                Ok(Self::set0(value, guard))
+            }
+            Err(_closed) => {
+                let guard = self.inner.lock().unwrap();
+                assert!(
+                    guard.value.is_some(),
+                    "semaphore got closed, must be initialized"
+                );
+                return Ok(Guard(guard));
+            }
         }
     }
 
@@ -211,11 +215,11 @@ mod tests {
                     barrier.wait().await;
                     let won = {
                         let g = cell
-                            .get_or_init(|| {
+                            .get_or_init(|permit| {
                                 counters.factory_got_to_run.fetch_add(1, Ordering::Relaxed);
                                 async {
                                     counters.future_polled.fetch_add(1, Ordering::Relaxed);
-                                    Ok::<_, Infallible>(i)
+                                    Ok::<_, Infallible>((i, permit))
                                 }
                             })
                             .await
@@ -258,7 +262,10 @@ mod tests {
             let cell = cell.clone();
             let deinitialization_started = deinitialization_started.clone();
             async move {
-                let (answer, _permit) = cell.get().expect("initialized to value").take_and_deinit();
+                let (answer, _permit) = cell
+                    .get()
+                    .expect("initialized to value")
+                    .take_and_deinit();
                 assert_eq!(answer, initial);
 
                 deinitialization_started.wait().await;
@@ -269,7 +276,7 @@ mod tests {
         deinitialization_started.wait().await;
 
         let started_at = tokio::time::Instant::now();
-        cell.get_or_init(|| async { Ok::<_, Infallible>(reinit) })
+        cell.get_or_init(|permit| async { Ok::<_, Infallible>((reinit, permit)) })
             .await
             .unwrap();
 
@@ -284,18 +291,32 @@ mod tests {
         assert_eq!(*cell.get().unwrap(), reinit);
     }
 
+    #[test]
+    fn reinit_with_deinit_permit() {
+        let cell = Arc::new(OnceCell::new(42));
+
+        let (mol, permit) = cell.get().unwrap().take_and_deinit();
+        cell.set(5, permit);
+        assert_eq!(*cell.get().unwrap(), 5);
+
+        let (five, permit) = cell.get().unwrap().take_and_deinit();
+        assert_eq!(5, five);
+        cell.set(mol, permit);
+        assert_eq!(*cell.get().unwrap(), 42);
+    }
+
     #[tokio::test]
     async fn initialization_attemptable_until_ok() {
         let cell = OnceCell::default();
 
         for _ in 0..10 {
-            cell.get_or_init(|| async { Err("whatever error") })
+            cell.get_or_init(|_permit| async { Err("whatever error") })
                 .await
                 .unwrap_err();
         }
 
         let g = cell
-            .get_or_init(|| async { Ok::<_, Infallible>("finally success") })
+            .get_or_init(|permit| async { Ok::<_, Infallible>(("finally success", permit)) })
             .await
             .unwrap();
         assert_eq!(*g, "finally success");
@@ -307,11 +328,11 @@ mod tests {
 
         let barrier = tokio::sync::Barrier::new(2);
 
-        let initializer = cell.get_or_init(|| async {
+        let initializer = cell.get_or_init(|permit| async {
             barrier.wait().await;
             futures::future::pending::<()>().await;
 
-            Ok::<_, Infallible>("never reached")
+            Ok::<_, Infallible>(("never reached", permit))
         });
 
         tokio::select! {
@@ -324,7 +345,7 @@ mod tests {
         assert!(cell.get().is_none());
 
         let g = cell
-            .get_or_init(|| async { Ok::<_, Infallible>("now initialized") })
+            .get_or_init(|permit| async { Ok::<_, Infallible>(("now initialized", permit)) })
             .await
             .unwrap();
         assert_eq!(*g, "now initialized");

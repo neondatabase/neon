@@ -621,7 +621,7 @@ impl LayerInner {
         let mut init_permit = None;
 
         loop {
-            let download = move || async move {
+            let download = move |permit| async move {
                 // disable any scheduled but not yet running eviction deletions for this
                 let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
@@ -644,7 +644,7 @@ impl LayerInner {
                     .await
                     .map_err(DownloadError::PreStatFailed)?;
 
-                if let Some(reason) = needs_download {
+                let permit = if let Some(reason) = needs_download {
                     // only reset this after we've decided we really need to download. otherwise it'd
                     // be impossible to mark cancelled downloads for eviction, like one could imagine
                     // we would like to do for prefetching which was not needed.
@@ -666,24 +666,14 @@ impl LayerInner {
                         return Err(DownloadError::DownloadRequired);
                     }
 
-                    // FIXME: in this case it will not work -- we might even do a short download:
-                    // T1: get_or_maybe_download
-                    // T2: get_or_maybe_download -- locked behind semaphore
-                    // T1: spawn_download_and_wait spawns T3
-                    // T3: do some downloading
-                    // T1: gets cancelled
-                    // T2: acquire semaphore
-                    // T2: spawn_download_and_wait spawns T4
-                    // T3 and T4 are misbehaving because they download over the same tempfile
-                    //
-                    // this probably needs some API using which we can move the semaphore permit to
-                    // a spawned task?
-                    self.spawn_download_and_wait(timeline).await?;
+                    self.spawn_download_and_wait(timeline, permit).await?
                 } else {
                     // the file is present locally, probably by a previous but cancelled call to
                     // get_or_maybe_download. alternatively we might be running without remote storage.
                     LAYER_IMPL_METRICS.inc_init_needed_no_download();
-                }
+
+                    permit
+                };
 
                 let res = Arc::new(DownloadedLayer {
                     owner: Arc::downgrade(self),
@@ -696,13 +686,13 @@ impl LayerInner {
                     LayerResidenceEventReason::ResidenceChange,
                 );
 
-                Ok(ResidentOrWantedEvicted::Resident(res))
+                Ok((ResidentOrWantedEvicted::Resident(res), permit))
             };
 
             if let Some(init_permit) = init_permit.take() {
                 // use the already held initialization permit because it is impossible to hit the
                 // below paths anymore essentially limiting the max loop iterations to 2.
-                let value = download().await?;
+                let (value, init_permit) = download(init_permit).await?;
                 let guard = self.inner.set(value, init_permit);
                 let strong = guard
                     .get()
@@ -773,18 +763,14 @@ impl LayerInner {
     async fn spawn_download_and_wait(
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
-    ) -> Result<(), DownloadError> {
+        permit: heavier_once_cell::InitPermit,
+    ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
         let task_name = format!("download layer {}", self);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
+
         // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
         // block tenant::mgr::remove_tenant_from_memory.
-        //
-        // also the localfs remote storage is not cancellation safe, and the download_layer_file
-        // uses a colliding file name for two or more concurrent invocations.
-        //
-        // FIXME: this needs to carry the initialization semaphore from heavier_once_cell::OnceCell
-        // into the task, and then out of it to avoid two concurrent downloads.
 
         let this: Arc<Self> = self.clone();
         crate::task_mgr::spawn(
@@ -816,9 +802,9 @@ impl LayerInner {
                     }
                 };
 
-                if let Err(res) = tx.send(result) {
+                if let Err(res) = tx.send((result, permit)) {
                     match res {
-                        Ok(()) => {
+                        (Ok(()), _) => {
                             // our caller is cancellation safe so this is fine; if someone
                             // else requests the layer, they'll find it already downloaded
                             // or redownload.
@@ -829,7 +815,7 @@ impl LayerInner {
                             tracing::info!("layer file download completed after requester had cancelled");
                             LAYER_IMPL_METRICS.inc_download_completed_without_requester();
                         },
-                        Err(e) => {
+                        (Err(e), _) => {
                             // our caller is cancellation safe, but we might be racing with
                             // another attempt to initialize. before we have cancellation
                             // token support: these attempts should converge regardless of
@@ -845,7 +831,7 @@ impl LayerInner {
             .in_current_span(),
         );
         match rx.await {
-            Ok(Ok(())) => {
+            Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
                     .needs_download()
                     .await
@@ -857,9 +843,10 @@ impl LayerInner {
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
 
-                Ok(())
+                Ok(permit)
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _permit)) => {
+                // FIXME: this should be with the spawned task and be cancellation sensitive
                 let consecutive_failures =
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
