@@ -337,18 +337,24 @@ enum ResidentOrWantedEvicted {
 }
 
 impl ResidentOrWantedEvicted {
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
+    /// If `Some` is returned, the ResidentOrWantedEvicted has been upgraded back from
+    /// `ResidentOrWantedEvicted::WantedEvicted` to `ResidentOrWantedEvicted::Resident`.
+    fn get_and_upgrade(&mut self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
             ResidentOrWantedEvicted::WantedEvicted(weak, _) => match weak.upgrade() {
                 Some(strong) => {
                     LAYER_IMPL_METRICS.inc_raced_wanted_evicted_accesses();
+
+                    *self = ResidentOrWantedEvicted::Resident(strong.clone());
+
                     Some(strong)
                 }
                 None => None,
             },
         }
     }
+
     /// When eviction is first requested, drop down to holding a [`Weak`].
     ///
     /// Returns `true` if this was the first time eviction was requested.
@@ -677,7 +683,12 @@ impl LayerInner {
                 drop(permit.take());
                 let mut locked = self.inner.get_or_init(download).await?;
 
-                if let Some(strong) = locked.get() {
+                if let Some(strong) = locked.get_and_upgrade() {
+                    self.wanted_evicted.store(false, Ordering::Relaxed);
+
+                    // error out any `evict_and_wait`
+                    drop(self.status.send(Status::Downloaded));
+
                     return Ok(strong);
                 } else {
                     // path to here:
