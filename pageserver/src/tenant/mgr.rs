@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::fs;
 
 use anyhow::Context;
@@ -936,6 +937,104 @@ pub(crate) fn get_tenant(
         },
         Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_id)),
         None | Some(TenantSlot::Secondary) => Err(GetTenantError::NotFound(tenant_id)),
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum GetActiveTenantError {
+    #[error(
+        "Timed out waiting {wait_time:?} for tenant active state. Latest state: {latest_state:?}"
+    )]
+    WaitForActiveTimeout {
+        latest_state: TenantState,
+        wait_time: Duration,
+    },
+    #[error(transparent)]
+    NotFound(#[from] GetTenantError),
+    #[error(transparent)]
+    WaitTenantActive(crate::tenant::WaitToBecomeActiveError),
+}
+
+/// Get a [`Tenant`] in its active state. If the tenant_id is currently in [`TenantSlot::InProgress`]
+/// state, then wait for up to `timeout`.  If the [`Tenant`] is not currently in [`TenantState::Active`],
+/// then wait for up to `timeout` (minus however long we waited for the slot).
+pub(crate) async fn get_active_tenant_with_timeout(
+    tenant_id: TenantId,
+    mut timeout: Duration,
+) -> Result<Arc<Tenant>, GetActiveTenantError> {
+    enum WaitFor {
+        Barrier(utils::completion::Barrier),
+        Tenant(Arc<Tenant>),
+    }
+
+    let wait_for = {
+        let locked = TENANTS.read().unwrap();
+        let peek_slot =
+            tenant_map_peek_slot(&locked, &tenant_id, true).map_err(GetTenantError::MapState)?;
+        match peek_slot {
+            Some(TenantSlot::Attached(tenant)) => {
+                match tenant.current_state() {
+                    TenantState::Active => {
+                        // Fast path: we don't need to do any async waiting.
+                        return Ok(tenant.clone());
+                    }
+                    _ => WaitFor::Tenant(tenant.clone()),
+                }
+            }
+            Some(TenantSlot::Secondary) => {
+                return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
+                    tenant_id,
+                )))
+            }
+            Some(TenantSlot::InProgress(barrier)) => WaitFor::Barrier(barrier.clone()),
+            None => {
+                return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
+                    tenant_id,
+                )))
+            }
+        }
+    };
+
+    tracing::debug!("Waiting for tenant InProgress state to pass...");
+    let tenant = match wait_for {
+        WaitFor::Barrier(barrier) => {
+            let wait_start = Instant::now();
+            barrier.wait().await;
+            let wait_duration = Instant::now().duration_since(wait_start);
+            timeout -= wait_duration;
+            {
+                let locked = TENANTS.read().unwrap();
+                let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, true)
+                    .map_err(GetTenantError::MapState)?;
+                match peek_slot {
+                    Some(TenantSlot::Attached(tenant)) => tenant.clone(),
+                    _ => {
+                        return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
+                            tenant_id,
+                        )))
+                    }
+                }
+            }
+        }
+        WaitFor::Tenant(tenant) => tenant,
+    };
+
+    tracing::debug!("Waiting for tenant to enter active state...");
+    match tokio::time::timeout(timeout, tenant.wait_to_become_active()).await {
+        Ok(Ok(())) => Ok(tenant),
+        // no .context(), the error message is good enough and some tests depend on it
+        Ok(Err(e)) => Err(GetActiveTenantError::WaitTenantActive(e)),
+        Err(_) => {
+            let latest_state = tenant.current_state();
+            if latest_state == TenantState::Active {
+                Ok(tenant)
+            } else {
+                Err(GetActiveTenantError::WaitForActiveTimeout {
+                    latest_state,
+                    wait_time: timeout,
+                })
+            }
+        }
     }
 }
 
