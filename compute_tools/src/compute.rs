@@ -693,11 +693,13 @@ impl ComputeNode {
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
         create_neon_superuser(spec, &mut client)?;
         cleanup_instance(&mut client)?;
+        handle_extension_neon(self.connstr.as_str())?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, &mut client, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
+        handle_alter_extension_neon(spec, &mut client, self.connstr.as_str())?;
         create_availability_check_data(&mut client)?;
 
         // 'Close' connection
@@ -737,11 +739,13 @@ impl ComputeNode {
         if spec.mode == ComputeMode::Primary {
             client.simple_query("SET neon.forward_ddl = false")?;
             cleanup_instance(&mut client)?;
+            handle_extension_neon(self.connstr.as_str())?;
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
             handle_grants(&spec, &mut client, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
+            handle_alter_extension_neon(&spec, &mut client, self.connstr.as_str())?;
         }
 
         // 'Close' connection
