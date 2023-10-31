@@ -83,15 +83,38 @@ impl<T> OnceCell<T> {
             // now we try
             let value = factory().await?;
 
-            let mut guard = self.inner.lock().unwrap();
-            assert!(
-                guard.value.is_none(),
-                "we won permit, must not be initialized"
-            );
-            guard.value = Some(value);
-            guard.init_semaphore.close();
-            Ok(Guard(guard))
+            let guard = self.inner.lock().unwrap();
+
+            Ok(Self::set0(value, guard))
         }
+    }
+
+    /// Assuming a permit is held after previous call to [`Guard::take_and_deinit`], it can be used
+    /// to complete initializing the inner value.
+    ///
+    /// # Panics
+    ///
+    /// If the inner has already been initialized.
+    pub fn set(&self, value: T, _permit: InitPermit) -> Guard<'_, T> {
+        // cannot assert that this permit is for self.inner.semaphore
+        let guard = self.inner.lock().unwrap();
+
+        if guard.init_semaphore.try_acquire().is_ok() {
+            drop(guard);
+            panic!("semaphore is of wrong origin");
+        }
+
+        Self::set0(value, guard)
+    }
+
+    fn set0(value: T, mut guard: std::sync::MutexGuard<'_, Inner<T>>) -> Guard<'_, T> {
+        if guard.value.is_some() {
+            drop(guard);
+            unreachable!("we won permit, must not be initialized");
+        }
+        guard.value = Some(value);
+        guard.init_semaphore.close();
+        Guard(guard)
     }
 
     /// Returns a guard to an existing initialized value, if any.
@@ -135,7 +158,7 @@ impl<'a, T> Guard<'a, T> {
     ///
     /// The permit will be on a semaphore part of the new internal value, and any following
     /// [`OnceCell::get_or_init`] will wait on it to complete.
-    pub fn take_and_deinit(&mut self) -> (T, tokio::sync::OwnedSemaphorePermit) {
+    pub fn take_and_deinit(&mut self) -> (T, InitPermit) {
         let mut swapped = Inner::default();
         let permit = swapped
             .init_semaphore
@@ -145,10 +168,13 @@ impl<'a, T> Guard<'a, T> {
         std::mem::swap(&mut *self.0, &mut swapped);
         swapped
             .value
-            .map(|v| (v, permit))
+            .map(|v| (v, InitPermit(permit)))
             .expect("guard is not created unless value has been initialized")
     }
 }
+
+/// Type held by OnceCell (de)initializing task.
+pub struct InitPermit(tokio::sync::OwnedSemaphorePermit);
 
 #[cfg(test)]
 mod tests {
