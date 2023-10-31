@@ -895,7 +895,12 @@ apply_error_callback(void *arg)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	xlog_outdesc(&buf, record);
+#if PG_VERSION_NUM >= 150000
+	if (record->record)
+#else
+	if (record->decoded_record)
+#endif
+		xlog_outdesc(&buf, record);
 
 	/* translator: %s is a WAL record description */
 	errcontext("WAL redo at %X/%X for %s",

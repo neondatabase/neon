@@ -16,20 +16,16 @@ pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
                 continue;
             }
             let ttid = tli.ttid;
-            if let Err(e) = tli
-                .maybe_persist_control_file()
-                .instrument(info_span!("", tenant = %ttid.tenant_id, timeline = %ttid.timeline_id))
-                .await
-            {
-                warn!("failed to persist control file: {e}");
+            async {
+                if let Err(e) = tli.maybe_persist_control_file().await {
+                    warn!("failed to persist control file: {e}");
+                }
+                if let Err(e) = tli.remove_old_wal(conf.wal_backup_enabled).await {
+                    error!("failed to remove WAL: {}", e);
+                }
             }
-            if let Err(e) = tli
-                .remove_old_wal(conf.wal_backup_enabled)
-                .instrument(info_span!("", tenant = %ttid.tenant_id, timeline = %ttid.timeline_id))
-                .await
-            {
-                error!("failed to remove WAL: {}", e);
-            }
+            .instrument(info_span!("WAL removal", ttid = %ttid))
+            .await;
         }
         sleep(wal_removal_interval).await;
     }

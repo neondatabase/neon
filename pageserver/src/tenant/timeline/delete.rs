@@ -38,6 +38,14 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
     }
     debug!("wal receiver shutdown confirmed");
 
+    // Shut down the layer flush task before the remote client, as one depends on the other
+    task_mgr::shutdown_tasks(
+        Some(TaskKind::LayerFlushTask),
+        Some(timeline.tenant_id),
+        Some(timeline.timeline_id),
+    )
+    .await;
+
     // Prevent new uploads from starting.
     if let Some(remote_client) = timeline.remote_client.as_ref() {
         let res = remote_client.stop();

@@ -148,7 +148,8 @@ async fn ensure_timelines_dir_empty(timelines_path: &Utf8Path) -> Result<(), Del
     // Assert timelines dir is empty.
     if !fs_ext::is_directory_empty(timelines_path).await? {
         // Display first 10 items in directory
-        let list = &fs_ext::list_dir(timelines_path).await.context("list_dir")?[..10];
+        let list = fs_ext::list_dir(timelines_path).await.context("list_dir")?;
+        let list = &list.into_iter().take(10).collect::<Vec<_>>();
         return Err(DeleteTenantError::Other(anyhow::anyhow!(
             "Timelines directory is not empty after all timelines deletion: {list:?}"
         )));

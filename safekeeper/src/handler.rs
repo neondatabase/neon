@@ -140,6 +140,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 }
             }
 
+            let ttid = TenantTimelineId::new(
+                self.tenant_id.unwrap_or(TenantId::from([0u8; 16])),
+                self.timeline_id.unwrap_or(TimelineId::from([0u8; 16])),
+            );
+            tracing::Span::current().record("ttid", tracing::field::display(ttid));
+
             Ok(())
         } else {
             Err(QueryError::Other(anyhow::anyhow!(
@@ -208,26 +214,22 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             PG_QUERIES_FINISHED.with_label_values(&[cmd_str]).inc();
         }
 
-        info!(
-            "got query {:?} in timeline {:?}",
-            query_string, self.timeline_id
-        );
+        info!("got query {:?}", query_string);
 
         let tenant_id = self.tenant_id.context("tenantid is required")?;
         let timeline_id = self.timeline_id.context("timelineid is required")?;
         self.check_permission(Some(tenant_id))?;
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
-        let span_ttid = self.ttid; // satisfy borrow checker
 
         match cmd {
             SafekeeperPostgresCommand::StartWalPush => {
                 self.handle_start_wal_push(pgb)
-                    .instrument(info_span!("WAL receiver", ttid = %span_ttid))
+                    .instrument(info_span!("WAL receiver"))
                     .await
             }
             SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
                 self.handle_start_replication(pgb, start_lsn, term)
-                    .instrument(info_span!("WAL sender", ttid = %span_ttid))
+                    .instrument(info_span!("WAL sender"))
                     .await
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,

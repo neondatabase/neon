@@ -1,6 +1,7 @@
 use super::{AuthSuccess, ComputeCredentials};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
+    proxy::LatencyTimer,
     stream,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -12,8 +13,13 @@ use tracing::{info, warn};
 /// use this mechanism for websocket connections.
 pub async fn cleartext_hack(
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("cleartext auth flow override is enabled, proceeding");
+
+    // pause the timer while we communicate with the client
+    let _paused = latency_timer.pause();
+
     let password = AuthFlow::new(client)
         .begin(auth::CleartextPassword)
         .await?
@@ -32,8 +38,13 @@ pub async fn cleartext_hack(
 pub async fn password_hack(
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("project not specified, resorting to the password hack auth flow");
+
+    // pause the timer while we communicate with the client
+    let _paused = latency_timer.pause();
+
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
         .await?

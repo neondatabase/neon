@@ -190,6 +190,8 @@ pub struct DeltaOp {
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
+    pub replication: Option<bool>,
+    pub bypassrls: Option<bool>,
     pub options: GenericOptions,
 }
 

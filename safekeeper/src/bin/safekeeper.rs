@@ -42,7 +42,7 @@ use utils::auth::{JwtAuth, Scope};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version,
+    project_build_tag, project_git_version,
     sentry_init::init_sentry,
     tcp_listener,
 };
@@ -51,6 +51,7 @@ const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const ABOUT: &str = r#"
 A fleet of safekeepers is responsible for reliably storing WAL received from
@@ -204,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
+    info!("buld_tag: {BUILD_TAG}");
 
     let args_workdir = &args.datadir;
     let workdir = args_workdir.canonicalize_utf8().with_context(|| {
@@ -423,7 +425,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .map(|res| ("WAL remover".to_owned(), res));
     tasks_handles.push(Box::pin(wal_remover_handle));
 
-    set_build_info_metric(GIT_VERSION);
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // TODO: update tokio-stream, convert to real async Stream with
     // SignalStream, map it to obtain missing signal name, combine streams into
