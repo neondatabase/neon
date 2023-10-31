@@ -110,6 +110,7 @@ void PGDLLEXPORT FileCacheMonitorMain(Datum main_arg);
 static void
 lfc_disable(char const* op)
 {
+	int fd;
 	elog(WARNING, "Failed to %s local file cache at %s: %m, disabling local file cache", op, lfc_path);
 
 	/* Invalidate hash */
@@ -139,8 +140,16 @@ lfc_disable(char const* op)
 				elog(WARNING, "Failed to truncate local file cache %s: %m", lfc_path);
 		}
 	}
-	LWLockRelease(lfc_lock);
+	/* We need to use unlink to to avoid races in LFC write, because it is not protectedby */
+	unlink(lfc_path);
 
+	fd = BasicOpenFile(lfc_path, O_RDWR|O_CREAT|O_TRUNC);
+	if (fd < 0)
+		elog(WARNING, "Failed to recreate local file cache %s: %m", lfc_path);
+	else
+		close(fd);
+
+	LWLockRelease(lfc_lock);
 
 	if (lfc_desc > 0)
 		close(lfc_desc);
@@ -553,6 +562,8 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	bool found;
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;
+	uint64 generation;
+	uint32 entry_offset;
 
 	if (lfc_maybe_disabled()) /* fast exit if file cache is disabled */
 		return;
@@ -610,20 +621,30 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		memset(entry->bitmap, 0, sizeof entry->bitmap);
 	}
 
-	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry->offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
+	generation = lfc_ctl->generation;
+	entry_offset = entry->offset;
+	LWLockRelease(lfc_lock);
+
+	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry_offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
 	if (rc != BLCKSZ)
 	{
-		LWLockRelease(lfc_lock);
 		lfc_disable("write");
 	}
 	else
 	{
-		/* Place entry to the head of LRU list */
-		Assert(entry->access_count > 0);
-		if (--entry->access_count == 0)
-			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
+		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
-		entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
+		if (lfc_ctl->generation == generation)
+		{
+			Assert(LFC_ENABLED());
+			/* Place entry to the head of LRU list */
+			Assert(entry->access_count > 0);
+			if (--entry->access_count == 0)
+				dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
+
+			entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
+		}
+
 		LWLockRelease(lfc_lock);
 	}
 }
