@@ -152,17 +152,20 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
     wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
-    endpoint_main = env.endpoints.create_start(
+    endpoint_main = env.endpoints.create(
         "test_timeline_size_quota",
         # Set small limit for the test
         config_lines=["neon.max_cluster_size=30MB"],
     )
+    # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
+    # which is needed for pg_cluster_size() to work
+    endpoint_main.respec(skip_pg_catalog_updates=False)
+    endpoint_main.start()
+
     log.info("postgres is running on 'test_timeline_size_quota' branch")
 
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
-
             cur.execute("CREATE TABLE foo (t text)")
 
             wait_for_pageserver_catchup(endpoint_main)
