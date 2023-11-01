@@ -1173,7 +1173,6 @@ impl DownloadedLayer {
                 "these are the same, just avoiding the upgrade"
             );
 
-            // there is nothing async here, but it should be async
             let res = if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_id,
@@ -1272,6 +1271,8 @@ impl std::fmt::Debug for ResidentLayer {
 
 impl ResidentLayer {
     /// Release the eviction guard, converting back into a plain [`Layer`].
+    ///
+    /// You can access the [`Layer`] also by using `as_ref`.
     pub(crate) fn drop_eviction_guard(self) -> Layer {
         self.into()
     }
@@ -1327,7 +1328,7 @@ impl AsRef<Layer> for ResidentLayer {
     }
 }
 
-/// Allow slimming down if we don't want the `2*usize` with eviction candidates?
+/// Drop the eviction guard.
 impl From<ResidentLayer> for Layer {
     fn from(value: ResidentLayer) -> Self {
         value.owner
