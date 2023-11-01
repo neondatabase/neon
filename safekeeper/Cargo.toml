@@ -47,10 +47,7 @@ pq_proto.workspace = true
 remote_storage.workspace = true
 safekeeper_api.workspace = true
 storage_broker.workspace = true
+tokio-stream.workspace = true
 utils.workspace = true
 
 workspace_hack.workspace = true
-
-# to use tokio channels as streams, this is faster to compile than async_stream
-# why is it only here? no other crate should use it, streams are rarely needed.
-tokio-stream = { version = "0.1.14" }
