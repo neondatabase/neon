@@ -15,7 +15,9 @@ use std::{io, result};
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{self, TenantInfo, TimelineInfo};
+use pageserver_api::models::{
+    self, LocationConfig, TenantInfo, TenantLocationConfigRequest, TimelineInfo,
+};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -504,6 +506,27 @@ impl PageServerNode {
             .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
+
+        Ok(())
+    }
+
+    pub fn location_config(
+        &self,
+        tenant_id: TenantId,
+        config: LocationConfig,
+    ) -> anyhow::Result<()> {
+        let req_body = TenantLocationConfigRequest { tenant_id, config };
+
+        self.http_request(
+            Method::PUT,
+            format!(
+                "{}/tenant/{}/location_config",
+                self.http_base_url, tenant_id
+            ),
+        )?
+        .json(&req_body)
+        .send()?
+        .error_from_body()?;
 
         Ok(())
     }

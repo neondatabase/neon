@@ -13,6 +13,7 @@ use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
+use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
 use pageserver_api::{
@@ -451,6 +452,15 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
             println!("tenant {tenant_id} successfully configured on the pageserver");
         }
+        Some(("migrate", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+            let new_pageserver = get_pageserver(env, matches)?;
+            let new_pageserver_id = new_pageserver.conf.id;
+
+            migrate_tenant(env, tenant_id, new_pageserver)?;
+            println!("tenant {tenant_id} migrated to {}", new_pageserver_id);
+        }
+
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
     }
@@ -885,20 +895,20 @@ fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Res
     }
 }
 
+fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
+    let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
+        NodeId(id_str.parse().context("while parsing pageserver id")?)
+    } else {
+        DEFAULT_PAGESERVER_ID
+    };
+
+    Ok(PageServerNode::from_env(
+        env,
+        env.get_pageserver_conf(node_id)?,
+    ))
+}
+
 fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
-        let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
-            NodeId(id_str.parse().context("while parsing pageserver id")?)
-        } else {
-            DEFAULT_PAGESERVER_ID
-        };
-
-        Ok(PageServerNode::from_env(
-            env,
-            env.get_pageserver_conf(node_id)?,
-        ))
-    }
-
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
             if let Err(e) = get_pageserver(env, subcommand_args)?
@@ -922,6 +932,20 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         Some(("restart", subcommand_args)) => {
+            let pageserver = get_pageserver(env, subcommand_args)?;
+            //TODO what shutdown strategy should we use here?
+            if let Err(e) = pageserver.stop(false) {
+                eprintln!("pageserver stop failed: {}", e);
+                exit(1);
+            }
+
+            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+                eprintln!("pageserver start failed: {e}");
+                exit(1);
+            }
+        }
+
+        Some(("migrate", subcommand_args)) => {
             let pageserver = get_pageserver(env, subcommand_args)?;
             //TODO what shutdown strategy should we use here?
             if let Err(e) = pageserver.stop(false) {
@@ -1327,6 +1351,10 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
+            .subcommand(Command::new("migrate")
+                .about("Migrate a tenant from one pageserver to another")
+                .arg(tenant_id_arg.clone())
+                .arg(pageserver_id_arg.clone()))
         )
         .subcommand(
             Command::new("pageserver")
