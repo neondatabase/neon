@@ -94,33 +94,32 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
         status.acceptor_state.epoch
     );
 
-    let conf = &GlobalTimelines::get_global_config();
+    let tli = match GlobalTimelines::get(ttid) {
+        Ok(tli) => tli,
+        Err(_) => {
+            bail!("Expected to fetch single timeline, got no timelines");
+        }
+    };
 
-    let client = reqwest::Client::new();
-    // TODO: don't use debug dump, it should be used only in tests.
-    //      This is a proof of concept, we should figure out a way
-    //      to use scp without implementing it manually.
-
-    // Implementing our own scp over HTTP.
-    // At first, we need to fetch list of files from safekeeper.
-    let dump: debug_dump::Response = client
-        .get(format!(
-            "{}/v1/debug_dump?dump_all=true&tenant_id={}&timeline_id={}",
-            host, status.tenant_id, status.timeline_id
-        ))
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    if dump.timelines.len() != 1 {
-        bail!(
-            "Expected to fetch single timeline, got {} timelines",
-            dump.timelines.len()
-        );
-    }
-
-    let timeline = dump.timelines.into_iter().next().unwrap();
+    let timeline = {
+        let control_file = {
+            let state = tli.get_state().await.1;
+            Some(state)
+        };
+        
+        let memory = Some(tli.memory_dump().await);
+    
+        let disk_content = debug_dump::build_disk_content(&tli.timeline_dir).ok();
+    
+        let timeline = debug_dump::Timeline {
+            tenant_id: tli.ttid.tenant_id,
+            timeline_id: tli.ttid.timeline_id,
+            control_file,
+            memory,
+            disk_content,
+        };
+        timeline
+    };
     let disk_content = timeline.disk_content.ok_or(anyhow::anyhow!(
         "Timeline {} doesn't have disk content",
         ttid
@@ -159,6 +158,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     // conf.workdir is usually /storage/safekeeper/data
     // will try to transform it into /storage/safekeeper/tmp
+    let conf = &GlobalTimelines::get_global_config();
     let temp_base = conf
         .workdir
         .parent()
@@ -176,6 +176,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     // Note: some time happens between fetching list of files and fetching files themselves.
     //       It's possible that some files will be removed from safekeeper and we will fail to fetch them.
     //       This function will fail in this case, should be retried by the caller.
+    let client = reqwest::Client::new();
     for filename in filenames {
         let file_path = tli_dir_path.join(&filename);
         // /v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename
