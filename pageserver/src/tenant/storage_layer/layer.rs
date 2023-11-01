@@ -693,7 +693,7 @@ impl LayerInner {
                 // use the already held initialization permit because it is impossible to hit the
                 // below paths anymore essentially limiting the max loop iterations to 2.
                 let (value, init_permit) = download(init_permit).await?;
-                let guard = self.inner.set(value, init_permit);
+                let mut guard = self.inner.set(value, init_permit);
                 let strong = guard
                     .get_and_upgrade()
                     .expect("init creates strong reference, we held the init permit");
