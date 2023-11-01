@@ -1044,11 +1044,13 @@ impl LayerInner {
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("failed to evict file from disk, it was already gone");
+                tracing::error!(
+                    "failed to evict file from disk, it was already gone (metrics will be off)"
+                );
                 Err(EvictionCancelled::FileNotFound)
             }
             Err(e) => {
-                tracing::warn!("failed to evict file from disk: {e:#}");
+                tracing::error!("failed to evict file from disk: {e:#}");
                 Err(EvictionCancelled::RemoveFailed)
             }
         };
