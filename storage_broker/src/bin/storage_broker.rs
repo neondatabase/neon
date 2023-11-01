@@ -39,8 +39,9 @@ use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 use storage_broker::proto::{
-    filter_tenant_timeline_id, FilterTenantTimelineId, MessageType, SafekeeperTimelineInfo,
-    SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
+    filter_tenant_timeline_id, FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest,
+    SafekeeperDiscoveryResponse, SafekeeperTimelineInfo, SubscribeByFilterRequest,
+    SubscribeSafekeeperInfoRequest, TypedMessage,
 };
 use storage_broker::{
     parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
@@ -84,8 +85,11 @@ type SubId = u64;
 
 /// Single enum type for all messages.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 enum Message {
     SafekeeperTimelineInfo(SafekeeperTimelineInfo),
+    SafekeeperDiscoveryRequest(SafekeeperDiscoveryRequest),
+    SafekeeperDiscoveryResponse(SafekeeperDiscoveryResponse),
 }
 
 impl Message {
@@ -94,9 +98,22 @@ impl Message {
         match proto_msg.r#type() {
             MessageType::SafekeeperTimelineInfo => Ok(Message::SafekeeperTimelineInfo(
                 proto_msg.safekeeper_timeline_info.ok_or_else(|| {
+                    Status::new(Code::InvalidArgument, "missing safekeeper_timeline_info")
+                })?,
+            )),
+            MessageType::SafekeeperDiscoveryRequest => Ok(Message::SafekeeperDiscoveryRequest(
+                proto_msg.safekeeper_discovery_request.ok_or_else(|| {
                     Status::new(
                         Code::InvalidArgument,
-                        "missing safekeeper_timeline_info",
+                        "missing safekeeper_discovery_request",
+                    )
+                })?,
+            )),
+            MessageType::SafekeeperDiscoveryResponse => Ok(Message::SafekeeperDiscoveryResponse(
+                proto_msg.safekeeper_discovery_response.ok_or_else(|| {
+                    Status::new(
+                        Code::InvalidArgument,
+                        "missing safekeeper_discovery_response",
                     )
                 })?,
             )),
@@ -115,6 +132,16 @@ impl Message {
                 .as_ref()
                 .map(parse_proto_ttid)
                 .transpose()?),
+            Message::SafekeeperDiscoveryRequest(msg) => Ok(msg
+                .tenant_timeline_id
+                .as_ref()
+                .map(parse_proto_ttid)
+                .transpose()?),
+            Message::SafekeeperDiscoveryResponse(msg) => Ok(msg
+                .tenant_timeline_id
+                .as_ref()
+                .map(parse_proto_ttid)
+                .transpose()?),
         }
     }
 
@@ -124,6 +151,20 @@ impl Message {
             Message::SafekeeperTimelineInfo(msg) => TypedMessage {
                 r#type: MessageType::SafekeeperTimelineInfo as i32,
                 safekeeper_timeline_info: Some(msg.clone()),
+                safekeeper_discovery_request: None,
+                safekeeper_discovery_response: None,
+            },
+            Message::SafekeeperDiscoveryRequest(msg) => TypedMessage {
+                r#type: MessageType::SafekeeperDiscoveryRequest as i32,
+                safekeeper_timeline_info: None,
+                safekeeper_discovery_request: Some(msg.clone()),
+                safekeeper_discovery_response: None,
+            },
+            Message::SafekeeperDiscoveryResponse(msg) => TypedMessage {
+                r#type: MessageType::SafekeeperDiscoveryResponse as i32,
+                safekeeper_timeline_info: None,
+                safekeeper_discovery_request: None,
+                safekeeper_discovery_response: Some(msg.clone()),
             },
         }
     }
@@ -132,6 +173,8 @@ impl Message {
     pub fn message_type(&self) -> &MessageType {
         match self {
             Message::SafekeeperTimelineInfo(_) => &MessageType::SafekeeperTimelineInfo,
+            Message::SafekeeperDiscoveryRequest(_) => &MessageType::SafekeeperDiscoveryRequest,
+            Message::SafekeeperDiscoveryResponse(_) => &MessageType::SafekeeperDiscoveryResponse,
         }
     }
 }
@@ -457,6 +500,7 @@ impl BrokerService for Broker {
                     Ok(info) => {
                         match info {
                             Message::SafekeeperTimelineInfo(info) => yield info,
+                            _ => {},
                         }
                     },
                     Err(RecvError::Lagged(skipped_msg)) => {

@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
+use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::{
     filter_tenant_timeline_id, FilterTenantTimelineId, MessageType, SubscribeByFilterRequest,
     TenantTimelineId as ProtoTenantTimelineId, TypedMessage,
 };
-use storage_broker::proto::{SafekeeperTimelineInfo};
 
 use storage_broker::{BrokerClientChannel, DEFAULT_ENDPOINT};
 use tokio::time;
