@@ -31,6 +31,9 @@ use utils::{
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
+/// Directory within .neon which will be used by default for LocalFs remote storage.
+pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "remote_storage";
+
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
     #[error("Reqwest error: {0}")]
@@ -115,6 +118,9 @@ impl PageServerNode {
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
+        let remote_storage_param =
+            format!("remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}");
+
         let mut overrides = vec![
             id,
             pg_distrib_dir_param,
@@ -123,6 +129,7 @@ impl PageServerNode {
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
+            remote_storage_param,
         ];
 
         if let Some(control_plane_api) = &self.env.control_plane_api {
