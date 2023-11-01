@@ -176,6 +176,7 @@ extern "C" fn conn_blocking_write(
 }
 
 extern "C" fn recovery_download(
+	wp: *mut WalProposer,
     sk: *mut Safekeeper,
     _timeline: TimeLineID,
     startpos: XLogRecPtr,
@@ -184,7 +185,7 @@ extern "C" fn recovery_download(
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).recovery_download(&mut (*sk), startpos, endpos)
+        (*api).recovery_download(&mut (*wp), &mut (*sk), startpos, endpos)
     }
 }
 
