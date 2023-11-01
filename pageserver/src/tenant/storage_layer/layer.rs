@@ -637,8 +637,6 @@ impl LayerInner {
 
                 // check if we really need to be downloaded; could have been already downloaded by a
                 // cancelled previous attempt.
-                //
-                // FIXME: what if it's a directory? that is currently needs_download == true
                 let needs_download = self
                     .needs_download()
                     .await
