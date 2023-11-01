@@ -47,9 +47,7 @@ impl<'de> Deserialize<'de> for Lsn {
                         "value in form of hex string({upper_u32_hex}/{lower_u32_hex}) representing u64 integer",
                     )
                 } else {
-                    formatter.write_str(
-                        "value in form of integer(u64)",
-                    )
+                    formatter.write_str("value in form of integer(u64)")
                 }
             }
 
@@ -69,9 +67,13 @@ impl<'de> Deserialize<'de> for Lsn {
         }
 
         if deserializer.is_human_readable() {
-            deserializer.deserialize_str(LsnVisitor { is_human_readable_deserializer: true })
+            deserializer.deserialize_str(LsnVisitor {
+                is_human_readable_deserializer: true,
+            })
         } else {
-            deserializer.deserialize_u64(LsnVisitor { is_human_readable_deserializer: false })
+            deserializer.deserialize_u64(LsnVisitor {
+                is_human_readable_deserializer: false,
+            })
         }
     }
 }
