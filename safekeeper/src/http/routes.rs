@@ -388,7 +388,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
 
     let response = Response::builder()
         .status(200)
-        .header(hyper::header::CONTENT_TYPE, "octet-stream")
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
         .body(body)
         .unwrap();
 
@@ -396,10 +396,9 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     tokio::task::spawn_blocking(move || {
         let _span = span.entered();
 
-        let mut bytes: Vec<u8> = Vec::new();
-        serde_json::to_writer(&mut bytes, &resp).expect("failed to convert to bytes");
-
-        let res = writer.write_all(&bytes).and_then(|_| writer.flush());
+        let res = serde_json::to_writer(&mut writer, &resp)
+            .map_err(|e| std::io::Error::from(e))
+            .and_then(|_| writer.flush());
 
         match res {
             Ok(()) => {
