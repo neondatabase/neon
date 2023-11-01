@@ -699,6 +699,8 @@ def test_ignore_while_attaching(
     env.pageserver.allowed_errors.append(
         f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
     )
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found")
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} is not active")
 
     data_id = 1
     data_secret = "very secret secret"
