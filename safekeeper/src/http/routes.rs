@@ -397,7 +397,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         let _span = span.entered();
 
         let res = serde_json::to_writer(&mut writer, &resp)
-            .map_err(|e| std::io::Error::from(e))
+            .map_err(std::io::Error::from)
             .and_then(|_| writer.flush());
 
         match res {

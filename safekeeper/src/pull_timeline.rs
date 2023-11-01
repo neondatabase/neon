@@ -106,19 +106,18 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
             let state = tli.get_state().await.1;
             Some(state)
         };
-        
+
         let memory = Some(tli.memory_dump().await);
-    
+
         let disk_content = debug_dump::build_disk_content(&tli.timeline_dir).ok();
-    
-        let timeline = debug_dump::Timeline {
+
+        debug_dump::Timeline {
             tenant_id: tli.ttid.tenant_id,
             timeline_id: tli.ttid.timeline_id,
             control_file,
             memory,
             disk_content,
-        };
-        timeline
+        }
     };
     let disk_content = timeline.disk_content.ok_or(anyhow::anyhow!(
         "Timeline {} doesn't have disk content",

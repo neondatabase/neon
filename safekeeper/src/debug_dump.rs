@@ -114,15 +114,13 @@ pub async fn build_from_tli_dump(timeline: Arc<crate::timeline::Timeline>, args:
         None
     };
 
-    let timeline = Timeline {
+    Timeline {
         tenant_id: timeline.ttid.tenant_id,
         timeline_id: timeline.ttid.timeline_id,
         control_file,
         memory,
         disk_content,
-    };
-
-    timeline
+    }
 }
 
 /// Safekeeper configuration.
