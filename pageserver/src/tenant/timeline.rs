@@ -933,6 +933,10 @@ impl Timeline {
             }
         }
 
+        // Page request handlers might be waiting for LSN to advance: they do not respect Timeline::cancel
+        // while doing so.
+        self.last_record_lsn.shutdown();
+
         tracing::info!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
 
