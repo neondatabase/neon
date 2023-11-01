@@ -90,7 +90,7 @@ impl Serialize for TimelineDumpSer {
     }
 }
 
-pub async fn build_from_tli_dump(timeline: Arc<crate::timeline::Timeline>, args: Args) -> Timeline {
+async fn build_from_tli_dump(timeline: Arc<crate::timeline::Timeline>, args: Args) -> Timeline {
     let control_file = if args.dump_control_file {
         let mut state = timeline.get_state().await.1;
         if !args.dump_term_history {
@@ -241,7 +241,7 @@ pub async fn build(args: Args) -> Result<Response> {
 
 /// Builds DiskContent from a directory path. It can fail if the directory
 /// is deleted between the time we get the path and the time we try to open it.
-pub fn build_disk_content(path: &Utf8Path) -> Result<DiskContent> {
+fn build_disk_content(path: &Utf8Path) -> Result<DiskContent> {
     let mut files = Vec::new();
     for entry in fs::read_dir(path)? {
         if entry.is_err() {
