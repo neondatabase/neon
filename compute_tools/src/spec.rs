@@ -24,7 +24,7 @@ fn do_control_plane_request(
 ) -> Result<ControlPlaneSpecResponse, (bool, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
-        .header("Authorization", jwt)
+        .header("Authorization", format!("Bearer {}", jwt))
         .send()
         .map_err(|e| {
             (
