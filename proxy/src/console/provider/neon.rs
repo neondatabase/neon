@@ -49,7 +49,7 @@ impl Api {
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
-                .header("Authorization", &self.jwt)
+                .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
@@ -94,7 +94,7 @@ impl Api {
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
-                .header("Authorization", &self.jwt)
+                .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),

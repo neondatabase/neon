@@ -97,8 +97,6 @@ pub mod errors {
                     !text.contains("quota exceeded")
                         && !text.contains("the limit for current plan reached")
                 }
-                // retry server errors
-                Self::Console { status, .. } if status.is_server_error() => true,
                 _ => false,
             }
         }

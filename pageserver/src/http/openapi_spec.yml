@@ -569,7 +569,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "409":
-          description: Tenant download is already in progress
+          description: |
+            The tenant is already known to Pageserver in some way,
+            and hence this `/attach` call has been rejected.
+
+            Some examples of how this can happen:
+            - tenant was created on this pageserver
+            - tenant attachment was started by an earlier call to `/attach`.
+
+            Callers should poll the tenant status's `attachment_status` field,
+            like for status 202. See the longer description for `POST /attach`
+            for details.
           content:
             application/json:
               schema:

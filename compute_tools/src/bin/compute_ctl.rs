@@ -278,8 +278,9 @@ fn main() -> Result<()> {
         if #[cfg(target_os = "linux")] {
             use std::env;
             use tokio_util::sync::CancellationToken;
-            use tracing::warn;
-            let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+            let vm_monitor_addr = matches
+                .get_one::<String>("vm-monitor-addr")
+                .expect("--vm-monitor-addr should always be set because it has a default arg");
             let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
             let cgroup = matches.get_one::<String>("cgroup");
             let file_cache_on_disk = matches.get_flag("file-cache-on-disk");
@@ -288,22 +289,16 @@ fn main() -> Result<()> {
             // Note: it seems like you can make a runtime in an inner scope and
             // if you start a task in it it won't be dropped. However, make it
             // in the outermost scope just to be safe.
-            let rt = match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
-                (None, None) => None,
-                (None, Some(_)) => {
-                    warn!("--vm-monitor-addr option set but AUTOSCALING env var not present");
-                    None
-                }
-                (Some(_), None) => {
-                    panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
-                }
-                (Some(_), Some(_)) => Some(
+            let rt = if env::var_os("AUTOSCALING").is_some() {
+                Some(
                     tokio::runtime::Builder::new_multi_thread()
                         .worker_threads(4)
                         .enable_all()
                         .build()
-                        .expect("failed to create tokio runtime for monitor"),
-                ),
+                        .expect("failed to create tokio runtime for monitor")
+                )
+            } else {
+                None
             };
 
             // This token is used internally by the monitor to clean up all threads
@@ -314,7 +309,7 @@ fn main() -> Result<()> {
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: cgroup.cloned(),
                         pgconnstr: file_cache_connstr.cloned(),
-                        addr: vm_monitor_addr.cloned().unwrap(),
+                        addr: vm_monitor_addr.clone(),
                         file_cache_on_disk,
                     })),
                     token.clone(),
