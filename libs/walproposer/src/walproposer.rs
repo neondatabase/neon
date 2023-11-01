@@ -86,7 +86,7 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn recovery_download(&self, _wp: &mut WalProposer, _sk: &mut Safekeeper, _startpos: u64, _endpos: u64) -> bool {
+    fn recovery_download(&self, _sk: &mut Safekeeper, _startpos: u64, _endpos: u64) -> bool {
         todo!()
     }
 

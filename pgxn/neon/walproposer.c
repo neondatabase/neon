@@ -882,7 +882,7 @@ HandleElectedProposer(WalProposer *wp)
 			 LSN_FORMAT_ARGS(wp->truncateLsn),
 			 LSN_FORMAT_ARGS(wp->propEpochStartLsn));
 		/* Perform recovery */
-		if (!wp->api.recovery_download(wp, &wp->safekeeper[wp->donor], wp->greetRequest.timeline, wp->truncateLsn, wp->propEpochStartLsn))
+		if (!wp->api.recovery_download(&wp->safekeeper[wp->donor], wp->greetRequest.timeline, wp->truncateLsn, wp->propEpochStartLsn))
 			walprop_log(FATAL, "Failed to recover state");
 	}
 	else if (wp->config->syncSafekeepers)

@@ -73,7 +73,7 @@ static void walprop_register_bgworker(void);
 static void walprop_pg_init_standalone_sync_safekeepers(void);
 static void walprop_pg_init_walsender(void);
 static void walprop_pg_init_bgworker(void);
-static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp );
+static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static TimeLineID walprop_pg_get_timeline_id(void);
 static void walprop_pg_load_libpqwalreceiver(void);
 
@@ -1169,7 +1169,7 @@ XLogBroadcastWalProposer(WalProposer *wp)
  * Receive WAL from most advanced safekeeper
  */
 static bool
-WalProposerRecovery(WalProposer *wp, Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
+WalProposerRecovery(Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
 {
 	char	   *err;
 	WalReceiverConn *wrconn;
@@ -1241,7 +1241,7 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk, TimeLineID timeline, XLogRe
 				rec_end_lsn = rec_start_lsn + len - XLOG_HDR_SIZE;
 
 				/* write WAL to disk */
-				XLogWalPropWrite(wp, &buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
+				XLogWalPropWrite(sk->wp, &buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
 
 				ereport(DEBUG1,
 						(errmsg("Recover message %X/%X length %d",

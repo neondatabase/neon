@@ -504,7 +504,7 @@ typedef struct walproposer_api
 	bool		(*conn_blocking_write) (Safekeeper *sk, void const *buf, size_t size);
 
 	/* Download WAL from startpos to endpos and make it available locally. */
-	bool		(*recovery_download) (WalProposer* wp, Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
+	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 
 	/* Read WAL from disk to buf. */
 	void		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
