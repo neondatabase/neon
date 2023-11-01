@@ -10,6 +10,12 @@ service BrokerService {
 
     // Publish safekeeper updates.
     rpc PublishSafekeeperInfo(stream SafekeeperTimelineInfo) returns (google.protobuf.Empty) {};
+
+    // Subscribe to all messages, limited by a filter.
+    rpc SubscribeByFilter(SubscribeByFilterRequest) returns (stream TypedMessage) {};
+
+    // Publish one message.
+    rpc PublishOne(TypedMessage) returns (google.protobuf.Empty) {};
 }
 
 message SubscribeSafekeeperInfoRequest {
@@ -47,4 +53,42 @@ message SafekeeperTimelineInfo {
 message TenantTimelineId {
     bytes tenant_id = 1;
     bytes timeline_id = 2;
+}
+
+message FilterTenantTimelineId {
+    enum Mode {
+        // Invalid mode.
+        INVALID = 0;
+
+        // Subscribe to all timelines.
+        ALL_TIMELINES = 1;
+
+        // Subscribe to a specific timeline.
+        SPECIFIC_TIMELINE = 2;
+    }
+
+    Mode mode = 1;
+
+    // Valid only if mode == SPECIFIC_TIMELINE.
+    optional TenantTimelineId tenant_timeline_id = 2;
+}
+
+message SubscribeByFilterRequest {
+    // Subscription will emit messages only of the specified types.
+    repeated MessageType types = 1;
+
+    // Subscription will emit messages only for the specified tenant/timeline.
+    FilterTenantTimelineId tenant_timeline_id = 2;
+}
+
+enum MessageType {
+    UNKNOWN = 0;
+    SAFEKEEPER_TIMELINE_INFO = 2;
+}
+
+// A message with a type.
+message TypedMessage {
+    MessageType type = 1;
+
+    optional SafekeeperTimelineInfo safekeeper_timeline_info = 2;
 }
