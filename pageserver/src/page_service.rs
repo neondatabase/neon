@@ -484,9 +484,20 @@ impl PageServerHandler {
                 }
             };
 
+            if let Err(e) = &response {
+                if timeline.cancel.is_cancelled() {
+                    // If we fail to fulfil a request during shutdown, which may be _because_ of
+                    // shutdown, then do not send the error to the client.  Instead just drop the
+                    // connection.
+                    span.in_scope(|| info!("dropped request during shutdown: {e}"));
+                    return Err(QueryError::Shutdown);
+                }
+            }
+
             let response = response.unwrap_or_else(|e| {
                 // print the all details to the log with {:#}, but for the client the
-                // error message is enough
+                // error message is enough.  Do not log if shutting down, as the anyhow::Error
+                // here includes cancellation which is not an error.
                 span.in_scope(|| error!("error reading relation or page version: {:#}", e));
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
