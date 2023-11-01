@@ -24,6 +24,18 @@ pub struct AttachHookResponse {
     pub gen: Option<u32>,
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct InspectRequest {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct InspectResponse {
+    pub attachment: Option<(u32, NodeId)>,
+}
+
 impl AttachmentService {
     pub fn from_env(env: &LocalEnv) -> Self {
         let path = env.base_data_dir.join("attachments.json");
@@ -100,5 +112,30 @@ impl AttachmentService {
 
         let response = response.json::<AttachHookResponse>()?;
         Ok(response.gen)
+    }
+
+    pub fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
+        use hyper::StatusCode;
+
+        let url = self
+            .env
+            .control_plane_api
+            .clone()
+            .unwrap()
+            .join("inspect")
+            .unwrap();
+        let client = reqwest::blocking::ClientBuilder::new()
+            .build()
+            .expect("Failed to construct http client");
+
+        let request = InspectRequest { tenant_id };
+
+        let response = client.post(url).json(&request).send()?;
+        if response.status() != StatusCode::OK {
+            return Err(anyhow!("Unexpected status {}", response.status()));
+        }
+
+        let response = response.json::<InspectResponse>()?;
+        Ok(response.attachment)
     }
 }
