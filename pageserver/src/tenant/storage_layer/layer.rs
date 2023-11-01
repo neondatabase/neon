@@ -695,7 +695,7 @@ impl LayerInner {
                 let (value, init_permit) = download(init_permit).await?;
                 let guard = self.inner.set(value, init_permit);
                 let strong = guard
-                    .get()
+                    .get_and_upgrade()
                     .expect("init creates strong reference, we held the init permit");
                 return Ok(strong);
             }
