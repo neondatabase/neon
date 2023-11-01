@@ -66,6 +66,7 @@ pub struct Response {
 pub struct TimelineDumpSer {
     pub tli: Arc<crate::timeline::Timeline>,
     pub args: Args,
+    pub runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl std::fmt::Debug for TimelineDumpSer {
@@ -82,8 +83,8 @@ impl Serialize for TimelineDumpSer {
     where
         S: serde::Serializer,
     {
-        let dump = tokio::runtime::Runtime::new()
-            .unwrap()
+        let dump = self
+            .runtime
             .block_on(build_from_tli_dump(self.tli.clone(), self.args.clone()));
         dump.serialize(serializer)
     }
@@ -202,6 +203,11 @@ pub async fn build(args: Args) -> Result<Response> {
     };
 
     let mut timelines = Vec::new();
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap(),
+    );
     for tli in ptrs_snapshot {
         let ttid = tli.ttid;
         if let Some(tenant_id) = args.tenant_id {
@@ -218,6 +224,7 @@ pub async fn build(args: Args) -> Result<Response> {
         timelines.push(TimelineDumpSer {
             tli,
             args: args.clone(),
+            runtime: runtime.clone(),
         });
     }
 
