@@ -17,6 +17,7 @@ pub struct Gate {
 
 /// RAII guard for a [`Gate`]: as long as this exists, calls to [`Gate::close`] will
 /// not complete.
+#[derive(Debug)]
 pub struct GateGuard(tokio::sync::OwnedSemaphorePermit);
 
 /// Observability helper: every `warn_period`, emit a log warning that we're still waiting on this gate
@@ -43,16 +44,17 @@ async fn warn_if_stuck<Fut: std::future::Future>(
     }
 }
 
+#[derive(Debug)]
 pub enum GateError {
     GateClosed,
 }
 
 impl Gate {
+    const MAX_UNITS: u32 = u32::MAX;
+
     pub fn new(name: String) -> Self {
         Self {
-            sem: Arc::new(tokio::sync::Semaphore::new(
-                tokio::sync::Semaphore::MAX_PERMITS,
-            )),
+            sem: Arc::new(tokio::sync::Semaphore::new(Self::MAX_UNITS as usize)),
             name,
         }
     }
@@ -85,11 +87,7 @@ impl Gate {
 
     async fn do_close(&self) {
         tracing::debug!(gate = self.name, "Closing Gate...");
-        match self
-            .sem
-            .acquire_many(tokio::sync::Semaphore::MAX_PERMITS as u32)
-            .await
-        {
+        match self.sem.acquire_many(Self::MAX_UNITS).await {
             Ok(_units) => {
                 // While holding all units, close the semaphore.  All subsequent calls to enter() will fail.
                 self.sem.close();
@@ -98,8 +96,63 @@ impl Gate {
                 // Semaphore closed: we are the only function that can do this, so it indicates a double-call.
                 // This is legal.  Timeline::shutdown for example is not protected from being called more than
                 // once.
+                tracing::debug!(gate = self.name, "Double close")
             }
         }
         tracing::debug!(gate = self.name, "Closed Gate.")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::Future;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_idle_gate() {
+        // Having taken no gates, we should not be blocked in close
+        let gate = Gate::new("test".to_string());
+        gate.close().await;
+
+        // If a guard is dropped before entering, close should not be blocked
+        let gate = Gate::new("test".to_string());
+        let guard = gate.enter().unwrap();
+        drop(guard);
+        gate.close().await;
+
+        // Entering a closed guard fails
+        gate.enter().expect_err("enter should fail after close");
+    }
+
+    #[tokio::test]
+    async fn test_busy_gate() {
+        let gate = Gate::new("test".to_string());
+
+        let guard = gate.enter().unwrap();
+
+        let mut close_fut = std::pin::pin!(gate.close());
+        let waker = futures::task::noop_waker_ref();
+        let mut cx = std::task::Context::from_waker(waker);
+
+        assert!(matches!(
+            close_fut.as_mut().poll(&mut cx),
+            std::task::Poll::Pending
+        ));
+
+        // Attempting to enter() should fail, even though close isn't done yet.
+        gate.enter()
+            .expect_err("enter should fail after entering close");
+
+        drop(guard);
+
+        // Guard is gone, close should finish
+        assert!(matches!(
+            close_fut.poll(&mut cx),
+            std::task::Poll::Ready(())
+        ));
+
+        // Attempting to enter() is still forbidden
+        gate.enter().expect_err("enter should fail finishing close");
     }
 }
