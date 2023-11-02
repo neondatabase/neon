@@ -119,12 +119,13 @@ impl<T> OnceCell<T> {
     ///
     /// If the inner has already been initialized.
     pub fn set(&self, value: T, _permit: InitPermit) -> Guard<'_, T> {
-        // cannot assert that this permit is for self.inner.semaphore
         let guard = self.inner.lock().unwrap();
 
+        // cannot assert that this permit is for self.inner.semaphore, but we can assert it cannot
+        // give more permits right now.
         if guard.init_semaphore.try_acquire().is_ok() {
             drop(guard);
-            panic!("semaphore is of wrong origin");
+            panic!("permit is of wrong origin");
         }
 
         Self::set0(value, guard)
