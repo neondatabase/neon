@@ -643,9 +643,8 @@ impl LayerInner {
                     .map_err(DownloadError::PreStatFailed)?;
 
                 let permit = if let Some(reason) = needs_download {
-                    match reason {
-                        NeedsDownload::NotFile(ft) => return Err(DownloadError::NotFile(ft)),
-                        _ => {}
+                    if let NeedsDownload::NotFile(ft) = reason {
+                        return Err(DownloadError::NotFile(ft));
                     }
 
                     // only reset this after we've decided we really need to download. otherwise it'd
