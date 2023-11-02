@@ -915,17 +915,27 @@ pub(crate) fn get_tenant(
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum GetActiveTenantError {
+    /// We may time out either while TenantSlot is InProgress, or while the Tenant
+    /// is in a non-Active state
     #[error(
         "Timed out waiting {wait_time:?} for tenant active state. Latest state: {latest_state:?}"
     )]
     WaitForActiveTimeout {
-        latest_state: TenantState,
+        latest_state: Option<TenantState>,
         wait_time: Duration,
     },
+
+    /// The TenantSlot is absent, or in secondary mode
     #[error(transparent)]
     NotFound(#[from] GetTenantError),
-    #[error(transparent)]
-    WaitTenantActive(crate::tenant::WaitToBecomeActiveError),
+
+    /// Cancellation token fired while we were waiting
+    #[error("cancelled")]
+    Cancelled,
+
+    /// Tenant exists, but is in a state that cannot become active (e.g. Stopping, Broken)
+    #[error("will not become active.  Current state: {0}")]
+    WillNotBecomeActive(TenantState),
 }
 
 enum TimeoutCancellableError {
@@ -1004,13 +1014,11 @@ pub(crate) async fn get_active_tenant_with_timeout(
                 .map_err(|e| match e {
                     TimeoutCancellableError::Timeout => {
                         GetActiveTenantError::WaitForActiveTimeout {
-                            latest_state: TenantState::Loading,
+                            latest_state: None,
                             wait_time: wait_start.elapsed(),
                         }
                     }
-                    TimeoutCancellableError::Cancelled => {
-                        GetActiveTenantError::NotFound(GetTenantError::NotFound(tenant_id))
-                    }
+                    TimeoutCancellableError::Cancelled => GetActiveTenantError::Cancelled,
                 })?;
             let wait_duration = Instant::now().duration_since(wait_start);
             timeout -= wait_duration;
@@ -1034,25 +1042,19 @@ pub(crate) async fn get_active_tenant_with_timeout(
     tracing::debug!("Waiting for tenant to enter active state...");
     match timeout_cancellable(timeout, tenant.wait_to_become_active(), cancel).await {
         Ok(Ok(())) => Ok(tenant),
-        // no .context(), the error message is good enough and some tests depend on it
-        Ok(Err(e)) => Err(GetActiveTenantError::WaitTenantActive(e)),
+        Ok(Err(e)) => Err(e),
         Err(TimeoutCancellableError::Timeout) => {
             let latest_state = tenant.current_state();
             if latest_state == TenantState::Active {
                 Ok(tenant)
             } else {
                 Err(GetActiveTenantError::WaitForActiveTimeout {
-                    latest_state,
+                    latest_state: Some(latest_state),
                     wait_time: timeout,
                 })
             }
         }
-        Err(TimeoutCancellableError::Cancelled) => {
-            Err(GetActiveTenantError::WaitForActiveTimeout {
-                latest_state: TenantState::Loading,
-                wait_time: timeout,
-            })
-        }
+        Err(TimeoutCancellableError::Cancelled) => Err(GetActiveTenantError::Cancelled),
     }
 }
 

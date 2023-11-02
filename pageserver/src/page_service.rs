@@ -1313,8 +1313,7 @@ impl From<GetActiveTenantError> for QueryError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
-            GetActiveTenantError::WaitTenantActive(e) => QueryError::Other(anyhow::Error::new(e)),
-            GetActiveTenantError::NotFound(e) => QueryError::Other(anyhow::Error::new(e)),
+            e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }
 }
