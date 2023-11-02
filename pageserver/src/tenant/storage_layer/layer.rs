@@ -692,6 +692,11 @@ impl LayerInner {
                     LayerResidenceEventReason::ResidenceChange,
                 );
 
+                let waiters = self.inner.initializer_count();
+                if waiters > 0 {
+                    tracing::info!(waiters, "completing the on-demand download for other tasks");
+                }
+
                 Ok((ResidentOrWantedEvicted::Resident(res), permit))
             };
 

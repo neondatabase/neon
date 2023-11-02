@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, MutexGuard,
+};
 use tokio::sync::Semaphore;
 
 /// Custom design like [`tokio::sync::OnceCell`] but using [`OwnedSemaphorePermit`] instead of
@@ -10,6 +13,7 @@ use tokio::sync::Semaphore;
 /// [`OwnedSemaphorePermit`]: tokio::sync::OwnedSemaphorePermit
 pub struct OnceCell<T> {
     inner: Mutex<Inner<T>>,
+    initializers: AtomicUsize,
 }
 
 impl<T> Default for OnceCell<T> {
@@ -17,6 +21,7 @@ impl<T> Default for OnceCell<T> {
     fn default() -> Self {
         Self {
             inner: Default::default(),
+            initializers: AtomicUsize::new(0),
         }
     }
 }
@@ -49,6 +54,7 @@ impl<T> OnceCell<T> {
                 init_semaphore: Arc::new(sem),
                 value: Some(value),
             }),
+            initializers: AtomicUsize::new(0),
         }
     }
 
@@ -63,6 +69,8 @@ impl<T> OnceCell<T> {
         F: FnOnce(InitPermit) -> Fut,
         Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
+        use futures::future::FutureExt;
+
         let sem = {
             let guard = self.inner.lock().unwrap();
             if guard.value.is_some() {
@@ -71,7 +79,18 @@ impl<T> OnceCell<T> {
             guard.init_semaphore.clone()
         };
 
-        let permit = sem.acquire_owned().await;
+        // use unconstrained to bypass the coop check -- this should be safe because we have 1
+        // permit and this whole structure should be rarely initialized.
+        let mut acquire = std::pin::pin!(tokio::task::unconstrained(sem.acquire_owned()));
+
+        let permit = if let Some(permit) = (&mut acquire).now_or_never() {
+            permit
+        } else {
+            // increment the count for the duration of queued
+            self.initializers.fetch_add(1, Ordering::Relaxed);
+            let _guard = DecrementInitializers(self);
+            acquire.await
+        };
 
         match permit {
             Ok(permit) => {
@@ -129,6 +148,19 @@ impl<T> OnceCell<T> {
         } else {
             None
         }
+    }
+
+    /// Return the number of [`Self::get_or_init`] calls waiting for initialization to complete.
+    pub fn initializer_count(&self) -> usize {
+        self.initializers.load(Ordering::Relaxed)
+    }
+}
+
+struct DecrementInitializers<'a, T>(&'a OnceCell<T>);
+
+impl<'a, T> Drop for DecrementInitializers<'a, T> {
+    fn drop(&mut self) {
+        self.0.initializers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
