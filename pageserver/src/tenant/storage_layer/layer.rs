@@ -411,6 +411,10 @@ struct LayerInner {
     version: AtomicUsize,
 
     /// Allow subscribing to when the layer actually gets evicted.
+    ///
+    /// If in future we need to implement "wait until layer instances are gone and done", carrying
+    /// this over to the gc spawn_blocking from LayerInner::drop will do the trick, and adding a
+    /// method for "wait_gc" which will wait to this being closed.
     status: tokio::sync::broadcast::Sender<Status>,
 
     /// Counter for exponential backoff with the download
