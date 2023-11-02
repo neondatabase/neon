@@ -337,18 +337,16 @@ enum ResidentOrWantedEvicted {
 }
 
 impl ResidentOrWantedEvicted {
-    /// If `Some` is returned, the ResidentOrWantedEvicted has been upgraded back from
-    /// `ResidentOrWantedEvicted::WantedEvicted` to `ResidentOrWantedEvicted::Resident`.
-    fn get_and_upgrade(&mut self) -> Option<Arc<DownloadedLayer>> {
+    fn get_and_upgrade(&mut self) -> Option<(Arc<DownloadedLayer>, bool)> {
         match self {
-            ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
+            ResidentOrWantedEvicted::Resident(strong) => Some((strong.clone(), false)),
             ResidentOrWantedEvicted::WantedEvicted(weak, _) => match weak.upgrade() {
                 Some(strong) => {
                     LAYER_IMPL_METRICS.inc_raced_wanted_evicted_accesses();
 
                     *self = ResidentOrWantedEvicted::Resident(strong.clone());
 
-                    Some(strong)
+                    Some((strong, true))
                 }
                 None => None,
             },
@@ -637,14 +635,16 @@ impl LayerInner {
 
                 // check if we really need to be downloaded; could have been already downloaded by a
                 // cancelled previous attempt.
-                //
-                // FIXME: what if it's a directory? that is currently needs_download == true
                 let needs_download = self
                     .needs_download()
                     .await
                     .map_err(DownloadError::PreStatFailed)?;
 
                 let permit = if let Some(reason) = needs_download {
+                    if let NeedsDownload::NotFile(ft) = reason {
+                        return Err(DownloadError::NotFile(ft));
+                    }
+
                     // only reset this after we've decided we really need to download. otherwise it'd
                     // be impossible to mark cancelled downloads for eviction, like one could imagine
                     // we would like to do for prefetching which was not needed.
@@ -694,7 +694,7 @@ impl LayerInner {
                 // below paths anymore essentially limiting the max loop iterations to 2.
                 let (value, init_permit) = download(init_permit).await?;
                 let mut guard = self.inner.set(value, init_permit);
-                let strong = guard
+                let (strong, _upgraded) = guard
                     .get_and_upgrade()
                     .expect("init creates strong reference, we held the init permit");
                 return Ok(strong);
@@ -703,11 +703,17 @@ impl LayerInner {
             let (weak, permit) = {
                 let mut locked = self.inner.get_or_init(download).await?;
 
-                if let Some(strong) = locked.get_and_upgrade() {
-                    self.wanted_evicted.store(false, Ordering::Relaxed);
+                if let Some((strong, upgraded)) = locked.get_and_upgrade() {
+                    if upgraded {
+                        // when upgraded back, the Arc<DownloadedLayer> is still available, but
+                        // previously a `evict_and_wait` was received.
+                        self.wanted_evicted.store(false, Ordering::Relaxed);
 
-                    // error out any `evict_and_wait`
-                    drop(self.status.send(Status::Downloaded));
+                        // error out any `evict_and_wait`
+                        drop(self.status.send(Status::Downloaded));
+                        LAYER_IMPL_METRICS
+                            .inc_eviction_cancelled(EvictionCancelled::UpgradedBackOnAccess);
+                    }
 
                     return Ok(strong);
                 } else {
@@ -883,7 +889,7 @@ impl LayerInner {
     fn is_file_present_and_good_size(&self, m: &std::fs::Metadata) -> Result<(), NeedsDownload> {
         // in future, this should include sha2-256 validation of the file.
         if !m.is_file() {
-            Err(NeedsDownload::NotFile)
+            Err(NeedsDownload::NotFile(m.file_type()))
         } else if m.len() != self.desc.file_size {
             Err(NeedsDownload::WrongSize {
                 actual: m.len(),
@@ -1082,6 +1088,8 @@ enum DownloadError {
     ContextAndConfigReallyDeniesDownloads,
     #[error("downloading is really required but not allowed by this method")]
     DownloadRequired,
+    #[error("layer path exists, but it is not a file: {0:?}")]
+    NotFile(std::fs::FileType),
     /// Why no error here? Because it will be reported by page_service. We should had also done
     /// retries already.
     #[error("downloading evicted layer file failed")]
@@ -1097,7 +1105,7 @@ enum DownloadError {
 #[derive(Debug, PartialEq)]
 pub(crate) enum NeedsDownload {
     NotFound,
-    NotFile,
+    NotFile(std::fs::FileType),
     WrongSize { actual: u64, expected: u64 },
 }
 
@@ -1105,7 +1113,7 @@ impl std::fmt::Display for NeedsDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NeedsDownload::NotFound => write!(f, "file was not found"),
-            NeedsDownload::NotFile => write!(f, "path is not a file"),
+            NeedsDownload::NotFile(ft) => write!(f, "path is not a file; {ft:?}"),
             NeedsDownload::WrongSize { actual, expected } => {
                 write!(f, "file size mismatch {actual} vs. {expected}")
             }
@@ -1501,6 +1509,8 @@ enum EvictionCancelled {
     AlreadyReinitialized,
     /// Not evicted because of a pending reinitialization
     LostToDownload,
+    /// After eviction, there was a new layer access which cancelled the eviction.
+    UpgradedBackOnAccess,
 }
 
 impl EvictionCancelled {
@@ -1513,6 +1523,7 @@ impl EvictionCancelled {
             EvictionCancelled::RemoveFailed => "remove_failed",
             EvictionCancelled::AlreadyReinitialized => "already_reinitialized",
             EvictionCancelled::LostToDownload => "lost_to_download",
+            EvictionCancelled::UpgradedBackOnAccess => "upgraded_back_on_access",
         }
     }
 }
