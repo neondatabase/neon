@@ -586,9 +586,10 @@ jobs:
         env:
           BUCKET: neon-github-public-dev
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REF: ${{ github.event.pull_request.base.ref || github.ref }}
         run: |
           CURRENT="${COMMIT_SHA}"
-          BASELINE="$(git merge-base $CURRENT origin/main)"
+          BASELINE="$(git merge-base $CURRENT $REF)"
 
           cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
 
