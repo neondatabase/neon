@@ -34,7 +34,7 @@ use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
-pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage";
+pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/pageserver";
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
