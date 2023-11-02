@@ -20,6 +20,7 @@
 #include "access/xlogutils.h"
 #include "storage/buf_internals.h"
 #include "c.h"
+#include "postmaster/interrupt.h"
 
 #include "libpq-fe.h"
 #include "libpq/pqformat.h"
@@ -66,20 +67,6 @@ bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = 
 static bool pageserver_flush(void);
 static void pageserver_disconnect(void);
 
-
-static pqsigfunc	 prev_signal_handler;
-
-static void
-pageserver_sighup_handler(SIGNAL_ARGS)
-{
-	if (prev_signal_handler)
-	{
-        	prev_signal_handler(postgres_signal_arg);
-	}
-	neon_log(LOG, "Received SIGHUP, disconnecting pageserver. New pageserver connstring is %s", page_server_connstring);
-	pageserver_disconnect();
-}
-
 static bool
 pageserver_connect(int elevel)
 {
@@ -90,6 +77,11 @@ pageserver_connect(int elevel)
 	int			n;
 
 	Assert(!connected);
+
+        if (ConfigReloadPending)
+        {
+            HandleMainLoopInterrupts();
+        }
 
 	/*
 	 * Connect using the connection string we got from the
@@ -254,6 +246,12 @@ pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
 
+        if (ConfigReloadPending)
+        {
+            pageserver_disconnect();
+            HandleMainLoopInterrupts();
+        }
+
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
 	{
@@ -274,6 +272,7 @@ pageserver_send(NeonRequest * request)
 	{
 		while (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
+			HandleMainLoopInterrupts();
 			n_reconnect_attempts += 1;
 			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
@@ -498,8 +497,6 @@ pg_init_libpagestore(void)
 		old_redo_read_buffer_filter = redo_read_buffer_filter;
 		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
-
-        prev_signal_handler = pqsignal(SIGHUP, pageserver_sighup_handler);
 
 	lfc_init();
 }
