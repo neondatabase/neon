@@ -351,7 +351,7 @@ impl InMemoryLayer {
         //       keys. To speed up all the comparisons we convert the key to i128 and
         //       keep the value as a reference.
         let mut keys: Vec<_> = inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect();
-        keys.sort_by_key(|k| k.0);
+        keys.sort_unstable_by_key(|k| k.0);
 
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
