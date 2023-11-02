@@ -748,7 +748,7 @@ impl LayerInner {
         match b {
             Download => Ok(()),
             Warn | Error => {
-                tracing::warn!(
+                tracing::info!(
                     "unexpectedly on-demand downloading for task kind {:?}",
                     ctx.task_kind()
                 );
