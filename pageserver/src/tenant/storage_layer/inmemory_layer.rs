@@ -367,4 +367,61 @@ impl InMemoryLayer {
         let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
         Ok(delta_layer)
     }
+
+    /// Write this frozen in-memory layer to disk.
+    ///
+    /// Returns a new delta layer with all the same data as this in-memory layer
+    pub async fn write_to_disk_bench(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        // Grab the lock in read-mode. We hold it over the I/O, but because this
+        // layer is not writeable anymore, no one should be trying to acquire the
+        // write lock on it, so we shouldn't block anyone. There's one exception
+        // though: another thread might have grabbed a reference to this layer
+        // in `get_layer_for_write' just before the checkpointer called
+        // `freeze`, and then `write_to_disk` on it. When the thread gets the
+        // lock, it will see that it's not writeable anymore and retry, but it
+        // would have to wait until we release it. That race condition is very
+        // rare though, so we just accept the potential latency hit for now.
+        let inner = self.inner.read().await;
+
+        let end_lsn = *self.end_lsn.get().unwrap();
+
+        let mut delta_layer_writer = DeltaLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_id,
+            Key::MIN,
+            self.start_lsn..end_lsn,
+        )
+        .await?;
+
+        let mut buf = Vec::new();
+
+        let cursor = inner.file.block_cursor();
+
+        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
+        keys.sort_by_key(|k| k.0);
+
+        let ctx = RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::InMemoryLayer)
+            .build();
+        for (key, vec_map) in keys.iter() {
+            let key = **key;
+            // Write all page versions
+            for (lsn, pos) in vec_map.as_slice() {
+                cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
+                let will_init = Value::des(&buf)?.will_init();
+                delta_layer_writer
+                    .put_value_bytes(key, *lsn, &buf, will_init)
+                    .await?;
+            }
+        }
+
+        // MAX is used here because we identify L0 layers by full key range
+        // TODO XXX do this
+        // let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
+        Ok(())
+    }
 }
