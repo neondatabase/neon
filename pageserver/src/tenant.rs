@@ -3692,7 +3692,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
-        Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
+        Lazy::new(|| Key::from_slice(&hex!("110000000033333333444444445500000001")));
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
@@ -3788,9 +3788,9 @@ mod tests {
         let writer = tline.writer().await;
 
         #[allow(non_snake_case)]
-        let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+        let TEST_KEY_A: Key = Key::from_hex("110000000033333333444444445500000001").unwrap();
         #[allow(non_snake_case)]
-        let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
+        let TEST_KEY_B: Key = Key::from_hex("110000000033333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
         writer
@@ -4374,7 +4374,7 @@ mod tests {
 
         let mut keyspace = KeySpaceAccum::new();
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let mut blknum = 0;
         for _ in 0..50 {
             for _ in 0..10000 {
@@ -4420,7 +4420,7 @@ mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -4501,7 +4501,7 @@ mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -4592,7 +4592,7 @@ mod tests {
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         // Track page mutation lsns across different timelines.
         let mut updated = [[Lsn(0); NUM_KEYS]; NUM_TLINES];
 
