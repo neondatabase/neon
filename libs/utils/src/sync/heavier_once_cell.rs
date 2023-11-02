@@ -69,8 +69,6 @@ impl<T> OnceCell<T> {
         F: FnOnce(InitPermit) -> Fut,
         Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
-        use futures::future::FutureExt;
-
         let sem = {
             let guard = self.inner.lock().unwrap();
             if guard.value.is_some() {
@@ -79,17 +77,10 @@ impl<T> OnceCell<T> {
             guard.init_semaphore.clone()
         };
 
-        // use unconstrained to bypass the coop check -- this should be safe because we have 1
-        // permit and this whole structure should be rarely initialized.
-        let mut acquire = std::pin::pin!(tokio::task::unconstrained(sem.acquire_owned()));
-
-        let permit = if let Some(permit) = (&mut acquire).now_or_never() {
-            permit
-        } else {
+        let permit = {
             // increment the count for the duration of queued
-            self.initializers.fetch_add(1, Ordering::Relaxed);
-            let _guard = DecrementInitializers(self);
-            acquire.await
+            let _guard = CountWaitingInitializers::start(self);
+            sem.acquire_owned().await
         };
 
         match permit {
@@ -157,9 +148,18 @@ impl<T> OnceCell<T> {
     }
 }
 
-struct DecrementInitializers<'a, T>(&'a OnceCell<T>);
+/// DropGuard counter for queued tasks waiting to initialize, mainly accessible for the
+/// initializing task for example at the end of initialization.
+struct CountWaitingInitializers<'a, T>(&'a OnceCell<T>);
 
-impl<'a, T> Drop for DecrementInitializers<'a, T> {
+impl<'a, T> CountWaitingInitializers<'a, T> {
+    fn start(target: &'a OnceCell<T>) -> Self {
+        target.initializers.fetch_add(1, Ordering::Relaxed);
+        CountWaitingInitializers(target)
+    }
+}
+
+impl<'a, T> Drop for CountWaitingInitializers<'a, T> {
     fn drop(&mut self) {
         self.0.initializers.fetch_sub(1, Ordering::Relaxed);
     }
