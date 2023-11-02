@@ -857,7 +857,8 @@ impl WalRedoProcess {
             let in_revents = stdin_pollfds[0].revents().unwrap();
             if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
                 nwrite += proc.stdin.write(&writebuf[nwrite..])?;
-            } else if in_revents.contains(PollFlags::POLLHUP) {
+            }
+            if in_revents.contains(PollFlags::POLLHUP) {
                 // We still have more data to write, but the process closed the pipe.
                 anyhow::bail!("WAL redo process closed its stdin unexpectedly");
             }
@@ -907,7 +908,8 @@ impl WalRedoProcess {
                 let out_revents = stdout_pollfds[0].revents().unwrap();
                 if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
                     nresult += output.stdout.read(&mut resultbuf[nresult..])?;
-                } else if out_revents.contains(PollFlags::POLLHUP) {
+                }
+                if out_revents.contains(PollFlags::POLLHUP) {
                     anyhow::bail!("WAL redo process closed its stdout unexpectedly");
                 }
             }
