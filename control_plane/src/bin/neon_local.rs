@@ -337,7 +337,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         .context("Failed to initialize neon repository")?;
 
     // Create remote storage location for default LocalFs remote storage
-    std::fs::create_dir(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
+    std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
     // Initialize pageserver, create initial tenant and timeline.
     for ps_conf in &env.pageservers {
