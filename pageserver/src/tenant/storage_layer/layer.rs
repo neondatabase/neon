@@ -561,6 +561,8 @@ impl LayerInner {
         }
     }
 
+    /// Cancellation safe, however dropping the future and calling this method again might result
+    /// in a new attempt to evict OR join the previously started attempt.
     pub(crate) async fn evict_and_wait(
         &self,
         _: &RemoteTimelineClient,
@@ -609,8 +611,7 @@ impl LayerInner {
         }
     }
 
-    /// Should be cancellation safe, but cancellation is troublesome together with the spawned
-    /// download.
+    /// Cancellation safe.
     #[tracing::instrument(skip_all, fields(layer=%self))]
     async fn get_or_maybe_download(
         self: &Arc<Self>,
