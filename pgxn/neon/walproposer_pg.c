@@ -1288,6 +1288,16 @@ XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr)
 	int			startoff;
 	int			byteswritten;
 
+	/*
+	 * Apart from walproposer, basebackup LSN page is also written out by
+	 * postgres itself which writes WAL only in pages, and in basebackup it is
+	 * inherently dummy (only safekeepers have historic WAL). Update WAL buffers
+	 * here to avoid dummy page overwriting correct one we download here. Ugly,
+	 * but alternatives are about the same ugly. We won't need that if we switch
+	 * to on-demand WAL download from safekeepers, without writing to disk.
+	 *
+	 * https://github.com/neondatabase/neon/issues/5749
+	 */
 	if (!wp->config->syncSafekeepers)
 		XLogUpdateWalBuffers(buf, recptr, nbytes);
 
