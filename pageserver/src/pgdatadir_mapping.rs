@@ -1694,6 +1694,7 @@ const AUX_FILES_KEY: Key = Key {
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
+/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
 pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
     Ok(match key.field1 {
         0x00 => (
@@ -1709,7 +1710,8 @@ pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
     })
 }
 
-fn is_rel_block_key(key: Key) -> bool {
+/// See [[key_to_rel_block]].
+pub fn is_rel_block_key(key: Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0
 }
 
