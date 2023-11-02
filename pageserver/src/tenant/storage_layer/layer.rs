@@ -337,18 +337,16 @@ enum ResidentOrWantedEvicted {
 }
 
 impl ResidentOrWantedEvicted {
-    /// If `Some` is returned, the ResidentOrWantedEvicted has been upgraded back from
-    /// `ResidentOrWantedEvicted::WantedEvicted` to `ResidentOrWantedEvicted::Resident`.
-    fn get_and_upgrade(&mut self) -> Option<Arc<DownloadedLayer>> {
+    fn get_and_upgrade(&mut self) -> Option<(Arc<DownloadedLayer>, bool)> {
         match self {
-            ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
+            ResidentOrWantedEvicted::Resident(strong) => Some((strong.clone(), false)),
             ResidentOrWantedEvicted::WantedEvicted(weak, _) => match weak.upgrade() {
                 Some(strong) => {
                     LAYER_IMPL_METRICS.inc_raced_wanted_evicted_accesses();
 
                     *self = ResidentOrWantedEvicted::Resident(strong.clone());
 
-                    Some(strong)
+                    Some((strong, true))
                 }
                 None => None,
             },
@@ -696,7 +694,7 @@ impl LayerInner {
                 // below paths anymore essentially limiting the max loop iterations to 2.
                 let (value, init_permit) = download(init_permit).await?;
                 let mut guard = self.inner.set(value, init_permit);
-                let strong = guard
+                let (strong, _upgraded) = guard
                     .get_and_upgrade()
                     .expect("init creates strong reference, we held the init permit");
                 return Ok(strong);
@@ -705,11 +703,17 @@ impl LayerInner {
             let (weak, permit) = {
                 let mut locked = self.inner.get_or_init(download).await?;
 
-                if let Some(strong) = locked.get_and_upgrade() {
-                    self.wanted_evicted.store(false, Ordering::Relaxed);
+                if let Some((strong, upgraded)) = locked.get_and_upgrade() {
+                    if upgraded {
+                        // when upgraded back, the Arc<DownloadedLayer> is still available, but
+                        // previously a `evict_and_wait` was received.
+                        self.wanted_evicted.store(false, Ordering::Relaxed);
 
-                    // error out any `evict_and_wait`
-                    drop(self.status.send(Status::Downloaded));
+                        // error out any `evict_and_wait`
+                        drop(self.status.send(Status::Downloaded));
+                        LAYER_IMPL_METRICS
+                            .inc_eviction_cancelled(EvictionCancelled::UpgradedBackOnAccess);
+                    }
 
                     return Ok(strong);
                 } else {
@@ -1505,6 +1509,8 @@ enum EvictionCancelled {
     AlreadyReinitialized,
     /// Not evicted because of a pending reinitialization
     LostToDownload,
+    /// After eviction, there was a new layer access which cancelled the eviction.
+    UpgradedBackOnAccess,
 }
 
 impl EvictionCancelled {
@@ -1517,6 +1523,7 @@ impl EvictionCancelled {
             EvictionCancelled::RemoveFailed => "remove_failed",
             EvictionCancelled::AlreadyReinitialized => "already_reinitialized",
             EvictionCancelled::LostToDownload => "lost_to_download",
+            EvictionCancelled::UpgradedBackOnAccess => "upgraded_back_on_access",
         }
     }
 }
