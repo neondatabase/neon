@@ -586,10 +586,12 @@ jobs:
         env:
           BUCKET: neon-github-public-dev
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REF: ${{ github.event.pull_request.base.ref || github.ref }}
+          # Use `ref` for PRs and `ref_name` for pushes, both returns branch name as is.
+          # `ref` for pushes returns `refs/heads/<branch-name>` so it won't work for us.
+          REF_NAME: ${{ github.event.pull_request.base.ref || github.ref_name }}
         run: |
           CURRENT="${COMMIT_SHA}"
-          BASELINE="$(git merge-base $CURRENT $REF)"
+          BASELINE="$(git merge-base origin/$REF_NAME $CURRENT)"
 
           cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
 
