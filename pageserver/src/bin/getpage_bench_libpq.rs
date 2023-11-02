@@ -37,13 +37,13 @@ impl std::str::FromStr for Key {
 }
 
 struct KeyRange {
-    start: Key,
-    end: Key,
+    start: i128,
+    end: i128,
 }
 
 impl KeyRange {
     fn len(&self) -> i128 {
-        self.end.0.to_i128() - self.start.0.to_i128()
+        self.end - self.start
     }
 }
 
@@ -207,7 +207,10 @@ fn timeline(
                 let end = Key::from_str(r[1].as_str().unwrap()).unwrap();
                 // filter out non-relblock keys
                 match (is_rel_block_key(start.0), is_rel_block_key(end.0)) {
-                    (true, true) => Some(KeyRange { start, end }),
+                    (true, true) => Some(KeyRange {
+                        start: start.0.to_i128(),
+                        end: end.0.to_i128(),
+                    }),
                     (true, false) | (false, true) => {
                         unimplemented!("split up range")
                     }
@@ -243,7 +246,7 @@ fn timeline(
                         let key = {
                             let mut rng = rand::thread_rng();
                             let r = ranges.choose_weighted(&mut rng, |r| r.len()).unwrap();
-                            let key: i128 = rng.gen_range((r.start.0.to_i128()..r.end.0.to_i128()));
+                            let key: i128 = rng.gen_range((r.start..r.end));
                             let key = repository::Key::from_i128(key);
                             // XXX filter these out when we iterate the keyspace
                             assert!(
