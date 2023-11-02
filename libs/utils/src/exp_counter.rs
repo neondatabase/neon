@@ -3,13 +3,13 @@
 /// The type implements an [`Iterator`] that yields numbers from the range
 /// from 0 to a pre-defined maximum.
 ///
-/// * It is *exhausting* in that it visits all numbers between 0 and `max`.
+/// * It is *exhausting* in that it visits all numbers inside `0..max`.
 /// * It is *injective* in that all numbers are visited only once.
 /// * It has *exponential search properties* in that it iterates over the
 ///   number range in a fractal pattern.
 ///
 /// This iterator is well suited for finding a pivot in algorithms that
-/// require centered pivots: its output is heavily biased towards starting
+/// want centered pivots: its output is heavily biased towards starting
 /// with small numbers.
 ///
 /// If the specified maximum is close to an exponent
@@ -58,7 +58,6 @@ impl Iterator for ExpCounter {
         self.offs *= 2;
 
         if self.base + self.offs >= self.max {
-            println!();
             self.base += 1;
             self.offs = 1;
             while self.base > self.offs {

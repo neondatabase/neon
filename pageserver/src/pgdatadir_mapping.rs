@@ -421,7 +421,7 @@ impl Timeline {
     /// Obtain the timestamp for the given lsn.
     ///
     /// If the lsn has no timestamps, returns None. Returns the maximum such timestamp otherwise.
-    pub async fn get_max_timestamp_for_lsn(
+    pub(crate) async fn get_max_timestamp_for_lsn(
         &self,
         probe_lsn: Lsn,
         ctx: &RequestContext,
