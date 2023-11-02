@@ -389,6 +389,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
+            enable_heatmap: settings
+                .remove("enable_heatmap")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'enable_heatmap' as bool")?,
         };
 
         let request = models::TenantCreateRequest {
@@ -486,6 +491,11 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'gc_feedback' as bool")?,
+                enable_heatmap: settings
+                    .remove("enable_heatmap")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'enable_heatmap' as bool")?,
             }
         };
 

@@ -2208,6 +2208,13 @@ impl Tenant {
             .or(self.conf.default_tenant_conf.min_resident_size_override)
     }
 
+    pub fn get_enable_heatmap(&self) -> bool {
+        let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
+        tenant_conf
+            .enable_heatmap
+            .unwrap_or(self.conf.default_tenant_conf.enable_heatmap)
+    }
+
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         self.tenant_conf.write().unwrap().tenant_conf = new_tenant_conf;
         // Don't hold self.timelines.lock() during the notifies.
@@ -3472,6 +3479,7 @@ pub(crate) mod harness {
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
                 gc_feedback: Some(tenant_conf.gc_feedback),
+                enable_heatmap: Some(tenant_conf.enable_heatmap),
             }
         }
     }
