@@ -2,10 +2,7 @@
 //! Other modules should use stuff from this module instead of
 //! directly relying on deps like `reqwest` (think loose coupling).
 
-pub mod conn_pool;
-pub mod server;
-pub mod sql_over_http;
-pub mod websocket;
+pub mod health_server;
 
 use std::{sync::Arc, time::Duration};
 

@@ -1,7 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
@@ -26,10 +26,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
-use crate::tenant::{
-    create_tenant_files, AttachMarkerMode, AttachedTenantConf, CreateTenantFilesMode, Tenant,
-    TenantState,
-};
+use crate::tenant::{create_tenant_files, AttachedTenantConf, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -256,83 +253,99 @@ async fn init_load_generations(
     Ok(Some(generations))
 }
 
+/// Given a directory discovered in the pageserver's tenants/ directory, attempt
+/// to load a tenant config from it.
+///
+/// If file is missing, return Ok(None)
+fn load_tenant_config(
+    conf: &'static PageServerConf,
+    dentry: Utf8DirEntry,
+) -> anyhow::Result<Option<(TenantId, anyhow::Result<LocationConf>)>> {
+    let tenant_dir_path = dentry.path().to_path_buf();
+    if crate::is_temporary(&tenant_dir_path) {
+        info!("Found temporary tenant directory, removing: {tenant_dir_path}");
+        // No need to use safe_remove_tenant_dir_all because this is already
+        // a temporary path
+        if let Err(e) = std::fs::remove_dir_all(&tenant_dir_path) {
+            error!(
+                "Failed to remove temporary directory '{}': {:?}",
+                tenant_dir_path, e
+            );
+        }
+        return Ok(None);
+    }
+
+    // This case happens if we crash during attachment before writing a config into the dir
+    let is_empty = tenant_dir_path
+        .is_empty_dir()
+        .with_context(|| format!("Failed to check whether {tenant_dir_path:?} is an empty dir"))?;
+    if is_empty {
+        info!("removing empty tenant directory {tenant_dir_path:?}");
+        if let Err(e) = std::fs::remove_dir(&tenant_dir_path) {
+            error!(
+                "Failed to remove empty tenant directory '{}': {e:#}",
+                tenant_dir_path
+            )
+        }
+        return Ok(None);
+    }
+
+    let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
+    if tenant_ignore_mark_file.exists() {
+        info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
+        return Ok(None);
+    }
+
+    let tenant_id = match tenant_dir_path
+        .file_name()
+        .unwrap_or_default()
+        .parse::<TenantId>()
+    {
+        Ok(id) => id,
+        Err(_) => {
+            warn!("Invalid tenant path (garbage in our repo directory?): {tenant_dir_path}",);
+            return Ok(None);
+        }
+    };
+
+    Ok(Some((
+        tenant_id,
+        Tenant::load_tenant_config(conf, &tenant_id),
+    )))
+}
+
 /// Initial stage of load: walk the local tenants directory, clean up any temp files,
 /// and load configurations for the tenants we found.
+///
+/// Do this in parallel, because we expect 10k+ tenants, so serial execution can take
+/// seconds even on reasonably fast drives.
 async fn init_load_tenant_configs(
     conf: &'static PageServerConf,
 ) -> anyhow::Result<HashMap<TenantId, anyhow::Result<LocationConf>>> {
     let tenants_dir = conf.tenants_path();
 
-    let mut dir_entries = tenants_dir
-        .read_dir_utf8()
-        .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
+    let dentries = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Utf8DirEntry>> {
+        let dir_entries = tenants_dir
+            .read_dir_utf8()
+            .with_context(|| format!("Failed to list tenants dir {tenants_dir:?}"))?;
+
+        Ok(dir_entries.collect::<Result<Vec<_>, std::io::Error>>()?)
+    })
+    .await??;
 
     let mut configs = HashMap::new();
 
-    loop {
-        match dir_entries.next() {
-            None => break,
-            Some(Ok(dentry)) => {
-                let tenant_dir_path = dentry.path().to_path_buf();
-                if crate::is_temporary(&tenant_dir_path) {
-                    info!("Found temporary tenant directory, removing: {tenant_dir_path}");
-                    // No need to use safe_remove_tenant_dir_all because this is already
-                    // a temporary path
-                    if let Err(e) = fs::remove_dir_all(&tenant_dir_path).await {
-                        error!(
-                            "Failed to remove temporary directory '{}': {:?}",
-                            tenant_dir_path, e
-                        );
-                    }
-                    continue;
-                }
+    let mut join_set = JoinSet::new();
+    for dentry in dentries {
+        join_set.spawn_blocking(move || load_tenant_config(conf, dentry));
+    }
 
-                // This case happens if we:
-                // * crash during attach before creating the attach marker file
-                // * crash during tenant delete before removing tenant directory
-                let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
-                    format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
-                })?;
-                if is_empty {
-                    info!("removing empty tenant directory {tenant_dir_path:?}");
-                    if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
-                        error!(
-                            "Failed to remove empty tenant directory '{}': {e:#}",
-                            tenant_dir_path
-                        )
-                    }
-                    continue;
-                }
-
-                let tenant_ignore_mark_file = tenant_dir_path.join(IGNORED_TENANT_FILE_NAME);
-                if tenant_ignore_mark_file.exists() {
-                    info!("Found an ignore mark file {tenant_ignore_mark_file:?}, skipping the tenant");
-                    continue;
-                }
-
-                let tenant_id = match tenant_dir_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .parse::<TenantId>()
-                {
-                    Ok(id) => id,
-                    Err(_) => {
-                        warn!(
-                            "Invalid tenant path (garbage in our repo directory?): {tenant_dir_path}",
-                        );
-                        continue;
-                    }
-                };
-
-                configs.insert(tenant_id, Tenant::load_tenant_config(conf, &tenant_id));
-            }
-            Some(Err(e)) => {
-                // An error listing the top level directory indicates serious problem
-                // with local filesystem: we will fail to load, and fail to start.
-                anyhow::bail!(e);
-            }
+    while let Some(r) = join_set.join_next().await {
+        if let Some((tenant_id, tenant_config)) = r?? {
+            configs.insert(tenant_id, tenant_config);
         }
     }
+
     Ok(configs)
 }
 
@@ -421,14 +434,15 @@ pub async fn init_tenant_mgr(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
-        match schedule_local_tenant_processing(
+        match tenant_spawn(
             conf,
             tenant_id,
             &tenant_dir_path,
-            AttachedTenantConf::try_from(location_conf)?,
             resources.clone(),
+            AttachedTenantConf::try_from(location_conf)?,
             Some(init_order.clone()),
             &TENANTS,
+            SpawnMode::Normal,
             &ctx,
         ) {
             Ok(tenant) => {
@@ -448,15 +462,18 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
+/// Wrapper for Tenant::spawn that checks invariants before running, and inserts
+/// a broken tenant in the map if Tenant::spawn fails.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn schedule_local_tenant_processing(
+pub(crate) fn tenant_spawn(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_path: &Utf8Path,
-    location_conf: AttachedTenantConf,
     resources: TenantSharedResources,
+    location_conf: AttachedTenantConf,
     init_order: Option<InitializationOrder>,
     tenants: &'static tokio::sync::RwLock<TenantsMap>,
+    mode: SpawnMode,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -480,45 +497,24 @@ pub(crate) fn schedule_local_tenant_processing(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
-        info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
-        if resources.remote_storage.is_none() {
-            warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
-            Tenant::create_broken_tenant(
-                conf,
-                tenant_id,
-                "attaching mark file present but no remote storage configured".to_string(),
-            )
-        } else {
-            match Tenant::spawn_attach(
-                conf,
-                tenant_id,
-                resources,
-                location_conf,
-                tenants,
-                AttachMarkerMode::Expect,
-                ctx,
-            ) {
-                Ok(tenant) => tenant,
-                Err(e) => {
-                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
-                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                }
-            }
+    info!("Attaching tenant {tenant_id}");
+    let tenant = match Tenant::spawn(
+        conf,
+        tenant_id,
+        resources,
+        location_conf,
+        init_order,
+        tenants,
+        mode,
+        ctx,
+    ) {
+        Ok(tenant) => tenant,
+        Err(e) => {
+            error!("Failed to spawn tenant {tenant_id}, reason: {e:#}");
+            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
         }
-    } else {
-        info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
-        // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(
-            conf,
-            tenant_id,
-            location_conf,
-            resources,
-            init_order,
-            tenants,
-            ctx,
-        )
     };
+
     Ok(tenant)
 }
 
@@ -654,29 +650,41 @@ pub(crate) async fn create_tenant(
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
-
         let location_conf = LocationConf::attached_single(tenant_conf, generation);
 
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Create).await?;
+        super::create_tenant_files(conf, &location_conf, &tenant_id).await?;
+
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        let created_tenant =
-            schedule_local_tenant_processing(conf, tenant_id, &tenant_directory,
-                AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
+        let tenant_path = conf.tenant_path(&tenant_id);
+
+        let created_tenant = tenant_spawn(
+            conf,
+            tenant_id,
+            &tenant_path,
+            resources,
+            AttachedTenantConf::try_from(location_conf)?,
+            None,
+            &TENANTS,
+            SpawnMode::Create,
+            ctx,
+        )?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
         let crated_tenant_id = created_tenant.tenant_id();
         anyhow::ensure!(
-                tenant_id == crated_tenant_id,
-                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
-            );
+            tenant_id == crated_tenant_id,
+            "loaded created tenant has unexpected tenant id \
+                (expect {tenant_id} != actual {crated_tenant_id})",
+        );
         Ok(created_tenant)
-    }).await
+    })
+    .await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -785,9 +793,10 @@ pub(crate) async fn upsert_location(
                 }
             }
 
+            let tenant_path = conf.tenant_path(&tenant_id);
+
             let new_slot = match &new_location_config.mode {
                 LocationMode::Secondary(_) => {
-                    let tenant_path = conf.tenant_path(&tenant_id);
                     // Directory doesn't need to be fsync'd because if we crash it can
                     // safely be recreated next time this tenant location is configured.
                     unsafe_create_dir_all(&tenant_path)
@@ -817,28 +826,21 @@ pub(crate) async fn upsert_location(
                         .await
                         .map_err(SetNewTenantConfigError::Persist)?;
 
-                    let tenant = match Tenant::spawn_attach(
+                    let tenant = tenant_spawn(
                         conf,
                         tenant_id,
+                        &tenant_path,
                         TenantSharedResources {
                             broker_client,
                             remote_storage,
                             deletion_queue_client,
                         },
                         AttachedTenantConf::try_from(new_location_config)?,
+                        None,
                         &TENANTS,
-                        // The LocationConf API does not use marker files, because we have Secondary
-                        // locations where the directory's existence is not a signal that it contains
-                        // all timelines.  See https://github.com/neondatabase/neon/issues/5550
-                        AttachMarkerMode::Ignore,
+                        SpawnMode::Normal,
                         ctx,
-                    ) {
-                        Ok(tenant) => tenant,
-                        Err(e) => {
-                            error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
-                            Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
-                        }
-                    };
+                    )?;
 
                     TenantSlot::Attached(tenant)
                 }
@@ -1027,7 +1029,7 @@ pub(crate) async fn load_tenant(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_id, &location_conf).await?;
 
-        let new_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_path, AttachedTenantConf::try_from(location_conf)?, resources, None,  &TENANTS, ctx)
+        let new_tenant = tenant_spawn(conf, tenant_id, &tenant_path, resources, AttachedTenantConf::try_from(location_conf)?, None,  &TENANTS, SpawnMode::Normal, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -1101,18 +1103,12 @@ pub(crate) async fn attach_tenant(
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, || async {
         let location_conf = LocationConf::attached_single(tenant_conf, generation);
-        let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id, CreateTenantFilesMode::Attach).await?;
+        let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id).await?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
 
-        // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
-        let marker_file_exists = conf
-            .tenant_attaching_mark_file_path(&tenant_id)
-            .try_exists()
-            .context("check for attach marker file existence")?;
-        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
-
-        let attached_tenant = schedule_local_tenant_processing(conf, tenant_id, &tenant_dir, AttachedTenantConf::try_from(location_conf)?, resources, None, &TENANTS, ctx)?;
+        let attached_tenant = tenant_spawn(conf, tenant_id, &tenant_dir,
+            resources, AttachedTenantConf::try_from(location_conf)?, None, &TENANTS, SpawnMode::Normal, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from typing import Any, List, Optional, Tuple
 
 import psycopg2
@@ -364,9 +365,13 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
     pid1 = get_pid(200, "http")["rows"][0]["pid"]
 
+    time.sleep(0.02)
+
     # query should be on the same connection
     rows = get_pid(200, "http")["rows"]
     assert rows == [{"pid": pid1}]
+
+    time.sleep(0.02)
 
     # incorrect password should not work
     res = get_pid(400, "foobar")
@@ -378,9 +383,13 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
     pid2 = get_pid(200, "http2")["rows"][0]["pid"]
     assert pid1 != pid2
 
+    time.sleep(0.02)
+
     # query should be on an existing connection
     pid = get_pid(200, "http2")["rows"][0]["pid"]
     assert pid in [pid1, pid2]
+
+    time.sleep(0.02)
 
     # old password should not work
     res = get_pid(400, "http")
@@ -419,6 +428,7 @@ def test_sql_over_http_pool_idle(static_proxy: NeonProxy):
         )
 
     pid1 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
+    time.sleep(0.02)
     query(200, "BEGIN")
     pid2 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
     assert pid1 != pid2

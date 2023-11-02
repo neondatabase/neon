@@ -798,6 +798,24 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 ep.start(&auth_token, safekeepers, remote_ext_config)?;
             }
         }
+        "reconfigure" => {
+            let endpoint_id = sub_args
+                .get_one::<String>("endpoint_id")
+                .ok_or_else(|| anyhow!("No endpoint ID provided to reconfigure"))?;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let pageserver_id =
+                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
+                    Some(NodeId(
+                        id_str.parse().context("while parsing pageserver id")?,
+                    ))
+                } else {
+                    None
+                };
+            endpoint.reconfigure(pageserver_id)?;
+        }
         "stop" => {
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
@@ -1368,6 +1386,12 @@ fn cli() -> Command {
                     .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
+                )
+                .subcommand(Command::new("reconfigure")
+                            .about("Reconfigure the endpoint")
+                            .arg(endpoint_pageserver_id_arg)
+                            .arg(endpoint_id_arg.clone())
+                            .arg(tenant_id_arg.clone())
                 )
                 .subcommand(
                     Command::new("stop")

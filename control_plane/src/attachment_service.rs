@@ -19,7 +19,7 @@ const COMMAND: &str = "attachment_service";
 pub struct AttachHookRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    pub pageserver_id: Option<NodeId>,
+    pub node_id: Option<NodeId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,7 +85,7 @@ impl AttachmentService {
             .control_plane_api
             .clone()
             .unwrap()
-            .join("attach_hook")
+            .join("attach-hook")
             .unwrap();
         let client = reqwest::blocking::ClientBuilder::new()
             .build()
@@ -93,7 +93,7 @@ impl AttachmentService {
 
         let request = AttachHookRequest {
             tenant_id,
-            pageserver_id: Some(pageserver_id),
+            node_id: Some(pageserver_id),
         };
 
         let response = client.post(url).json(&request).send()?;

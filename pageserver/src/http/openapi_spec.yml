@@ -392,13 +392,19 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: The version of the endpoint to use
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: string
+                $ref: "#/components/schemas/LsnByTimestampResponse"
         "400":
           description: Error when no tenant id found in path, no timeline id or invalid timestamp
           content:
@@ -563,7 +569,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "409":
-          description: Tenant download is already in progress
+          description: |
+            The tenant is already known to Pageserver in some way,
+            and hence this `/attach` call has been rejected.
+
+            Some examples of how this can happen:
+            - tenant was created on this pageserver
+            - tenant attachment was started by an earlier call to `/attach`.
+
+            Callers should poll the tenant status's `attachment_status` field,
+            like for status 202. See the longer description for `POST /attach`
+            for details.
           content:
             application/json:
               schema:
@@ -707,6 +723,12 @@ paths:
 
         Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
         Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantLoadRequest"
       responses:
         "202":
           description: Tenant scheduled to load successfully
@@ -1197,6 +1219,15 @@ components:
             new_tenant_id:
               type: string
               format: hex
+            generation:
+              type: integer
+              description: Attachment generation number.
+    TenantLoadRequest:
+      type: object
+      properties:
+        generation:
+          type: integer
+          description: Attachment generation number.
     TenantAttachRequest:
       type: object
       required:
@@ -1383,6 +1414,19 @@ components:
         timeline_id:
           type: string
           format: hex
+
+    LsnByTimestampResponse:
+      type: object
+      required:
+        - lsn
+        - kind
+      properties:
+        lsn:
+          type: string
+          format: hex
+        kind:
+          type: string
+          enum: [past, present, future, nodata]
 
     Error:
       type: object

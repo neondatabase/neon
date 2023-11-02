@@ -267,6 +267,12 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
     let buf = download_and_compare(dl).await?;
     assert_eq!(buf, data);
 
+    debug!("Cleanup: deleting file at path {path:?}");
+    ctx.client
+        .delete(&path)
+        .await
+        .with_context(|| format!("{path:?} removal"))?;
+
     Ok(())
 }
 

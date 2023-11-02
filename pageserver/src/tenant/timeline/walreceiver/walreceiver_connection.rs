@@ -122,7 +122,7 @@ pub(super) async fn handle_walreceiver_connection(
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
 
-    let (mut replication_client, connection) = {
+    let (replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
@@ -205,7 +205,7 @@ pub(super) async fn handle_walreceiver_connection(
         gauge.dec();
     }
 
-    let identify = identify_system(&mut replication_client).await?;
+    let identify = identify_system(&replication_client).await?;
     info!("{identify:?}");
 
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
@@ -444,7 +444,7 @@ struct IdentifySystem {
 struct IdentifyError;
 
 /// Run the postgres `IDENTIFY_SYSTEM` command
-async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> {
+async fn identify_system(client: &Client) -> anyhow::Result<IdentifySystem> {
     let query_str = "IDENTIFY_SYSTEM";
     let response = client.simple_query(query_str).await?;
 
@@ -459,7 +459,7 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
 
     // extract the row contents into an IdentifySystem struct.
     // written as a closure so I can use ? for Option here.
-    if let Some(SimpleQueryMessage::Row(first_row)) = response.get(0) {
+    if let Some(SimpleQueryMessage::Row(first_row)) = response.first() {
         Ok(IdentifySystem {
             systemid: get_parse(first_row, 0)?,
             timeline: get_parse(first_row, 1)?,
