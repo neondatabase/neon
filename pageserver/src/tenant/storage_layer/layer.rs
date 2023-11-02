@@ -1141,6 +1141,8 @@ impl std::fmt::Display for NeedsDownload {
 /// Existence of `DownloadedLayer` means that we have the file locally, and can later evict it.
 pub(crate) struct DownloadedLayer {
     owner: Weak<LayerInner>,
+    // Use tokio OnceCell as we do not need to deinitialize this, it'll just get dropped with the
+    // DownloadedLayer
     kind: tokio::sync::OnceCell<anyhow::Result<LayerKind>>,
     version: usize,
 }
