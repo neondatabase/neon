@@ -2580,9 +2580,9 @@ dependencies = [
 
 [[package]]
 name = "io-uring"
-version = "0.6.2"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460648e47a07a43110fbfa2e0b14afb2be920093c31e5dccc50e49568e099762"
+checksum = "141a0f4546a50b2ed637c7a6df0d7dff45c9f41523254996764461c8ae0d9424"
 dependencies = [
  "bitflags",
  "libc",
@@ -5406,7 +5406,7 @@ name = "tokio-epoll-uring"
 version = "0.1.0"
 dependencies = [
  "futures",
- "io-uring 0.6.2",
+ "io-uring 0.6.1",
  "libc",
  "once_cell",
  "scopeguard",
