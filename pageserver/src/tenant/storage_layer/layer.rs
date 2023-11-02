@@ -1046,7 +1046,8 @@ impl LayerInner {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::error!(
-                    "failed to evict file from disk, it was already gone (metrics will be off)"
+                    layer_size = %self.desc.file_size,
+                    "failed to evict layer from disk, it was already gone (metrics will be inaccurate)"
                 );
                 Err(EvictionCancelled::FileNotFound)
             }
