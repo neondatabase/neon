@@ -86,7 +86,7 @@ paths:
         default:
           $ref: "#/components/responses/GenericError"
 
-  /v1/tenant/{tenant_id}/timeline/{timeline_id}/copy_to:
+  /v1/tenant/{tenant_id}/timeline/{source_timeline_id}/copy:
     parameters:
       - name: tenant_id
         in: path
@@ -94,14 +94,8 @@ paths:
         schema:
           type: string
           format: hex
-      - name: timeline_id
+      - name: source_timeline_id
         in: path
-        required: true
-        schema:
-          type: string
-          format: hex
-      - name: target_timeline_id
-        in: query
         required: true
         schema:
           type: string
@@ -117,7 +111,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TimelineCreateRequest"
+              $ref: "#/components/schemas/TimelineCopyRequest"
       responses:
         "201":
           description: Timeline created
@@ -245,6 +239,24 @@ components:
         timeline_id:
           type: string
           format: hex
+        peer_ids:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+
+    TimelineCopyRequest:
+      type: object
+      required:
+        - target_timeline_id
+        - until_lsn
+        - peer_ids
+      properties:
+        target_timeline_id:
+          type: string
+          format: hex
+        until_lsn:
+          type: string
         peer_ids:
           type: array
           items:
