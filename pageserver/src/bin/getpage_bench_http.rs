@@ -1,12 +1,13 @@
 use clap::Parser;
-use std::future::Future;
 use hyper::client::conn::Parts;
 use hyper::client::HttpConnector;
 use hyper::{Body, Client, Uri};
 use pageserver::{repository, tenant};
 use rand::prelude::*;
 use std::env::args;
+use std::future::Future;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::mpsc::{channel, Sender};
@@ -47,6 +48,17 @@ struct Args {
     pick_n_tenants: Option<usize>,
 }
 
+#[derive(Debug, Default)]
+struct Stats {
+    completed_requests: AtomicU64,
+}
+
+impl Stats {
+    fn inc(&self) {
+        self.completed_requests.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: &'static Args = Box::leak(Box::new(Args::parse()));
@@ -85,8 +97,11 @@ async fn main() {
     for tenant_id in tenants {
         let resp = client
             .get(
-                Uri::try_from(&format!("{}/v1/tenant/{}/timeline", args.ps_endpoint, tenant_id))
-                    .unwrap(),
+                Uri::try_from(&format!(
+                    "{}/v1/tenant/{}/timeline",
+                    args.ps_endpoint, tenant_id
+                ))
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -100,6 +115,24 @@ async fn main() {
     }
     println!("tenant_timelines:\n{:?}", tenant_timelines);
 
+    let mut stats = Arc::new(Stats::default());
+
+    tokio::spawn({
+        let stats = Arc::clone(&stats);
+        async move {
+            loop {
+                let start = std::time::Instant::now();
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let completed_requests = stats.completed_requests.swap(0, Ordering::Relaxed);
+                let elapsed = start.elapsed();
+                println!(
+                    "RPS: {:.0}",
+                    completed_requests as f64 / elapsed.as_secs_f64()
+                );
+            }
+        }
+    });
+
     let mut tasks = Vec::new();
     for (tenant_id, timeline_id) in tenant_timelines {
         let t = tokio::spawn(timeline(
@@ -107,6 +140,7 @@ async fn main() {
             client.clone(),
             tenant_id,
             timeline_id,
+            Arc::clone(&stats),
         ));
         tasks.push(t);
     }
@@ -121,6 +155,7 @@ fn timeline(
     client: Client<HttpConnector, Body>,
     tenant_id: String,
     timeline_id: String,
+    stats: Arc<Stats>,
 ) -> impl Future<Output = ()> {
     async move {
         let mut resp = client
@@ -174,6 +209,7 @@ fn timeline(
             let client = client.clone();
             let tenant_id = tenant_id.clone();
             let timeline_id = timeline_id.clone();
+            let stats = Arc::clone(&stats);
             let task = tokio::spawn(async move {
                 for i in 0..args.num_requests {
                     let key = {
@@ -188,6 +224,7 @@ fn timeline(
                     );
                     let uri = url.parse::<Uri>().unwrap();
                     let resp = client.get(uri).await.unwrap();
+                    stats.inc();
                 }
             });
             tasks.push(task);
