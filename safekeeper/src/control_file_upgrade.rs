@@ -29,6 +29,7 @@ struct SafeKeeperStateV1 {
     server: ServerInfoV2,
     /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
     proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
     commit_lsn: Lsn,
@@ -45,7 +46,9 @@ pub struct ServerInfoV2 {
     /// Postgres server version
     pub pg_version: u32,
     pub system_id: SystemId,
+    #[serde(with = "hex")]
     pub tenant_id: TenantId,
+    #[serde(with = "hex")]
     pub timeline_id: TimelineId,
     pub wal_seg_size: u32,
 }
@@ -58,6 +61,7 @@ pub struct SafeKeeperStateV2 {
     pub server: ServerInfoV2,
     /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
     pub commit_lsn: Lsn,
@@ -74,7 +78,9 @@ pub struct ServerInfoV3 {
     /// Postgres server version
     pub pg_version: u32,
     pub system_id: SystemId,
+    #[serde(with = "hex")]
     pub tenant_id: TenantId,
+    #[serde(with = "hex")]
     pub timeline_id: TimelineId,
     pub wal_seg_size: u32,
 }
@@ -87,6 +93,7 @@ pub struct SafeKeeperStateV3 {
     pub server: ServerInfoV3,
     /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
     /// part of WAL acknowledged by quorum and available locally
     pub commit_lsn: Lsn,
@@ -108,6 +115,7 @@ pub struct SafeKeeperStateV4 {
     pub server: ServerInfo,
     /// Unique id of the last *elected* proposer we dealt with. Not needed
     /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
     /// Part of WAL acknowledged by quorum and available locally. Always points
     /// to record boundary.
