@@ -23,6 +23,9 @@ platforms = [
 ]
 
 [final-excludes]
+# vm_monitor benefits from the same Cargo.lock as the rest of our artifacts, but
+# it is built primarly in separate repo neondatabase/autoscaling and thus is excluded
+# from depending on workspace-hack because most of the dependencies are not used.
 workspace-members = ["vm_monitor"]
 
 # Write out exact versions rather than a semver range. (Defaults to false.)
