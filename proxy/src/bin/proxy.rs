@@ -4,6 +4,7 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
+use proxy::rate_limiter::RateLimiterConfig;
 use proxy::usage_metrics;
 
 use anyhow::bail;
@@ -60,7 +61,7 @@ struct ProxyCliArgs {
     auth_endpoint: String,
     /// path to TLS key for client postgres connections
     ///
-    /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
+    /// tls-key and tls-cert are for backwards compatibility, we can put/// /// all certs in one dir
     #[clap(short = 'k', long, alias = "ssl-key")]
     tls_key: Option<String>,
     /// path to TLS cert for client postgres connections
@@ -92,6 +93,27 @@ struct ProxyCliArgs {
     /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
+    /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
+    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
+    rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
+    /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
+    #[clap(long, default_value_t = 10)]
+    initial_limit: usize,
+    /// Minimum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 1)]
+    aimd_min_limit: usize,
+    /// Maximum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 1000)]
+    aimd_max_limit: usize,
+    /// Increase AIMD increase by value in case of success. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 1)]
+    aimd_increase_by: usize,
+    /// Decrease AIMD decrease by value in case of timout/429. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 0.9)]
+    aimd_decrease_factor: f32,
+    /// A threshold below which the limit won't be increased. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 0.8)]
+    aimd_min_utilisation_threshold: f32,
 }
 
 #[tokio::main]
@@ -210,6 +232,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
+    let rate_limiter_config = RateLimiterConfig {
+        algorithm: args.rate_limit_algorithm,
+        initial_limit: args.initial_limit,
+        aimd_min_limit: args.aimd_min_limit,
+        aimd_max_limit: args.aimd_max_limit,
+        aimd_increase_by: args.aimd_increase_by,
+        aimd_decrease_factor: args.aimd_decrease_factor,
+        aimd_min_utilisation_threshold: args.aimd_min_utilisation_threshold,
+    };
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
@@ -221,7 +252,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             }));
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client());
+            let endpoint = http::Endpoint::new(url, http::new_client(&rate_limiter_config));
 
             let api = console::provider::neon::Api::new(endpoint, caches);
             auth::BackendType::Console(Cow::Owned(api), ())

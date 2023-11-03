@@ -31,6 +31,7 @@ once_cell.workspace = true
 opentelemetry.workspace = true
 parking_lot.workspace = true
 pbkdf2 = { workspace = true, features = ["simple", "std"] }
+pin-list.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 pq_proto.workspace = true
@@ -51,6 +52,7 @@ serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 sync_wrapper.workspace = true
+task-local-extensions.workspace = true
 thiserror.workspace = true
 tls-listener.workspace = true
 tokio-postgres.workspace = true

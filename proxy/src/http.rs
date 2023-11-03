@@ -13,22 +13,33 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::Instant;
 use tracing::trace;
 
-use crate::url::ApiUrl;
+use crate::{rate_limiter, url::ApiUrl};
 use reqwest_middleware::RequestBuilder;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
 /// We deliberately don't want to replace this with a public static.
-pub fn new_client() -> ClientWithMiddleware {
+pub fn new_client(rate_limiter_config: &rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
         .dns_resolver(Arc::new(GaiResolver::default()))
         .connection_verbose(true)
         .build()
         .expect("Failed to create http client");
 
-    reqwest_middleware::ClientBuilder::new(client)
-        .with(reqwest_tracing::TracingMiddleware::default())
-        .build()
+    let builder = reqwest_middleware::ClientBuilder::new(client)
+        .with(reqwest_tracing::TracingMiddleware::default());
+    let builder = match rate_limiter_config.algorithm {
+        rate_limiter::RateLimitAlgorithm::None => builder,
+        rate_limiter::RateLimitAlgorithm::Fixed => builder.with(rate_limiter::Limiter::new(
+            rate_limiter::Fixed,
+            rate_limiter_config.initial_limit,
+        )),
+        rate_limiter::RateLimitAlgorithm::Aimd => builder.with(rate_limiter::Limiter::new(
+            rate_limiter::Aimd::new(rate_limiter_config),
+            rate_limiter_config.initial_limit,
+        )),
+    };
+    builder.build()
 }
 
 pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
