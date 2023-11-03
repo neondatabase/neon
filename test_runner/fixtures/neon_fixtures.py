@@ -626,8 +626,7 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
 
             for pageserver in self.env.pageservers:
-                if pageserver.running:
-                    pageserver.assert_no_metric_errors()
+                pageserver.assert_no_metric_errors()
 
                 pageserver.stop(immediate=True)
 
