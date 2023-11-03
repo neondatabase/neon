@@ -1614,36 +1614,37 @@ fn tenant_map_acquire_slot_impl(
             match (o.get(), mode) {
                 (TenantSlot::InProgress(_), _) => {
                     tracing::debug!("Occupied, failing for InProgress");
-                    return Err(TenantSlotError::InProgress);
+                    Err(TenantSlotError::InProgress)
                 }
                 (slot, MustNotExist) => match slot {
                     TenantSlot::Attached(tenant) => {
                         tracing::debug!("Attached && MustNotExist, return AlreadyExists");
-                        return Err(TenantSlotError::AlreadyExists(
+                        Err(TenantSlotError::AlreadyExists(
                             *tenant_id,
                             tenant.current_state(),
-                        ));
+                        ))
                     }
                     _ => {
                         // FIXME: the AlreadyExists error assumes that we have a Tenant
                         // to get the state from
                         tracing::debug!("Occupied & MustNotExist, return AlreadyExists");
-                        return Err(TenantSlotError::AlreadyExists(
+                        Err(TenantSlotError::AlreadyExists(
                             *tenant_id,
                             TenantState::Broken {
                                 reason: "Present but not attached".to_string(),
                                 backtrace: "".to_string(),
                             },
-                        ));
+                        ))
                     }
                 },
-                _ => {}
-            };
-
-            let (completion, barrier) = utils::completion::channel();
-            let old_value = o.insert(TenantSlot::InProgress(barrier));
-            tracing::debug!("Occupied, replaced with InProgress");
-            Ok(SlotGuard::new(*tenant_id, Some(old_value), completion))
+                _ => {
+                    // Happy case: the slot was not in any state that violated our mode
+                    let (completion, barrier) = utils::completion::channel();
+                    let old_value = o.insert(TenantSlot::InProgress(barrier));
+                    tracing::debug!("Occupied, replaced with InProgress");
+                    Ok(SlotGuard::new(*tenant_id, Some(old_value), completion))
+                }
+            }
         }
     }
 }
