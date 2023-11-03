@@ -489,7 +489,7 @@ impl PageServerHandler {
                     // If we fail to fulfil a request during shutdown, which may be _because_ of
                     // shutdown, then do not send the error to the client.  Instead just drop the
                     // connection.
-                    span.in_scope(|| info!("dropped request during shutdown: {e}"));
+                    span.in_scope(|| info!("dropped response during shutdown: {e:#}"));
                     return Err(QueryError::Shutdown);
                 }
             }
