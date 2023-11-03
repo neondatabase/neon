@@ -26,6 +26,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
+use crate::metrics::TENANT_MANAGER as METRICS;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{AttachmentMode, LocationConf, LocationMode, TenantConfOpt};
 use crate::tenant::delete::DeleteTenantFlow;
@@ -109,6 +110,13 @@ impl TenantsMap {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.remove(tenant_id),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            TenantsMap::Initializing => 0,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m.len(),
         }
     }
 }
@@ -458,6 +466,7 @@ pub async fn init_tenant_mgr(
 
     let mut tenants_map = TENANTS.write().unwrap();
     assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
+    METRICS.tenant_slots.set(tenants.len() as u64);
     *tenants_map = TenantsMap::Open(tenants);
     Ok(())
 }
@@ -1427,26 +1436,33 @@ impl SlotGuard {
     /// Emplace a new value in the slot.  This consumes the guard, and after
     /// returning, the slot is no longer protected from concurrent changes.
     fn upsert(mut self, new_value: TenantSlot) -> Result<(), TenantSlotUpsertError> {
-        let mut locked = TENANTS.write().unwrap();
+        let replaced = {
+            let mut locked = TENANTS.write().unwrap();
 
-        if let TenantSlot::InProgress(_) = new_value {
-            // It is never expected to try and upsert InProgress via this path: it should
-            // only be written via the tenant_map_acquire_slot path.  If we hit this it's a bug.
-            return Err(TenantSlotUpsertError::InternalError(
-                "Attempt to upsert an InProgress state".into(),
-            ));
-        }
-
-        let m = match &mut *locked {
-            TenantsMap::Initializing => return Err(TenantMapError::StillInitializing.into()),
-            TenantsMap::ShuttingDown(_) => {
-                return Err(TenantMapError::ShuttingDown.into());
+            if let TenantSlot::InProgress(_) = new_value {
+                // It is never expected to try and upsert InProgress via this path: it should
+                // only be written via the tenant_map_acquire_slot path.  If we hit this it's a bug.
+                return Err(TenantSlotUpsertError::InternalError(
+                    "Attempt to upsert an InProgress state".into(),
+                ));
             }
-            TenantsMap::Open(m) => m,
-        };
 
-        let replaced = m.insert(self.tenant_id, new_value);
-        self.upserted = true;
+            let m = match &mut *locked {
+                TenantsMap::Initializing => return Err(TenantMapError::StillInitializing.into()),
+                TenantsMap::ShuttingDown(_) => {
+                    return Err(TenantMapError::ShuttingDown.into());
+                }
+                TenantsMap::Open(m) => m,
+            };
+
+            let replaced = m.insert(self.tenant_id, new_value);
+            self.upserted = true;
+
+            tracing::info!("Upserting slot {}, size {}", self.tenant_id, m.len());
+            METRICS.tenant_slots.set(m.len() as u64);
+
+            replaced
+        };
 
         // Sanity check: on an upsert we should always be replacing an InProgress marker
         match replaced {
@@ -1457,6 +1473,7 @@ impl SlotGuard {
                 Ok(())
             }
             None => {
+                METRICS.unexpected_errors.inc();
                 error!(
                     tenant_id = %self.tenant_id,
                     "Missing InProgress marker during tenant upsert, this is a bug."
@@ -1466,6 +1483,7 @@ impl SlotGuard {
                 ))
             }
             Some(slot) => {
+                METRICS.unexpected_errors.inc();
                 error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during upsert, this is a bug.  Contents: {:?}", slot);
                 Err(TenantSlotUpsertError::InternalError(
                     "Unexpected contents of TenantSlot".into(),
@@ -1478,16 +1496,21 @@ impl SlotGuard {
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         if !self.upserted {
-            let mut locked = TENANTS.write().unwrap();
+            let slot = {
+                let mut locked = TENANTS.write().unwrap();
 
-            let m = match &mut *locked {
-                TenantsMap::Initializing | TenantsMap::ShuttingDown(_) => {
-                    return;
-                }
-                TenantsMap::Open(m) => m,
+                let m = match &mut *locked {
+                    TenantsMap::Initializing | TenantsMap::ShuttingDown(_) => {
+                        return;
+                    }
+                    TenantsMap::Open(m) => m,
+                };
+
+                let slot = m.remove(&self.tenant_id);
+                tracing::info!("Dropping slot {}, size {}", self.tenant_id, m.len());
+                METRICS.tenant_slots.set(m.len() as u64);
+                slot
             };
-
-            let slot = m.remove(&self.tenant_id);
             match slot {
                 Some(slot) => match slot {
                     TenantSlot::InProgress(_) => {
@@ -1495,10 +1518,12 @@ impl Drop for SlotGuard {
                         // that was set when we were constructed.
                     }
                     _ => {
+                        METRICS.unexpected_errors.inc();
                         error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during upsert, this is a bug.  Contents: {:?}", slot);
                     }
                 },
                 None => {
+                    METRICS.unexpected_errors.inc();
                     error!(
                         tenant_id = %self.tenant_id,
                         "Missing InProgress marker during SlotGuard drop, this is a bug."
@@ -1557,6 +1582,7 @@ fn tenant_map_acquire_slot_impl(
     mode: TenantSlotAcquireMode,
 ) -> Result<SlotGuard, TenantSlotError> {
     use TenantSlotAcquireMode::*;
+    METRICS.tenant_slot_writes.inc();
 
     let mut locked = tenants.write().unwrap();
     let span = tracing::info_span!("acquire_slot", %tenant_id);

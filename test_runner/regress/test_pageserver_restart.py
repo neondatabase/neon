@@ -20,6 +20,8 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     endpoint = env.endpoints.create_start("main")
     pageserver_http = env.pageserver.http_client()
 
+    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
@@ -51,6 +53,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     # Stop the pageserver gracefully and restart it.
     env.pageserver.stop()
     env.pageserver.start()
+
+    # We reloaded our tenant
+    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)

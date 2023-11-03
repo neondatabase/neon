@@ -537,10 +537,18 @@ impl DeleteTenantFlow {
             .await
             .context("cleanup_remaining_fs_traces")?;
 
-        let mut locked = tenants.write().unwrap();
-        if locked.remove(&tenant.tenant_id).is_none() {
-            warn!("Tenant got removed from tenants map during deletion");
-        };
+        {
+            let mut locked = tenants.write().unwrap();
+            if locked.remove(&tenant.tenant_id).is_none() {
+                warn!("Tenant got removed from tenants map during deletion");
+            };
+
+            // FIXME: we should not be modifying this from outside of mgr.rs.
+            // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)
+            crate::metrics::TENANT_MANAGER
+                .tenant_slots
+                .set(locked.len() as u64);
+        }
 
         *guard = Self::Finished;
 
