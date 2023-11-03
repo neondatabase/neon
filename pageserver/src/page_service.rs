@@ -397,7 +397,7 @@ impl PageServerHandler {
         // Avoid starting new requests if the timeline has already started shutting down,
         // and block timeline shutdown until this request is complete, or drops out due
         // to cancellation.
-        let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown);
+        let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown)?;
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
