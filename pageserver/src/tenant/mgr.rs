@@ -970,13 +970,16 @@ where
 /// then wait for up to `timeout` (minus however long we waited for the slot).
 pub(crate) async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
-    mut timeout: Duration,
+    timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
     enum WaitFor {
         Barrier(utils::completion::Barrier),
         Tenant(Arc<Tenant>),
     }
+
+    let wait_start = Instant::now();
+    let deadline = wait_start + timeout;
 
     let wait_for = {
         let locked = TENANTS.read().unwrap();
@@ -1009,20 +1012,19 @@ pub(crate) async fn get_active_tenant_with_timeout(
     let tenant = match wait_for {
         WaitFor::Barrier(barrier) => {
             tracing::debug!("Waiting for tenant InProgress state to pass...");
-            let wait_start = Instant::now();
-            timeout_cancellable(timeout, barrier.wait(), cancel)
-                .await
-                .map_err(|e| match e {
-                    TimeoutCancellableError::Timeout => {
-                        GetActiveTenantError::WaitForActiveTimeout {
-                            latest_state: None,
-                            wait_time: wait_start.elapsed(),
-                        }
-                    }
-                    TimeoutCancellableError::Cancelled => GetActiveTenantError::Cancelled,
-                })?;
-            let wait_duration = Instant::now().duration_since(wait_start);
-            timeout -= wait_duration;
+            timeout_cancellable(
+                deadline.duration_since(Instant::now()),
+                barrier.wait(),
+                cancel,
+            )
+            .await
+            .map_err(|e| match e {
+                TimeoutCancellableError::Timeout => GetActiveTenantError::WaitForActiveTimeout {
+                    latest_state: None,
+                    wait_time: wait_start.elapsed(),
+                },
+                TimeoutCancellableError::Cancelled => GetActiveTenantError::Cancelled,
+            })?;
             {
                 let locked = TENANTS.read().unwrap();
                 let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, true)
@@ -1041,7 +1043,13 @@ pub(crate) async fn get_active_tenant_with_timeout(
     };
 
     tracing::debug!("Waiting for tenant to enter active state...");
-    match timeout_cancellable(timeout, tenant.wait_to_become_active(), cancel).await {
+    match timeout_cancellable(
+        deadline.duration_since(Instant::now()),
+        tenant.wait_to_become_active(),
+        cancel,
+    )
+    .await
+    {
         Ok(Ok(())) => Ok(tenant),
         Ok(Err(e)) => Err(e),
         Err(TimeoutCancellableError::Timeout) => {
