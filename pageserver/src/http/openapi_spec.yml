@@ -58,10 +58,6 @@ paths:
       responses:
         "200":
           description: The reload completed successfully.
-          content:
-            application/json:
-              schema:
-                type: object
         "401":
           description: Unauthorized Error
           content:
