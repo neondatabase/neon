@@ -44,7 +44,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::config::PageServerConf;
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
-    WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
@@ -207,11 +206,8 @@ impl PostgresRedoManager {
     ) -> anyhow::Result<Bytes> {
         let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
-        let start_time = Instant::now();
         let mut n_attempts = 0u32;
         loop {
-            let lock_time = Instant::now();
-
             // launch the WAL redo process on first use
             let proc: Arc<WalRedoProcess> = {
                 let proc_guard = self.redo_process.read().unwrap();
@@ -236,7 +232,7 @@ impl PostgresRedoManager {
                 }
             };
 
-            WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
+            let started_at = std::time::Instant::now();
 
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
@@ -244,8 +240,7 @@ impl PostgresRedoManager {
                 .apply_wal_records(buf_tag, &base_img, records, wal_redo_timeout)
                 .context("apply_wal_records");
 
-            let end_time = Instant::now();
-            let duration = end_time.duration_since(lock_time);
+            let duration = started_at.elapsed();
 
             let len = records.len();
             let nbytes = records.iter().fold(0, |acumulator, record| {
