@@ -28,8 +28,9 @@ impl Key {
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
-        (((self.field1 & 0xf) as i128) << 120)
+        assert!(self.field1 < 0xF);
+        assert!(self.field2 < 0xFFFF);
+        (((self.field1 & 0xF) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
             | ((self.field4 as i128) << 40)
@@ -149,8 +150,8 @@ impl Key {
         field6: u32::MIN,
     };
     pub const MAX: Key = Key {
-        field1: u8::MAX,
-        field2: u32::MAX,
+        field1: 0xF - 1,
+        field2: 0xFFFF - 1,
         field3: u32::MAX,
         field4: u32::MAX,
         field5: u8::MAX,
