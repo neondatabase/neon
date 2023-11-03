@@ -1500,7 +1500,14 @@ impl Drop for SlotGuard {
                 let mut locked = TENANTS.write().unwrap();
 
                 let m = match &mut *locked {
-                    TenantsMap::Initializing | TenantsMap::ShuttingDown(_) => {
+                    TenantsMap::Initializing => {
+                        // There is no map, this should never happen.
+                        return;
+                    }
+                    TenantsMap::ShuttingDown(_) => {
+                        // When we transition to shutdown, InProgress elements are removed
+                        // from the map, so we do not need to clean up our Inprogress marker.
+                        // See [`shutdown_all_tenants0`]
                         return;
                     }
                     TenantsMap::Open(m) => m,
