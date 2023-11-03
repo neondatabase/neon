@@ -675,7 +675,7 @@ pub(crate) async fn create_tenant(
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     let location_conf = LocationConf::attached_single(tenant_conf, generation);
 
-    let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
+    let tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
     let tenant_path = super::create_tenant_files(conf, &location_conf, &tenant_id).await?;
 
     let created_tenant = tenant_spawn(
@@ -749,7 +749,7 @@ pub(crate) async fn upsert_location(
     // existng tenant.
     {
         let locked = TENANTS.read().unwrap();
-        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, false)?;
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, TenantSlotPeekMode::Write)?;
         match (&new_location_config.mode, peek_slot) {
             (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
                 if attach_conf.generation == tenant.generation {
@@ -780,7 +780,7 @@ pub(crate) async fn upsert_location(
     // the tenant is inaccessible to the outside world while we are doing this, but that is sensible:
     // the state is ill-defined while we're in transition.  Transitions are async, but fast: we do
     // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
-    let mut tenant_guard = tenant_map_acquire_slot(&tenant_id, None)?;
+    let mut tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::Any)?;
 
     if let Some(TenantSlot::Attached(tenant)) = tenant_guard.take_value() {
         // The case where we keep a Tenant alive was covered above in the special case
@@ -892,7 +892,7 @@ pub(crate) fn get_tenant(
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
     let locked = TENANTS.read().unwrap();
-    let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, true)?;
+    let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, TenantSlotPeekMode::Read)?;
 
     match peek_slot {
         Some(TenantSlot::Attached(tenant)) => match tenant.current_state() {
@@ -983,8 +983,8 @@ pub(crate) async fn get_active_tenant_with_timeout(
 
     let wait_for = {
         let locked = TENANTS.read().unwrap();
-        let peek_slot =
-            tenant_map_peek_slot(&locked, &tenant_id, true).map_err(GetTenantError::MapState)?;
+        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, TenantSlotPeekMode::Read)
+            .map_err(GetTenantError::MapState)?;
         match peek_slot {
             Some(TenantSlot::Attached(tenant)) => {
                 match tenant.current_state() {
@@ -1027,7 +1027,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
             })?;
             {
                 let locked = TENANTS.read().unwrap();
-                let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, true)
+                let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, TenantSlotPeekMode::Read)
                     .map_err(GetTenantError::MapState)?;
                 match peek_slot {
                     Some(TenantSlot::Attached(tenant)) => tenant.clone(),
@@ -1083,7 +1083,7 @@ pub(crate) async fn delete_tenant(
     //
     // See https://github.com/neondatabase/neon/issues/5080
 
-    let mut slot_guard = tenant_map_acquire_slot(&tenant_id, Some(true))?;
+    let mut slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustExist)?;
 
     // unwrap is safe because we used expect_exist=true when acquiring the slot
     let slot = slot_guard.take_value().unwrap();
@@ -1218,7 +1218,7 @@ pub(crate) async fn load_tenant(
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
+    let tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
     let tenant_path = conf.tenant_path(&tenant_id);
 
     let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
@@ -1322,7 +1322,7 @@ pub(crate) async fn attach_tenant(
     resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    let tenant_guard = tenant_map_acquire_slot(&tenant_id, Some(false))?;
+    let tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
     let location_conf = LocationConf::attached_single(tenant_conf, generation);
     let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id).await?;
     // TODO: tenant directory remains on disk if we bail out from here on.
@@ -1534,42 +1534,55 @@ impl Drop for SlotGuard {
     }
 }
 
-/// `allow_shutdown=true` is appropriate for read-only APIs that should stay working while
-/// the pageserver is shutting down.  Otherwise, set it to false to refuse attempts to
-/// operate on a slot while we are shutting down.
-///
+enum TenantSlotPeekMode {
+    /// In Read mode, peek will be permitted to see the slots even if the pageserver is shutting down
+    Read,
+    /// In Write mode, trying to peek at a slot while the pageserver is shutting down is an error
+    Write,
+}
+
 fn tenant_map_peek_slot<'a>(
     tenants: &'a std::sync::RwLockReadGuard<'a, TenantsMap>,
     tenant_id: &TenantId,
-    allow_shutdown: bool,
+    mode: TenantSlotPeekMode,
 ) -> Result<Option<&'a TenantSlot>, TenantMapError> {
     let m = match tenants.deref() {
         TenantsMap::Initializing => return Err(TenantMapError::StillInitializing),
-        TenantsMap::ShuttingDown(m) => {
-            if allow_shutdown {
+        TenantsMap::ShuttingDown(m) => match mode {
+            TenantSlotPeekMode::Read => m,
+            TenantSlotPeekMode::Write => {
                 return Err(TenantMapError::ShuttingDown);
-            } else {
-                m
             }
-        }
+        },
         TenantsMap::Open(m) => m,
     };
 
     Ok(m.get(tenant_id))
 }
 
+enum TenantSlotAcquireMode {
+    /// Acquire the slot irrespective of current state, or whether it already exists
+    Any,
+    /// Return an error if trying to acquire a slot and it doesn't already exist
+    MustExist,
+    /// Return an error if trying to acquire a slot and it already exists
+    MustNotExist,
+}
+
 fn tenant_map_acquire_slot(
     tenant_id: &TenantId,
-    expect_exist: Option<bool>,
+    mode: TenantSlotAcquireMode,
 ) -> Result<SlotGuard, TenantSlotError> {
-    tenant_map_acquire_slot_impl(tenant_id, &TENANTS, expect_exist)
+    tenant_map_acquire_slot_impl(tenant_id, &TENANTS, mode)
 }
 
 fn tenant_map_acquire_slot_impl(
     tenant_id: &TenantId,
     tenants: &std::sync::RwLock<TenantsMap>,
-    expect_exist: Option<bool>,
+    mode: TenantSlotAcquireMode,
 ) -> Result<SlotGuard, TenantSlotError> {
+    use TenantSlotAcquireMode::*;
+
     let mut locked = tenants.write().unwrap();
     let span = tracing::info_span!("acquire_slot", %tenant_id);
     let _guard = span.enter();
@@ -1583,26 +1596,28 @@ fn tenant_map_acquire_slot_impl(
     use std::collections::hash_map::Entry;
     let entry = m.entry(*tenant_id);
     match entry {
-        Entry::Vacant(v) => {
-            if let Some(true) = expect_exist {
-                tracing::debug!("Vacant & expect_exist: return NotFound");
+        Entry::Vacant(v) => match mode {
+            MustExist => {
+                tracing::debug!("Vacant && MustExist: return NotFound");
                 return Err(TenantSlotError::NotFound(*tenant_id));
             }
-
-            let (completion, barrier) = utils::completion::channel();
-            v.insert(TenantSlot::InProgress(barrier));
-            tracing::debug!("Vacant, inserted InProgress");
-            Ok(SlotGuard::new(*tenant_id, None, completion))
-        }
+            _ => {
+                let (completion, barrier) = utils::completion::channel();
+                v.insert(TenantSlot::InProgress(barrier));
+                tracing::debug!("Vacant, inserted InProgress");
+                Ok(SlotGuard::new(*tenant_id, None, completion))
+            }
+        },
         Entry::Occupied(mut o) => {
-            match (o.get(), expect_exist) {
+            // Apply mode-driven checks
+            match (o.get(), mode) {
                 (TenantSlot::InProgress(_), _) => {
                     tracing::debug!("Occupied, failing for InProgress");
                     return Err(TenantSlotError::InProgress);
                 }
-                (slot, Some(false)) => match slot {
+                (slot, MustNotExist) => match slot {
                     TenantSlot::Attached(tenant) => {
-                        tracing::debug!("Attached & !expected_exist, return AlreadyExists");
+                        tracing::debug!("Attached && MustNotExist, return AlreadyExists");
                         return Err(TenantSlotError::AlreadyExists(
                             *tenant_id,
                             tenant.current_state(),
@@ -1611,7 +1626,7 @@ fn tenant_map_acquire_slot_impl(
                     _ => {
                         // FIXME: the AlreadyExists error assumes that we have a Tenant
                         // to get the state from
-                        tracing::debug!("Occupied & !expected_exist, return AlreadyExists");
+                        tracing::debug!("Occupied & MustNotExist, return AlreadyExists");
                         return Err(TenantSlotError::AlreadyExists(
                             *tenant_id,
                             TenantState::Broken {
@@ -1646,7 +1661,8 @@ where
 {
     use utils::completion;
 
-    let mut tenant_guard = tenant_map_acquire_slot_impl(&tenant_id, tenants, Some(true))?;
+    let mut tenant_guard =
+        tenant_map_acquire_slot_impl(&tenant_id, tenants, TenantSlotAcquireMode::MustExist)?;
     let tenant_slot = tenant_guard.take_value();
 
     // The SlotGuard allows us to manipulate the Tenant object without fear of some
