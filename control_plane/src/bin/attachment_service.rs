@@ -12,6 +12,7 @@ use hyper::{Body, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
+use utils::http::endpoint::request_span;
 use utils::logging::{self, LogFormat};
 use utils::signals::{ShutdownSignals, Signal};
 
@@ -171,7 +172,7 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
             state.generation += 1;
             response.tenants.push(ReAttachResponseTenant {
                 id: *t,
-                generation: state.generation,
+                gen: state.generation,
             });
         }
     }
@@ -217,14 +218,31 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
         .tenants
         .entry(attach_req.tenant_id)
         .or_insert_with(|| TenantState {
-            pageserver: attach_req.pageserver_id,
+            pageserver: attach_req.node_id,
             generation: 0,
         });
 
-    if attach_req.pageserver_id.is_some() {
+    if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
         tenant_state.generation += 1;
+        tracing::info!(
+            tenant_id = %attach_req.tenant_id,
+            ps_id = %attaching_pageserver,
+            generation = %tenant_state.generation,
+            "issuing",
+        );
+    } else if let Some(ps_id) = tenant_state.pageserver {
+        tracing::info!(
+            tenant_id = %attach_req.tenant_id,
+            %ps_id,
+            generation = %tenant_state.generation,
+            "dropping",
+        );
+    } else {
+        tracing::info!(
+            tenant_id = %attach_req.tenant_id,
+            "no-op: tenant already has no pageserver");
     }
-    tenant_state.pageserver = attach_req.pageserver_id;
+    tenant_state.pageserver = attach_req.node_id;
     let generation = tenant_state.generation;
 
     locked.save().await.map_err(ApiError::InternalServerError)?;
@@ -232,7 +250,7 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
     json_response(
         StatusCode::OK,
         AttachHookResponse {
-            gen: attach_req.pageserver_id.map(|_| generation),
+            gen: attach_req.node_id.map(|_| generation),
         },
     )
 }
@@ -240,9 +258,9 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
 fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, ApiError> {
     endpoint::make_router()
         .data(Arc::new(State::new(persistent_state)))
-        .post("/re-attach", handle_re_attach)
-        .post("/validate", handle_validate)
-        .post("/attach_hook", handle_attach_hook)
+        .post("/re-attach", |r| request_span(r, handle_re_attach))
+        .post("/validate", |r| request_span(r, handle_validate))
+        .post("/attach-hook", |r| request_span(r, handle_attach_hook))
 }
 
 #[tokio::main]

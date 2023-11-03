@@ -57,7 +57,10 @@ impl ControlPlaneClient {
 
         if let Some(jwt) = &conf.control_plane_api_token {
             let mut headers = hyper::HeaderMap::new();
-            headers.insert("Authorization", jwt.get_contents().parse().unwrap());
+            headers.insert(
+                "Authorization",
+                format!("Bearer {}", jwt.get_contents()).parse().unwrap(),
+            );
             client = client.default_headers(headers);
         }
 
@@ -144,7 +147,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
         Ok(response
             .tenants
             .into_iter()
-            .map(|t| (t.id, Generation::new(t.generation)))
+            .map(|t| (t.id, Generation::new(t.gen)))
             .collect::<HashMap<_, _>>())
     }
 

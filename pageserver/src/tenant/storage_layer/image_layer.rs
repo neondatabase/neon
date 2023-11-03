@@ -31,21 +31,23 @@ use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
-    LayerAccessStats, PersistentLayer, ValueReconstructResult, ValueReconstructState,
+    LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
+use crate::tenant::Timeline;
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
-use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
+use pageserver_api::models::LayerAccessKind;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::*;
 
@@ -56,7 +58,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{AsLayerDesc, Layer, LayerAccessStatsReset, PathOrConf, PersistentLayerDesc};
+use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer};
 
 ///
 /// Header stored in the beginning of the file
@@ -114,22 +116,14 @@ impl Summary {
     }
 }
 
-/// ImageLayer is the in-memory data structure associated with an on-disk image
-/// file.
-///
-/// We keep an ImageLayer in memory for each file, in the LayerMap. If a layer
-/// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
-/// Otherwise the struct is just a placeholder for a file that exists on disk,
-/// and it needs to be loaded before using it in queries.
+/// This is used only from `pagectl`. Within pageserver, all layers are
+/// [`crate::tenant::storage_layer::Layer`], which can hold an [`ImageLayerInner`].
 pub struct ImageLayer {
-    path_or_conf: PathOrConf,
-
+    path: Utf8PathBuf,
     pub desc: PersistentLayerDesc,
     // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
-
     access_stats: LayerAccessStats,
-
     inner: OnceCell<ImageLayerInner>,
 }
 
@@ -146,6 +140,8 @@ impl std::fmt::Debug for ImageLayer {
     }
 }
 
+/// ImageLayer is the in-memory data structure associated with an on-disk image
+/// file.
 pub struct ImageLayerInner {
     // values copied from summary
     index_start_blk: u32,
@@ -166,73 +162,11 @@ impl std::fmt::Debug for ImageLayerInner {
     }
 }
 
-#[async_trait::async_trait]
-impl Layer for ImageLayer {
-    /// Look up given page in the file
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        self.get_value_reconstruct_data(key, lsn_range, reconstruct_state, ctx)
-            .await
-    }
-}
-
-/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
-impl std::fmt::Display for ImageLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.layer_desc().short_id())
-    }
-}
-
-impl AsLayerDesc for ImageLayer {
-    fn layer_desc(&self) -> &PersistentLayerDesc {
-        &self.desc
-    }
-}
-
-impl PersistentLayer for ImageLayer {
-    fn local_path(&self) -> Option<Utf8PathBuf> {
-        self.local_path()
-    }
-
-    fn delete_resident_layer_file(&self) -> Result<()> {
-        self.delete_resident_layer_file()
-    }
-
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        self.info(reset)
-    }
-
-    fn access_stats(&self) -> &LayerAccessStats {
-        self.access_stats()
-    }
-}
-
-impl ImageLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
-            self.desc.tenant_id,
-            self.desc.timeline_id,
-            self.desc.key_range.start,
-            self.desc.key_range.end,
-            self.lsn,
-            self.desc.is_incremental(),
-            self.desc.file_size
-        );
-
-        if !verbose {
-            return Ok(());
-        }
-
-        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
-        let file = &inner.file;
+impl ImageLayerInner {
+    pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        let file = &self.file;
         let tree_reader =
-            DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
+            DiskBtreeReader::<_, KEY_SIZE>::new(self.index_start_blk, self.index_root_blk, file);
 
         tree_reader.dump().await?;
 
@@ -250,67 +184,34 @@ impl ImageLayer {
 
         Ok(())
     }
+}
 
-    pub(crate) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        assert!(self.desc.key_range.contains(&key));
-        assert!(lsn_range.start >= self.lsn);
-        assert!(lsn_range.end >= self.lsn);
-
-        let inner = self
-            .load(LayerAccessKind::GetValueReconstructData, ctx)
-            .await?;
-        inner
-            .get_value_reconstruct_data(key, reconstruct_state, ctx)
-            .await
-            // FIXME: makes no sense to dump paths
-            .with_context(|| format!("read {}", self.path()))
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
     }
+}
 
-    pub(crate) fn local_path(&self) -> Option<Utf8PathBuf> {
-        Some(self.path())
+impl AsLayerDesc for ImageLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
     }
+}
 
-    pub(crate) fn delete_resident_layer_file(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
+impl ImageLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+        self.desc.dump();
+
+        if !verbose {
+            return Ok(());
+        }
+
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
+
+        inner.dump(ctx).await?;
+
         Ok(())
-    }
-
-    pub(crate) fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.layer_desc().filename().file_name();
-        let lsn_start = self.layer_desc().image_layer_lsn();
-
-        HistoricLayerInfo::Image {
-            layer_file_name,
-            layer_file_size: self.desc.file_size,
-            lsn_start,
-            remote: false,
-            access_stats: self.access_stats.as_api_model(reset),
-        }
-    }
-
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        &self.access_stats
-    }
-
-    fn path_for(
-        path_or_conf: &PathOrConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
-        fname: &ImageFileName,
-    ) -> Utf8PathBuf {
-        match path_or_conf {
-            PathOrConf::Path(path) => path.to_path_buf(),
-            PathOrConf::Conf(conf) => conf
-                .timeline_path(&tenant_id, &timeline_id)
-                .join(fname.to_string()),
-        }
     }
 
     fn temp_path_for(
@@ -348,52 +249,19 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let expected_summary = match &self.path_or_conf {
-            PathOrConf::Conf(_) => Some(Summary::from(self)),
-            PathOrConf::Path(_) => None,
-        };
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, ctx).await?;
 
-        let loaded =
-            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), expected_summary, ctx)
-                .await?;
+        // not production code
+        let actual_filename = path.file_name().unwrap().to_owned();
+        let expected_filename = self.layer_desc().filename().file_name();
 
-        if let PathOrConf::Path(ref path) = self.path_or_conf {
-            // not production code
-            let actual_filename = path.file_name().unwrap().to_owned();
-            let expected_filename = self.filename().file_name();
-
-            if actual_filename != expected_filename {
-                println!("warning: filename does not match what is expected from in-file summary");
-                println!("actual: {:?}", actual_filename);
-                println!("expected: {:?}", expected_filename);
-            }
+        if actual_filename != expected_filename {
+            println!("warning: filename does not match what is expected from in-file summary");
+            println!("actual: {:?}", actual_filename);
+            println!("expected: {:?}", expected_filename);
         }
 
         Ok(loaded)
-    }
-
-    /// Create an ImageLayer struct representing an existing file on disk
-    pub fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
-        filename: &ImageFileName,
-        file_size: u64,
-        access_stats: LayerAccessStats,
-    ) -> ImageLayer {
-        ImageLayer {
-            path_or_conf: PathOrConf::Conf(conf),
-            desc: PersistentLayerDesc::new_img(
-                tenant_id,
-                timeline_id,
-                filename.key_range.clone(),
-                filename.lsn,
-                file_size,
-            ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
-            lsn: filename.lsn,
-            access_stats,
-            inner: OnceCell::new(),
-        }
     }
 
     /// Create an ImageLayer struct representing an existing file on disk.
@@ -407,7 +275,7 @@ impl ImageLayer {
             .metadata()
             .context("get file metadata to determine size")?;
         Ok(ImageLayer {
-            path_or_conf: PathOrConf::Path(path.to_path_buf()),
+            path: path.to_path_buf(),
             desc: PersistentLayerDesc::new_img(
                 summary.tenant_id,
                 summary.timeline_id,
@@ -421,18 +289,8 @@ impl ImageLayer {
         })
     }
 
-    fn layer_name(&self) -> ImageFileName {
-        self.desc.image_file_name()
-    }
-
-    /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> Utf8PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            self.desc.timeline_id,
-            self.desc.tenant_id,
-            &self.layer_name(),
-        )
+    fn path(&self) -> Utf8PathBuf {
+        self.path.clone()
     }
 }
 
@@ -604,7 +462,7 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish(self) -> anyhow::Result<ImageLayer> {
+    async fn finish(self, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -658,33 +516,14 @@ impl ImageLayerWriterInner {
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
-        let layer = ImageLayer {
-            path_or_conf: PathOrConf::Conf(self.conf),
-            desc,
-            lsn: self.lsn,
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: OnceCell::new(),
-        };
 
         // fsync the file
         file.sync_all().await?;
 
-        // Rename the file to its final name
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
-        let final_path = ImageLayer::path_for(
-            &PathOrConf::Conf(self.conf),
-            self.timeline_id,
-            self.tenant_id,
-            &ImageFileName {
-                key_range: self.key_range.clone(),
-                lsn: self.lsn,
-            },
-        );
-        std::fs::rename(self.path, final_path)?;
+        // FIXME: why not carry the virtualfile here, it supports renaming?
+        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
-        trace!("created image layer {}", layer.path());
+        trace!("created image layer {}", layer.local_path());
 
         Ok(layer)
     }
@@ -746,8 +585,11 @@ impl ImageLayerWriter {
     ///
     /// Finish writing the image layer.
     ///
-    pub async fn finish(mut self) -> anyhow::Result<ImageLayer> {
-        self.inner.take().unwrap().finish().await
+    pub(crate) async fn finish(
+        mut self,
+        timeline: &Arc<Timeline>,
+    ) -> anyhow::Result<super::ResidentLayer> {
+        self.inner.take().unwrap().finish(timeline).await
     }
 }
 

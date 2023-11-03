@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tonic::codegen::StdError;
 use tonic::transport::{ClientTlsConfig, Endpoint};
-use tonic::{transport::Channel, Code, Status};
+use tonic::{transport::Channel, Status};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use proto::{
@@ -23,6 +23,7 @@ pub mod proto {
 pub mod metrics;
 
 // Re-exports to avoid direct tonic dependency in user crates.
+pub use tonic::Code;
 pub use tonic::Request;
 pub use tonic::Streaming;
 

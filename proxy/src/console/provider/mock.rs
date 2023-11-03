@@ -59,7 +59,7 @@ impl Api {
             let rows = client.query(query, &[&creds.user]).await?;
 
             // We can get at most one row, because `rolname` is unique.
-            let row = match rows.get(0) {
+            let row = match rows.first() {
                 Some(row) => row,
                 // This means that the user doesn't exist, so there can be no secret.
                 // However, this is still a *valid* outcome which is very similar

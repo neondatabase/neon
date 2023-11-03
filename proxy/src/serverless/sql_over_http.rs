@@ -470,30 +470,26 @@ async fn query_to_json<T: GenericClient>(
     }
     .and_then(|s| s.parse::<i64>().ok());
 
-    let fields = if !rows.is_empty() {
-        rows[0]
-            .columns()
-            .iter()
-            .map(|c| {
-                json!({
-                    "name": Value::String(c.name().to_owned()),
-                    "dataTypeID": Value::Number(c.type_().oid().into()),
-                    "tableID": c.table_oid(),
-                    "columnID": c.column_id(),
-                    "dataTypeSize": c.type_size(),
-                    "dataTypeModifier": c.type_modifier(),
-                    "format": "text",
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let mut fields = vec![];
+    let mut columns = vec![];
+
+    for c in row_stream.columns() {
+        fields.push(json!({
+            "name": Value::String(c.name().to_owned()),
+            "dataTypeID": Value::Number(c.type_().oid().into()),
+            "tableID": c.table_oid(),
+            "columnID": c.column_id(),
+            "dataTypeSize": c.type_size(),
+            "dataTypeModifier": c.type_modifier(),
+            "format": "text",
+        }));
+        columns.push(client.get_type(c.type_oid()).await?);
+    }
 
     // convert rows to JSON
     let rows = rows
         .iter()
-        .map(|row| pg_text_row_to_json(row, raw_output, array_mode))
+        .map(|row| pg_text_row_to_json(row, &columns, raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
 
     // resulting JSON format is based on the format of node-postgres result
@@ -514,22 +510,28 @@ async fn query_to_json<T: GenericClient>(
 //
 pub fn pg_text_row_to_json(
     row: &Row,
+    columns: &[Type],
     raw_output: bool,
     array_mode: bool,
 ) -> Result<Value, anyhow::Error> {
-    let iter = row.columns().iter().enumerate().map(|(i, column)| {
-        let name = column.name();
-        let pg_value = row.as_text(i)?;
-        let json_value = if raw_output {
-            match pg_value {
-                Some(v) => Value::String(v.to_string()),
-                None => Value::Null,
-            }
-        } else {
-            pg_text_to_json(pg_value, column.type_())?
-        };
-        Ok((name.to_string(), json_value))
-    });
+    let iter = row
+        .columns()
+        .iter()
+        .zip(columns)
+        .enumerate()
+        .map(|(i, (column, typ))| {
+            let name = column.name();
+            let pg_value = row.as_text(i)?;
+            let json_value = if raw_output {
+                match pg_value {
+                    Some(v) => Value::String(v.to_string()),
+                    None => Value::Null,
+                }
+            } else {
+                pg_text_to_json(pg_value, typ)?
+            };
+            Ok((name.to_string(), json_value))
+        });
 
     if array_mode {
         // drop keys and aggregate into array

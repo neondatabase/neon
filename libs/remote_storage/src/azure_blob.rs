@@ -23,8 +23,8 @@ use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
 use crate::{
-    AzureConfig, ConcurrencyLimiter, Download, DownloadError, RemotePath, RemoteStorage,
-    StorageMetadata,
+    AzureConfig, ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath,
+    RemoteStorage, StorageMetadata,
 };
 
 pub struct AzureBlobStorage {
@@ -184,10 +184,11 @@ fn to_download_error(error: azure_core::Error) -> DownloadError {
 
 #[async_trait::async_trait]
 impl RemoteStorage for AzureBlobStorage {
-    async fn list_prefixes(
+    async fn list(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
+        mode: ListingMode,
+    ) -> anyhow::Result<Listing, DownloadError> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_name(p))
@@ -195,16 +196,19 @@ impl RemoteStorage for AzureBlobStorage {
             .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
                     p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
                 p
             });
 
-        let mut builder = self
-            .client
-            .list_blobs()
-            .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+        let mut builder = self.client.list_blobs();
+
+        if let ListingMode::WithDelimiter = mode {
+            builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+        }
 
         if let Some(prefix) = list_prefix {
             builder = builder.prefix(Cow::from(prefix.to_owned()));
@@ -215,46 +219,23 @@ impl RemoteStorage for AzureBlobStorage {
         }
 
         let mut response = builder.into_stream();
-        let mut res = Vec::new();
-        while let Some(entry) = response.next().await {
-            let entry = entry.map_err(to_download_error)?;
-            let name_iter = entry
+        let mut res = Listing::default();
+        while let Some(l) = response.next().await {
+            let entry = l.map_err(to_download_error)?;
+            let prefix_iter = entry
                 .blobs
                 .prefixes()
                 .map(|prefix| self.name_to_relative_path(&prefix.name));
-            res.extend(name_iter);
-        }
-        Ok(res)
-    }
+            res.prefixes.extend(prefix_iter);
 
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let folder_name = folder
-            .map(|p| self.relative_path_to_name(p))
-            .or_else(|| self.prefix_in_container.clone());
-
-        let mut builder = self.client.list_blobs();
-
-        if let Some(folder_name) = folder_name {
-            builder = builder.prefix(Cow::from(folder_name.to_owned()));
-        }
-
-        if let Some(limit) = self.max_keys_per_list_response {
-            builder = builder.max_results(MaxResults::new(limit));
-        }
-
-        let mut response = builder.into_stream();
-        let mut res = Vec::new();
-        while let Some(l) = response.next().await {
-            let entry = l.map_err(anyhow::Error::new)?;
-            let name_iter = entry
+            let blob_iter = entry
                 .blobs
                 .blobs()
-                .map(|bl| self.name_to_relative_path(&bl.name));
-            res.extend(name_iter);
+                .map(|k| self.name_to_relative_path(&k.name));
+            res.keys.extend(blob_iter);
         }
         Ok(res)
     }
-
     async fn upload(
         &self,
         mut from: impl AsyncRead + Unpin + Send + Sync + 'static,

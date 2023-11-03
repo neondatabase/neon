@@ -24,7 +24,7 @@ fn do_control_plane_request(
 ) -> Result<ControlPlaneSpecResponse, (bool, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
-        .header("Authorization", jwt)
+        .header("Authorization", format!("Bearer {}", jwt))
         .send()
         .map_err(|e| {
             (
@@ -265,6 +265,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         let action = if let Some(r) = pg_role {
             if (r.encrypted_password.is_none() && role.encrypted_password.is_some())
                 || (r.encrypted_password.is_some() && role.encrypted_password.is_none())
+                || !r.bypassrls.unwrap_or(false)
+                || !r.replication.unwrap_or(false)
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
@@ -296,7 +298,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         match action {
             RoleAction::None => {}
             RoleAction::Update => {
-                let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
+                let mut query: String =
+                    format!("ALTER ROLE {} BYPASSRLS REPLICATION", name.pg_quote());
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }

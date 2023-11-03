@@ -338,6 +338,16 @@ jobs:
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
 
+          # Run separate tests for real Azure Blob Storage
+          # XXX: replace region with `eu-central-1`-like region
+          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
+
       - name: Install rust binaries
         run: |
           # Install target binaries
@@ -423,7 +433,7 @@ jobs:
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
         env:
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
 
       - name: Merge and upload coverage data
@@ -458,7 +468,7 @@ jobs:
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-          TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}"
+          TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 

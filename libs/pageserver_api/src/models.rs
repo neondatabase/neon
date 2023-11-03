@@ -110,7 +110,6 @@ impl TenantState {
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
             // tenant mgr startup distinguishes attaching from loading via marker file.
-            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
             Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.

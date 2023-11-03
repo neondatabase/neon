@@ -1,5 +1,4 @@
 import os
-import shutil
 import time
 from contextlib import closing
 from datetime import datetime
@@ -20,7 +19,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn, TenantId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
@@ -298,13 +297,8 @@ def test_pageserver_with_empty_tenants(
 
     client = env.pageserver.http_client()
 
-    tenant_with_empty_timelines = TenantId.generate()
-    client.tenant_create(tenant_with_empty_timelines)
-    temp_timelines = client.timeline_list(tenant_with_empty_timelines)
-    for temp_timeline in temp_timelines:
-        timeline_delete_wait_completed(
-            client, tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
-        )
+    tenant_with_empty_timelines = env.initial_tenant
+    timeline_delete_wait_completed(client, tenant_with_empty_timelines, env.initial_timeline)
 
     files_in_timelines_dir = sum(
         1 for _p in Path.iterdir(env.pageserver.timeline_dir(tenant_with_empty_timelines))
@@ -317,33 +311,18 @@ def test_pageserver_with_empty_tenants(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    tenant_without_timelines_dir = env.initial_tenant
-    shutil.rmtree(env.pageserver.timeline_dir(tenant_without_timelines_dir))
-
     env.pageserver.start()
 
     client = env.pageserver.http_client()
 
-    def not_loading():
+    def not_attaching():
         tenants = client.tenant_list()
-        assert len(tenants) == 2
-        assert all(t["state"]["slug"] != "Loading" for t in tenants)
+        assert len(tenants) == 1
+        assert all(t["state"]["slug"] != "Attaching" for t in tenants)
 
-    wait_until(10, 0.2, not_loading)
+    wait_until(10, 0.2, not_attaching)
 
     tenants = client.tenant_list()
-
-    [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
-    assert (
-        broken_tenant["state"]["slug"] == "Broken"
-    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
-
-    broken_tenant_status = client.tenant_status(tenant_without_timelines_dir)
-    assert (
-        broken_tenant_status["state"]["slug"] == "Broken"
-    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
-
-    assert env.pageserver.log_contains(".*load failed, setting tenant state to Broken:.*")
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines)]
     assert (
@@ -358,9 +337,6 @@ def test_pageserver_with_empty_tenants(
     time.sleep(1)  # to allow metrics propagation
 
     ps_metrics = client.get_metrics()
-    broken_tenants_metric_filter = {
-        "tenant_id": str(tenant_without_timelines_dir),
-    }
     active_tenants_metric_filter = {
         "state": "Active",
     }
@@ -374,13 +350,3 @@ def test_pageserver_with_empty_tenants(
     assert (
         tenant_active_count == 1
     ), f"Tenant {tenant_with_empty_timelines} should have metric as active"
-
-    tenant_broken_count = int(
-        ps_metrics.query_one(
-            "pageserver_broken_tenants_count", filter=broken_tenants_metric_filter
-        ).value
-    )
-
-    assert (
-        tenant_broken_count == 1
-    ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"

@@ -414,16 +414,32 @@ impl Endpoint {
             );
         }
 
-        // Also wait for the compute_ctl process to die. It might have some cleanup
-        // work to do after postgres stops, like syncing safekeepers, etc.
-        //
+        Ok(())
+    }
+
+    fn wait_for_compute_ctl_to_exit(&self) -> Result<()> {
         // TODO use background_process::stop_process instead
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
         crate::background_process::wait_until_stopped("compute_ctl", pid)?;
-
         Ok(())
+    }
+
+    fn read_postgresql_conf(&self) -> Result<String> {
+        // Slurp the endpoints/<endpoint id>/postgresql.conf file into
+        // memory. We will include it in the spec file that we pass to
+        // `compute_ctl`, and `compute_ctl` will write it to the postgresql.conf
+        // in the data directory.
+        let postgresql_conf_path = self.endpoint_path().join("postgresql.conf");
+        match std::fs::read(&postgresql_conf_path) {
+            Ok(content) => Ok(String::from_utf8(content)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("".to_string()),
+            Err(e) => Err(anyhow::Error::new(e).context(format!(
+                "failed to read config file in {}",
+                postgresql_conf_path.to_str().unwrap()
+            ))),
+        }
     }
 
     pub fn start(
@@ -436,21 +452,7 @@ impl Endpoint {
             anyhow::bail!("The endpoint is already running");
         }
 
-        // Slurp the endpoints/<endpoint id>/postgresql.conf file into
-        // memory. We will include it in the spec file that we pass to
-        // `compute_ctl`, and `compute_ctl` will write it to the postgresql.conf
-        // in the data directory.
-        let postgresql_conf_path = self.endpoint_path().join("postgresql.conf");
-        let postgresql_conf = match std::fs::read(&postgresql_conf_path) {
-            Ok(content) => String::from_utf8(content)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "".to_string(),
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context(format!(
-                    "failed to read config file in {}",
-                    postgresql_conf_path.to_str().unwrap()
-                )))
-            }
-        };
+        let postgresql_conf = self.read_postgresql_conf()?;
 
         // We always start the compute node from scratch, so if the Postgres
         // data dir exists from a previous launch, remove it first.
@@ -621,6 +623,61 @@ impl Endpoint {
         }
     }
 
+    pub fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
+        let mut spec: ComputeSpec = {
+            let spec_path = self.endpoint_path().join("spec.json");
+            let file = std::fs::File::open(spec_path)?;
+            serde_json::from_reader(file)?
+        };
+
+        let postgresql_conf = self.read_postgresql_conf()?;
+        spec.cluster.postgresql_conf = Some(postgresql_conf);
+
+        if let Some(pageserver_id) = pageserver_id {
+            let endpoint_config_path = self.endpoint_path().join("endpoint.json");
+            let mut endpoint_conf: EndpointConf = {
+                let file = std::fs::File::open(&endpoint_config_path)?;
+                serde_json::from_reader(file)?
+            };
+            endpoint_conf.pageserver_id = pageserver_id;
+            std::fs::write(
+                endpoint_config_path,
+                serde_json::to_string_pretty(&endpoint_conf)?,
+            )?;
+
+            let pageserver =
+                PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
+            let ps_http_conf = &pageserver.pg_connection_config;
+            let (host, port) = (ps_http_conf.host(), ps_http_conf.port());
+            spec.pageserver_connstring = Some(format!("postgresql://no_user@{host}:{port}"));
+        }
+
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(format!(
+                "http://{}:{}/configure",
+                self.http_address.ip(),
+                self.http_address.port()
+            ))
+            .body(format!(
+                "{{\"spec\":{}}}",
+                serde_json::to_string_pretty(&spec)?
+            ))
+            .send()?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text() {
+                Ok(err_body) => format!("Error: {}", err_body),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
     pub fn stop(&self, destroy: bool) -> Result<()> {
         // If we are going to destroy data directory,
         // use immediate shutdown mode, otherwise,
@@ -629,15 +686,25 @@ impl Endpoint {
         // Postgres is always started from scratch, so stop
         // without destroy only used for testing and debugging.
         //
+        self.pg_ctl(
+            if destroy {
+                &["-m", "immediate", "stop"]
+            } else {
+                &["stop"]
+            },
+            &None,
+        )?;
+
+        // Also wait for the compute_ctl process to die. It might have some cleanup
+        // work to do after postgres stops, like syncing safekeepers, etc.
+        //
+        self.wait_for_compute_ctl_to_exit()?;
         if destroy {
-            self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
             println!(
                 "Destroying postgres data directory '{}'",
                 self.pgdata().to_str().unwrap()
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
-        } else {
-            self.pg_ctl(&["stop"], &None)?;
         }
         Ok(())
     }
