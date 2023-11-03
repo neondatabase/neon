@@ -23,7 +23,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{gate::Gate, id::TenantTimelineId};
+use utils::{id::TenantTimelineId, sync::gate::Gate};
 
 use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};

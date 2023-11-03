@@ -26,7 +26,7 @@ use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
-use utils::gate::Gate;
+use utils::sync::gate::Gate;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
