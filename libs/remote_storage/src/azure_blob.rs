@@ -237,10 +237,9 @@ impl RemoteStorage for AzureBlobStorage {
             >,
         > = Box::pin(from);
 
-        let body = azure_core::Body::SeekableStream(Box::new(NonSeekableStream::new(
-            from,
-            data_size_bytes,
-        )));
+        let from = NonSeekableStream::new(from, data_size_bytes);
+
+        let body = azure_core::Body::SeekableStream(Box::new(from));
 
         let mut builder = blob_client.put_block_blob(body);
 
@@ -323,19 +322,25 @@ impl RemoteStorage for AzureBlobStorage {
 pin_project_lite::pin_project! {
     #[project = NonSeekableStreamProj]
     enum NonSeekableStream<S> {
+        /// A stream wrappers initial form.
+        ///
+        /// Mutex exists to allow moving when cloning. If the sdk changes to do less than 1
+        /// clone before first request, then this must be changed.
         Initial {
             inner: std::sync::Mutex<Option<tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>>>,
             len: usize,
         },
-        // azure always clones once, even without retry policy
+        /// The actually readable variant, produced by cloning the Initial variant.
+        ///
+        /// The sdk currently always clones once, even without retry policy.
         Actual {
             #[pin]
             inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>,
             len: usize,
             read_any: bool,
         },
+        /// Most likely unneeded, but left to make life easier, in case more clones are added.
         Cloned {
-            inner_was: std::marker::PhantomData<S>,
             len_was: usize,
         }
     }
@@ -381,6 +386,12 @@ where
                 *read_any = true;
                 inner.poll_read(cx, buf)
             }
+            // NonSeekableStream::Initial does not support reading because it is just much easier
+            // to have the mutex in place where one does not poll the contents, or that's how it
+            // seemed originally. If there is a version upgrade which changes the cloning, then
+            // that support needs to be hacked in.
+            //
+            // including {self:?} into the message would be useful, but unsure how to unproject.
             _ => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "cloned or initial values cannot be read",
@@ -400,20 +411,11 @@ impl<S> Clone for NonSeekableStream<S> {
                         read_any: false,
                     }
                 } else {
-                    Self::Cloned {
-                        inner_was: std::marker::PhantomData,
-                        len_was: *len,
-                    }
+                    Self::Cloned { len_was: *len }
                 }
             }
-            Self::Actual { len, .. } => Self::Cloned {
-                inner_was: std::marker::PhantomData,
-                len_was: *len,
-            },
-            Self::Cloned { inner_was, len_was } => Self::Cloned {
-                inner_was: *inner_was,
-                len_was: *len_was,
-            },
+            Self::Actual { len, .. } => Self::Cloned { len_was: *len },
+            Self::Cloned { len_was } => Self::Cloned { len_was: *len_was },
         }
     }
 }
@@ -428,21 +430,26 @@ where
         + 'static,
 {
     async fn reset(&mut self) -> azure_core::error::Result<()> {
-        match self {
-            NonSeekableStream::Initial { .. } => {
-                return Ok(());
+        let msg = match self {
+            NonSeekableStream::Initial { inner, .. } => {
+                if inner.get_mut().unwrap().is_some() {
+                    return Ok(());
+                } else {
+                    "reset after first clone is not supported"
+                }
             }
             NonSeekableStream::Actual { read_any, .. } if !*read_any => return Ok(()),
-            _ => {}
-        }
+            NonSeekableStream::Actual { .. } => "reset after reading is not supported",
+            NonSeekableStream::Cloned { .. } => "reset after second clone is not supported",
+        };
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "resetting is not really supported",
-            ),
+            std::io::Error::new(std::io::ErrorKind::Other, msg),
         ))
     }
+
+    // Note: it is not documented if this should be the total or remaining length, total passes the
+    // tests.
     fn len(&self) -> usize {
         match self {
             NonSeekableStream::Initial { len, .. } => *len,
