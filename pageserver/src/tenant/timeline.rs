@@ -4406,7 +4406,7 @@ mod tests {
 
         let batch = [layer];
 
-        let first = { async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() } };
+        let first = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
         let second = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
 
         let (first, second) = tokio::join!(first, second);
