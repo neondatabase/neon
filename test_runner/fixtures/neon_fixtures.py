@@ -2968,24 +2968,33 @@ class S3Scrubber:
         self.env = env
         self.log_dir = log_dir
 
-    def scrubber_cli(self, args, timeout):
+    def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
 
         env = {
             "REGION": s3_storage.bucket_region,
             "BUCKET": s3_storage.bucket_name,
+            "BUCKET_PREFIX": s3_storage.prefix_in_bucket,
+            "RUST_LOG": "DEBUG",
         }
         env.update(s3_storage.access_env_vars())
 
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [self.env.neon_binpath / "s3_scrubber"]
+        base_args = [str(self.env.neon_binpath / "s3_scrubber")]
         args = base_args + args
 
-        (output_path, _, status_code) = subprocess_capture(
-            self.log_dir, args, echo_stderr=True, echo_stdout=True, env=env, check=False
+        (output_path, stdout, status_code) = subprocess_capture(
+            self.log_dir,
+            args,
+            echo_stderr=True,
+            echo_stdout=True,
+            env=env,
+            check=False,
+            capture_stdout=True,
+            timeout=timeout,
         )
         if status_code:
             log.warning(f"Scrub command {args} failed")
@@ -2994,8 +3003,18 @@ class S3Scrubber:
 
             raise RuntimeError("Remote storage scrub failed")
 
-    def scan_metadata(self):
-        self.scrubber_cli(["scan-metadata"], timeout=30)
+        assert stdout is not None
+        return stdout
+
+    def scan_metadata(self) -> Any:
+        stdout = self.scrubber_cli(["scan-metadata", "--json"], timeout=30)
+
+        try:
+            return json.loads(stdout)
+        except:
+            log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
+            log.error(stdout)
+            raise
 
 
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:

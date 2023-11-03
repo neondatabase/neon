@@ -4419,6 +4419,7 @@ dependencies = [
  "itertools",
  "pageserver",
  "rand 0.8.5",
+ "remote_storage",
  "reqwest",
  "serde",
  "serde_json",
