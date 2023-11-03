@@ -63,6 +63,14 @@ struct Args {
     tenants: Option<Vec<String>>,
     #[clap(long)]
     pick_n_tenants: Option<usize>,
+    #[clap(subcommand)]
+    mode: Mode,
+}
+
+#[derive(clap::Parser, Clone)]
+enum Mode {
+    GetPage,
+    NoOp,
 }
 
 #[derive(Debug, Default)]
@@ -243,27 +251,37 @@ fn timeline(
                             .await
                             .unwrap();
                     for i in 0..args.num_requests {
-                        let key = {
-                            let mut rng = rand::thread_rng();
-                            let r = ranges.choose_weighted(&mut rng, |r| r.len()).unwrap();
-                            let key: i128 = rng.gen_range((r.start..r.end));
-                            let key = repository::Key::from_i128(key);
-                            // XXX filter these out when we iterate the keyspace
-                            assert!(
-                                is_rel_block_key(key),
-                                "we filter non-relblock keys out above"
-                            );
-                            let (rel_tag, block_no) =
-                                key_to_rel_block(key).expect("we just checked");
-                            RelTagBlockNo { rel_tag, block_no }
-                        };
-                        client
-                            .getpage(key, lsn)
-                            .await
-                            .with_context(|| {
-                                format!("getpage for tenant {} timeline {}", tenant_id, timeline_id)
-                            })
-                            .unwrap();
+                        match args.mode {
+                            Mode::GetPage => {
+                                let key = {
+                                    let mut rng = rand::thread_rng();
+                                    let r = ranges.choose_weighted(&mut rng, |r| r.len()).unwrap();
+                                    let key: i128 = rng.gen_range((r.start..r.end));
+                                    let key = repository::Key::from_i128(key);
+                                    // XXX filter these out when we iterate the keyspace
+                                    assert!(
+                                        is_rel_block_key(key),
+                                        "we filter non-relblock keys out above"
+                                    );
+                                    let (rel_tag, block_no) =
+                                        key_to_rel_block(key).expect("we just checked");
+                                    RelTagBlockNo { rel_tag, block_no }
+                                };
+                                client
+                                    .getpage(key, lsn)
+                                    .await
+                                    .with_context(|| {
+                                        format!(
+                                            "getpage for tenant {} timeline {}",
+                                            tenant_id, timeline_id
+                                        )
+                                    })
+                                    .unwrap();
+                            }
+                            Mode::NoOp => {
+                                client.noop().await.unwrap();
+                            }
+                        }
                         stats.inc();
                     }
                     client.shutdown().await;
@@ -352,6 +370,23 @@ mod getpage_client {
                 lsn,
             };
             let req = PagestreamFeMessage::GetPage(req);
+            match self.do_request(req).await? {
+                PagestreamBeMessage::GetPage(p) => Ok(p),
+                x => anyhow::bail!("Unexpected response: {:?}", x),
+            }
+        }
+
+        pub async fn noop(&mut self) -> anyhow::Result<()> {
+            match self.do_request(PagestreamFeMessage::NoOp).await? {
+                PagestreamBeMessage::NoOp => Ok(()),
+                x => anyhow::bail!("Unexpected response: {:?}", x),
+            }
+        }
+
+        async fn do_request(
+            &mut self,
+            req: PagestreamFeMessage,
+        ) -> Result<PagestreamBeMessage, anyhow::Error> {
             let req: bytes::Bytes = req.serialize();
             // let mut req = tokio_util::io::ReaderStream::new(&req);
             let mut req = tokio_stream::once(Ok(req));
@@ -362,11 +397,8 @@ mod getpage_client {
             let next = next.unwrap().unwrap();
 
             match PagestreamBeMessage::deserialize(next)? {
-                PagestreamBeMessage::Exists(_) => todo!(),
-                PagestreamBeMessage::Nblocks(_) => todo!(),
-                PagestreamBeMessage::GetPage(p) => Ok(p),
                 PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
-                PagestreamBeMessage::DbSize(_) => todo!(),
+                x => Ok(x),
             }
         }
     }
