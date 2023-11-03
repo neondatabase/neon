@@ -685,7 +685,7 @@ pub(crate) async fn create_tenant(
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     let location_conf = LocationConf::attached_single(tenant_conf, generation);
 
-    let tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
+    let slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
     let tenant_path = super::create_tenant_files(conf, &location_conf, &tenant_id).await?;
 
     let created_tenant = tenant_spawn(
@@ -709,7 +709,7 @@ pub(crate) async fn create_tenant(
         )));
     }
 
-    tenant_guard.upsert(TenantSlot::Attached(created_tenant.clone()))?;
+    slot_guard.upsert(TenantSlot::Attached(created_tenant.clone()))?;
 
     Ok(created_tenant)
 }
@@ -790,9 +790,9 @@ pub(crate) async fn upsert_location(
     // the tenant is inaccessible to the outside world while we are doing this, but that is sensible:
     // the state is ill-defined while we're in transition.  Transitions are async, but fast: we do
     // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
-    let mut tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::Any)?;
+    let mut slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::Any)?;
 
-    if let Some(TenantSlot::Attached(tenant)) = tenant_guard.get_old_value() {
+    if let Some(TenantSlot::Attached(tenant)) = slot_guard.get_old_value() {
         // The case where we keep a Tenant alive was covered above in the special case
         // for Attached->Attached transitions in the same generation.  By this point,
         // if we see an attached tenant we know it will be discarded and should be
@@ -818,7 +818,7 @@ pub(crate) async fn upsert_location(
                 barrier.wait().await;
             }
         }
-        tenant_guard.drop_old_value().expect("We just shut it down");
+        slot_guard.drop_old_value().expect("We just shut it down");
     }
 
     let tenant_path = conf.tenant_path(&tenant_id);
@@ -872,7 +872,7 @@ pub(crate) async fn upsert_location(
         }
     };
 
-    tenant_guard.upsert(new_slot)?;
+    slot_guard.upsert(new_slot)?;
 
     Ok(())
 }
@@ -1201,7 +1201,7 @@ pub(crate) async fn load_tenant(
     deletion_queue_client: DeletionQueueClient,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    let tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
+    let slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
     let tenant_path = conf.tenant_path(&tenant_id);
 
     let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(&tenant_id);
@@ -1238,7 +1238,7 @@ pub(crate) async fn load_tenant(
     )
     .with_context(|| format!("Failed to schedule tenant processing in path {tenant_path:?}"))?;
 
-    tenant_guard.upsert(TenantSlot::Attached(new_tenant))?;
+    slot_guard.upsert(TenantSlot::Attached(new_tenant))?;
     Ok(())
 }
 
@@ -1305,7 +1305,7 @@ pub(crate) async fn attach_tenant(
     resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    let tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
+    let slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustNotExist)?;
     let location_conf = LocationConf::attached_single(tenant_conf, generation);
     let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_id).await?;
     // TODO: tenant directory remains on disk if we bail out from here on.
@@ -1332,7 +1332,7 @@ pub(crate) async fn attach_tenant(
         )));
     }
 
-    tenant_guard.upsert(TenantSlot::Attached(attached_tenant))?;
+    slot_guard.upsert(TenantSlot::Attached(attached_tenant))?;
     Ok(())
 }
 
@@ -1751,12 +1751,12 @@ where
 {
     use utils::completion;
 
-    let mut tenant_guard =
+    let mut slot_guard =
         tenant_map_acquire_slot_impl(&tenant_id, tenants, TenantSlotAcquireMode::MustExist)?;
 
     // The SlotGuard allows us to manipulate the Tenant object without fear of some
     // concurrent API request doing something else for the same tenant ID.
-    let attached_tenant = match tenant_guard.get_old_value() {
+    let attached_tenant = match slot_guard.get_old_value() {
         Some(TenantSlot::Attached(t)) => Some(t),
         _ => None,
     };
@@ -1778,7 +1778,7 @@ where
                 Err(_other) => {
                     // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
                     // wait for it but return an error right away because these are distinct requests.
-                    tenant_guard.revert();
+                    slot_guard.revert();
                     return Err(TenantStateError::IsStopping(tenant_id));
                 }
             }
@@ -1794,7 +1794,7 @@ where
     {
         Ok(hook_value) => {
             // Success: drop the old TenantSlot::Attached.
-            tenant_guard
+            slot_guard
                 .drop_old_value()
                 .expect("We just called shutdown");
 
@@ -1806,7 +1806,7 @@ where
                 attached_tenant.set_broken(e.to_string()).await;
             }
             // Leave the broken tenant in the map
-            tenant_guard.revert();
+            slot_guard.revert();
 
             Err(TenantStateError::Other(e))
         }
