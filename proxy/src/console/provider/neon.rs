@@ -152,7 +152,7 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key = creds.project().expect("impossible");
+        let key: &str = &creds.cache_key;
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);

@@ -3820,6 +3820,7 @@ dependencies = [
  "hyper",
  "hyper-tungstenite",
  "itertools",
+ "lazy_static",
  "md5",
  "metrics",
  "native-tls",

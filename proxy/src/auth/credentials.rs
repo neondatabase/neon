@@ -1,6 +1,8 @@
 //! User credentials used in authentication.
 
-use crate::{auth::password_hack::parse_endpoint_param, error::UserFacingError};
+use crate::{
+    auth::password_hack::parse_endpoint_param, error::UserFacingError, proxy::is_neon_param,
+};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use std::collections::HashSet;
@@ -38,6 +40,8 @@ pub struct ClientCredentials<'a> {
     pub user: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<String>,
+
+    pub cache_key: String,
 }
 
 impl ClientCredentials<'_> {
@@ -53,6 +57,7 @@ impl<'a> ClientCredentials<'a> {
         ClientCredentials {
             user: "",
             project: None,
+            cache_key: "".to_string(),
         }
     }
 
@@ -120,8 +125,35 @@ impl<'a> ClientCredentials<'a> {
 
         info!(user, project = project.as_deref(), "credentials");
 
-        Ok(Self { user, project })
+        let cache_key = format!(
+            "{}{}",
+            project.as_deref().unwrap_or(""),
+            neon_options(params).unwrap_or("".to_string())
+        );
+
+        Ok(Self {
+            user,
+            project,
+            cache_key,
+        })
     }
+}
+
+fn neon_options(params: &StartupMessageParams) -> Option<String> {
+    #[allow(unstable_name_collisions)]
+    let options: String = params
+        .options_raw()?
+        .filter(|opt| is_neon_param(opt))
+        .sorted()
+        .intersperse(" ") // TODO: use impl from std once it's stabilized
+        .collect();
+
+    // Don't even bother with empty options.
+    if options.is_empty() {
+        return None;
+    }
+
+    Some(options)
 }
 
 fn project_name_valid(name: &str) -> bool {

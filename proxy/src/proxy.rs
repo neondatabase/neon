@@ -15,10 +15,13 @@ use crate::{
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use itertools::Itertools;
+use lazy_static::lazy_static;
 use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use prometheus::{register_histogram_vec, HistogramVec};
+use regex::Regex;
 use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -881,10 +884,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             allow_self_signed_compute,
         } = self;
 
+        let console_options = neon_options(params);
+
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
-            options: params.get("options"),
+            options: console_options.as_deref(),
         };
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
@@ -945,4 +950,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         node.stream.write_all(&read_buf).await?;
         proxy_pass(stream, node.stream, &aux).await
     }
+}
+
+pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
+    #[allow(unstable_name_collisions)]
+    let options: String = params
+        .options_raw()?
+        .filter(|opt| is_neon_param(opt))
+        .intersperse(" ") // TODO: use impl from std once it's stabilized
+        .collect();
+
+    // Don't even bother with empty options.
+    if options.is_empty() {
+        return None;
+    }
+
+    Some(options)
+}
+
+pub fn is_neon_param(bytes: &str) -> bool {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"^neon_\w+:").unwrap();
+    }
+    RE.is_match(bytes)
 }
