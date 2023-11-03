@@ -577,16 +577,15 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
         }
     };
 
-    info!(
-        "Waiting for {} InProgress tenants to complete...",
-        in_progress_ops.len()
-    );
+
+    info!("Waiting for {} InProgress tenants and {} Attached tenants to shut down", in_progress_ops.len(), tenants_to_shut_down.len());
+
     for barrier in in_progress_ops {
         barrier.wait().await;
     }
 
     info!(
-        "Waiting for {} attached tenants to shut down...",
+        "InProgress tenants shut down, waiting for Attached tenants to shut down",
         tenants_to_shut_down.len()
     );
     let started_at = std::time::Instant::now();
