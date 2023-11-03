@@ -222,10 +222,10 @@ pub(crate) enum BlobDataParseResult {
 fn parse_layer_object_name(name: &str) -> Result<(LayerFileName, Generation), String> {
     match name.rsplit_once('-') {
         // FIXME: this is gross, just use a regex?
-        Some(gen) if gen.1.len() == 8 => {
-            let layer = gen.0.parse::<LayerFileName>()?;
+        Some((layer_filename, gen)) if gen.len() == 8 => {
+            let layer = layer_filename.parse::<LayerFileName>()?;
             let gen =
-                Generation::parse_suffix(gen.1).ok_or("Malformed generation suffix".to_string())?;
+                Generation::parse_suffix(gen).ok_or("Malformed generation suffix".to_string())?;
             Ok((layer, gen))
         }
         _ => Ok((name.parse::<LayerFileName>()?, Generation::none())),
