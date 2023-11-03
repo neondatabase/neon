@@ -325,6 +325,7 @@ pin_project_lite::pin_project! {
             #[pin]
             inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>,
             len: usize,
+            read_any: bool,
         },
         Cloned {
             inner_was: std::marker::PhantomData<S>,
@@ -341,7 +342,11 @@ where
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         let inner = tokio_util::io::StreamReader::new(inner).compat();
-        NonSeekableStream::Initial { inner, len }
+        NonSeekableStream::Initial {
+            inner,
+            len,
+            read_any: false,
+        }
     }
 }
 
@@ -364,7 +369,12 @@ where
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         match self.project() {
-            NonSeekableStreamProj::Initial { inner, .. } => inner.poll_read(cx, buf),
+            NonSeekableStreamProj::Initial {
+                inner, read_any, ..
+            } => {
+                *read_any = true;
+                inner.poll_read(cx, buf)
+            }
             NonSeekableStreamProj::Cloned { .. } => std::task::Poll::Ready(Err(
                 std::io::Error::new(std::io::ErrorKind::Other, "cloned values cannot be read"),
             )),
@@ -397,6 +407,12 @@ where
         + 'static,
 {
     async fn reset(&mut self) -> azure_core::error::Result<()> {
+        match self {
+            NonSeekableStream::Initial { read_any, .. } if !*read_any => {
+                return Ok(());
+            }
+            _ => {}
+        }
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
             std::io::Error::new(
