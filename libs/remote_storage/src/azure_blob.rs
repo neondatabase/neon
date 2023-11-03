@@ -3,19 +3,15 @@
 use std::env;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::{borrow::Cow, collections::HashMap, io::Cursor};
+use std::{borrow::Cow, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
-use azure_core::Header;
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
-use azure_storage_blobs::{
-    blob::operations::GetBlobBuilder,
-    prelude::{BlobClient, ContainerClient},
-};
+use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use futures_util::StreamExt;
 use http_types::StatusCode;
 use tokio::io::AsyncRead;
@@ -112,7 +108,7 @@ impl AzureBlobStorage {
 
     async fn download_for_builder(
         &self,
-        metadata: StorageMetadata,
+        metadata: Option<StorageMetadata>,
         builder: GetBlobBuilder,
     ) -> Result<Download, DownloadError> {
         let mut response = builder.into_stream();
@@ -131,27 +127,8 @@ impl AzureBlobStorage {
         }
         Ok(Download {
             download_stream: Box::pin(Cursor::new(buf)),
-            metadata: Some(metadata),
+            metadata,
         })
-    }
-    // TODO get rid of this function once we have metadata included in the response
-    // https://github.com/Azure/azure-sdk-for-rust/issues/1439
-    async fn get_metadata(
-        &self,
-        blob_client: &BlobClient,
-    ) -> Result<StorageMetadata, DownloadError> {
-        let builder = blob_client.get_metadata();
-
-        let response = builder.into_future().await.map_err(to_download_error)?;
-        let mut map = HashMap::new();
-
-        for md in response.metadata.iter() {
-            map.insert(
-                md.name().as_str().to_string(),
-                md.value().as_str().to_string(),
-            );
-        }
-        Ok(StorageMetadata(map))
     }
 
     async fn permit(&self, kind: RequestKind) -> tokio::sync::SemaphorePermit<'_> {
@@ -269,8 +246,7 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
-        let metadata = self.get_metadata(&blob_client).await?;
-
+        let metadata = None;
         let builder = blob_client.get();
 
         self.download_for_builder(metadata, builder).await
@@ -285,8 +261,7 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
-        let metadata = self.get_metadata(&blob_client).await?;
-
+        let metadata = None;
         let mut builder = blob_client.get();
 
         if let Some(end_exclusive) = end_exclusive {
