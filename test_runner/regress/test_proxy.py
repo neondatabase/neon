@@ -471,7 +471,6 @@ def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
             expected_code=status,
         )
 
-    # query generates a million rows - should hit the 10MB reponse limit quickly
     response = query(
         200,
         "select array['foo'::foo, 'bar'::foo, 'baz'::foo] as data",
