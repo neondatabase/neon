@@ -9,6 +9,7 @@ use std::{borrow::Cow, io::Cursor};
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
+use azure_core::{Header, RetryOptions};
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
@@ -48,7 +49,8 @@ impl AzureBlobStorage {
             StorageCredentials::token_credential(Arc::new(token_credential))
         };
 
-        let builder = ClientBuilder::new(account, credentials);
+        // we have an outer retry
+        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
