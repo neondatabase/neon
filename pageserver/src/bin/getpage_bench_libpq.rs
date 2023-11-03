@@ -56,6 +56,8 @@ struct RelTagBlockNo {
 struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
     ps_endpoint: String,
+    #[clap(long, default_value = "postgres://postgres@localhost:64000")]
+    pq_client_connstring: String,
     // tenant_id: String,
     // timeline_id: String,
     num_tasks: usize,
@@ -246,10 +248,13 @@ fn timeline(
             let task = tokio::spawn({
                 let stats = Arc::clone(&stats);
                 async move {
-                    let mut client =
-                        getpage_client::Client::new(tenant_id.clone(), timeline_id.clone())
-                            .await
-                            .unwrap();
+                    let mut client = getpage_client::Client::new(
+                        args.pq_client_connstring.clone(),
+                        tenant_id.clone(),
+                        timeline_id.clone(),
+                    )
+                    .await
+                    .unwrap();
                     for i in 0..args.num_requests {
                         match args.mode {
                             Mode::GetPage => {
@@ -319,12 +324,13 @@ mod getpage_client {
 
     impl Client {
         pub fn new(
+            connstring: String,
             tenant_id: String,
             timeline_id: String,
         ) -> impl std::future::Future<Output = anyhow::Result<Self>> + Send {
             async move {
                 let (client, connection) =
-                    tokio_postgres::connect("host=localhost port=64000", postgres::NoTls).await?;
+                    tokio_postgres::connect(&connstring, postgres::NoTls).await?;
 
                 let conn_task_cancel = CancellationToken::new();
                 let conn_task = tokio::spawn({
