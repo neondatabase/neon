@@ -21,7 +21,6 @@ use tokio_postgres::ReadyForQueryStatus;
 use tokio_postgres::Row;
 use tokio_postgres::Transaction;
 use tracing::error;
-use tracing::info;
 use tracing::instrument;
 use url::Url;
 use utils::http::error::ApiError;
