@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
@@ -195,24 +194,6 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     ctx.client.delete_objects(&[path3]).await?;
 
     Ok(())
-}
-
-fn upload_stream(
-    content: Cow<'static, [u8]>,
-) -> (
-    impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
-    usize,
-) {
-    let len = content.len();
-
-    let content = match content {
-        Cow::Borrowed(x) => bytes::Bytes::from_static(x),
-        Cow::Owned(vec) => bytes::Bytes::from(vec),
-    };
-
-    let content = futures::future::ready(Ok(content));
-
-    (futures::stream::once(content), len)
 }
 
 fn ensure_logging_ready() {
@@ -555,4 +536,31 @@ async fn upload_simple_s3_data(
     } else {
         ControlFlow::Continue(uploaded_blobs)
     }
+}
+
+fn upload_stream(
+    content: std::borrow::Cow<'static, [u8]>,
+) -> (
+    impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
+    usize,
+) {
+    use std::borrow::Cow;
+
+    let content = match content {
+        Cow::Borrowed(x) => bytes::Bytes::from_static(x),
+        Cow::Owned(vec) => bytes::Bytes::from(vec),
+    };
+    wrap_stream(content)
+}
+
+fn wrap_stream(
+    content: bytes::Bytes,
+) -> (
+    impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
+    usize,
+) {
+    let len = content.len();
+    let content = futures::future::ready(Ok(content));
+
+    (futures::stream::once(content), len)
 }

@@ -341,8 +341,7 @@ where
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         let inner = tokio_util::io::StreamReader::new(inner).compat();
-        let sad = NonSeekableStream::Initial { inner, len };
-        sad
+        NonSeekableStream::Initial { inner, len }
     }
 }
 
@@ -381,7 +380,7 @@ impl<S> Clone for NonSeekableStream<S> {
                 len_was: *len,
             },
             Self::Cloned { inner_was, len_was } => Self::Cloned {
-                inner_was: inner_was.clone(),
+                inner_was: *inner_was,
                 len_was: *len_was,
             },
         }

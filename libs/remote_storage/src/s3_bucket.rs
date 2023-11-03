@@ -31,7 +31,6 @@ use aws_smithy_types::byte_stream::ByteStream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
 use tokio::io::{self, AsyncRead};
-use tokio_util::io::ReaderStream;
 use tracing::debug;
 
 use super::StorageMetadata;
