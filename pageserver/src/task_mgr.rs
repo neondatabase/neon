@@ -316,7 +316,7 @@ struct PageServerTask {
     cancel: CancellationToken,
 
     /// Tasks may optionally be launched for a particular tenant/timeline, enabling
-    ///
+    /// later cancelling tasks for that tenant/timeline in [`shutdown_tasks`]
     tenant_id: Option<TenantId>,
     timeline_id: Option<TimelineId>,
 
