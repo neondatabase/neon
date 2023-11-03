@@ -695,7 +695,7 @@ impl AsyncWrite for YieldingVec {
     }
 }
 
-pub async fn create_tar_zst(pgdata_path: &Path) -> Result<Vec<u8>> {
+pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     let mut paths = Vec::new();
     for entry in WalkDir::new(pgdata_path) {
         let entry = entry?;
