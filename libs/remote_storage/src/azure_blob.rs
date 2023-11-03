@@ -324,6 +324,11 @@ pin_project_lite::pin_project! {
     #[project = NonSeekableStreamProj]
     enum NonSeekableStream<S> {
         Initial {
+            inner: std::sync::Mutex<Option<tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>>>,
+            len: usize,
+        },
+        // azure always clones once, even without retry policy
+        Actual {
             #[pin]
             inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>,
             len: usize,
@@ -344,11 +349,9 @@ where
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         let inner = tokio_util::io::StreamReader::new(inner).compat();
-        NonSeekableStream::Initial {
-            inner,
-            len,
-            read_any: false,
-        }
+        let inner = Some(inner);
+        let inner = std::sync::Mutex::new(inner);
+        NonSeekableStream::Initial { inner, len }
     }
 }
 
@@ -356,6 +359,7 @@ impl<S> std::fmt::Debug for NonSeekableStream<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initial { len, .. } => f.debug_struct("Initial").field("len", len).finish(),
+            Self::Actual { len, .. } => f.debug_struct("Actual").field("len", len).finish(),
             Self::Cloned { len_was, .. } => f.debug_struct("Cloned").field("len", len_was).finish(),
         }
     }
@@ -371,15 +375,16 @@ where
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         match self.project() {
-            NonSeekableStreamProj::Initial {
+            NonSeekableStreamProj::Actual {
                 inner, read_any, ..
             } => {
                 *read_any = true;
                 inner.poll_read(cx, buf)
             }
-            NonSeekableStreamProj::Cloned { .. } => std::task::Poll::Ready(Err(
-                std::io::Error::new(std::io::ErrorKind::Other, "cloned values cannot be read"),
-            )),
+            _ => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "cloned or initial values cannot be read",
+            ))),
         }
     }
 }
@@ -387,7 +392,21 @@ where
 impl<S> Clone for NonSeekableStream<S> {
     fn clone(&self) -> Self {
         match self {
-            Self::Initial { len, .. } => Self::Cloned {
+            Self::Initial { inner, len } => {
+                if let Some(inner) = inner.lock().unwrap().take() {
+                    Self::Actual {
+                        inner,
+                        len: *len,
+                        read_any: false,
+                    }
+                } else {
+                    Self::Cloned {
+                        inner_was: std::marker::PhantomData,
+                        len_was: *len,
+                    }
+                }
+            }
+            Self::Actual { len, .. } => Self::Cloned {
                 inner_was: std::marker::PhantomData,
                 len_was: *len,
             },
@@ -410,9 +429,10 @@ where
 {
     async fn reset(&mut self) -> azure_core::error::Result<()> {
         match self {
-            NonSeekableStream::Initial { read_any, .. } if !*read_any => {
+            NonSeekableStream::Initial { .. } => {
                 return Ok(());
             }
+            NonSeekableStream::Actual { read_any, .. } if !*read_any => return Ok(()),
             _ => {}
         }
         Err(azure_core::error::Error::new(
@@ -426,6 +446,7 @@ where
     fn len(&self) -> usize {
         match self {
             NonSeekableStream::Initial { len, .. } => *len,
+            NonSeekableStream::Actual { len, .. } => *len,
             NonSeekableStream::Cloned { len_was, .. } => *len_was,
         }
     }
