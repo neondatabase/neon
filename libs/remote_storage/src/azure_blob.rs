@@ -365,9 +365,9 @@ where
     ) -> std::task::Poll<std::io::Result<usize>> {
         match self.project() {
             NonSeekableStreamProj::Initial { inner, .. } => inner.poll_read(cx, buf),
-            NonSeekableStreamProj::Cloned { .. } => {
-                std::task::Poll::Ready(Err(std::io::Error::other("cloned values cannot be read")))
-            }
+            NonSeekableStreamProj::Cloned { .. } => std::task::Poll::Ready(Err(
+                std::io::Error::new(std::io::ErrorKind::Other, "cloned values cannot be read"),
+            )),
         }
     }
 }
