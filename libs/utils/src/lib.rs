@@ -73,6 +73,9 @@ pub mod completion;
 /// Reporting utilities
 pub mod error;
 
+/// async timeout helper
+pub mod timeout;
+
 pub mod sync;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages

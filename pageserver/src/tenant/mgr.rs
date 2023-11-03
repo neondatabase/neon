@@ -9,6 +9,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
+use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
@@ -939,32 +940,6 @@ pub(crate) enum GetActiveTenantError {
     WillNotBecomeActive(TenantState),
 }
 
-enum TimeoutCancellableError {
-    Timeout,
-    Cancelled,
-}
-
-/// Wrap [`tokio::time::timeout`] with a CancellationToken.
-async fn timeout_cancellable<F>(
-    duration: Duration,
-    future: F,
-    cancel: &CancellationToken,
-) -> Result<F::Output, TimeoutCancellableError>
-where
-    F: std::future::Future,
-{
-    tokio::select!(
-        r = tokio::time::timeout(duration, future) => {
-            r.map_err(|_| TimeoutCancellableError::Timeout)
-
-        },
-        _ = cancel.cancelled() => {
-            Err(TimeoutCancellableError::Cancelled)
-
-        }
-    )
-}
-
 /// Get a [`Tenant`] in its active state. If the tenant_id is currently in [`TenantSlot::InProgress`]
 /// state, then wait for up to `timeout`.  If the [`Tenant`] is not currently in [`TenantState::Active`],
 /// then wait for up to `timeout` (minus however long we waited for the slot).
@@ -1014,8 +989,8 @@ pub(crate) async fn get_active_tenant_with_timeout(
             tracing::debug!("Waiting for tenant InProgress state to pass...");
             timeout_cancellable(
                 deadline.duration_since(Instant::now()),
-                barrier.wait(),
                 cancel,
+                barrier.wait(),
             )
             .await
             .map_err(|e| match e {
@@ -1045,8 +1020,8 @@ pub(crate) async fn get_active_tenant_with_timeout(
     tracing::debug!("Waiting for tenant to enter active state...");
     match timeout_cancellable(
         deadline.duration_since(Instant::now()),
-        tenant.wait_to_become_active(),
         cancel,
+        tenant.wait_to_become_active(),
     )
     .await
     {
