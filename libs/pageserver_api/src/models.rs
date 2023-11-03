@@ -572,15 +572,18 @@ pub enum PagestreamFeMessage {
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
+    NoOp,
 }
 
 // Wrapped in libpq CopyData
+#[derive(Debug)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+    NoOp,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -679,6 +682,10 @@ impl PagestreamFeMessage {
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.dbnode);
             }
+
+            Self::NoOp => {
+                bytes.put_u8(4);
+            }
         }
 
         bytes.into()
@@ -729,6 +736,7 @@ impl PagestreamFeMessage {
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 dbnode: body.read_u32::<BigEndian>()?,
             })),
+            4 => Ok(PagestreamFeMessage::NoOp),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
@@ -763,6 +771,9 @@ impl PagestreamBeMessage {
                 bytes.put_u8(104); /* tag from pagestore_client.h */
                 bytes.put_i64(resp.db_size);
             }
+            Self::NoOp => {
+                bytes.put_u8(105);
+            }
         }
 
         bytes.into()
@@ -794,6 +805,9 @@ impl PagestreamBeMessage {
                 }))
             }
             104 => todo!(),
+            105 => {
+                Ok(PagestreamBeMessage::NoOp)
+            },
             _ => bail!("unknown tag: {:?}", msg_tag),
         }
     }

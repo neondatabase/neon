@@ -491,6 +491,11 @@ impl PageServerHandler {
                         span,
                     )
                 }
+                PagestreamFeMessage::NoOp => {
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::NoOp);
+                    let span = tracing::info_span!("no_op");
+                    (Ok(PagestreamBeMessage::NoOp), span)
+                }
             };
 
             if let Err(e) = &response {

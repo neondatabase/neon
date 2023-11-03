@@ -33,6 +33,7 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonPagestoreNoopRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -40,6 +41,7 @@ typedef enum
 	T_NeonGetPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
+	T_NeonPagestoreNoopResponse,
 }			NeonMessageTag;
 
 /* base struct for c-style inheritance */
