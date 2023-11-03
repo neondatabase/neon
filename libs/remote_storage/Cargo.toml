@@ -16,10 +16,11 @@ aws-credential-types.workspace = true
 bytes.workspace = true
 camino.workspace = true
 hyper = { workspace = true, features = ["stream"] }
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "io-util"] }
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
 toml_edit.workspace = true
 tracing.workspace = true
 scopeguard.workspace = true

@@ -15,7 +15,6 @@ use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use futures_util::StreamExt;
 use http_types::StatusCode;
-use tokio::io::AsyncRead;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
@@ -219,7 +218,7 @@ impl RemoteStorage for AzureBlobStorage {
     }
     async fn upload(
         &self,
-        mut from: impl AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -227,13 +226,19 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Put).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        // TODO FIX THIS UGLY HACK and don't buffer the entire object
-        // into RAM here, but use the streaming interface. For that,
-        // we'd have to change the interface though...
-        // https://github.com/neondatabase/neon/issues/5563
-        let mut buf = Vec::with_capacity(data_size_bytes);
-        tokio::io::copy(&mut from, &mut buf).await?;
-        let body = azure_core::Body::Bytes(buf.into());
+        let from: std::pin::Pin<
+            Box<
+                dyn futures::stream::Stream<Item = std::io::Result<bytes::Bytes>>
+                    + Send
+                    + Sync
+                    + 'static,
+            >,
+        > = Box::pin(from);
+
+        let body = azure_core::Body::SeekableStream(Box::new(NonSeekableStream::new(
+            from,
+            data_size_bytes,
+        )));
 
         let mut builder = blob_client.put_block_blob(body);
 
@@ -310,5 +315,101 @@ impl RemoteStorage for AzureBlobStorage {
             self.delete(path).await?;
         }
         Ok(())
+    }
+}
+
+pin_project_lite::pin_project! {
+    #[project = NonSeekableStreamProj]
+    enum NonSeekableStream<S> {
+        Initial {
+            #[pin]
+            inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>,
+            len: usize,
+        },
+        Cloned {
+            inner_was: std::marker::PhantomData<S>,
+            len_was: usize,
+        }
+    }
+}
+
+impl<S> NonSeekableStream<S>
+where
+    S: futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
+{
+    fn new(inner: S, len: usize) -> NonSeekableStream<S> {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let inner = tokio_util::io::StreamReader::new(inner).compat();
+        let sad = NonSeekableStream::Initial { inner, len };
+        sad
+    }
+}
+
+impl<S> std::fmt::Debug for NonSeekableStream<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initial { len, .. } => f.debug_struct("Initial").field("len", len).finish(),
+            Self::Cloned { len_was, .. } => f.debug_struct("Cloned").field("len", len_was).finish(),
+        }
+    }
+}
+
+impl<S> futures::io::AsyncRead for NonSeekableStream<S>
+where
+    S: futures::stream::Stream<Item = std::io::Result<bytes::Bytes>>,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.project() {
+            NonSeekableStreamProj::Initial { inner, .. } => inner.poll_read(cx, buf),
+            NonSeekableStreamProj::Cloned { .. } => {
+                std::task::Poll::Ready(Err(std::io::Error::other("cloned values cannot be read")))
+            }
+        }
+    }
+}
+
+impl<S> Clone for NonSeekableStream<S> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Initial { len, .. } => Self::Cloned {
+                inner_was: std::marker::PhantomData,
+                len_was: *len,
+            },
+            Self::Cloned { inner_was, len_was } => Self::Cloned {
+                inner_was: inner_was.clone(),
+                len_was: *len_was,
+            },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> azure_core::SeekableStream for NonSeekableStream<S>
+where
+    S: futures::stream::Stream<Item = std::io::Result<bytes::Bytes>>
+        + Unpin
+        + Send
+        + Sync
+        + 'static,
+{
+    async fn reset(&mut self) -> azure_core::error::Result<()> {
+        Err(azure_core::error::Error::new(
+            azure_core::error::ErrorKind::Io,
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "resetting is not really supported",
+            ),
+        ))
+    }
+    fn len(&self) -> usize {
+        match self {
+            NonSeekableStream::Initial { len, .. } => *len,
+            NonSeekableStream::Cloned { len_was, .. } => *len_was,
+        }
     }
 }
