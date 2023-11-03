@@ -1600,7 +1600,7 @@ fn tenant_map_acquire_slot_impl(
         Entry::Vacant(v) => match mode {
             MustExist => {
                 tracing::debug!("Vacant && MustExist: return NotFound");
-                return Err(TenantSlotError::NotFound(*tenant_id));
+                Err(TenantSlotError::NotFound(*tenant_id))
             }
             _ => {
                 let (completion, barrier) = utils::completion::channel();
