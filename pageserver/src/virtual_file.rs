@@ -19,6 +19,7 @@ use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockWriteGuard};
+use utils::fs_ext;
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -173,37 +174,78 @@ impl OpenFiles {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum CrashsafeOverwriteError {
-    #[error("final path has no parent dir")]
-    FinalPathHasNoParentDir,
-    #[error("remove tempfile")]
-    RemovePreviousTempfile(#[source] std::io::Error),
-    #[error("create tempfile")]
-    CreateTempfile(#[source] std::io::Error),
-    #[error("write tempfile")]
-    WriteContents(#[source] std::io::Error),
-    #[error("sync tempfile")]
-    SyncTempfile(#[source] std::io::Error),
-    #[error("rename tempfile to final path")]
-    RenameTempfileToFinalPath(#[source] std::io::Error),
-    #[error("open final path parent dir")]
-    OpenFinalPathParentDir(#[source] std::io::Error),
-    #[error("sync final path parent dir")]
-    SyncFinalPathParentDir(#[source] std::io::Error),
+/// Identify error types that should alwways terminate the process.  Other
+/// error types may be elegible for retry.
+pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
+    use nix::errno::Errno::*;
+    match e.raw_os_error().map(nix::errno::from_i32) {
+        Some(EIO) => {
+            // Terminate on EIO because we no longer trust the device to store
+            // data safely, or to uphold persistence guarantees on fsync.
+            true
+        }
+        Some(EROFS) => {
+            // Terminate on EROFS because a filesystem is usually remounted
+            // readonly when it has experienced some critical issue, so the same
+            // logic as EIO applies.
+            true
+        }
+        Some(EACCES) => {
+            // Terminate on EACCESS because we should always have permissions
+            // for our own data dir: if we don't, then we can't do our job and
+            // need administrative intervention to fix permissions.  Terminating
+            // is the best way to make sure we stop cleanly rather than going
+            // into infinite retry loops, and will make it clear to the outside
+            // world that we need help.
+            true
+        }
+        _ => {
+            // Treat all other local file I/O errors are retryable.  This includes:
+            // - ENOSPC: we stay up and wait for eviction to free some space
+            // - EINVAL, EBADF, EBADFD: this is a code bug, not a filesystem/hardware issue
+            // - WriteZero, Interrupted: these are used internally VirtualFile
+            false
+        }
+    }
 }
-impl CrashsafeOverwriteError {
-    /// Returns true iff the new contents are durably stored.
-    pub fn are_new_contents_durable(&self) -> bool {
+
+/// Call this when the local filesystem gives us an error with an external
+/// cause: this includes EIO, EROFS, and EACCESS: all these indicate either
+/// bad storage or bad configuration, and we can't fix that from inside
+/// a running process.
+pub(crate) fn on_fatal_io_error(e: &std::io::Error, context: &str) -> ! {
+    tracing::error!("Fatal I/O error: {e}: {context})");
+    std::process::abort();
+}
+
+pub(crate) trait MaybeFatalIo<T> {
+    fn maybe_fatal_err(self, context: &str) -> std::io::Result<T>;
+    fn fatal_err(self, context: &str) -> T;
+}
+
+impl<T> MaybeFatalIo<T> for std::io::Result<T> {
+    /// Terminate the process if the result is an error of a fatal type, else pass it through
+    ///
+    /// This is appropriate for writes, where we typically want to die on EIO/ACCES etc, but
+    /// not on ENOSPC.
+    fn maybe_fatal_err(self, context: &str) -> std::io::Result<T> {
+        if let Err(e) = &self {
+            if is_fatal_io_error(e) {
+                on_fatal_io_error(e, context);
+            }
+        }
+        self
+    }
+
+    /// Terminate the process on any I/O error.
+    ///
+    /// This is appropriate for reads on files that we know exist: they should always work.
+    fn fatal_err(self, context: &str) -> T {
         match self {
-            Self::FinalPathHasNoParentDir => false,
-            Self::RemovePreviousTempfile(_) => false,
-            Self::CreateTempfile(_) => false,
-            Self::WriteContents(_) => false,
-            Self::SyncTempfile(_) => false,
-            Self::RenameTempfileToFinalPath(_) => false,
-            Self::OpenFinalPathParentDir(_) => false,
-            Self::SyncFinalPathParentDir(_) => true,
+            Ok(v) => v,
+            Err(e) => {
+                on_fatal_io_error(&e, context);
+            }
         }
     }
 }
@@ -284,15 +326,13 @@ impl VirtualFile {
         final_path: &Utf8Path,
         tmp_path: &Utf8Path,
         content: &[u8],
-    ) -> Result<(), CrashsafeOverwriteError> {
+    ) -> std::io::Result<()> {
         let Some(final_path_parent) = final_path.parent() else {
-            return Err(CrashsafeOverwriteError::FinalPathHasNoParentDir);
+            return Err(std::io::Error::from_raw_os_error(
+                nix::errno::Errno::EINVAL as i32,
+            ));
         };
-        match std::fs::remove_file(tmp_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(CrashsafeOverwriteError::RemovePreviousTempfile(e)),
-        }
+        std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
         let mut file = Self::open_with_options(
             tmp_path,
             OpenOptions::new()
@@ -301,31 +341,20 @@ impl VirtualFile {
                 // we bail out instead of causing damage.
                 .create_new(true),
         )
-        .await
-        .map_err(CrashsafeOverwriteError::CreateTempfile)?;
-        file.write_all(content)
-            .await
-            .map_err(CrashsafeOverwriteError::WriteContents)?;
-        file.sync_all()
-            .await
-            .map_err(CrashsafeOverwriteError::SyncTempfile)?;
+        .await?;
+        file.write_all(content).await?;
+        file.sync_all().await?;
         drop(file); // before the rename, that's important!
                     // renames are atomic
-        std::fs::rename(tmp_path, final_path)
-            .map_err(CrashsafeOverwriteError::RenameTempfileToFinalPath)?;
+        std::fs::rename(tmp_path, final_path)?;
         // Only open final path parent dirfd now, so that this operation only
         // ever holds one VirtualFile fd at a time.  That's important because
         // the current `find_victim_slot` impl might pick the same slot for both
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
         let final_parent_dirfd =
-            Self::open_with_options(final_path_parent, OpenOptions::new().read(true))
-                .await
-                .map_err(CrashsafeOverwriteError::OpenFinalPathParentDir)?;
-        final_parent_dirfd
-            .sync_all()
-            .await
-            .map_err(CrashsafeOverwriteError::SyncFinalPathParentDir)?;
+            Self::open_with_options(final_path_parent, OpenOptions::new().read(true)).await?;
+        final_parent_dirfd.sync_all().await?;
         Ok(())
     }
 
