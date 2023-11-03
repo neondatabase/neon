@@ -3692,7 +3692,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
-        Lazy::new(|| Key::from_slice(&hex!("110000000033333333444444445500000001")));
+        Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
