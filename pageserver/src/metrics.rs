@@ -760,6 +760,7 @@ pub enum SmgrQueryType {
     GetRelSize,
     GetPageAtLsn,
     GetDbSize,
+    NoOp,
 }
 
 #[derive(Debug)]
