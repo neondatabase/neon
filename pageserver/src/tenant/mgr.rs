@@ -535,8 +535,7 @@ pub(crate) async fn shutdown_all_tenants() {
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
     use utils::completion;
 
-    // Under write lock (prevent any new tenants being created), extract the list
-    // of tenants to shut down.
+    // Atomically, 1. extract the list of tenants to shut down and 2. prevent creation of new tenants.
     let (in_progress_ops, tenants_to_shut_down) = {
         let mut m = tenants.write().unwrap();
         match &mut *m {
