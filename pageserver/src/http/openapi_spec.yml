@@ -93,9 +93,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
     delete:
       description: |
-        Attempts to delete specified tenant. 500 and 409 errors should be retried until 404 is retrieved.
+        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
         404 means that deletion successfully finished"
       responses:
         "400":
@@ -134,6 +141,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline:
     parameters:
@@ -178,6 +192,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
@@ -226,6 +247,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
     delete:
       description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
@@ -265,7 +293,74 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PreconditionFailedError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: Get timestamp for a given LSN
+      parameters:
+        - name: lsn
+          in: query
+          required: true
+          schema:
+            type: integer
+          description: A LSN to get the timestamp
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: string
+                format: date-time
+        "400":
+          description: Error when no tenant id found in path, no timeline id or invalid timestamp
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Timeline not found, or there is no timestamp information for the given lsn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
         "500":
           description: Generic operation error
           content:
@@ -297,13 +392,19 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: The version of the endpoint to use
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: string
+                $ref: "#/components/schemas/LsnByTimestampResponse"
         "400":
           description: Error when no tenant id found in path, no timeline id or invalid timestamp
           content:
@@ -328,6 +429,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
     parameters:
       - name: tenant_id
@@ -375,6 +483,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
@@ -454,7 +569,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "409":
-          description: Tenant download is already in progress
+          description: |
+            The tenant is already known to Pageserver in some way,
+            and hence this `/attach` call has been rejected.
+
+            Some examples of how this can happen:
+            - tenant was created on this pageserver
+            - tenant attachment was started by an earlier call to `/attach`.
+
+            Callers should poll the tenant status's `attachment_status` field,
+            like for status 202. See the longer description for `POST /attach`
+            for details.
           content:
             application/json:
               schema:
@@ -465,6 +590,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/detach:
     parameters:
@@ -518,6 +650,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/ignore:
     parameters:
@@ -560,6 +699,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/load:
     parameters:
@@ -577,6 +723,12 @@ paths:
 
         Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
         Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantLoadRequest"
       responses:
         "202":
           description: Tenant scheduled to load successfully
@@ -604,6 +756,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/synthetic_size:
     parameters:
@@ -641,6 +800,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/size:
     parameters:
@@ -704,6 +869,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/{tenant_id}/timeline/:
     parameters:
@@ -780,6 +952,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/:
     get:
       description: Get tenants list
@@ -810,6 +989,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
     post:
       description: |
         Create a tenant. Returns new tenant id on success.
@@ -860,6 +1046,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 
   /v1/tenant/config:
     put:
@@ -905,6 +1098,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
   /v1/tenant/{tenant_id}/config/:
     parameters:
       - name: tenant_id
@@ -954,6 +1154,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
 components:
   securitySchemes:
     JWT:
@@ -1012,6 +1219,15 @@ components:
             new_tenant_id:
               type: string
               format: hex
+            generation:
+              type: integer
+              description: Attachment generation number.
+    TenantLoadRequest:
+      type: object
+      properties:
+        generation:
+          type: integer
+          description: Attachment generation number.
     TenantAttachRequest:
       type: object
       required:
@@ -1199,6 +1415,19 @@ components:
           type: string
           format: hex
 
+    LsnByTimestampResponse:
+      type: object
+      required:
+        - lsn
+        - kind
+      properties:
+        lsn:
+          type: string
+          format: hex
+        kind:
+          type: string
+          enum: [past, present, future, nodata]
+
     Error:
       type: object
       required:
@@ -1214,6 +1443,13 @@ components:
         msg:
           type: string
     ForbiddenError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    ServiceUnavailableError:
       type: object
       required:
         - msg

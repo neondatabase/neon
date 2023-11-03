@@ -136,20 +136,41 @@ pub fn get_current_timestamp() -> TimestampTz {
     to_pg_timestamp(SystemTime::now())
 }
 
-pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
-    const UNIX_EPOCH_JDATE: u64 = 2440588; /* == date2j(1970, 1, 1) */
-    const POSTGRES_EPOCH_JDATE: u64 = 2451545; /* == date2j(2000, 1, 1) */
+// Module to reduce the scope of the constants
+mod timestamp_conversions {
+    use std::time::Duration;
+
+    use super::*;
+
+    const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
+    const POSTGRES_EPOCH_JDATE: u64 = 2451545; // == date2j(2000, 1, 1)
     const SECS_PER_DAY: u64 = 86400;
     const USECS_PER_SEC: u64 = 1000000;
-    match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(n) => {
-            ((n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
-                * USECS_PER_SEC
-                + n.subsec_micros() as u64) as i64
+    const SECS_DIFF_UNIX_TO_POSTGRES_EPOCH: u64 =
+        (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+
+    pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
+        match time.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(n) => {
+                ((n.as_secs() - SECS_DIFF_UNIX_TO_POSTGRES_EPOCH) * USECS_PER_SEC
+                    + n.subsec_micros() as u64) as i64
+            }
+            Err(_) => panic!("SystemTime before UNIX EPOCH!"),
         }
-        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+
+    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+        let time: u64 = time
+            .try_into()
+            .expect("timestamp before millenium (postgres epoch)");
+        let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_micros(since_unix_epoch))
+            .expect("SystemTime overflow")
     }
 }
+
+pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -481,4 +502,24 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
     wal
 }
 
-// If you need to craft WAL and write tests for this module, put it at wal_craft crate.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ts_conversion() {
+        let now = SystemTime::now();
+        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+
+        let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
+
+        let now_pg = get_current_timestamp();
+        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+
+        assert_eq!(now_pg, round_trip_pg);
+    }
+
+    // If you need to craft WAL and write tests for this module, put it at wal_craft crate.
+}

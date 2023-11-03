@@ -1,5 +1,6 @@
 use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
+use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::{path::PathBuf, process::Child};
@@ -18,7 +19,7 @@ const COMMAND: &str = "attachment_service";
 pub struct AttachHookRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    pub pageserver_id: Option<NodeId>,
+    pub node_id: Option<NodeId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,8 +48,9 @@ impl AttachmentService {
         }
     }
 
-    fn pid_file(&self) -> PathBuf {
-        self.env.base_data_dir.join("attachment_service.pid")
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.env.base_data_dir.join("attachment_service.pid"))
+            .expect("non-Unicode path")
     }
 
     pub fn start(&self) -> anyhow::Result<Child> {
@@ -83,7 +85,7 @@ impl AttachmentService {
             .control_plane_api
             .clone()
             .unwrap()
-            .join("attach_hook")
+            .join("attach-hook")
             .unwrap();
         let client = reqwest::blocking::ClientBuilder::new()
             .build()
@@ -91,7 +93,7 @@ impl AttachmentService {
 
         let request = AttachHookRequest {
             tenant_id,
-            pageserver_id: Some(pageserver_id),
+            node_id: Some(pageserver_id),
         };
 
         let response = client.post(url).json(&request).send()?;

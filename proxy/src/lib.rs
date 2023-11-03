@@ -14,14 +14,15 @@ pub mod console;
 pub mod error;
 pub mod http;
 pub mod logging;
-pub mod metrics;
 pub mod parse;
 pub mod protocol2;
 pub mod proxy;
 pub mod sasl;
 pub mod scram;
+pub mod serverless;
 pub mod stream;
 pub mod url;
+pub mod usage_metrics;
 pub mod waiters;
 
 /// Handle unix signals appropriately.

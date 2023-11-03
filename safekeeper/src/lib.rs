@@ -1,8 +1,8 @@
+use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
 use tokio::runtime::Runtime;
 
-use std::path::PathBuf;
 use std::time::Duration;
 use storage_broker::Uri;
 
@@ -51,7 +51,7 @@ pub struct SafeKeeperConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // data directories to avoid clashing with each other.
-    pub workdir: PathBuf,
+    pub workdir: Utf8PathBuf,
     pub my_id: NodeId,
     pub listen_pg_addr: String,
     pub listen_pg_addr_tenant_only: Option<String>,
@@ -62,6 +62,7 @@ pub struct SafeKeeperConf {
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
+    pub peer_recovery_enabled: bool,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_parallel_jobs: usize,
@@ -73,11 +74,11 @@ pub struct SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_dir(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.workdir.join(tenant_id.to_string())
     }
 
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> PathBuf {
+    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
         self.tenant_dir(&ttid.tenant_id)
             .join(ttid.timeline_id.to_string())
     }
@@ -87,7 +88,7 @@ impl SafeKeeperConf {
     #[cfg(test)]
     fn dummy() -> Self {
         SafeKeeperConf {
-            workdir: PathBuf::from("./"),
+            workdir: Utf8PathBuf::from("./"),
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_pg_addr_tenant_only: None,
@@ -100,6 +101,7 @@ impl SafeKeeperConf {
                 .parse()
                 .expect("failed to parse default broker endpoint"),
             broker_keepalive_interval: Duration::from_secs(5),
+            peer_recovery_enabled: true,
             wal_backup_enabled: true,
             backup_parallel_jobs: 1,
             pg_auth: None,

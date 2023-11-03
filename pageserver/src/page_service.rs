@@ -35,6 +35,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
+use tokio_util::sync::CancellationToken;
 use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
@@ -63,69 +64,6 @@ use crate::trace::Tracer;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
-
-fn copyin_stream<IO>(pgb: &mut PostgresBackend<IO>) -> impl Stream<Item = io::Result<Bytes>> + '_
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    async_stream::try_stream! {
-        loop {
-            let msg = tokio::select! {
-                biased;
-
-                _ = task_mgr::shutdown_watcher() => {
-                    // We were requested to shut down.
-                    let msg = "pageserver is shutting down";
-                    let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
-                    Err(QueryError::Other(anyhow::anyhow!(msg)))
-                }
-
-                msg = pgb.read_message() => { msg.map_err(QueryError::from)}
-            };
-
-            match msg {
-                Ok(Some(message)) => {
-                    let copy_data_bytes = match message {
-                        FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => { break },
-                        FeMessage::Sync => continue,
-                        FeMessage::Terminate => {
-                            let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                            // error can't happen here, ErrorResponse serialization should be always ok
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                            Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                            break;
-                        }
-                        m => {
-                            let msg = format!("unexpected message {m:?}");
-                            // error can't happen here, ErrorResponse serialization should be always ok
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
-                            Err(io::Error::new(io::ErrorKind::Other, msg))?;
-                            break;
-                        }
-                    };
-
-                    yield copy_data_bytes;
-                }
-                Ok(None) => {
-                    let msg = "client closed connection during COPY";
-                    let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                    // error can't happen here, ErrorResponse serialization should be always ok
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                    pgb.flush().await?;
-                    Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                }
-                Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
-                    Err(io_error)?;
-                }
-                Err(other) => {
-                    Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
-                }
-            };
-        }
-    }
-}
 
 /// Read the end of a tar archive.
 ///
@@ -184,6 +122,7 @@ pub async fn libpq_listener_main(
     listener: TcpListener,
     auth_type: AuthType,
     listener_ctx: RequestContext,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -192,7 +131,7 @@ pub async fn libpq_listener_main(
     while let Some(res) = tokio::select! {
         biased;
 
-        _ = task_mgr::shutdown_watcher() => {
+        _ = cancel.cancelled() => {
             // We were requested to shut down.
             None
         }
@@ -284,7 +223,13 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
+    let mut conn_handler = PageServerHandler::new(
+        conf,
+        broker_client,
+        auth,
+        connection_ctx,
+        task_mgr::shutdown_token(),
+    );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -318,6 +263,10 @@ struct PageServerHandler {
     /// For each query received over the connection,
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
+
+    /// A token that should fire when the tenant transitions from
+    /// attached state, or when the pageserver is shutting down.
+    cancel: CancellationToken,
 }
 
 impl PageServerHandler {
@@ -326,6 +275,7 @@ impl PageServerHandler {
         broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<JwtAuth>>,
         connection_ctx: RequestContext,
+        cancel: CancellationToken,
     ) -> Self {
         PageServerHandler {
             _conf: conf,
@@ -333,6 +283,91 @@ impl PageServerHandler {
             auth,
             claims: None,
             connection_ctx,
+            cancel,
+        }
+    }
+
+    /// Wrap PostgresBackend::flush to respect our CancellationToken: it is important to use
+    /// this rather than naked flush() in order to shut down promptly.  Without this, we would
+    /// block shutdown of a tenant if a postgres client was failing to consume bytes we send
+    /// in the flush.
+    async fn flush_cancellable<IO>(&self, pgb: &mut PostgresBackend<IO>) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        tokio::select!(
+            flush_r = pgb.flush() => {
+                Ok(flush_r?)
+            },
+            _ = self.cancel.cancelled() => {
+                Err(QueryError::Shutdown)
+            }
+        )
+    }
+
+    fn copyin_stream<'a, IO>(
+        &'a self,
+        pgb: &'a mut PostgresBackend<IO>,
+    ) -> impl Stream<Item = io::Result<Bytes>> + 'a
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        async_stream::try_stream! {
+            loop {
+                let msg = tokio::select! {
+                    biased;
+
+                    _ = self.cancel.cancelled() => {
+                        // We were requested to shut down.
+                        let msg = "pageserver is shutting down";
+                        let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
+                        Err(QueryError::Shutdown)
+                    }
+
+                    msg = pgb.read_message() => { msg.map_err(QueryError::from)}
+                };
+
+                match msg {
+                    Ok(Some(message)) => {
+                        let copy_data_bytes = match message {
+                            FeMessage::CopyData(bytes) => bytes,
+                            FeMessage::CopyDone => { break },
+                            FeMessage::Sync => continue,
+                            FeMessage::Terminate => {
+                                let msg = "client terminated connection with Terminate message during COPY";
+                                let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                                // error can't happen here, ErrorResponse serialization should be always ok
+                                pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
+                                Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                                break;
+                            }
+                            m => {
+                                let msg = format!("unexpected message {m:?}");
+                                // error can't happen here, ErrorResponse serialization should be always ok
+                                pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
+                                Err(io::Error::new(io::ErrorKind::Other, msg))?;
+                                break;
+                            }
+                        };
+
+                        yield copy_data_bytes;
+                    }
+                    Ok(None) => {
+                        let msg = "client closed connection during COPY";
+                        let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                        // error can't happen here, ErrorResponse serialization should be always ok
+                        pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
+                        self.flush_cancellable(pgb).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                        Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                    }
+                    Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
+                        Err(io_error)?;
+                    }
+                    Err(other) => {
+                        Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
+                    }
+                };
+            }
         }
     }
 
@@ -372,7 +407,7 @@ impl PageServerHandler {
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         let metrics = metrics::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
 
@@ -380,10 +415,10 @@ impl PageServerHandler {
             let msg = tokio::select! {
                 biased;
 
-                _ = task_mgr::shutdown_watcher() => {
+                _ = self.cancel.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
-                    break;
+                    return Err(QueryError::Shutdown)
                 }
 
                 msg = pgb.read_message() => { msg }
@@ -412,38 +447,60 @@ impl PageServerHandler {
             // TODO: We could create a new per-request context here, with unique ID.
             // Currently we use the same per-timeline context for all requests
 
-            let response = match neon_fe_msg {
+            let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelExists);
-                    self.handle_get_rel_exists_request(&timeline, &req, &ctx)
-                        .await
+                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_rel_exists_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelSize);
-                    self.handle_get_nblocks_request(&timeline, &req, &ctx).await
+                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_nblocks_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetPageAtLsn);
-                    self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
-                        .await
+                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.start_timer(metrics::SmgrQueryType::GetDbSize);
-                    self.handle_db_size_request(&timeline, &req, &ctx).await
+                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.lsn);
+                    (
+                        self.handle_db_size_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
             };
 
             let response = response.unwrap_or_else(|e| {
                 // print the all details to the log with {:#}, but for the client the
                 // error message is enough
-                error!("error reading relation or page version: {:?}", e);
+                span.in_scope(|| error!("error reading relation or page version: {:#}", e));
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
                 })
             });
 
             pgb.write_message_noflush(&BeMessage::CopyData(&response.serialize()))?;
-            pgb.flush().await?;
+            self.flush_cancellable(pgb).await?;
         }
         Ok(())
     }
@@ -486,9 +543,9 @@ impl PageServerHandler {
         // Import basebackup provided via CopyData
         info!("importing basebackup");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb)));
         timeline
             .import_basebackup_from_tar(
                 &mut copyin_reader,
@@ -541,8 +598,8 @@ impl PageServerHandler {
         // Import wal provided via CopyData
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+        self.flush_cancellable(pgb).await?;
+        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb)));
         import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 
@@ -627,7 +684,6 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
@@ -648,7 +704,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
@@ -667,7 +722,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
@@ -689,7 +743,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
@@ -754,7 +807,7 @@ impl PageServerHandler {
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
@@ -806,7 +859,7 @@ impl PageServerHandler {
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb).await?;
 
         let basebackup_after = started
             .elapsed()
@@ -1265,7 +1318,10 @@ async fn get_active_tenant_with_timeout(
         Ok(tenant) => tenant,
         Err(e @ GetTenantError::NotFound(_)) => return Err(GetActiveTenantError::NotFound(e)),
         Err(GetTenantError::NotActive(_)) => {
-            unreachable!("we're calling get_tenant with active=false")
+            unreachable!("we're calling get_tenant with active_only=false")
+        }
+        Err(GetTenantError::Broken(_)) => {
+            unreachable!("we're calling get_tenant with active_only=false")
         }
     };
     let wait_time = Duration::from_secs(30);

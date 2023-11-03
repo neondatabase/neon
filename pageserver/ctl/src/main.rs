@@ -8,6 +8,7 @@ mod draw_timeline_dir;
 mod layer_map_analyzer;
 mod layers;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 use layers::LayerCmd;
 use pageserver::{
@@ -18,7 +19,6 @@ use pageserver::{
     virtual_file,
 };
 use postgres_ffi::ControlFileData;
-use std::path::{Path, PathBuf};
 use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -49,7 +49,7 @@ enum Commands {
 #[derive(Parser)]
 struct MetadataCmd {
     /// Input metadata file path
-    metadata_path: PathBuf,
+    metadata_path: Utf8PathBuf,
     /// Replace disk consistent Lsn
     disk_consistent_lsn: Option<Lsn>,
     /// Replace previous record Lsn
@@ -61,13 +61,13 @@ struct MetadataCmd {
 #[derive(Parser)]
 struct PrintLayerFileCmd {
     /// Pageserver data path
-    path: PathBuf,
+    path: Utf8PathBuf,
 }
 
 #[derive(Parser)]
 struct AnalyzeLayerMapCmd {
     /// Pageserver data path
-    path: PathBuf,
+    path: Utf8PathBuf,
     /// Max holes
     max_holes: Option<usize>,
 }
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
+fn read_pg_control_file(control_file_path: &Utf8Path) -> anyhow::Result<()> {
     let control_file = ControlFileData::decode(&std::fs::read(control_file_path)?)?;
     println!("{control_file:?}");
     let control_file_initdb = Lsn(control_file.checkPoint);
@@ -114,7 +114,7 @@ fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn print_layerfile(path: &Path) -> anyhow::Result<()> {
+async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
     page_cache::init(100);

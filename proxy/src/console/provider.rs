@@ -89,9 +89,14 @@ pub mod errors {
                 Self::Console {
                     status: http::StatusCode::LOCKED,
                     ref text,
-                } => !text.contains("quota"),
-                // retry server errors
-                Self::Console { status, .. } if status.is_server_error() => true,
+                } => {
+                    // written data quota exceeded
+                    // data transfer quota exceeded
+                    // compute time quota exceeded
+                    // logical size quota exceeded
+                    !text.contains("quota exceeded")
+                        && !text.contains("the limit for current plan reached")
+                }
                 _ => false,
             }
         }

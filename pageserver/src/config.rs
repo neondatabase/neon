@@ -11,17 +11,18 @@ use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
+use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
 use reqwest::Url;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
@@ -32,12 +33,11 @@ use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
-    TENANTS_SEGMENT_NAME, TENANT_ATTACHING_MARKER_FILENAME, TENANT_DELETED_MARKER_FILE_NAME,
-    TIMELINES_SEGMENT_NAME,
+    TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
-    TIMELINE_UNINIT_MARK_SUFFIX,
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
+    TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 pub mod defaults {
@@ -152,9 +152,9 @@ pub struct PageServerConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // repositories.
-    pub workdir: PathBuf,
+    pub workdir: Utf8PathBuf,
 
-    pub pg_distrib_dir: PathBuf,
+    pub pg_distrib_dir: Utf8PathBuf,
 
     // Authentication
     /// authentication method for the HTTP mgmt API
@@ -163,7 +163,7 @@ pub struct PageServerConf {
     pub pg_auth_type: AuthType,
     /// Path to a file containing public key for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
-    pub auth_validation_public_key_path: Option<PathBuf>,
+    pub auth_validation_public_key_path: Option<Utf8PathBuf>,
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
@@ -207,6 +207,13 @@ pub struct PageServerConf {
     pub background_task_maximum_delay: Duration,
 
     pub control_plane_api: Option<Url>,
+
+    /// JWT token for use with the control plane API.
+    pub control_plane_api_token: Option<SecretString>,
+
+    /// If true, pageserver will make best-effort to operate without a control plane: only
+    /// for use in major incidents.
+    pub control_plane_emergency_mode: bool,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -249,15 +256,15 @@ struct PageServerConfigBuilder {
     page_cache_size: BuilderValue<usize>,
     max_file_descriptors: BuilderValue<usize>,
 
-    workdir: BuilderValue<PathBuf>,
+    workdir: BuilderValue<Utf8PathBuf>,
 
-    pg_distrib_dir: BuilderValue<PathBuf>,
+    pg_distrib_dir: BuilderValue<Utf8PathBuf>,
 
     http_auth_type: BuilderValue<AuthType>,
     pg_auth_type: BuilderValue<AuthType>,
 
     //
-    auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
+    auth_validation_public_key_path: BuilderValue<Option<Utf8PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
     id: BuilderValue<NodeId>,
@@ -283,6 +290,8 @@ struct PageServerConfigBuilder {
     background_task_maximum_delay: BuilderValue<Duration>,
 
     control_plane_api: BuilderValue<Option<Url>>,
+    control_plane_api_token: BuilderValue<Option<SecretString>>,
+    control_plane_emergency_mode: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -300,10 +309,12 @@ impl Default for PageServerConfigBuilder {
             superuser: Set(DEFAULT_SUPERUSER.to_string()),
             page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
-            workdir: Set(PathBuf::new()),
-            pg_distrib_dir: Set(env::current_dir()
-                .expect("cannot access current directory")
-                .join("pg_install")),
+            workdir: Set(Utf8PathBuf::new()),
+            pg_distrib_dir: Set(Utf8PathBuf::from_path_buf(
+                env::current_dir().expect("cannot access current directory"),
+            )
+            .expect("non-Unicode path")
+            .join("pg_install")),
             http_auth_type: Set(AuthType::Trust),
             pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
@@ -347,6 +358,8 @@ impl Default for PageServerConfigBuilder {
             .unwrap()),
 
             control_plane_api: Set(None),
+            control_plane_api_token: Set(None),
+            control_plane_emergency_mode: Set(false),
         }
     }
 }
@@ -384,11 +397,11 @@ impl PageServerConfigBuilder {
         self.max_file_descriptors = BuilderValue::Set(max_file_descriptors)
     }
 
-    pub fn workdir(&mut self, workdir: PathBuf) {
+    pub fn workdir(&mut self, workdir: Utf8PathBuf) {
         self.workdir = BuilderValue::Set(workdir)
     }
 
-    pub fn pg_distrib_dir(&mut self, pg_distrib_dir: PathBuf) {
+    pub fn pg_distrib_dir(&mut self, pg_distrib_dir: Utf8PathBuf) {
         self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
     }
 
@@ -402,7 +415,7 @@ impl PageServerConfigBuilder {
 
     pub fn auth_validation_public_key_path(
         &mut self,
-        auth_validation_public_key_path: Option<PathBuf>,
+        auth_validation_public_key_path: Option<Utf8PathBuf>,
     ) {
         self.auth_validation_public_key_path = BuilderValue::Set(auth_validation_public_key_path)
     }
@@ -477,6 +490,14 @@ impl PageServerConfigBuilder {
 
     pub fn control_plane_api(&mut self, api: Option<Url>) {
         self.control_plane_api = BuilderValue::Set(api)
+    }
+
+    pub fn control_plane_api_token(&mut self, token: Option<SecretString>) {
+        self.control_plane_api_token = BuilderValue::Set(token)
+    }
+
+    pub fn control_plane_emergency_mode(&mut self, enabled: bool) {
+        self.control_plane_emergency_mode = BuilderValue::Set(enabled)
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -567,6 +588,12 @@ impl PageServerConfigBuilder {
             control_plane_api: self
                 .control_plane_api
                 .ok_or(anyhow!("missing control_plane_api"))?,
+            control_plane_api_token: self
+                .control_plane_api_token
+                .ok_or(anyhow!("missing control_plane_api_token"))?,
+            control_plane_emergency_mode: self
+                .control_plane_emergency_mode
+                .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
         })
     }
 }
@@ -576,15 +603,15 @@ impl PageServerConf {
     // Repository paths, relative to workdir.
     //
 
-    pub fn tenants_path(&self) -> PathBuf {
+    pub fn tenants_path(&self) -> Utf8PathBuf {
         self.workdir.join(TENANTS_SEGMENT_NAME)
     }
 
-    pub fn deletion_prefix(&self) -> PathBuf {
+    pub fn deletion_prefix(&self) -> Utf8PathBuf {
         self.workdir.join("deletion")
     }
 
-    pub fn deletion_list_path(&self, sequence: u64) -> PathBuf {
+    pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
         // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.
         const VERSION: u8 = 1;
@@ -593,7 +620,7 @@ impl PageServerConf {
             .join(format!("{sequence:016x}-{VERSION:02x}.list"))
     }
 
-    pub fn deletion_header_path(&self) -> PathBuf {
+    pub fn deletion_header_path(&self) -> Utf8PathBuf {
         // Encode a version in the filename, so that if we ever switch away from JSON we can
         // increment this.
         const VERSION: u8 = 1;
@@ -601,30 +628,33 @@ impl PageServerConf {
         self.deletion_prefix().join(format!("header-{VERSION:02x}"))
     }
 
-    pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenants_path().join(tenant_id.to_string())
     }
 
-    pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id)
-            .join(TENANT_ATTACHING_MARKER_FILENAME)
-    }
-
-    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenant_path(tenant_id).join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
-    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> PathBuf {
+    ///
+    /// Legacy: superseded by tenant_location_config_path.  Eventually
+    /// remove this function.
+    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
     }
 
-    pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_location_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
+        self.tenant_path(tenant_id)
+            .join(TENANT_LOCATION_CONFIG_NAME)
+    }
+
+    pub fn timelines_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
+    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> Utf8PathBuf {
         self.timelines_path(tenant_id).join(timeline_id.to_string())
     }
 
@@ -632,7 +662,7 @@ impl PageServerConf {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         path_with_suffix_extension(
             self.timeline_path(&tenant_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
@@ -643,19 +673,19 @@ impl PageServerConf {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         path_with_suffix_extension(
             self.timeline_path(&tenant_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
     }
 
-    pub fn tenant_deleted_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_deleted_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.tenant_path(tenant_id)
             .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
 
-    pub fn traces_path(&self) -> PathBuf {
+    pub fn traces_path(&self) -> Utf8PathBuf {
         self.workdir.join("traces")
     }
 
@@ -664,7 +694,7 @@ impl PageServerConf {
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
         connection_id: &ConnectionId,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         self.traces_path()
             .join(tenant_id.to_string())
             .join(timeline_id.to_string())
@@ -673,20 +703,20 @@ impl PageServerConf {
 
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
+    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> Utf8PathBuf {
         self.timeline_path(tenant_id, timeline_id)
             .join(METADATA_FILE_NAME)
     }
 
     /// Turns storage remote path of a file into its local path.
-    pub fn local_path(&self, remote_path: &RemotePath) -> PathBuf {
+    pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
         remote_path.with_base(&self.workdir)
     }
 
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
         #[allow(clippy::manual_range_patterns)]
@@ -696,10 +726,10 @@ impl PageServerConf {
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
@@ -707,7 +737,7 @@ impl PageServerConf {
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Path) -> anyhow::Result<Self> {
+    pub fn parse_and_validate(toml: &Document, workdir: &Utf8Path) -> anyhow::Result<Self> {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
@@ -726,10 +756,10 @@ impl PageServerConf {
                     builder.max_file_descriptors(parse_toml_u64(key, item)? as usize)
                 }
                 "pg_distrib_dir" => {
-                    builder.pg_distrib_dir(PathBuf::from(parse_toml_string(key, item)?))
+                    builder.pg_distrib_dir(Utf8PathBuf::from(parse_toml_string(key, item)?))
                 }
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
-                    PathBuf::from(parse_toml_string(key, item)?),
+                    Utf8PathBuf::from(parse_toml_string(key, item)?),
                 )),
                 "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
                 "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
@@ -776,6 +806,18 @@ impl PageServerConf {
                         builder.control_plane_api(Some(parsed.parse().context("failed to parse control plane URL")?))
                     }
                 },
+                "control_plane_api_token" => {
+                    let parsed = parse_toml_string(key, item)?;
+                    if parsed.is_empty() {
+                        builder.control_plane_api_token(None)
+                    } else {
+                        builder.control_plane_api_token(Some(parsed.into()))
+                    }
+                },
+                "control_plane_emergency_mode" => {
+                    builder.control_plane_emergency_mode(parse_toml_bool(key, item)?)
+
+                },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -789,8 +831,7 @@ impl PageServerConf {
             ensure!(
                 auth_validation_public_key_path.exists(),
                 format!(
-                    "Can't find auth_validation_public_key at '{}'",
-                    auth_validation_public_key_path.display()
+                    "Can't find auth_validation_public_key at '{auth_validation_public_key_path}'",
                 )
             );
         }
@@ -906,12 +947,12 @@ impl PageServerConf {
     }
 
     #[cfg(test)]
-    pub fn test_repo_dir(test_name: &str) -> PathBuf {
-        PathBuf::from(format!("../tmp_check/test_{test_name}"))
+    pub fn test_repo_dir(test_name: &str) -> Utf8PathBuf {
+        Utf8PathBuf::from(format!("../tmp_check/test_{test_name}"))
     }
 
-    pub fn dummy_conf(repo_dir: PathBuf) -> Self {
-        let pg_distrib_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
+    pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
+        let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
         PageServerConf {
             id: NodeId(0),
@@ -945,6 +986,8 @@ impl PageServerConf {
             ondemand_download_behavior_treat_error_as_warn: false,
             background_task_maximum_delay: Duration::ZERO,
             control_plane_api: None,
+            control_plane_api_token: None,
+            control_plane_emergency_mode: false,
         }
     }
 }
@@ -1077,8 +1120,8 @@ mod tests {
         num::{NonZeroU32, NonZeroUsize},
     };
 
+    use camino_tempfile::{tempdir, Utf8TempDir};
     use remote_storage::{RemoteStorageKind, S3Config};
-    use tempfile::{tempdir, TempDir};
     use utils::serde_percent::Percent;
 
     use super::*;
@@ -1117,8 +1160,7 @@ background_task_maximum_delay = '334 s'
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
         let config_string = format!(
-            "pg_distrib_dir='{}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-            pg_distrib_dir.display()
+            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
         );
         let toml = config_string.parse()?;
 
@@ -1168,7 +1210,9 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: humantime::parse_duration(
                     defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
                 )?,
-                control_plane_api: None
+                control_plane_api: None,
+                control_plane_api_token: None,
+                control_plane_emergency_mode: false
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1183,8 +1227,7 @@ background_task_maximum_delay = '334 s'
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
 
         let config_string = format!(
-            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'\nbroker_endpoint = '{broker_endpoint}'",
-            pg_distrib_dir.display()
+            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",
         );
         let toml = config_string.parse()?;
 
@@ -1224,7 +1267,9 @@ background_task_maximum_delay = '334 s'
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
                 background_task_maximum_delay: Duration::from_secs(334),
-                control_plane_api: None
+                control_plane_api: None,
+                control_plane_api_token: None,
+                control_plane_emergency_mode: false
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1243,23 +1288,18 @@ background_task_maximum_delay = '334 s'
         let identical_toml_declarations = &[
             format!(
                 r#"[remote_storage]
-local_path = '{}'"#,
-                local_storage_path.display()
+local_path = '{local_storage_path}'"#,
             ),
-            format!(
-                "remote_storage={{local_path='{}'}}",
-                local_storage_path.display()
-            ),
+            format!("remote_storage={{local_path='{local_storage_path}'}}"),
         ];
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
-                pg_distrib_dir.display(),
             );
 
             let toml = config_string.parse()?;
@@ -1322,11 +1362,10 @@ concurrency_limit = {s3_concurrency_limit}"#
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
-                pg_distrib_dir.display(),
             );
 
             let toml = config_string.parse()?;
@@ -1368,12 +1407,11 @@ broker_endpoint = '{broker_endpoint}'
 
         let config_string = format!(
             r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 [tenant_config]
 trace_read_requests = {trace_read_requests}"#,
-            pg_distrib_dir.display(),
         );
 
         let toml = config_string.parse()?;
@@ -1393,7 +1431,7 @@ trace_read_requests = {trace_read_requests}"#,
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
 
         let pageserver_conf_toml = format!(
-            r#"pg_distrib_dir = "{}"
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
 id = 222
@@ -1411,7 +1449,6 @@ kind = "LayerAccessThreshold"
 period = "20m"
 threshold = "20m"
 "#,
-            pg_distrib_dir.display(),
         );
         let toml: Document = pageserver_conf_toml.parse()?;
         let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
@@ -1452,7 +1489,7 @@ threshold = "20m"
         Ok(())
     }
 
-    fn prepare_fs(tempdir: &TempDir) -> anyhow::Result<(PathBuf, PathBuf)> {
+    fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
         let tempdir_path = tempdir.path();
 
         let workdir = tempdir_path.join("workdir");

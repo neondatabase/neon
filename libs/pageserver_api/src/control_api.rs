@@ -17,7 +17,7 @@ pub struct ReAttachRequest {
 pub struct ReAttachResponseTenant {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
-    pub generation: u32,
+    pub gen: u32,
 }
 
 #[derive(Serialize, Deserialize)]

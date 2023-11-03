@@ -29,7 +29,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        storage_layer::PersistentLayer,
+        tasks::{BackgroundLoopKind, RateLimitError},
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -129,7 +129,11 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::tenant::tasks::warn_when_period_overrun(
+                    elapsed,
+                    p.period,
+                    BackgroundLoopKind::Eviction,
+                );
                 crate::metrics::EVICTION_ITERATION_DURATION
                     .get_metric_with_label_values(&[
                         &format!("{}", p.period.as_secs()),
@@ -149,6 +153,17 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
+
+        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(
+            BackgroundLoopKind::Eviction,
+            ctx,
+            cancel,
+        )
+        .await
+        {
+            Ok(permit) => permit,
+            Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
+        };
 
         // If we evict layers but keep cached values derived from those layers, then
         // we face a storm of on-demand downloads after pageserver restart.
@@ -194,15 +209,26 @@ impl Timeline {
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
-        let candidates: Vec<Arc<dyn PersistentLayer>> = {
+        let candidates: Vec<_> = {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
-                if hist_layer.is_remote_layer() {
-                    continue;
-                }
+
+                // guard against eviction while we inspect it; it might be that eviction_task and
+                // disk_usage_eviction_task both select the same layers to be evicted, and
+                // seemingly free up double the space. both succeeding is of no consequence.
+                let guard = match hist_layer.keep_resident().await {
+                    Ok(Some(l)) => l,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        // these should not happen, but we cannot make them statically impossible right
+                        // now.
+                        tracing::warn!(layer=%hist_layer, "failed to keep the layer resident: {e:#}");
+                        continue;
+                    }
+                };
 
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
@@ -233,7 +259,7 @@ impl Timeline {
                     }
                 };
                 if no_activity_for > p.threshold {
-                    candidates.push(hist_layer)
+                    candidates.push(guard.drop_eviction_guard())
                 }
             }
             candidates
@@ -252,7 +278,7 @@ impl Timeline {
         };
 
         let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
+            .evict_layer_batch(remote_client, &candidates, cancel)
             .await
         {
             Err(pre_err) => {
@@ -263,7 +289,7 @@ impl Timeline {
             Ok(results) => results,
         };
         assert_eq!(results.len(), candidates.len());
-        for (l, result) in candidates.iter().zip(results) {
+        for result in results {
             match result {
                 None => {
                     stats.skipped_for_shutdown += 1;
@@ -271,18 +297,8 @@ impl Timeline {
                 Some(Ok(())) => {
                     stats.evicted += 1;
                 }
-                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                    stats.not_evictable += 1;
-                }
-                Some(Err(EvictionError::FileNotFound)) => {
+                Some(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
                     // compaction/gc removed the file while we were waiting on layer_removal_cs
-                    stats.not_evictable += 1;
-                }
-                Some(Err(
-                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
-                )) => {
-                    let e = utils::error::report_compact_sources(&e);
-                    warn!(layer = %l, "failed to evict layer: {e}");
                     stats.not_evictable += 1;
                 }
             }

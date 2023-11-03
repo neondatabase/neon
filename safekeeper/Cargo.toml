@@ -10,6 +10,8 @@ anyhow.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+camino.workspace = true
+camino-tempfile.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
@@ -36,7 +38,6 @@ tokio = { workspace = true, features = ["fs"] }
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 toml_edit.workspace = true
-tempfile.workspace = true
 tracing.workspace = true
 url.workspace = true
 metrics.workspace = true

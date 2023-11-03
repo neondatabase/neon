@@ -1,9 +1,9 @@
 use anyhow::Context;
 use async_stream::{stream, try_stream};
-use aws_sdk_s3::Client;
+use aws_sdk_s3::{types::ObjectIdentifier, Client};
 use tokio_stream::Stream;
 
-use crate::{list_objects_with_retries, RootTarget, TenantId};
+use crate::{list_objects_with_retries, RootTarget, S3Target, TenantId};
 use utils::id::{TenantTimelineId, TimelineId};
 
 /// Given an S3 bucket, output a stream of TenantIds discovered via ListObjectsv2
@@ -103,4 +103,35 @@ pub async fn stream_tenant_timelines<'a>(
             yield Ok(TenantTimelineId::new(tenant, id));
         }
     })
+}
+
+pub(crate) fn stream_listing<'a>(
+    s3_client: &'a Client,
+    target: &'a S3Target,
+) -> impl Stream<Item = anyhow::Result<ObjectIdentifier>> + 'a {
+    try_stream! {
+        let mut continuation_token = None;
+        loop {
+            let fetch_response =
+                list_objects_with_retries(s3_client, target, continuation_token.clone()).await?;
+
+            if target.delimiter.is_empty() {
+                for object_id in fetch_response.contents().unwrap_or_default().iter().filter_map(|object| object.key()).map(|i|
+                    ObjectIdentifier::builder().key(i).build()
+                ) {
+                    yield object_id;
+                }
+            } else {
+                for prefix in fetch_response.common_prefixes().unwrap_or_default()
+                .iter().filter_map(|p| p.prefix().map(|k| ObjectIdentifier::builder().key(k).build())) {
+                    yield prefix;
+                }
+            }
+
+            match fetch_response.next_continuation_token {
+                Some(new_token) => continuation_token = Some(new_token),
+                None => break,
+            }
+        }
+    }
 }

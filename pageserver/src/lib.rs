@@ -25,9 +25,8 @@ pub mod walredo;
 
 pub mod failpoint_support;
 
-use std::path::Path;
-
 use crate::task_mgr::TaskKind;
+use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
 use tracing::info;
 
@@ -113,6 +112,10 @@ pub const METADATA_FILE_NAME: &str = "metadata";
 /// Full path: `tenants/<tenant_id>/config`.
 pub const TENANT_CONFIG_NAME: &str = "config";
 
+/// Per-tenant configuration file.
+/// Full path: `tenants/<tenant_id>/config`.
+pub const TENANT_LOCATION_CONFIG_NAME: &str = "config-v1";
+
 /// A suffix used for various temporary files. Any temporary files found in the
 /// data directory at pageserver startup can be automatically removed.
 pub const TEMP_FILE_SUFFIX: &str = "___temp";
@@ -132,25 +135,29 @@ pub const TIMELINE_DELETE_MARK_SUFFIX: &str = "___delete";
 /// Full path: `tenants/<tenant_id>/___ignored_tenant`.
 pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
 
-pub fn is_temporary(path: &Path) -> bool {
+pub fn is_temporary(path: &Utf8Path) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
+        Some(name) => name.ends_with(TEMP_FILE_SUFFIX),
         None => false,
     }
 }
 
-fn ends_with_suffix(path: &Path, suffix: &str) -> bool {
+fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
     match path.file_name() {
-        Some(name) => name.to_string_lossy().ends_with(suffix),
+        Some(name) => name.ends_with(suffix),
         None => false,
     }
 }
 
-pub fn is_uninit_mark(path: &Path) -> bool {
+// FIXME: DO NOT ADD new query methods like this, which will have a next step of parsing timelineid
+// from the directory name. Instead create type "UninitMark(TimelineId)" and only parse it once
+// from the name.
+
+pub fn is_uninit_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)
 }
 
-pub fn is_delete_mark(path: &Path) -> bool {
+pub fn is_delete_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_DELETE_MARK_SUFFIX)
 }
 
@@ -170,6 +177,9 @@ fn is_walkdir_io_not_found(e: &walkdir::Error) -> bool {
 /// delaying is needed.
 #[derive(Clone)]
 pub struct InitializationOrder {
+    /// Each initial tenant load task carries this until it is done loading timelines from remote storage
+    pub initial_tenant_load_remote: Option<utils::completion::Completion>,
+
     /// Each initial tenant load task carries this until completion.
     pub initial_tenant_load: Option<utils::completion::Completion>,
 

@@ -16,8 +16,8 @@ use tokio::io::AsyncReadExt;
 use utils::http::endpoint::request_span;
 
 use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
+use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
 use crate::timeline::PeerInfo;
 use crate::{debug_dump, pull_timeline};
@@ -60,14 +60,23 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .as_ref()
 }
 
-/// Same as TermSwitchEntry, but serializes LSN using display serializer
+/// Same as TermLsn, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TermSwitchApiEntry {
     pub term: Term,
     #[serde_as(as = "DisplayFromStr")]
     pub lsn: Lsn,
+}
+
+impl From<TermSwitchApiEntry> for TermLsn {
+    fn from(api_val: TermSwitchApiEntry) -> Self {
+        TermLsn {
+            term: api_val.term,
+            lsn: api_val.lsn,
+        }
+    }
 }
 
 /// Augment AcceptorState with epoch for convenience
@@ -374,8 +383,12 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             #[allow(clippy::mutable_key_type)]
-            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> =
-                Lazy::new(|| ["/v1/status"].iter().map(|v| v.parse().unwrap()).collect());
+            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
+                ["/v1/status", "/metrics"]
+                    .iter()
+                    .map(|v| v.parse().unwrap())
+                    .collect()
+            });
             if ALLOWLIST_ROUTES.contains(request.uri()) {
                 None
             } else {

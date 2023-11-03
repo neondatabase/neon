@@ -34,6 +34,8 @@ use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::virtual_file::on_fatal_io_error;
+use crate::virtual_file::MaybeFatalIo;
 
 // The number of keys in a DeletionList before we will proactively persist it
 // (without reaching a flush deadline).  This aims to deliver objects of the order
@@ -85,7 +87,7 @@ pub(super) struct ListWriter {
     conf: &'static PageServerConf,
 
     // Incoming frontend requests to delete some keys
-    rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
 
     // Outbound requests to the backend to execute deletion lists we have composed.
     tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
@@ -111,7 +113,7 @@ impl ListWriter {
 
     pub(super) fn new(
         conf: &'static PageServerConf,
-        rx: tokio::sync::mpsc::Receiver<ListWriterQueueMessage>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<ListWriterQueueMessage>,
         tx: tokio::sync::mpsc::Sender<ValidatorQueueMessage>,
         cancel: CancellationToken,
     ) -> Self {
@@ -180,8 +182,7 @@ impl ListWriter {
                     Ok(h) => Ok(Some(h.validated_sequence)),
                     Err(e) => {
                         warn!(
-                            "Failed to deserialize deletion header, ignoring {}: {e:#}",
-                            header_path.display()
+                            "Failed to deserialize deletion header, ignoring {header_path}: {e:#}",
                         );
                         // This should never happen unless we make a mistake with our serialization.
                         // Ignoring a deletion header is not consequential for correctnes because all deletions
@@ -193,13 +194,10 @@ impl ListWriter {
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    debug!(
-                        "Deletion header {} not found, first start?",
-                        header_path.display()
-                    );
+                    debug!("Deletion header {header_path} not found, first start?");
                     Ok(None)
                 } else {
-                    Err(anyhow::anyhow!(e))
+                    on_fatal_io_error(&e, "reading deletion header");
                 }
             }
         }
@@ -220,45 +218,32 @@ impl ListWriter {
         self.pending.sequence = validated_sequence + 1;
 
         let deletion_directory = self.conf.deletion_prefix();
-        let mut dir = match tokio::fs::read_dir(&deletion_directory).await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    "Failed to open deletion list directory {}: {e:#}",
-                    deletion_directory.display(),
-                );
-
-                // Give up: if we can't read the deletion list directory, we probably can't
-                // write lists into it later, so the queue won't work.
-                return Err(e.into());
-            }
-        };
+        let mut dir = tokio::fs::read_dir(&deletion_directory)
+            .await
+            .fatal_err("read deletion directory");
 
         let list_name_pattern =
             Regex::new("(?<sequence>[a-zA-Z0-9]{16})-(?<version>[a-zA-Z0-9]{2}).list").unwrap();
 
+        let temp_extension = format!(".{TEMP_SUFFIX}");
         let header_path = self.conf.deletion_header_path();
         let mut seqs: Vec<u64> = Vec::new();
-        while let Some(dentry) = dir.next_entry().await? {
+        while let Some(dentry) = dir.next_entry().await.fatal_err("read deletion dentry") {
             let file_name = dentry.file_name();
             let dentry_str = file_name.to_string_lossy();
 
-            if Some(file_name.as_os_str()) == header_path.file_name() {
+            if file_name == header_path.file_name().unwrap_or("") {
                 // Don't try and parse the header's name like a list
                 continue;
             }
 
-            if dentry_str.ends_with(TEMP_SUFFIX) {
+            if dentry_str.ends_with(&temp_extension) {
                 info!("Cleaning up temporary file {dentry_str}");
-                let absolute_path = deletion_directory.join(dentry.file_name());
-                if let Err(e) = tokio::fs::remove_file(&absolute_path).await {
-                    // Non-fatal error: we will just leave the file behind but not
-                    // try and load it.
-                    warn!(
-                        "Failed to clean up temporary file {}: {e:#}",
-                        absolute_path.display()
-                    );
-                }
+                let absolute_path =
+                    deletion_directory.join(dentry.file_name().to_str().expect("non-Unicode path"));
+                tokio::fs::remove_file(&absolute_path)
+                    .await
+                    .fatal_err("delete temp file");
 
                 continue;
             }
@@ -298,7 +283,9 @@ impl ListWriter {
         for s in seqs {
             let list_path = self.conf.deletion_list_path(s);
 
-            let list_bytes = tokio::fs::read(&list_path).await?;
+            let list_bytes = tokio::fs::read(&list_path)
+                .await
+                .fatal_err("read deletion list");
 
             let mut deletion_list = match serde_json::from_slice::<DeletionList>(&list_bytes) {
                 Ok(l) => l,
@@ -357,10 +344,10 @@ impl ListWriter {
         info!("Started deletion frontend worker");
 
         // Synchronous, but we only do it once per process lifetime so it's tolerable
-        if let Err(e) = create_dir_all(&self.conf.deletion_prefix()) {
+        if let Err(e) = create_dir_all(self.conf.deletion_prefix()) {
             tracing::error!(
                 "Failed to create deletion list directory {}, deletions will not be executed ({e})",
-                self.conf.deletion_prefix().display()
+                self.conf.deletion_prefix(),
             );
             metrics::DELETION_QUEUE.unexpected_errors.inc();
             return;

@@ -53,12 +53,19 @@ impl ControlPlaneClient {
             segs.pop_if_empty().push("");
         }
 
-        let client = reqwest::ClientBuilder::new()
-            .build()
-            .expect("Failed to construct http client");
+        let mut client = reqwest::ClientBuilder::new();
+
+        if let Some(jwt) = &conf.control_plane_api_token {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(
+                "Authorization",
+                format!("Bearer {}", jwt.get_contents()).parse().unwrap(),
+            );
+            client = client.default_headers(headers);
+        }
 
         Some(Self {
-            http_client: client,
+            http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
@@ -129,6 +136,8 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
             node_id: self.node_id,
         };
 
+        fail::fail_point!("control-plane-client-re-attach");
+
         let response: ReAttachResponse = self.retry_http_forever(&re_attach_path, request).await?;
         tracing::info!(
             "Received re-attach response with {} tenants",
@@ -138,7 +147,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
         Ok(response
             .tenants
             .into_iter()
-            .map(|t| (t.id, Generation::new(t.generation)))
+            .map(|t| (t.id, Generation::new(t.gen)))
             .collect::<HashMap<_, _>>())
     }
 
@@ -163,6 +172,8 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                 })
                 .collect(),
         };
+
+        fail::fail_point!("control-plane-client-validate");
 
         let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
 
