@@ -957,6 +957,7 @@ pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
     let options: String = params
         .options_raw()?
         .filter(|opt| is_neon_param(opt))
+        .sorted() // we sort it to use as cache key
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 

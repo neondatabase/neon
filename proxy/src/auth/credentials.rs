@@ -1,7 +1,7 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param, error::UserFacingError, proxy::is_neon_param,
+    auth::password_hack::parse_endpoint_param, error::UserFacingError, proxy::neon_options,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -139,23 +139,6 @@ impl<'a> ClientCredentials<'a> {
     }
 }
 
-fn neon_options(params: &StartupMessageParams) -> Option<String> {
-    #[allow(unstable_name_collisions)]
-    let options: String = params
-        .options_raw()?
-        .filter(|opt| is_neon_param(opt))
-        .sorted()
-        .intersperse(" ") // TODO: use impl from std once it's stabilized
-        .collect();
-
-    // Don't even bother with empty options.
-    if options.is_empty() {
-        return None;
-    }
-
-    Some(options)
-}
-
 fn project_name_valid(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '-')
 }
@@ -208,6 +191,7 @@ mod tests {
         let creds = ClientCredentials::parse(&options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
+        assert_eq!(creds.cache_key, "foo");
 
         Ok(())
     }
@@ -334,5 +318,24 @@ mod tests {
             }
             _ => panic!("bad error: {err:?}"),
         }
+    }
+
+    #[test]
+    fn parse_neon_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "neon_lsn:0/2 neon_endpoint_type:read_write"),
+        ]);
+
+        let sni = Some("project.localhost");
+        let common_names = Some(["localhost".into()].into());
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("project"));
+        assert_eq!(
+            creds.cache_key,
+            "projectneon_endpoint_type:read_write neon_lsn:0/2"
+        );
+
+        Ok(())
     }
 }
