@@ -120,7 +120,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             // correct, we need to try sending a HEAD request for the
                             // layer we think is missing.
                             result.errors.push(format!(
-                                "index_part.json contains a layer {}{} that is not present in S3",
+                                "index_part.json contains a layer {}{} that is not present in remote storage",
                                 layer_map_key.0.file_name(),
                                 layer_map_key.1.get_suffix()
                             ))
