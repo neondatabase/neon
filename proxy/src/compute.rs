@@ -314,5 +314,11 @@ mod tests {
 
         let params = StartupMessageParams::new([("options", "project = foo")]);
         assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+
+        let params = StartupMessageParams::new([(
+            "options",
+            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
+        )]);
+        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
     }
 }
