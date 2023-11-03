@@ -792,7 +792,7 @@ pub(crate) async fn upsert_location(
     // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
     let mut tenant_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::Any)?;
 
-    if let Some(TenantSlot::Attached(tenant)) = tenant_guard.take_value() {
+    if let Some(TenantSlot::Attached(tenant)) = tenant_guard.get_old_value() {
         // The case where we keep a Tenant alive was covered above in the special case
         // for Attached->Attached transitions in the same generation.  By this point,
         // if we see an attached tenant we know it will be discarded and should be
@@ -818,6 +818,7 @@ pub(crate) async fn upsert_location(
                 barrier.wait().await;
             }
         }
+        tenant_guard.drop_old_value().expect("We just shut it down");
     }
 
     let tenant_path = conf.tenant_path(&tenant_id);
@@ -1069,10 +1070,8 @@ pub(crate) async fn delete_tenant(
 
     let mut slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::MustExist)?;
 
-    // unwrap is safe because we used expect_exist=true when acquiring the slot
-    let slot = slot_guard.take_value().unwrap();
-
-    let tenant = match &slot {
+    // unwrap is safe because we used MustExist mode when acquiring
+    let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
         TenantSlot::Attached(tenant) => tenant.clone(),
         _ => {
             // Express "not attached" as equivalent to "not found"
@@ -1082,8 +1081,8 @@ pub(crate) async fn delete_tenant(
 
     let result = DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant).await;
 
-    // Replace our InProgress marker with the Tenant in attached state, after the prepare phase of deletion is done
-    slot_guard.upsert(slot)?;
+    // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
+    slot_guard.revert();
     result
 }
 
@@ -1383,6 +1382,12 @@ pub enum TenantSlotUpsertError {
     MapState(#[from] TenantMapError),
 }
 
+#[derive(Debug)]
+enum TenantSlotDropError {
+    /// It is only legal to drop a TenantSlot if its contents are fully shut down
+    NotShutdown,
+}
+
 /// Errors that can happen any time we are walking the tenant map to try and acquire
 /// the TenantSlot for a particular tenant.
 #[derive(Debug, thiserror::Error)]
@@ -1400,6 +1405,21 @@ pub enum TenantMapError {
 /// structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
 /// for this tenant, which acts as a marker for any operations targeting
 /// this tenant to retry later, or wait for the InProgress state to end.
+///
+/// This structure enforces the important invariant that we do not have overlapping
+/// tasks that will try use local storage for a the same tenant ID: we enforce that
+/// the previous contents of a slot have been shut down before the slot can be
+/// left empty or used for something else
+///
+/// Holders of a SlotGuard should explicitly dispose of it, using either `upsert`
+/// to provide a new value, or `revert` to put the slot back into its initial
+/// state.  If the SlotGuard is dropped without calling either of these, then
+/// we will leave the slot empty if our `old_value` is already shut down, else
+/// we will replace the slot with `old_value` (equivalent to doing a revert).
+///
+/// The `old_value` may be dropped before the SlotGuard is dropped, by calling
+/// `drop_old_value`.  It is an error to call this without shutting down
+/// the conents of `old_value`.
 pub struct SlotGuard {
     tenant_id: TenantId,
     old_value: Option<TenantSlot>,
@@ -1429,13 +1449,21 @@ impl SlotGuard {
 
     /// Take any value that was present in the slot before we acquired ownership
     /// of it: in state transitions, this will be the old state.
-    fn take_value(&mut self) -> Option<TenantSlot> {
-        self.old_value.take()
+    fn get_old_value(&mut self) -> &Option<TenantSlot> {
+        &self.old_value
     }
 
     /// Emplace a new value in the slot.  This consumes the guard, and after
     /// returning, the slot is no longer protected from concurrent changes.
     fn upsert(mut self, new_value: TenantSlot) -> Result<(), TenantSlotUpsertError> {
+        if !self.old_value_is_shutdown() {
+            // This is a bug: callers should never try to drop an old value without
+            // shutting it down
+            return Err(TenantSlotUpsertError::InternalError(
+                "Old TenantSlot value not shut down".into(),
+            ));
+        }
+
         let replaced = {
             let mut locked = TENANTS.write().unwrap();
 
@@ -1458,7 +1486,6 @@ impl SlotGuard {
             let replaced = m.insert(self.tenant_id, new_value);
             self.upserted = true;
 
-            tracing::info!("Upserting slot {}, size {}", self.tenant_id, m.len());
             METRICS.tenant_slots.set(m.len() as u64);
 
             replaced
@@ -1491,45 +1518,97 @@ impl SlotGuard {
             }
         }
     }
+
+    /// Replace the InProgress slot with whatever was in the guard when we started
+    fn revert(mut self) {
+        if let Some(value) = self.old_value.take() {
+            match self.upsert(value) {
+                Err(TenantSlotUpsertError::InternalError(_)) => {
+                    // We already logged the error, nothing else we can do.
+                }
+                Err(TenantSlotUpsertError::MapState(_)) => {
+                    // If the map is shutting down, we need not replace anything
+                }
+                Ok(()) => {}
+            }
+        }
+    }
+
+    /// We may never drop our old value until it is cleanly shut down: otherwise we might leave
+    /// rogue background tasks that would write to the local tenant directory that this guard
+    /// is responsible for protecting
+    fn old_value_is_shutdown(&self) -> bool {
+        match self.old_value.as_ref() {
+            Some(TenantSlot::Attached(tenant)) => {
+                // TODO: PR #5711 will add a gate that enables properly checking that
+                // shutdown completed.
+                matches!(
+                    tenant.current_state(),
+                    TenantState::Stopping { .. } | TenantState::Broken { .. }
+                )
+            }
+            Some(TenantSlot::Secondary) => {
+                // TODO: when adding secondary mode tenants, this will check for shutdown
+                // in the same way that we do for `Tenant` above
+                true
+            }
+            Some(TenantSlot::InProgress(_)) => {
+                // A SlotGuard cannot be constructed for a slot that was already InProgress
+                unreachable!()
+            }
+            None => true,
+        }
+    }
+
+    /// The guard holder is done with the old value of the slot: they are obliged to already
+    /// shut it down before we reach this point.
+    fn drop_old_value(&mut self) -> Result<(), TenantSlotDropError> {
+        if !self.old_value_is_shutdown() {
+            Err(TenantSlotDropError::NotShutdown)
+        } else {
+            self.old_value.take();
+            Ok(())
+        }
+    }
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         if !self.upserted {
-            let slot = {
-                let mut locked = TENANTS.write().unwrap();
+            // Our old value is already shutdown, or it never existed: it is safe
+            // for us to fully release the TenantSlot back into an empty state
 
-                let m = match &mut *locked {
-                    TenantsMap::Initializing => {
-                        // There is no map, this should never happen.
-                        return;
-                    }
-                    TenantsMap::ShuttingDown(_) => {
-                        // When we transition to shutdown, InProgress elements are removed
-                        // from the map, so we do not need to clean up our Inprogress marker.
-                        // See [`shutdown_all_tenants0`]
-                        return;
-                    }
-                    TenantsMap::Open(m) => m,
-                };
+            let mut locked = TENANTS.write().unwrap();
 
-                let slot = m.remove(&self.tenant_id);
-                tracing::info!("Dropping slot {}, size {}", self.tenant_id, m.len());
-                METRICS.tenant_slots.set(m.len() as u64);
-                slot
+            let m = match &mut *locked {
+                TenantsMap::Initializing => {
+                    // There is no map, this should never happen.
+                    return;
+                }
+                TenantsMap::ShuttingDown(_) => {
+                    // When we transition to shutdown, InProgress elements are removed
+                    // from the map, so we do not need to clean up our Inprogress marker.
+                    // See [`shutdown_all_tenants0`]
+                    return;
+                }
+                TenantsMap::Open(m) => m,
             };
-            match slot {
-                Some(slot) => match slot {
-                    TenantSlot::InProgress(_) => {
-                        // Normal case: nothing should have replaced the TenantSlot value
-                        // that was set when we were constructed.
-                    }
-                    _ => {
+
+            use std::collections::hash_map::Entry;
+            match m.entry(self.tenant_id) {
+                Entry::Occupied(mut entry) => {
+                    if !matches!(entry.get(), TenantSlot::InProgress(_)) {
                         METRICS.unexpected_errors.inc();
-                        error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during upsert, this is a bug.  Contents: {:?}", slot);
+                        error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during drop, this is a bug.  Contents: {:?}", entry.get());
                     }
-                },
-                None => {
+
+                    if self.old_value_is_shutdown() {
+                        entry.remove();
+                    } else {
+                        entry.insert(self.old_value.take().unwrap());
+                    }
+                }
+                Entry::Vacant(_) => {
                     METRICS.unexpected_errors.inc();
                     error!(
                         tenant_id = %self.tenant_id,
@@ -1537,6 +1616,8 @@ impl Drop for SlotGuard {
                     );
                 }
             }
+
+            METRICS.tenant_slots.set(m.len() as u64);
         }
     }
 }
@@ -1672,11 +1753,10 @@ where
 
     let mut tenant_guard =
         tenant_map_acquire_slot_impl(&tenant_id, tenants, TenantSlotAcquireMode::MustExist)?;
-    let tenant_slot = tenant_guard.take_value();
 
     // The SlotGuard allows us to manipulate the Tenant object without fear of some
     // concurrent API request doing something else for the same tenant ID.
-    let attached_tenant = match tenant_slot {
+    let attached_tenant = match tenant_guard.get_old_value() {
         Some(TenantSlot::Attached(t)) => Some(t),
         _ => None,
     };
@@ -1698,6 +1778,7 @@ where
                 Err(_other) => {
                     // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
                     // wait for it but return an error right away because these are distinct requests.
+                    tenant_guard.revert();
                     return Err(TenantStateError::IsStopping(tenant_id));
                 }
             }
@@ -1711,13 +1792,21 @@ where
         .await
         .with_context(|| format!("Failed to run cleanup for tenant {tenant_id}"))
     {
-        Ok(hook_value) => Ok(hook_value),
+        Ok(hook_value) => {
+            // Success: drop the old TenantSlot::Attached.
+            tenant_guard
+                .drop_old_value()
+                .expect("We just called shutdown");
+
+            Ok(hook_value)
+        }
         Err(e) => {
             // If we had a Tenant, set it to Broken and put it back in the TenantsMap
             if let Some(attached_tenant) = attached_tenant {
                 attached_tenant.set_broken(e.to_string()).await;
-                tenant_guard.upsert(TenantSlot::Attached(attached_tenant))?;
             }
+            // Leave the broken tenant in the map
+            tenant_guard.revert();
 
             Err(TenantStateError::Other(e))
         }
