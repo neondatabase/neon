@@ -259,7 +259,7 @@ pub(crate) async fn list_timeline_blobs(
         let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
         match blob_name {
             Some(name) if name.starts_with("index_part.json") => {
-                tracing::info!("Index key {}", key);
+                tracing::info!("Index key {key}");
                 index_parts.push(obj)
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
@@ -268,7 +268,7 @@ pub(crate) async fn list_timeline_blobs(
                     s3_layers.insert((new_layer, gen));
                 }
                 Err(e) => {
-                    tracing::info!("Error parsing key {}", maybe_layer_name);
+                    tracing::info!("Error parsing key {maybe_layer_name}");
                     errors.push(
                         format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
                     );
