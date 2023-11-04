@@ -269,7 +269,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<SafeKeeperState>
 mod tests {
     use std::str::FromStr;
 
-    use utils::id::NodeId;
+    use utils::{id::NodeId, Hex};
 
     use crate::safekeeper::PersistedPeerInfo;
 
@@ -504,26 +504,5 @@ mod tests {
         let deser = SafeKeeperStateV4::des(&ser).unwrap();
 
         assert_eq!(state, deser);
-    }
-
-    #[derive(PartialEq)]
-    struct Hex<'a>(&'a [u8]);
-
-    impl std::fmt::Debug for Hex<'_> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "[")?;
-            for (i, c) in self.0.chunks(16).enumerate() {
-                if i > 0 && !c.is_empty() {
-                    writeln!(f, ", ")?;
-                }
-                for (j, b) in c.iter().enumerate() {
-                    if j > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "0x{b:02x}")?;
-                }
-            }
-            write!(f, "; {}]", self.0.len())
-        }
     }
 }

@@ -1317,6 +1317,7 @@ mod tests {
 
     #[test]
     fn test_sk_state_bincode_serde_roundtrip() {
+        use utils::Hex;
         let tenant_id = TenantId::from_str("cf0480929707ee75372337efaa5ecf96").unwrap();
         let timeline_id = TimelineId::from_str("112ded66422aa5e953e5440fa5427ac4").unwrap();
         let state = SafeKeeperState {
@@ -1385,26 +1386,5 @@ mod tests {
         let deser = SafeKeeperState::des(&ser).unwrap();
 
         assert_eq!(deser, state);
-    }
-
-    #[derive(PartialEq)]
-    struct Hex<'a>(&'a [u8]);
-
-    impl std::fmt::Debug for Hex<'_> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "[")?;
-            for (i, c) in self.0.chunks(16).enumerate() {
-                if i > 0 && !c.is_empty() {
-                    writeln!(f, ", ")?;
-                }
-                for (j, b) in c.iter().enumerate() {
-                    if j > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "0x{b:02x}")?;
-                }
-            }
-            write!(f, "; {}]", self.0.len())
-        }
     }
 }
