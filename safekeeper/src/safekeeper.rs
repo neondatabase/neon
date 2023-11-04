@@ -1314,4 +1314,18 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn test_sk_state_bincode_serde_roundtrip() {
+        let sk_state = test_sk_state();
+
+        let mut buf = vec![];
+        let _ = sk_state.ser_into(&mut buf);
+
+        let des_sk_state = SafeKeeperState::des(&buf).unwrap();
+
+        assert!(sk_state.server.wal_seg_size == des_sk_state.server.wal_seg_size);
+        assert!(sk_state.tenant_id == des_sk_state.tenant_id);
+        assert!(sk_state.timeline_id == des_sk_state.timeline_id);
+    }
 }
