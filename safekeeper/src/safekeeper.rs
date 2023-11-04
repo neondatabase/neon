@@ -52,7 +52,7 @@ impl From<(Term, Lsn)> for TermLsn {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct TermHistory(pub Vec<TermLsn>);
 
 impl TermHistory {
@@ -178,7 +178,7 @@ impl fmt::Debug for TermHistory {
 pub type PgUuid = [u8; 16];
 
 /// Persistent consensus state of the acceptor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcceptorState {
     /// acceptor's last term it voted for (advanced in 1 phase)
     pub term: Term,
@@ -209,16 +209,16 @@ pub struct ServerInfo {
     pub wal_seg_size: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedPeerInfo {
     /// LSN up to which safekeeper offloaded WAL to s3.
-    backup_lsn: Lsn,
+    pub backup_lsn: Lsn,
     /// Term of the last entry.
-    term: Term,
+    pub term: Term,
     /// LSN of the last record.
-    flush_lsn: Lsn,
+    pub flush_lsn: Lsn,
     /// Up to which LSN safekeeper regards its WAL as committed.
-    commit_lsn: Lsn,
+    pub commit_lsn: Lsn,
 }
 
 impl PersistedPeerInfo {
@@ -232,12 +232,12 @@ impl PersistedPeerInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
 
 /// Persistent information stored on safekeeper node
 /// On disk data is prefixed by magic and format version and followed by checksum.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SafeKeeperState {
     #[serde(with = "hex")]
     pub tenant_id: TenantId,
@@ -1096,7 +1096,7 @@ mod tests {
 
     use super::*;
     use crate::wal_storage::Storage;
-    use std::{ops::Deref, time::Instant};
+    use std::{ops::Deref, str::FromStr, time::Instant};
 
     // fake storage for tests
     struct InMemoryState {
@@ -1317,34 +1317,94 @@ mod tests {
 
     #[test]
     fn test_sk_state_bincode_serde_roundtrip() {
-        let sk_state = test_sk_state();
+        let tenant_id = TenantId::from_str("cf0480929707ee75372337efaa5ecf96").unwrap();
+        let timeline_id = TimelineId::from_str("112ded66422aa5e953e5440fa5427ac4").unwrap();
+        let state = SafeKeeperState {
+            tenant_id,
+            timeline_id,
+            acceptor_state: AcceptorState {
+                term: 42,
+                term_history: TermHistory(vec![TermLsn {
+                    lsn: Lsn(0x1),
+                    term: 41,
+                }]),
+            },
+            server: ServerInfo {
+                pg_version: 14,
+                system_id: 0x1234567887654321,
+                wal_seg_size: 0x12345678,
+            },
+            proposer_uuid: {
+                let mut arr = timeline_id.as_arr();
+                arr.reverse();
+                arr
+            },
+            timeline_start_lsn: Lsn(0x12345600),
+            local_start_lsn: Lsn(0x12),
+            commit_lsn: Lsn(1234567800),
+            backup_lsn: Lsn(1234567300),
+            peer_horizon_lsn: Lsn(9999999),
+            remote_consistent_lsn: Lsn(1234560000),
+            peers: PersistedPeers(vec![(
+                NodeId(1),
+                PersistedPeerInfo {
+                    backup_lsn: Lsn(1234567000),
+                    term: 42,
+                    flush_lsn: Lsn(1234567800 - 8),
+                    commit_lsn: Lsn(1234567600),
+                },
+            )]),
+        };
 
-        let mut buf = Vec::new();
-        sk_state.ser_into(&mut buf).unwrap();
+        let ser = state.ser().unwrap();
 
-        #[rustfmt::skip]
         let expected = [
-            32, 0, 0, 0, 0, 0, 0, 0, 48, 49, 48, 49, 48, 49, 48, 49,
-            48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49,
-            48, 49, 48, 49, 48, 49, 48, 49, 32, 0, 0, 0, 0, 0, 0, 0,
-            48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49,
-            48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49, 48, 49,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            32, 0, 0, 0, 0, 0, 0, 0, 48, 48, 48, 48, 48, 48, 48, 48,
-            48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
-            48, 48, 48, 48, 48, 48, 48, 48, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x66, 0x30, 0x34, 0x38, 0x30,
+            0x39, 0x32, 0x39, 0x37, 0x30, 0x37, 0x65, 0x65, 0x37, 0x35, 0x33, 0x37, 0x32, 0x33,
+            0x33, 0x37, 0x65, 0x66, 0x61, 0x61, 0x35, 0x65, 0x63, 0x66, 0x39, 0x36, 0x20, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0x31, 0x32, 0x64, 0x65, 0x64, 0x36, 0x36,
+            0x34, 0x32, 0x32, 0x61, 0x61, 0x35, 0x65, 0x39, 0x35, 0x33, 0x65, 0x35, 0x34, 0x34,
+            0x30, 0x66, 0x61, 0x35, 0x34, 0x32, 0x37, 0x61, 0x63, 0x34, 0x2a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x0e, 0x00, 0x00, 0x00, 0x21, 0x43, 0x65, 0x87, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56,
+            0x34, 0x12, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x63, 0x34, 0x37, 0x61,
+            0x34, 0x32, 0x61, 0x35, 0x30, 0x66, 0x34, 0x34, 0x65, 0x35, 0x35, 0x33, 0x65, 0x39,
+            0x61, 0x35, 0x32, 0x61, 0x34, 0x32, 0x36, 0x36, 0x65, 0x64, 0x32, 0x64, 0x31, 0x31,
+            0x00, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x78, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00, 0x84, 0x00, 0x96, 0x49,
+            0x00, 0x00, 0x00, 0x00, 0x7f, 0x96, 0x98, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe4,
+            0x95, 0x49, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x58, 0xff, 0x95, 0x49, 0x00, 0x00,
+            0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x02, 0x96, 0x49,
+            0x00, 0x00, 0x00, 0x00, 0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        assert_eq!(&buf[..], &expected);
+        assert_eq!(Hex(&ser), Hex(&expected));
 
-        let des_sk_state = SafeKeeperState::des(&buf).unwrap();
+        let deser = SafeKeeperState::des(&ser).unwrap();
 
-        assert!(sk_state.server.wal_seg_size == des_sk_state.server.wal_seg_size);
-        assert!(sk_state.tenant_id == des_sk_state.tenant_id);
-        assert!(sk_state.timeline_id == des_sk_state.timeline_id);
+        assert_eq!(deser, state);
+    }
+
+    #[derive(PartialEq)]
+    struct Hex<'a>(&'a [u8]);
+
+    impl std::fmt::Debug for Hex<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "[")?;
+            for (i, c) in self.0.chunks(16).enumerate() {
+                if i > 0 && !c.is_empty() {
+                    writeln!(f, ", ")?;
+                }
+                for (j, b) in c.iter().enumerate() {
+                    if j > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "0x{b:02x}")?;
+                }
+            }
+            write!(f, "; {}]", self.0.len())
+        }
     }
 }
