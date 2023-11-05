@@ -870,7 +870,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -spec=vm-image-spec.yaml
+            -spec=vm-image-spec.yaml \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
