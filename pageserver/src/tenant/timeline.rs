@@ -2524,7 +2524,7 @@ impl Timeline {
         Ok(())
     }
 
-    fn finish_write(&self, new_lsn: Lsn) {
+    pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
         self.metrics.last_record_gauge.set(new_lsn.0 as i64);
