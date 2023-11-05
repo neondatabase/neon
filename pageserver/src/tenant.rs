@@ -2128,6 +2128,11 @@ impl Tenant {
     pub fn get_tenant_id(&self) -> TenantId {
         self.tenant_id
     }
+
+    pub(crate) fn get_shard(&self) -> ShardIdentity {
+        self.tenant_conf.read().unwrap().shard.clone()
+    }
+
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.read().unwrap().tenant_conf
     }

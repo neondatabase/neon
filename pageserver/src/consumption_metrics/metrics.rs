@@ -3,6 +3,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
+use pageserver_api::shard::ShardNumber;
 use std::{sync::Arc, time::SystemTime};
 use utils::{
     id::{TenantId, TimelineId},
@@ -228,6 +229,11 @@ where
 
     while let Some((tenant_id, tenant)) = tenants.next().await {
         let mut tenant_resident_size = 0;
+
+        // Sharded tenants report all consumption metrics from shard zero
+        if tenant.get_shard().number == ShardNumber(0) {
+            continue;
+        }
 
         for timeline in tenant.list_timelines() {
             let timeline_id = timeline.timeline_id;
