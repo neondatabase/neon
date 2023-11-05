@@ -857,7 +857,8 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          # TEMPORARY: Pull custom version of vm-builder built from neondatabase/autoscaling#600.
+          curl -fL https://sharnoff.io/misc/8706cca48732d4f9/vm-builder-9d18874 -o vm-builder
           chmod +x vm-builder
 
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
@@ -869,8 +870,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -enable-file-cache \
-            -cgroup-uid=postgres \
+            -spec=vm-image-spec.yaml
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
