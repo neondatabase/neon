@@ -14,7 +14,7 @@ commands:
     sysvInitAction: respawn
     shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres" /bin/postgres_exporter'
 files:
-  - name: pgbouncer.ini
+  - filename: pgbouncer.ini
     content: |
       [databases]
       *=host=localhost port=5432 auth_user=cloud_admin
@@ -30,7 +30,7 @@ files:
       max_client_conn=10000
       default_pool_size=16
       max_prepared_statements=0
-  - name: cgconfig.conf
+  - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
       group neon-postgres {
