@@ -17,7 +17,7 @@ use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
 use pageserver_api::{
-    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    shard, DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
 use postgres_backend::AuthType;
@@ -374,7 +374,6 @@ fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
 }
 
 fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> anyhow::Result<()> {
-    let pageserver = get_default_pageserver(env);
     match tenant_match.subcommand() {
         Some(("list", _)) => {
             for t in pageserver.tenant_list()? {
@@ -387,9 +386,12 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
 
+            let shard_count = create_match.get_many::<u8>("shard-count").unwrap_or(1);
+
             // If tenant ID was not specified, generate one
             let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(TenantId::generate);
 
+            // TODO: per-shard generations
             let generation = if env.control_plane_api.is_some() {
                 // We must register the tenant with the attachment service, so
                 // that when the pageserver restarts, it will be re-attached.
@@ -399,35 +401,61 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 None
             };
 
-            pageserver.tenant_create(tenant_id, generation, tenant_conf)?;
-            println!("tenant {tenant_id} successfully created on the pageserver");
-
-            // Create an initial timeline for the new tenant
+            // We will create an initial timeline for the new tenant
             let new_timeline_id = parse_timeline_id(create_match)?;
             let pg_version = create_match
                 .get_one::<u32>("pg-version")
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info = pageserver.timeline_create(
-                tenant_id,
-                new_timeline_id,
-                None,
-                None,
-                Some(pg_version),
-            )?;
-            let new_timeline_id = timeline_info.timeline_id;
-            let last_record_lsn = timeline_info.last_record_lsn;
+            // TODO: implement ability for one pageserver to hold multiple
+            // shards for the same tenant.  Until then, we must place each
+            // shard on a different pageserver.
+            assert!(env.pageservers.len() >= shard_count);
 
-            env.register_branch_mapping(
-                DEFAULT_BRANCH_NAME.to_string(),
-                tenant_id,
-                new_timeline_id,
-            )?;
+            for shard in 0..shard_count {
+                let ps_conf = env.pageservers.get(shard as usize).unwrap();
+                let pageserver = PageServerNode::from_env(env, ps_conf);
 
-            println!(
+                // TODO: shard-aware tenant creation.  Currently tenant creation on the
+                // pageserver is a no-op, but we shouldn't skip the command entirely.
+
+                //               pageserver.location_conf...
+
+                // pageserver.tenant_create(
+                //     tenant_id,
+                //     shard_number,
+                //     shard_count,
+                //     generation,
+                //     tenant_conf,
+                // )?;
+
+                todo!();
+                println!(
+                    "tenant {tenant_id} successfully created on pageserver {}",
+                    pageserver.conf.id
+                );
+
+                let timeline_info = pageserver.timeline_create(
+                    tenant_id,
+                    new_timeline_id,
+                    None,
+                    None,
+                    Some(pg_version),
+                )?;
+                let new_timeline_id = timeline_info.timeline_id;
+                let last_record_lsn = timeline_info.last_record_lsn;
+
+                env.register_branch_mapping(
+                    DEFAULT_BRANCH_NAME.to_string(),
+                    tenant_id,
+                    new_timeline_id,
+                )?;
+
+                println!(
                 "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
             );
+            }
 
             if create_match.get_flag("set-default") {
                 println!("Setting tenant {tenant_id} as a default one");
