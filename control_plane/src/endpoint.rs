@@ -67,7 +67,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
-    pageserver_id: NodeId,
+    pageservers: Vec<NodeId>,
 }
 
 //
@@ -80,6 +80,33 @@ pub struct ComputeControlPlane {
     pub endpoints: BTreeMap<String, Arc<Endpoint>>,
 
     env: LocalEnv,
+}
+
+fn load_pageservers(
+    env: &LocalEnv,
+    pageserver_ids: &Vec<NodeId>,
+) -> anyhow::Result<Vec<PageServerNode>> {
+    let mut pageservers = Vec::new();
+    for ps_id in pageserver_ids {
+        let pageserver = env
+            .get_pageserver_conf(*ps_id)
+            .map(|conf| PageServerNode::from_env(env, conf))?;
+        pageservers.push(pageserver);
+    }
+    Ok(pageservers)
+}
+
+fn build_pageserver_connstr(pageservers: &[PageServerNode]) -> String {
+    pageservers
+        .iter()
+        .map(|ps| {
+            let config = ps.pg_connection_config.clone();
+            let (host, port) = (config.host(), config.port());
+            // NOTE: avoid spaces in connection string, because it is less error prone if we forward it somewhere.
+            format!("postgresql://no_user@{host}:{port}")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl ComputeControlPlane {
@@ -119,19 +146,16 @@ impl ComputeControlPlane {
         http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
-        pageserver_id: NodeId,
+        pageservers: Vec<NodeId>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
-        let pageserver =
-            PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
-
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
             env: self.env.clone(),
-            pageserver,
+            pageservers: load_pageservers(&self.env, &pageservers)?,
             timeline_id,
             mode,
             tenant_id,
@@ -157,7 +181,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates: true,
-                pageserver_id,
+                pageservers,
             })?,
         )?;
         std::fs::write(
@@ -216,7 +240,7 @@ pub struct Endpoint {
     // These are not part of the endpoint as such, but the environment
     // the endpoint runs in.
     pub env: LocalEnv,
-    pageserver: PageServerNode,
+    pageservers: Vec<PageServerNode>,
 
     // Optimizations
     skip_pg_catalog_updates: bool,
@@ -239,15 +263,14 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
-        let pageserver =
-            PageServerNode::from_env(env, env.get_pageserver_conf(conf.pageserver_id)?);
+        let pageservers: Vec<PageServerNode> = load_pageservers(env, &conf.pageservers)?;
 
         Ok(Endpoint {
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
             endpoint_id,
             env: env.clone(),
-            pageserver,
+            pageservers,
             timeline_id: conf.timeline_id,
             mode: conf.mode,
             tenant_id: conf.tenant_id,
@@ -482,13 +505,7 @@ impl Endpoint {
             std::fs::remove_dir_all(self.pgdata())?;
         }
 
-        let pageserver_connstring = {
-            let config = &self.pageserver.pg_connection_config;
-            let (host, port) = (config.host(), config.port());
-
-            // NOTE: avoid spaces in connection string, because it is less error prone if we forward it somewhere.
-            format!("postgresql://no_user@{host}:{port}")
-        };
+        let pageserver_connstring = build_pageserver_connstr(&self.pageservers);
         let mut safekeeper_connstrings = Vec::new();
         if self.mode == ComputeMode::Primary {
             for sk_id in safekeepers {
@@ -658,7 +675,7 @@ impl Endpoint {
         }
     }
 
-    pub fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
+    pub fn reconfigure(&self, pageservers: Option<Vec<NodeId>>) -> Result<()> {
         let mut spec: ComputeSpec = {
             let spec_path = self.endpoint_path().join("spec.json");
             let file = std::fs::File::open(spec_path)?;
@@ -668,23 +685,20 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        if let Some(pageserver_id) = pageserver_id {
+        if let Some(pageservers) = pageservers {
             let endpoint_config_path = self.endpoint_path().join("endpoint.json");
             let mut endpoint_conf: EndpointConf = {
                 let file = std::fs::File::open(&endpoint_config_path)?;
                 serde_json::from_reader(file)?
             };
-            endpoint_conf.pageserver_id = pageserver_id;
+            endpoint_conf.pageservers = pageservers.clone();
             std::fs::write(
                 endpoint_config_path,
                 serde_json::to_string_pretty(&endpoint_conf)?,
             )?;
 
-            let pageserver =
-                PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
-            let ps_http_conf = &pageserver.pg_connection_config;
-            let (host, port) = (ps_http_conf.host(), ps_http_conf.port());
-            spec.pageserver_connstring = Some(format!("postgresql://no_user@{host}:{port}"));
+            let pageservers = load_pageservers(&self.env, &pageservers)?;
+            spec.pageserver_connstring = Some(build_pageserver_connstr(&pageservers));
         }
 
         let client = reqwest::blocking::Client::new();

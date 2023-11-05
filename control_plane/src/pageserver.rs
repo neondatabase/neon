@@ -340,15 +340,8 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
+    pub fn build_config(mut settings: HashMap<&str, &str>) -> anyhow::Result<models::TenantConfig> {
+        Ok(models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -407,8 +400,16 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
-        };
+        })
+    }
 
+    pub fn tenant_create(
+        &self,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
+        settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<TenantId> {
+        let config = Self::build_config(settings.clone())?;
         let request = models::TenantCreateRequest {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),
             generation,
@@ -521,15 +522,18 @@ impl PageServerNode {
 
     pub fn location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
     ) -> anyhow::Result<()> {
-        let req_body = TenantLocationConfigRequest { tenant_id, config };
+        let req_body = TenantLocationConfigRequest {
+            tenant_shard_id,
+            config,
+        };
 
         let path = format!(
             "{}/tenant/{}/location_config",
-            self.http_base_url, tenant_id
+            self.http_base_url, tenant_shard_id
         );
         let path = if let Some(flush_ms) = flush_ms {
             format!("{}?flush_ms={}", path, flush_ms.as_millis())
@@ -560,7 +564,7 @@ impl PageServerNode {
 
     pub fn timeline_create(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         new_timeline_id: Option<TimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
@@ -572,7 +576,7 @@ impl PageServerNode {
 
         self.http_request(
             Method::POST,
-            format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
+            format!("{}/tenant/{}/timeline", self.http_base_url, tenant_shard_id),
         )?
         .json(&models::TimelineCreateRequest {
             new_timeline_id,
@@ -585,11 +589,11 @@ impl PageServerNode {
         .error_from_body()?
         .json::<Option<TimelineInfo>>()
         .with_context(|| {
-            format!("Failed to parse timeline creation response for tenant id: {tenant_id}")
+            format!("Failed to parse timeline creation response for tenant id: {tenant_shard_id}")
         })?
         .with_context(|| {
             format!(
-                "No timeline id was found in the timeline creation response for tenant {tenant_id}"
+                "No timeline id was found in the timeline creation response for tenant {tenant_shard_id}"
             )
         })
     }

@@ -11,6 +11,7 @@ use crate::{
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
+use pageserver_api::shard::TenantShardId;
 use std::collections::HashMap;
 use std::time::Duration;
 use utils::{
@@ -108,6 +109,9 @@ pub fn migrate_tenant(
         }
     }
 
+    // No support for sharding in this function yet
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
     let previous = attachment_service.inspect(tenant_id)?;
     let mut baseline_lsns = None;
     if let Some((generation, origin_ps_id)) = &previous {
@@ -117,7 +121,7 @@ pub fn migrate_tenant(
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
             let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
             let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-            dest_ps.location_config(tenant_id, dest_conf, None)?;
+            dest_ps.location_config(tenant_shard_id, dest_conf, None)?;
             println!("✅ Migration complete");
             return Ok(());
         }
@@ -126,7 +130,7 @@ pub fn migrate_tenant(
 
         let stale_conf =
             build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
-        origin_ps.location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))?;
+        origin_ps.location_config(tenant_shard_id, stale_conf, Some(Duration::from_secs(10)))?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps)?);
     }
@@ -135,7 +139,7 @@ pub fn migrate_tenant(
     let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
-    dest_ps.location_config(tenant_id, dest_conf, None)?;
+    dest_ps.location_config(tenant_shard_id, dest_conf, None)?;
 
     if let Some(baseline) = baseline_lsns {
         println!("🕑 Waiting for LSN to catch up...");
@@ -149,7 +153,7 @@ pub fn migrate_tenant(
                 "🔁 Reconfiguring endpoint {} to use pageserver {}",
                 endpoint_name, dest_ps.conf.id
             );
-            endpoint.reconfigure(Some(dest_ps.conf.id))?;
+            endpoint.reconfigure(Some(vec![dest_ps.conf.id]))?;
         }
     }
 
@@ -181,7 +185,7 @@ pub fn migrate_tenant(
             "💤 Switching to secondary mode on pageserver {}",
             other_ps.conf.id
         );
-        other_ps.location_config(tenant_id, secondary_conf, None)?;
+        other_ps.location_config(tenant_shard_id, secondary_conf, None)?;
     }
 
     println!(
@@ -189,7 +193,7 @@ pub fn migrate_tenant(
         dest_ps.conf.id
     );
     let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-    dest_ps.location_config(tenant_id, dest_conf, None)?;
+    dest_ps.location_config(tenant_shard_id, dest_conf, None)?;
 
     println!("✅ Migration complete");
 

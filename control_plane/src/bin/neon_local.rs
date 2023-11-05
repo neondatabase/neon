@@ -15,7 +15,8 @@ use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
-use pageserver_api::models::TimelineInfo;
+use pageserver_api::models::{LocationConfig, LocationConfigMode, TimelineInfo};
+use pageserver_api::shard::{ShardCount, ShardNumber, TenantShardId};
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -26,6 +27,7 @@ use safekeeper_api::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
@@ -95,6 +97,22 @@ struct TimelineTreeEl {
     pub name: Option<String>,
     /// Holds all direct children of this timeline referenced using `timeline_id`.
     pub children: BTreeSet<TimelineId>,
+}
+
+/// Helper for CLI args that contain a comma-separate list of NodeId
+fn parse_ids_arg(
+    matches: &ArgMatches,
+    arg: &str,
+) -> Result<Option<Vec<NodeId>>, std::num::ParseIntError> {
+    if let Some(id_str) = matches.get_one::<String>(arg) {
+        let r: Result<Vec<_>, ParseIntError> = id_str
+            .split(',')
+            .map(|ps_id| u64::from_str(str::trim(ps_id)).map(NodeId))
+            .collect();
+        r.map(Some)
+    } else {
+        Ok(Some(vec![DEFAULT_PAGESERVER_ID]))
+    }
 }
 
 // Main entry point for the 'neon_local' CLI utility
@@ -374,9 +392,10 @@ fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
 }
 
 fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> anyhow::Result<()> {
-    let pageserver = get_default_pageserver(env);
     match tenant_match.subcommand() {
         Some(("list", _)) => {
+            // TODO: make command aware of multiple pageservers
+            let pageserver = get_default_pageserver(env);
             for t in pageserver.tenant_list()? {
                 println!("{} {:?}", t.id, t.state);
             }
@@ -387,38 +406,94 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
 
+            let shard_count: u8 = create_match
+                .get_one::<u8>("shard-count")
+                .cloned()
+                .unwrap_or(1);
+
             // If tenant ID was not specified, generate one
             let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(TenantId::generate);
 
-            let generation = if env.control_plane_api.is_some() {
-                // We must register the tenant with the attachment service, so
-                // that when the pageserver restarts, it will be re-attached.
-                let attachment_service = AttachmentService::from_env(env);
-                attachment_service.attach_hook(tenant_id, pageserver.conf.id)?
-            } else {
-                None
-            };
-
-            pageserver.tenant_create(tenant_id, generation, tenant_conf)?;
-            println!("tenant {tenant_id} successfully created on the pageserver");
-
-            // Create an initial timeline for the new tenant
-            let new_timeline_id = parse_timeline_id(create_match)?;
+            // We will create an initial timeline for the new tenant
+            let new_timeline_id =
+                parse_timeline_id(create_match)?.unwrap_or(TimelineId::generate());
             let pg_version = create_match
                 .get_one::<u32>("pg-version")
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info = pageserver.timeline_create(
-                tenant_id,
-                new_timeline_id,
-                None,
-                None,
-                Some(pg_version),
-                None,
-            )?;
-            let new_timeline_id = timeline_info.timeline_id;
-            let last_record_lsn = timeline_info.last_record_lsn;
+            // TODO: implement ability for one pageserver to hold multiple
+            // shards for the same tenant.  Until then, we must place each
+            // shard on a different pageserver.
+            assert!(env.pageservers.len() >= shard_count as usize);
+
+            let cfg_shard_count = if shard_count > 1 {
+                shard_count
+            } else {
+                // For single-sharded mode, use the legacy unsharded configuration.  This avoids
+                // breaking any existing tests that assume legacy unsharded storage paths
+                0
+            };
+
+            for shard_number in 0..shard_count {
+                let ps_conf = env.pageservers.get(shard_number as usize).unwrap();
+                let pageserver = PageServerNode::from_env(env, ps_conf);
+
+                // TODO: per-shard generations
+                let generation = if env.control_plane_api.is_some() {
+                    // We must register the tenant with the attachment service, so
+                    // that when the pageserver restarts, it will be re-attached.
+                    let attachment_service = AttachmentService::from_env(env);
+                    attachment_service.attach_hook(tenant_id, pageserver.conf.id)?
+                } else {
+                    None
+                };
+
+                // TODO: shard-aware POST /v1/tenant.  Currently tenant creation on the
+                // pageserver is a no-op, but we shouldn't skip the command entirely.
+
+                let tenant_conf = PageServerNode::build_config(tenant_conf.clone())?;
+
+                let tenant_shard_id = TenantShardId {
+                    shard_number: ShardNumber(shard_number),
+                    shard_count: ShardCount(cfg_shard_count),
+                    tenant_id,
+                };
+
+                let location_conf = LocationConfig {
+                    shard_count: cfg_shard_count,
+                    shard_number,
+                    shard_stripe_size: 32768,
+                    mode: LocationConfigMode::AttachedSingle,
+                    generation,
+                    secondary_conf: None,
+                    tenant_conf,
+                };
+                pageserver.location_config(tenant_shard_id, location_conf, None)?;
+                println!(
+                    "tenant {tenant_id} successfully created on pageserver {}",
+                    pageserver.conf.id
+                );
+            }
+
+            for shard_number in 0..shard_count {
+                let ps_conf = env.pageservers.get(shard_number as usize).unwrap();
+                let pageserver = PageServerNode::from_env(env, ps_conf);
+                let tenant_shard_id = TenantShardId {
+                    shard_number: ShardNumber(shard_number),
+                    shard_count: ShardCount(cfg_shard_count),
+                    tenant_id,
+                };
+
+                pageserver.timeline_create(
+                    tenant_shard_id,
+                    Some(new_timeline_id),
+                    None,
+                    None,
+                    Some(pg_version),
+                    None,
+                )?;
+            }
 
             env.register_branch_mapping(
                 DEFAULT_BRANCH_NAME.to_string(),
@@ -426,9 +501,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 new_timeline_id,
             )?;
 
-            println!(
-                "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
-            );
+            println!("Created an initial timeline '{new_timeline_id}' for tenant: {tenant_id}",);
 
             if create_match.get_flag("set-default") {
                 println!("Setting tenant {tenant_id} as a default one");
@@ -448,6 +521,8 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
 
+            // TODO: make command aware of multiple pageservers
+            let pageserver = get_default_pageserver(env);
             pageserver
                 .tenant_config(tenant_id, tenant_conf)
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
@@ -491,7 +566,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let new_timeline_id_opt = parse_timeline_id(create_match)?;
 
             let timeline_info = pageserver.timeline_create(
-                tenant_id,
+                TenantShardId::unsharded(tenant_id),
                 new_timeline_id_opt,
                 None,
                 None,
@@ -554,7 +629,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 None,
                 pg_version,
                 ComputeMode::Primary,
-                DEFAULT_PAGESERVER_ID,
+                vec![DEFAULT_PAGESERVER_ID],
             )?;
             println!("Done");
         }
@@ -579,7 +654,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
             let timeline_info = pageserver.timeline_create(
-                tenant_id,
+                TenantShardId::unsharded(tenant_id),
                 None,
                 start_lsn,
                 Some(ancestor_timeline_id),
@@ -704,13 +779,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .unwrap_or(false);
 
-            let pageserver_id =
-                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
-                    NodeId(id_str.parse().context("while parsing pageserver id")?)
-                } else {
-                    DEFAULT_PAGESERVER_ID
-                };
-
+            let pageserver_ids = parse_ids_arg(sub_args, "endpoint-pageserver-id")?
+                .unwrap_or(vec![DEFAULT_PAGESERVER_ID]);
             let mode = match (lsn, hot_standby) {
                 (Some(lsn), false) => ComputeMode::Static(lsn),
                 (None, true) => ComputeMode::Replica,
@@ -738,7 +808,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 http_port,
                 pg_version,
                 mode,
-                pageserver_id,
+                pageserver_ids,
             )?;
         }
         "start" => {
@@ -746,29 +816,14 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
 
-            let pageserver_id =
-                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
-                    NodeId(id_str.parse().context("while parsing pageserver id")?)
-                } else {
-                    DEFAULT_PAGESERVER_ID
-                };
+            let pageservers = parse_ids_arg(sub_args, "endpoint-pageserver-id")?
+                .unwrap_or(vec![DEFAULT_PAGESERVER_ID]);
 
             let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
 
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
-            let safekeepers =
-                if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
-                    let mut safekeepers: Vec<NodeId> = Vec::new();
-                    for sk_id in safekeepers_str.split(',').map(str::trim) {
-                        let sk_id = NodeId(u64::from_str(sk_id).map_err(|_| {
-                            anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list")
-                        })?);
-                        safekeepers.push(sk_id);
-                    }
-                    safekeepers
-                } else {
-                    env.safekeepers.iter().map(|sk| sk.id).collect()
-                };
+            let safekeepers = parse_ids_arg(sub_args, "safekeepers")?
+                .unwrap_or_else(|| env.safekeepers.iter().map(|sk| sk.id).collect());
 
             let endpoint = cplane
                 .endpoints
@@ -781,7 +836,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 endpoint.timeline_id,
             )?;
 
-            let ps_conf = env.get_pageserver_conf(pageserver_id)?;
+            // We assume that all pageservers have the same auth conf
+            let ps_conf = env.get_pageserver_conf(pageservers[0])?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
 
@@ -801,15 +857,21 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let pageserver_id =
-                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
-                    Some(NodeId(
-                        id_str.parse().context("while parsing pageserver id")?,
-                    ))
-                } else {
-                    None
-                };
-            endpoint.reconfigure(pageserver_id)?;
+            let pageserver_ids: Option<Result<Vec<NodeId>, _>> = sub_args
+                .get_many::<String>("endpoint-pageserver-id")
+                .map(|ids| {
+                    ids.map(|id_str| id_str.parse().context("while parsing pageserver id"))
+                        .map(|r| r.map(NodeId))
+                        .collect()
+                });
+
+            let pageserver_ids = match pageserver_ids {
+                Some(Ok(v)) => Ok(Some(v)),
+                Some(Err(e)) => Err(e),
+                None => Ok(None),
+            }?;
+
+            endpoint.reconfigure(pageserver_ids)?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -1313,6 +1375,7 @@ fn cli() -> Command {
                 .arg(pg_version_arg.clone())
                 .arg(Arg::new("set-default").long("set-default").action(ArgAction::SetTrue).required(false)
                     .help("Use this tenant in future CLI commands where tenant_id is needed, but not specified"))
+                .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
                 )
             .subcommand(Command::new("set-default").arg(tenant_id_arg.clone().required(true))
                 .about("Set a particular tenant as default in future CLI commands where tenant_id is needed, but not specified"))
