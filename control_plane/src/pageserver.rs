@@ -338,15 +338,8 @@ impl PageServerNode {
             .json()?)
     }
 
-    pub fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
+    pub fn build_config(mut settings: HashMap<&str, &str>) -> anyhow::Result<models::TenantConfig> {
+        Ok(models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -405,8 +398,16 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
-        };
+        })
+    }
 
+    pub fn tenant_create(
+        &self,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
+        settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<TenantId> {
+        let config = Self::build_config(settings.clone())?;
         let request = models::TenantCreateRequest {
             new_tenant_id,
             generation,

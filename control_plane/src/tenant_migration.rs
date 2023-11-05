@@ -102,6 +102,9 @@ pub fn migrate_tenant(
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
             let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
             let dest_conf = LocationConfig {
+                shard_count: 0,
+                shard_number: 0,
+                shard_stripe_size: 0,
                 mode: LocationConfigMode::AttachedSingle,
                 generation: gen.map(Generation::new),
                 secondary_conf: None,
@@ -115,6 +118,9 @@ pub fn migrate_tenant(
         println!("🔁 Switching origin pageserver {origin_ps_id} to stale mode");
 
         let stale_conf = LocationConfig {
+            shard_count: 0,
+            shard_number: 0,
+            shard_stripe_size: 0,
             mode: LocationConfigMode::AttachedStale,
             generation: Some(Generation::new(*generation)),
             secondary_conf: None,
@@ -127,6 +133,9 @@ pub fn migrate_tenant(
 
     let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
     let dest_conf = LocationConfig {
+        shard_count: 0,
+        shard_number: 0,
+        shard_stripe_size: 0,
         mode: LocationConfigMode::AttachedMulti,
         generation: gen.map(Generation::new),
         secondary_conf: None,
@@ -171,6 +180,9 @@ pub fn migrate_tenant(
 
         // Downgrade to a secondary location
         let secondary_conf = LocationConfig {
+            shard_count: 0,
+            shard_number: 0,
+            shard_stripe_size: 0,
             mode: LocationConfigMode::Secondary,
             generation: None,
             secondary_conf: Some(LocationConfigSecondary { warm: true }),
@@ -189,6 +201,9 @@ pub fn migrate_tenant(
         dest_ps.conf.id
     );
     let dest_conf = LocationConfig {
+        shard_count: 0,
+        shard_number: 0,
+        shard_stripe_size: 0,
         mode: LocationConfigMode::AttachedSingle,
         generation: gen.map(Generation::new),
         secondary_conf: None,
