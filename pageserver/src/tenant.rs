@@ -15,6 +15,7 @@ use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
+use pageserver_api::shard::ShardIdentity;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
@@ -169,6 +170,7 @@ pub struct TenantSharedResources {
 /// for an attached tenant is a subset of the [`LocationConf`], represented
 /// in this struct.
 pub(super) struct AttachedTenantConf {
+    shard: ShardIdentity,
     tenant_conf: TenantConfOpt,
     location: AttachedLocationConfig,
 }
@@ -177,6 +179,7 @@ impl AttachedTenantConf {
     fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => Ok(Self {
+                shard: location_conf.shard,
                 tenant_conf: location_conf.tenant_conf,
                 location: attach_conf.clone(),
             }),

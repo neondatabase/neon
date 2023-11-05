@@ -12,8 +12,12 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::models::{
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo, TimelineState,
+use pageserver_api::{
+    models::{
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
+        TimelineState,
+    },
+    shard::ShardIdentity,
 };
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
@@ -1310,6 +1314,11 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
     }
 
+    pub(crate) fn get_shard(&self) -> ShardIdentity {
+        let tenant_conf = &self.tenant_conf.read().unwrap();
+        tenant_conf.shard.clone()
+    }
+
     pub(super) fn tenant_conf_updated(&self) {
         // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
@@ -1538,6 +1547,7 @@ impl Timeline {
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
+        let shard = tenant_conf_guard.shard.clone();
         drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();
