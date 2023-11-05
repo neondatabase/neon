@@ -2868,7 +2868,7 @@ class SafekeeperHttpClient(requests.Session):
         params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
-        res_json = res.json()
+        res_json = json.loads(res.text)
         assert isinstance(res_json, dict)
         return res_json
 

@@ -5,6 +5,7 @@ use std::fs::DirEntry;
 use std::io::BufReader;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use camino::Utf8Path;
@@ -28,7 +29,7 @@ use crate::send_wal::WalSenderState;
 use crate::GlobalTimelines;
 
 /// Various filters that influence the resulting JSON output.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Args {
     /// Dump all available safekeeper state. False by default.
     pub dump_all: bool,
@@ -53,13 +54,74 @@ pub struct Args {
 }
 
 /// Response for debug dump request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct Response {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,
-    pub timelines: Vec<Timeline>,
+    pub timelines: Vec<TimelineDumpSer>,
     pub timelines_count: usize,
     pub config: Config,
+}
+
+pub struct TimelineDumpSer {
+    pub tli: Arc<crate::timeline::Timeline>,
+    pub args: Args,
+    pub runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl std::fmt::Debug for TimelineDumpSer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelineDumpSer")
+            .field("tli", &self.tli.ttid)
+            .field("args", &self.args)
+            .finish()
+    }
+}
+
+impl Serialize for TimelineDumpSer {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let dump = self
+            .runtime
+            .block_on(build_from_tli_dump(self.tli.clone(), self.args.clone()));
+        dump.serialize(serializer)
+    }
+}
+
+async fn build_from_tli_dump(timeline: Arc<crate::timeline::Timeline>, args: Args) -> Timeline {
+    let control_file = if args.dump_control_file {
+        let mut state = timeline.get_state().await.1;
+        if !args.dump_term_history {
+            state.acceptor_state.term_history = TermHistory(vec![]);
+        }
+        Some(state)
+    } else {
+        None
+    };
+
+    let memory = if args.dump_memory {
+        Some(timeline.memory_dump().await)
+    } else {
+        None
+    };
+
+    let disk_content = if args.dump_disk_content {
+        // build_disk_content can fail, but we don't want to fail the whole
+        // request because of that.
+        build_disk_content(&timeline.timeline_dir).ok()
+    } else {
+        None
+    };
+
+    Timeline {
+        tenant_id: timeline.ttid.tenant_id,
+        timeline_id: timeline.ttid.timeline_id,
+        control_file,
+        memory,
+        disk_content,
+    }
 }
 
 /// Safekeeper configuration.
@@ -140,8 +202,12 @@ pub async fn build(args: Args) -> Result<Response> {
         GlobalTimelines::get_all()
     };
 
-    // TODO: return Stream instead of Vec
     let mut timelines = Vec::new();
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap(),
+    );
     for tli in ptrs_snapshot {
         let ttid = tli.ttid;
         if let Some(tenant_id) = args.tenant_id {
@@ -155,38 +221,11 @@ pub async fn build(args: Args) -> Result<Response> {
             }
         }
 
-        let control_file = if args.dump_control_file {
-            let mut state = tli.get_state().await.1;
-            if !args.dump_term_history {
-                state.acceptor_state.term_history = TermHistory(vec![]);
-            }
-            Some(state)
-        } else {
-            None
-        };
-
-        let memory = if args.dump_memory {
-            Some(tli.memory_dump().await)
-        } else {
-            None
-        };
-
-        let disk_content = if args.dump_disk_content {
-            // build_disk_content can fail, but we don't want to fail the whole
-            // request because of that.
-            build_disk_content(&tli.timeline_dir).ok()
-        } else {
-            None
-        };
-
-        let timeline = Timeline {
-            tenant_id: ttid.tenant_id,
-            timeline_id: ttid.timeline_id,
-            control_file,
-            memory,
-            disk_content,
-        };
-        timelines.push(timeline);
+        timelines.push(TimelineDumpSer {
+            tli,
+            args: args.clone(),
+            runtime: runtime.clone(),
+        });
     }
 
     let config = GlobalTimelines::get_global_config();

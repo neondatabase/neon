@@ -13,7 +13,12 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use utils::http::endpoint::request_span;
+
+use std::io::Write as _;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::info_span;
+use utils::http::endpoint::{request_span, ChannelWriter};
 
 use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::Term;
@@ -373,8 +378,52 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    // TODO: use streaming response
-    json_response(StatusCode::OK, resp)
+    let started_at = std::time::Instant::now();
+
+    let (tx, rx) = mpsc::channel(1);
+
+    let body = Body::wrap_stream(ReceiverStream::new(rx));
+
+    let mut writer = ChannelWriter::new(128 * 1024, tx);
+
+    let response = Response::builder()
+        .status(200)
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    let span = info_span!("blocking");
+    tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+
+        let res = serde_json::to_writer(&mut writer, &resp)
+            .map_err(std::io::Error::from)
+            .and_then(|_| writer.flush());
+
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "responded /v1/debug_dump"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("failed to write out /v1/debug_dump response: {e:#}");
+                // semantics of this error are quite... unclear. we want to error the stream out to
+                // abort the response to somehow notify the client that we failed.
+                //
+                // though, most likely the reason for failure is that the receiver is already gone.
+                drop(
+                    writer
+                        .tx
+                        .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
+                );
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 /// Safekeeper http router.
