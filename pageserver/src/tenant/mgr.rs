@@ -1574,51 +1574,52 @@ impl SlotGuard {
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        if !self.upserted {
-            // Our old value is already shutdown, or it never existed: it is safe
-            // for us to fully release the TenantSlot back into an empty state
+        if self.upserted {
+            return;
+        }
+        // Our old value is already shutdown, or it never existed: it is safe
+        // for us to fully release the TenantSlot back into an empty state
 
-            let mut locked = TENANTS.write().unwrap();
+        let mut locked = TENANTS.write().unwrap();
 
-            let m = match &mut *locked {
-                TenantsMap::Initializing => {
-                    // There is no map, this should never happen.
-                    return;
-                }
-                TenantsMap::ShuttingDown(_) => {
-                    // When we transition to shutdown, InProgress elements are removed
-                    // from the map, so we do not need to clean up our Inprogress marker.
-                    // See [`shutdown_all_tenants0`]
-                    return;
-                }
-                TenantsMap::Open(m) => m,
-            };
+        let m = match &mut *locked {
+            TenantsMap::Initializing => {
+                // There is no map, this should never happen.
+                return;
+            }
+            TenantsMap::ShuttingDown(_) => {
+                // When we transition to shutdown, InProgress elements are removed
+                // from the map, so we do not need to clean up our Inprogress marker.
+                // See [`shutdown_all_tenants0`]
+                return;
+            }
+            TenantsMap::Open(m) => m,
+        };
 
-            use std::collections::hash_map::Entry;
-            match m.entry(self.tenant_id) {
-                Entry::Occupied(mut entry) => {
-                    if !matches!(entry.get(), TenantSlot::InProgress(_)) {
-                        METRICS.unexpected_errors.inc();
-                        error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during drop, this is a bug.  Contents: {:?}", entry.get());
-                    }
-
-                    if self.old_value_is_shutdown() {
-                        entry.remove();
-                    } else {
-                        entry.insert(self.old_value.take().unwrap());
-                    }
-                }
-                Entry::Vacant(_) => {
+        use std::collections::hash_map::Entry;
+        match m.entry(self.tenant_id) {
+            Entry::Occupied(mut entry) => {
+                if !matches!(entry.get(), TenantSlot::InProgress(_)) {
                     METRICS.unexpected_errors.inc();
-                    error!(
-                        tenant_id = %self.tenant_id,
-                        "Missing InProgress marker during SlotGuard drop, this is a bug."
-                    );
+                    error!(tenant_id=%self.tenant_id, "Unexpected contents of TenantSlot during drop, this is a bug.  Contents: {:?}", entry.get());
+                }
+
+                if self.old_value_is_shutdown() {
+                    entry.remove();
+                } else {
+                    entry.insert(self.old_value.take().unwrap());
                 }
             }
-
-            METRICS.tenant_slots.set(m.len() as u64);
+            Entry::Vacant(_) => {
+                METRICS.unexpected_errors.inc();
+                error!(
+                    tenant_id = %self.tenant_id,
+                    "Missing InProgress marker during SlotGuard drop, this is a bug."
+                );
+            }
         }
+
+        METRICS.tenant_slots.set(m.len() as u64);
     }
 }
 
