@@ -793,7 +793,11 @@ impl Timeline {
                 // as an empty timeline. Also in unit tests, when we use the timeline
                 // as a simple key-value store, ignoring the datadir layout. Log the
                 // error but continue.
-                error!("could not compact, repartitioning keyspace failed: {err:?}");
+                //
+                // Suppress error when it's due to cancellation
+                if !self.cancel.is_cancelled() {
+                    error!("could not compact, repartitioning keyspace failed: {err:?}");
+                }
             }
         };
 
