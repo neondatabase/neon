@@ -9,7 +9,7 @@ use std::{borrow::Cow, io::Cursor};
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
-use azure_core::{Header, RetryOptions};
+use azure_core::RetryOptions;
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
