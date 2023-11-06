@@ -406,10 +406,12 @@ async fn fill_logical_sizes(
                 have_any_error = true;
             }
             Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error)))) => {
-                warn!(
-                    timeline_id=%timeline.timeline_id,
-                    "failed to calculate logical size at {lsn}: {error:#}"
-                );
+                if !matches!(error, CalculateLogicalSizeError::Cancelled) {
+                    warn!(
+                        timeline_id=%timeline.timeline_id,
+                        "failed to calculate logical size at {lsn}: {error:#}"
+                    );
+                }
                 have_any_error = true;
             }
             Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size)))) => {
