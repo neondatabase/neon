@@ -250,6 +250,10 @@ pub(crate) enum UploadOp {
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
+
+    /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
+    /// this is the same as a Barrier.
+    Shutdown(Option<tokio::sync::oneshot::Sender<()>>),
 }
 
 impl std::fmt::Display for UploadOp {
@@ -271,6 +275,7 @@ impl std::fmt::Display for UploadOp {
                 write!(f, "Delete({} layers)", delete.layers.len())
             }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
+            UploadOp::Shutdown(_) => write!(f, "Shutdown"),
         }
     }
 }

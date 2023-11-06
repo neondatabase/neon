@@ -945,7 +945,7 @@ impl Timeline {
                     // what is problematic is the shutting down of RemoteTimelineClient, because
                     // obviously it does not make sense to stop while we wait for it, but what
                     // about corner cases like s3 suddenly hanging up?
-                    if let Err(e) = client.wait_completion().await {
+                    if let Err(e) = client.shutdown().await {
                         // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
                         // we have some extra WAL replay to do next time the timeline starts.
                         warn!("failed to flush to remote storage: {e:#}");
