@@ -1,5 +1,6 @@
 use serde::Deserialize;
-use std::{fmt, sync::Arc};
+use smol_str::SmolStr;
+use std::fmt;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -88,37 +89,11 @@ impl fmt::Debug for DatabaseInfo {
 
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct MetricsAuxInfo {
-    #[serde(with = "arcstr")]
-    pub endpoint_id: Arc<str>,
-    #[serde(with = "arcstr")]
-    pub project_id: Arc<str>,
-    #[serde(with = "arcstr")]
-    pub branch_id: Arc<str>,
-}
-
-impl Default for MetricsAuxInfo {
-    fn default() -> Self {
-        Self {
-            endpoint_id: "".into(),
-            project_id: "".into(),
-            branch_id: "".into(),
-        }
-    }
-}
-
-pub mod arcstr {
-    use std::sync::Arc;
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Arc<str>, D::Error> {
-        let s = <&str as serde::Deserialize>::deserialize(d)?;
-        Ok(s.into())
-    }
-
-    pub fn serialize<S: serde::Serializer>(this: &Arc<str>, s: S) -> Result<S::Ok, S::Error> {
-        <str as serde::Serialize>::serialize(&**this, s)
-    }
+    pub endpoint_id: SmolStr,
+    pub project_id: SmolStr,
+    pub branch_id: SmolStr,
 }
 
 impl MetricsAuxInfo {
