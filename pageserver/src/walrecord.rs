@@ -748,6 +748,26 @@ impl XlMultiXactTruncate {
     }
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlLogicalMessage {
+    pub db_id: Oid,
+    pub transactional: bool,
+    pub prefix_size: usize,
+    pub message_size: usize,
+}
+
+impl XlLogicalMessage {
+    pub fn decode(buf: &mut Bytes) -> XlLogicalMessage {
+        XlLogicalMessage {
+            db_id: buf.get_u32_le(),
+            transactional: buf.get_u32_le() != 0, // 4-bytes alignment
+            prefix_size: buf.get_u64_le() as usize,
+            message_size: buf.get_u64_le() as usize,
+        }
+    }
+}
+
 /// Main routine to decode a WAL record and figure out which blocks are modified
 //
 // See xlogrecord.h for details

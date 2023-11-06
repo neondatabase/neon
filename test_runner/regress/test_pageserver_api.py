@@ -157,6 +157,8 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         tenant_id, timeline_id = env.neon_cli.create_tenant()
         endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
+        # insert something to force sk -> ps message
+        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
         # Wait to make sure that we get a latest WAL receiver data.
         # We need to wait here because it's possible that we don't have access to
         # the latest WAL yet, when the `timeline_detail` API is first called.
@@ -168,7 +170,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         )
 
         # Make a DB modification then expect getting a new WAL receiver's data.
-        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
+        endpoint.safe_psql("INSERT INTO t VALUES (1, 'hey')")
         wait_until(
             number_of_iterations=5,
             interval=1,

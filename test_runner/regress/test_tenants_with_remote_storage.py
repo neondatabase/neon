@@ -108,11 +108,8 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
         wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_tenants_attached_after_download(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     data_id = 1
     data_secret = "very secret secret"
@@ -230,9 +227,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    env.pageserver.allowed_errors.append(
-        ".*removing local file .* because it has unexpected length.*"
-    )
+    env.pageserver.allowed_errors.append(".*removing local file .* because .*")
 
     # FIXME: Are these expected?
     env.pageserver.allowed_errors.append(

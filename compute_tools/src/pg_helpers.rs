@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::fs::File;
@@ -192,11 +193,16 @@ impl Escaping for PgIdent {
 /// Build a list of existing Postgres roles
 pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
     let postgres_roles = xact
-        .query("SELECT rolname, rolpassword FROM pg_catalog.pg_authid", &[])?
+        .query(
+            "SELECT rolname, rolpassword, rolreplication, rolbypassrls FROM pg_catalog.pg_authid",
+            &[],
+        )?
         .iter()
         .map(|row| Role {
             name: row.get("rolname"),
             encrypted_password: row.get("rolpassword"),
+            replication: Some(row.get("rolreplication")),
+            bypassrls: Some(row.get("rolbypassrls")),
             options: None,
         })
         .collect();
@@ -205,22 +211,37 @@ pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
 }
 
 /// Build a list of existing Postgres databases
-pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
-    let postgres_dbs = client
+pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>> {
+    // `pg_database.datconnlimit = -2` means that the database is in the
+    // invalid state. See:
+    //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
+    let postgres_dbs: Vec<Database> = client
         .query(
-            "SELECT datname, datdba::regrole::text as owner
-               FROM pg_catalog.pg_database;",
+            "SELECT
+                datname AS name,
+                datdba::regrole::text AS owner,
+                NOT datallowconn AS restrict_conn,
+                datconnlimit = - 2 AS invalid
+            FROM
+                pg_catalog.pg_database;",
             &[],
         )?
         .iter()
         .map(|row| Database {
-            name: row.get("datname"),
+            name: row.get("name"),
             owner: row.get("owner"),
+            restrict_conn: row.get("restrict_conn"),
+            invalid: row.get("invalid"),
             options: None,
         })
         .collect();
 
-    Ok(postgres_dbs)
+    let dbs_map = postgres_dbs
+        .iter()
+        .map(|db| (db.name.clone(), db.clone()))
+        .collect::<HashMap<_, _>>();
+
+    Ok(dbs_map)
 }
 
 /// Wait for Postgres to become ready to accept connections. It's ready to

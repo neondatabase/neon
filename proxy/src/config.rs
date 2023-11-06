@@ -13,6 +13,9 @@ pub struct ProxyConfig {
     pub auth_backend: auth::BackendType<'static, ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
+    pub http_config: HttpConfig,
+    pub authentication_config: AuthenticationConfig,
+    pub require_client_ip: bool,
 }
 
 #[derive(Debug)]
@@ -24,6 +27,14 @@ pub struct MetricCollectionConfig {
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_names: Option<HashSet<String>>,
+}
+
+pub struct HttpConfig {
+    pub sql_over_http_timeout: tokio::time::Duration,
+}
+
+pub struct AuthenticationConfig {
+    pub scram_protocol_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -212,7 +223,7 @@ pub struct CacheOptions {
 
 impl CacheOptions {
     /// Default options for [`crate::console::provider::NodeInfoCache`].
-    pub const DEFAULT_OPTIONS_NODE_INFO: &str = "size=4000,ttl=4m";
+    pub const DEFAULT_OPTIONS_NODE_INFO: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::DEFAULT_OPTIONS_NODE_INFO`].

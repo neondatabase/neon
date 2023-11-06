@@ -4,7 +4,7 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::sync::Arc;
+use std::borrow::Cow;
 
 use anyhow::Context;
 use aws_config::{
@@ -24,23 +24,20 @@ use aws_sdk_s3::{
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::{
-    io::{self, AsyncRead},
-    sync::Semaphore,
-};
+use tokio::io::{self, AsyncRead};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
-
-const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
 
 pub(super) mod metrics;
 
-use self::metrics::{AttemptOutcome, RequestKind};
+use self::metrics::AttemptOutcome;
+pub(super) use self::metrics::RequestKind;
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -48,10 +45,7 @@ pub struct S3Bucket {
     bucket_name: String,
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
-    // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
-    // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
-    // The helps to ensure we don't exceed the thresholds.
-    concurrency_limiter: Arc<Semaphore>,
+    concurrency_limiter: ConcurrencyLimiter,
 }
 
 #[derive(Default)]
@@ -118,7 +112,7 @@ impl S3Bucket {
             bucket_name: aws_config.bucket_name.clone(),
             max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
-            concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
+            concurrency_limiter: ConcurrencyLimiter::new(aws_config.concurrency_limit.get()),
         })
     }
 
@@ -144,12 +138,11 @@ impl S3Bucket {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
         let path_string = path
             .get_path()
-            .to_string_lossy()
-            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
-            .to_string();
+            .as_str()
+            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
         match &self.prefix_in_bucket {
-            Some(prefix) => prefix.clone() + "/" + &path_string,
-            None => path_string,
+            Some(prefix) => prefix.clone() + "/" + path_string,
+            None => path_string.to_string(),
         }
     }
 
@@ -157,7 +150,7 @@ impl S3Bucket {
         let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
-            .acquire()
+            .acquire(kind)
             .await
             .expect("semaphore is never closed");
 
@@ -173,8 +166,7 @@ impl S3Bucket {
         let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
-            .clone()
-            .acquire_owned()
+            .acquire_owned(kind)
             .await
             .expect("semaphore is never closed");
 
@@ -307,13 +299,13 @@ impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    /// See the doc for `RemoteStorage::list_prefixes`
-    /// Note: it wont include empty "directories"
-    async fn list_prefixes(
+    async fn list(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
+        let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -322,13 +314,13 @@ impl RemoteStorage for S3Bucket {
             .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
                     p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
                 p
             });
-
-        let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
 
@@ -336,14 +328,19 @@ impl RemoteStorage for S3Bucket {
             let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
-            let fetch_response = self
+            let mut request = self
                 .client
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
-                .set_max_keys(self.max_keys_per_list_response)
+                .set_max_keys(self.max_keys_per_list_response);
+
+            if let ListingMode::WithDelimiter = mode {
+                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+            }
+
+            let response = request
                 .send()
                 .await
                 .context("Failed to list S3 prefixes")
@@ -353,71 +350,35 @@ impl RemoteStorage for S3Bucket {
 
             metrics::BUCKET_METRICS
                 .req_seconds
-                .observe_elapsed(kind, &fetch_response, started_at);
+                .observe_elapsed(kind, &response, started_at);
 
-            let fetch_response = fetch_response?;
+            let response = response?;
 
-            document_keys.extend(
-                fetch_response
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
+            let keys = response.contents().unwrap_or_default();
+            let empty = Vec::new();
+            let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
+
+            tracing::info!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+
+            for object in keys {
+                let object_path = object.key().expect("response does not contain a key");
+                let remote_path = self.s3_object_to_relative_path(object_path);
+                result.keys.push(remote_path);
+            }
+
+            result.prefixes.extend(
+                prefixes
+                    .iter()
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            continuation_token = match fetch_response.next_continuation_token {
+            continuation_token = match response.next_continuation_token {
                 Some(new_token) => Some(new_token),
                 None => break,
             };
         }
 
-        Ok(document_keys)
-    }
-
-    /// See the doc for `RemoteStorage::list_files`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let kind = RequestKind::List;
-
-        let folder_name = folder
-            .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone());
-
-        // AWS may need to break the response into several parts
-        let mut continuation_token = None;
-        let mut all_files = vec![];
-        loop {
-            let _guard = self.permit(kind).await;
-            let started_at = start_measuring_requests(kind);
-
-            let response = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(folder_name.clone())
-                .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response)
-                .send()
-                .await
-                .context("Failed to list files in S3 bucket");
-
-            let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &response, started_at);
-
-            let response = response?;
-
-            for object in response.contents().unwrap_or_default() {
-                let object_path = object.key().expect("response does not contain a key");
-                let remote_path = self.s3_object_to_relative_path(object_path);
-                all_files.push(remote_path);
-            }
-            match response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-        Ok(all_files)
+        Ok(result)
     }
 
     async fn upload(
@@ -500,7 +461,7 @@ impl RemoteStorage for S3Bucket {
             delete_objects.push(obj_id);
         }
 
-        for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
+        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
             let started_at = start_measuring_requests(kind);
 
             let resp = self
@@ -522,6 +483,20 @@ impl RemoteStorage for S3Bucket {
                         .deleted_objects_total
                         .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
+                        // Log a bounded number of the errors within the response:
+                        // these requests can carry 1000 keys so logging each one
+                        // would be too verbose, especially as errors may lead us
+                        // to retry repeatedly.
+                        const LOG_UP_TO_N_ERRORS: usize = 10;
+                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                            tracing::warn!(
+                                "DeleteObjects key {} failed: {}: {}",
+                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                            );
+                        }
+
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
                             errors.len()
@@ -566,8 +541,8 @@ fn start_measuring_requests(
 
 #[cfg(test)]
 mod tests {
+    use camino::Utf8Path;
     use std::num::NonZeroUsize;
-    use std::path::Path;
 
     use crate::{RemotePath, S3Bucket, S3Config};
 
@@ -576,7 +551,7 @@ mod tests {
         let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
-            .map(|x| RemotePath::new(Path::new(x)).expect("bad path"))
+            .map(|x| RemotePath::new(Utf8Path::new(x)).expect("bad path"))
             .collect();
         let prefixes = [
             None,

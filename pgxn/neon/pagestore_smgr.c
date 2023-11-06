@@ -63,7 +63,6 @@
 #include "storage/md.h"
 #include "pgstat.h"
 
-
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
@@ -721,7 +720,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 
 	/* use an intermediate PrefetchRequest struct to ensure correct alignment */
 	req.buftag = tag;
-	
+  Retry:
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
 
 	if (entry != NULL)
@@ -858,7 +857,11 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
 	{
-		page_server->flush();
+		if (!page_server->flush())
+		{
+			/* Prefetch set is reset in case of error, so we should try to register our request once again */
+			goto Retry;
+		}
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
@@ -1391,12 +1394,6 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
-	else if (am_walsender)
-	{
-		*latest = true;
-		lsn = InvalidXLogRecPtr;
-		elog(DEBUG1, "am walsender neon_get_request_lsn lsn 0 ");
-	}
 	else
 	{
 		XLogRecPtr	flushlsn;
@@ -1790,6 +1787,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if (!XLogInsertAllowed())
 		return;
 
+	/* ensure we have enough xlog buffers to log max-sized records */
+	XLogEnsureRecordSpace(Min(remblocks, (XLR_MAX_BLOCK_ID - 1)), 0);
+
+	/*
+	 * Iterate over all the pages. They are collected into batches of
+	 * XLR_MAX_BLOCK_ID pages, and a single WAL-record is written for each
+	 * batch.
+	 */
 	while (remblocks > 0)
 	{
 		int			count = Min(remblocks, XLR_MAX_BLOCK_ID);

@@ -11,10 +11,7 @@ use std::sync::{Arc, Barrier};
 
 use bytes::{Buf, Bytes};
 use pageserver::{
-    config::PageServerConf,
-    repository::Key,
-    walrecord::NeonWalRecord,
-    walredo::{PostgresRedoManager, WalRedoError},
+    config::PageServerConf, repository::Key, walrecord::NeonWalRecord, walredo::PostgresRedoManager,
 };
 use utils::{id::TenantId, lsn::Lsn};
 
@@ -25,7 +22,7 @@ fn redo_scenarios(c: &mut Criterion) {
     // input to the stderr.
     // utils::logging::init(utils::logging::LogFormat::Plain).unwrap();
 
-    let repo_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
     let conf = Box::leak(Box::new(conf));
@@ -35,9 +32,15 @@ fn redo_scenarios(c: &mut Criterion) {
 
     let manager = Arc::new(manager);
 
-    tracing::info!("executing first");
-    short().execute(&manager).unwrap();
-    tracing::info!("first executed");
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::info!("executing first");
+        short().execute(rt.handle(), &manager).unwrap();
+        tracing::info!("first executed");
+    }
 
     let thread_counts = [1, 2, 4, 8, 16];
 
@@ -80,9 +83,14 @@ fn add_multithreaded_walredo_requesters(
     assert_ne!(threads, 0);
 
     if threads == 1 {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.handle();
         b.iter_batched_ref(
             || Some(input_factory()),
-            |input| execute_all(input.take(), manager),
+            |input| execute_all(input.take(), handle, manager),
             criterion::BatchSize::PerIteration,
         );
     } else {
@@ -98,19 +106,26 @@ fn add_multithreaded_walredo_requesters(
                     let manager = manager.clone();
                     let barrier = barrier.clone();
                     let work_rx = work_rx.clone();
-                    move || loop {
-                        // queue up and wait if we want to go another round
-                        if work_rx.lock().unwrap().recv().is_err() {
-                            break;
+                    move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        let handle = rt.handle();
+                        loop {
+                            // queue up and wait if we want to go another round
+                            if work_rx.lock().unwrap().recv().is_err() {
+                                break;
+                            }
+
+                            let input = Some(input_factory());
+
+                            barrier.wait();
+
+                            execute_all(input, handle, &manager).unwrap();
+
+                            barrier.wait();
                         }
-
-                        let input = Some(input_factory());
-
-                        barrier.wait();
-
-                        execute_all(input, &manager).unwrap();
-
-                        barrier.wait();
                     }
                 })
             })
@@ -152,15 +167,19 @@ impl Drop for JoinOnDrop {
     }
 }
 
-fn execute_all<I>(input: I, manager: &PostgresRedoManager) -> Result<(), WalRedoError>
+fn execute_all<I>(
+    input: I,
+    handle: &tokio::runtime::Handle,
+    manager: &PostgresRedoManager,
+) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = Request>,
 {
     // just fire all requests as fast as possible
     input.into_iter().try_for_each(|req| {
-        let page = req.execute(manager)?;
+        let page = req.execute(handle, manager)?;
         assert_eq!(page.remaining(), 8192);
-        Ok::<_, WalRedoError>(())
+        anyhow::Ok(())
     })
 }
 
@@ -473,9 +492,11 @@ struct Request {
 }
 
 impl Request {
-    fn execute(self, manager: &PostgresRedoManager) -> Result<Bytes, WalRedoError> {
-        use pageserver::walredo::WalRedoManager;
-
+    fn execute(
+        self,
+        rt: &tokio::runtime::Handle,
+        manager: &PostgresRedoManager,
+    ) -> anyhow::Result<Bytes> {
         let Request {
             key,
             lsn,
@@ -484,6 +505,6 @@ impl Request {
             pg_version,
         } = self;
 
-        manager.request_redo(key, lsn, base_img, records, pg_version)
+        rt.block_on(manager.request_redo(key, lsn, base_img, records, pg_version))
     }
 }

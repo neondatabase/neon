@@ -2,7 +2,8 @@
 // Main entry point for the safekeeper executable
 //
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use camino::{Utf8Path, Utf8PathBuf};
+use clap::{ArgAction, Parser};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
@@ -14,7 +15,6 @@ use toml_edit::Document;
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,7 +42,7 @@ use utils::auth::{JwtAuth, Scope};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version,
+    project_build_tag, project_git_version,
     sentry_init::init_sentry,
     tcp_listener,
 };
@@ -51,6 +51,7 @@ const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const ABOUT: &str = r#"
 A fleet of safekeepers is responsible for reliably storing WAL received from
@@ -63,7 +64,7 @@ split), and serving the hardened part further downstream to pageserver(s).
 struct Args {
     /// Path to the safekeeper data directory.
     #[arg(short = 'D', long, default_value = "./")]
-    datadir: PathBuf,
+    datadir: Utf8PathBuf,
     /// Safekeeper node id.
     #[arg(long)]
     id: Option<u64>,
@@ -92,7 +93,7 @@ struct Args {
     no_sync: bool,
     /// Dump control file at path specified by this argument and exit.
     #[arg(long)]
-    dump_control_file: Option<PathBuf>,
+    dump_control_file: Option<Utf8PathBuf>,
     /// Broker endpoint for storage nodes coordination in the form
     /// http[s]://host:port. In case of https schema TLS is connection is
     /// established; plaintext otherwise.
@@ -105,6 +106,9 @@ struct Args {
     /// it during this period passed as a human readable duration.
     #[arg(long, value_parser= humantime::parse_duration, default_value = DEFAULT_HEARTBEAT_TIMEOUT, verbatim_doc_comment)]
     heartbeat_timeout: Duration,
+    /// Enable/disable peer recovery.
+    #[arg(long, default_value = "false", action=ArgAction::Set)]
+    peer_recovery: bool,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
     ///   {"max_concurrent_syncs" = 17, "max_sync_errors": 13, "bucket_name": "<BUCKETNAME>", "bucket_region":"<REGION>", "concurrency_limit": 119}
@@ -128,19 +132,19 @@ struct Args {
     /// validations of JWT tokens. Empty string is allowed and means disabling
     /// auth.
     #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
-    pg_auth_public_key_path: Option<PathBuf>,
+    pg_auth_public_key_path: Option<Utf8PathBuf>,
     /// If given, enables auth on incoming connections to tenant only WAL
     /// service endpoint (--listen-pg-tenant-only). Value specifies path to a
     /// .pem public key used for validations of JWT tokens. Empty string is
     /// allowed and means disabling auth.
     #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
-    pg_tenant_only_auth_public_key_path: Option<PathBuf>,
+    pg_tenant_only_auth_public_key_path: Option<Utf8PathBuf>,
     /// If given, enables auth on incoming connections to http management
     /// service endpoint (--listen-http). Value specifies path to a .pem public
     /// key used for validations of JWT tokens. Empty string is allowed and
     /// means disabling auth.
     #[arg(long, verbatim_doc_comment, value_parser = opt_pathbuf_parser)]
-    http_auth_public_key_path: Option<PathBuf>,
+    http_auth_public_key_path: Option<Utf8PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
@@ -151,8 +155,8 @@ struct Args {
 }
 
 // Like PathBufValueParser, but allows empty string.
-fn opt_pathbuf_parser(s: &str) -> Result<PathBuf, String> {
-    Ok(PathBuf::from_str(s).unwrap())
+fn opt_pathbuf_parser(s: &str) -> Result<Utf8PathBuf, String> {
+    Ok(Utf8PathBuf::from_str(s).unwrap())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -201,9 +205,10 @@ async fn main() -> anyhow::Result<()> {
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
+    info!("buld_tag: {BUILD_TAG}");
 
     let args_workdir = &args.datadir;
-    let workdir = args_workdir.canonicalize().with_context(|| {
+    let workdir = args_workdir.canonicalize_utf8().with_context(|| {
         format!("Failed to get the absolute path for input workdir {args_workdir:?}")
     })?;
 
@@ -222,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Some(path) => {
-            info!("loading pg auth JWT key from {}", path.display());
+            info!("loading pg auth JWT key from {path}");
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
             ))
@@ -234,10 +239,7 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Some(path) => {
-            info!(
-                "loading pg tenant only auth JWT key from {}",
-                path.display()
-            );
+            info!("loading pg tenant only auth JWT key from {path}");
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
             ))
@@ -249,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Some(path) => {
-            info!("loading http auth JWT key from {}", path.display());
+            info!("loading http auth JWT key from {path}");
             Some(Arc::new(
                 JwtAuth::from_key_path(path).context("failed to load the auth key")?,
             ))
@@ -268,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         broker_endpoint: args.broker_endpoint,
         broker_keepalive_interval: args.broker_keepalive_interval,
         heartbeat_timeout: args.heartbeat_timeout,
+        peer_recovery_enabled: args.peer_recovery,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
         wal_backup_enabled: !args.disable_wal_backup,
@@ -422,7 +425,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .map(|res| ("WAL remover".to_owned(), res));
     tasks_handles.push(Box::pin(wal_remover_handle));
 
-    set_build_info_metric(GIT_VERSION);
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // TODO: update tokio-stream, convert to real async Stream with
     // SignalStream, map it to obtain missing signal name, combine streams into
@@ -447,7 +450,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 }
 
 /// Determine safekeeper id.
-fn set_id(workdir: &Path, given_id: Option<NodeId>) -> Result<NodeId> {
+fn set_id(workdir: &Utf8Path, given_id: Option<NodeId>) -> Result<NodeId> {
     let id_file_path = workdir.join(ID_FILE_NAME);
 
     let my_id: NodeId;

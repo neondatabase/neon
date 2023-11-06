@@ -5,10 +5,10 @@
 
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use camino::Utf8Path;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
-use remote_storage::{DownloadError, GenericRemoteStorage};
+use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
@@ -50,7 +50,12 @@ pub async fn download_layer_file<'a>(
         .timeline_path(&tenant_id, &timeline_id)
         .join(layer_file_name.file_name());
 
-    let remote_path = remote_layer_path(&tenant_id, &timeline_id, layer_file_name, layer_metadata);
+    let remote_path = remote_layer_path(
+        &tenant_id,
+        &timeline_id,
+        layer_file_name,
+        layer_metadata.generation,
+    );
 
     // Perform a rename inspired by durable_rename from file_utils.c.
     // The sequence:
@@ -69,12 +74,7 @@ pub async fn download_layer_file<'a>(
             // TODO: this doesn't use the cached fd for some reason?
             let mut destination_file = fs::File::create(&temp_file_path)
                 .await
-                .with_context(|| {
-                    format!(
-                        "create a destination file for layer '{}'",
-                        temp_file_path.display()
-                    )
-                })
+                .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
             let mut download = storage
                 .download(&remote_path)
@@ -116,7 +116,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .flush()
         .await
-        .with_context(|| format!("flush source file at {}", temp_file_path.display()))
+        .with_context(|| format!("flush source file at {temp_file_path}"))
         .map_err(DownloadError::Other)?;
 
     let expected = layer_metadata.file_size();
@@ -130,12 +130,7 @@ pub async fn download_layer_file<'a>(
     destination_file
         .sync_all()
         .await
-        .with_context(|| {
-            format!(
-                "failed to fsync source file at {}",
-                temp_file_path.display()
-            )
-        })
+        .with_context(|| format!("failed to fsync source file at {temp_file_path}"))
         .map_err(DownloadError::Other)?;
     drop(destination_file);
 
@@ -147,27 +142,23 @@ pub async fn download_layer_file<'a>(
 
     fs::rename(&temp_file_path, &local_path)
         .await
-        .with_context(|| format!("rename download layer file to {}", local_path.display(),))
+        .with_context(|| format!("rename download layer file to {local_path}"))
         .map_err(DownloadError::Other)?;
 
     crashsafe::fsync_async(&local_path)
         .await
-        .with_context(|| format!("fsync layer file {}", local_path.display(),))
+        .with_context(|| format!("fsync layer file {local_path}"))
         .map_err(DownloadError::Other)?;
 
-    tracing::debug!("download complete: {}", local_path.display());
+    tracing::debug!("download complete: {local_path}");
 
     Ok(bytes_amount)
 }
 
 const TEMP_DOWNLOAD_EXTENSION: &str = "temp_download";
 
-pub fn is_temp_download_file(path: &Path) -> bool {
-    let extension = path.extension().map(|pname| {
-        pname
-            .to_str()
-            .expect("paths passed to this function must be valid Rust strings")
-    });
+pub fn is_temp_download_file(path: &Utf8Path) -> bool {
+    let extension = path.extension();
     match extension {
         Some(TEMP_DOWNLOAD_EXTENSION) => true,
         Some(_) => false,
@@ -179,47 +170,43 @@ pub fn is_temp_download_file(path: &Path) -> bool {
 pub async fn list_remote_timelines(
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,
-) -> anyhow::Result<HashSet<TimelineId>> {
+    cancel: CancellationToken,
+) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
     let remote_path = remote_timelines_path(&tenant_id);
 
     fail::fail_point!("storage-sync-list-remote-timelines", |_| {
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
-    let timelines = download_retry(
-        || storage.list_prefixes(Some(&remote_path)),
-        &format!("list prefixes for {tenant_id}"),
+    let listing = download_retry_forever(
+        || storage.list(Some(&remote_path), ListingMode::WithDelimiter),
+        &format!("list timelines for {tenant_id}"),
+        cancel,
     )
     .await?;
 
-    if timelines.is_empty() {
-        anyhow::bail!("no timelines found on the remote storage")
-    }
-
     let mut timeline_ids = HashSet::new();
+    let mut other_prefixes = HashSet::new();
 
-    for timeline_remote_storage_key in timelines {
+    for timeline_remote_storage_key in listing.prefixes {
         let object_name = timeline_remote_storage_key.object_name().ok_or_else(|| {
             anyhow::anyhow!("failed to get timeline id for remote tenant {tenant_id}")
         })?;
 
-        let timeline_id: TimelineId = object_name
-            .parse()
-            .with_context(|| format!("parse object name into timeline id '{object_name}'"))?;
-
-        // list_prefixes is assumed to return unique names. Ensure this here.
-        // NB: it's safer to bail out than warn-log this because the pageserver
-        //     needs to absolutely know about _all_ timelines that exist, so that
-        //     GC knows all the branchpoints. If we skipped over a timeline instead,
-        //     GC could delete a layer that's still needed by that timeline.
-        anyhow::ensure!(
-            !timeline_ids.contains(&timeline_id),
-            "list_prefixes contains duplicate timeline id {timeline_id}"
-        );
-        timeline_ids.insert(timeline_id);
+        match object_name.parse::<TimelineId>() {
+            Ok(t) => timeline_ids.insert(t),
+            Err(_) => other_prefixes.insert(object_name.to_string()),
+        };
     }
 
-    Ok(timeline_ids)
+    for key in listing.keys {
+        let object_name = key
+            .object_name()
+            .ok_or_else(|| anyhow::anyhow!("object name for key {key}"))?;
+        other_prefixes.insert(object_name.to_string());
+    }
+
+    Ok((timeline_ids, other_prefixes))
 }
 
 async fn do_download_index_part(
@@ -227,10 +214,11 @@ async fn do_download_index_part(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     index_generation: Generation,
+    cancel: CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
     let remote_path = remote_index_path(tenant_id, timeline_id, index_generation);
 
-    let index_part_bytes = download_retry(
+    let index_part_bytes = download_retry_forever(
         || async {
             let mut index_part_download = storage.download(&remote_path).await?;
 
@@ -245,6 +233,7 @@ async fn do_download_index_part(
             Ok(index_part_bytes)
         },
         &format!("download {remote_path:?}"),
+        cancel,
     )
     .await?;
 
@@ -266,19 +255,28 @@ pub(super) async fn download_index_part(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
     my_generation: Generation,
+    cancel: CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     if my_generation.is_none() {
         // Operating without generations: just fetch the generation-less path
-        return do_download_index_part(storage, tenant_id, timeline_id, my_generation).await;
+        return do_download_index_part(storage, tenant_id, timeline_id, my_generation, cancel)
+            .await;
     }
 
     // Stale case: If we were intentionally attached in a stale generation, there may already be a remote
     // index in our generation.
     //
     // This is an optimization to avoid doing the listing for the general case below.
-    let res = do_download_index_part(storage, tenant_id, timeline_id, my_generation).await;
+    let res = do_download_index_part(
+        storage,
+        tenant_id,
+        timeline_id,
+        my_generation,
+        cancel.clone(),
+    )
+    .await;
     match res {
         Ok(index_part) => {
             tracing::debug!(
@@ -298,8 +296,14 @@ pub(super) async fn download_index_part(
     //    we want to find the most recent index from a previous generation.
     //
     // This is an optimization to avoid doing the listing for the general case below.
-    let res =
-        do_download_index_part(storage, tenant_id, timeline_id, my_generation.previous()).await;
+    let res = do_download_index_part(
+        storage,
+        tenant_id,
+        timeline_id,
+        my_generation.previous(),
+        cancel.clone(),
+    )
+    .await;
     match res {
         Ok(index_part) => {
             tracing::debug!("Found index_part from previous generation");
@@ -343,13 +347,14 @@ pub(super) async fn download_index_part(
     match max_previous_generation {
         Some(g) => {
             tracing::debug!("Found index_part in generation {g:?}");
-            do_download_index_part(storage, tenant_id, timeline_id, g).await
+            do_download_index_part(storage, tenant_id, timeline_id, g, cancel).await
         }
         None => {
             // Migration from legacy pre-generation state: we have a generation but no prior
             // attached pageservers did.  Try to load from a no-generation path.
             tracing::info!("No index_part.json* found");
-            do_download_index_part(storage, tenant_id, timeline_id, Generation::none()).await
+            do_download_index_part(storage, tenant_id, timeline_id, Generation::none(), cancel)
+                .await
         }
     }
 }
@@ -376,6 +381,26 @@ where
         backoff::Cancel::new(CancellationToken::new(), || -> DownloadError {
             unreachable!()
         }),
+    )
+    .await
+}
+
+async fn download_retry_forever<T, O, F>(
+    op: O,
+    description: &str,
+    cancel: CancellationToken,
+) -> Result<T, DownloadError>
+where
+    O: FnMut() -> F,
+    F: Future<Output = Result<T, DownloadError>>,
+{
+    backoff::retry(
+        op,
+        |e| matches!(e, DownloadError::BadInput(_) | DownloadError::NotFound),
+        FAILED_DOWNLOAD_WARN_THRESHOLD,
+        u32::MAX,
+        description,
+        backoff::Cancel::new(cancel, || DownloadError::Cancelled),
     )
     .await
 }

@@ -1,8 +1,9 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
 use anyhow::{bail, Context};
+use camino::Utf8Path;
 use fail::fail_point;
-use std::{io::ErrorKind, path::Path};
+use std::io::ErrorKind;
 use tokio::fs;
 
 use super::Generation;
@@ -30,6 +31,7 @@ pub(super) async fn upload_index_part<'a>(
     fail_point!("before-upload-index", |_| {
         bail!("failpoint before-upload-index")
     });
+    pausable_failpoint!("before-upload-index-pausable");
 
     let index_part_bytes =
         serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;
@@ -50,13 +52,15 @@ pub(super) async fn upload_index_part<'a>(
 pub(super) async fn upload_timeline_layer<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    source_path: &'a Path,
+    source_path: &'a Utf8Path,
     known_metadata: &'a LayerFileMetadata,
     generation: Generation,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
     });
+
+    pausable_failpoint!("before-upload-layer-pausable");
 
     let storage_path = remote_path(conf, source_path, generation)?;
     let source_file_res = fs::File::open(&source_path).await;
@@ -68,7 +72,9 @@ pub(super) async fn upload_timeline_layer<'a>(
             // upload. However, a nonexistent file can also be indicative of
             // something worse, like when a file is scheduled for upload before
             // it has been written to disk yet.
-            info!(path = %source_path.display(), "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
+            //
+            // This is tested against `test_compaction_delete_before_upload`
+            info!(path = %source_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
         Err(e) => {
@@ -93,7 +99,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     storage
         .upload(source_file, fs_size, &storage_path, None)
         .await
-        .with_context(|| format!("upload layer from local path '{}'", source_path.display()))?;
+        .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
     Ok(())
 }

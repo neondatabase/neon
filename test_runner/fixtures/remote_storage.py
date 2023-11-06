@@ -202,9 +202,6 @@ class RemoteStorageKind(str, enum.Enum):
     LOCAL_FS = "local_fs"
     MOCK_S3 = "mock_s3"
     REAL_S3 = "real_s3"
-    # Pass to tests that are generic to remote storage
-    # to ensure the test pass with or without the remote storage
-    NOOP = "noop"
 
     def configure(
         self,
@@ -215,10 +212,7 @@ class RemoteStorageKind(str, enum.Enum):
         user: RemoteStorageUser,
         bucket_name: Optional[str] = None,
         bucket_region: Optional[str] = None,
-    ) -> Optional[RemoteStorage]:
-        if self == RemoteStorageKind.NOOP:
-            return None
-
+    ) -> RemoteStorage:
         if self == RemoteStorageKind.LOCAL_FS:
             return LocalFsStorage(LocalFsStorage.component_path(repo_dir, user))
 

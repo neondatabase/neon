@@ -670,6 +670,7 @@ pub fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
 }
 
 pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
+pub const SQLSTATE_ADMIN_SHUTDOWN: &[u8; 5] = b"57P01";
 pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
 impl<'a> BeMessage<'a> {

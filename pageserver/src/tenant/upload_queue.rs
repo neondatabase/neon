@@ -1,6 +1,5 @@
-use crate::metrics::RemoteOpFileKind;
-
 use super::storage_layer::LayerFileName;
+use super::storage_layer::ResidentLayer;
 use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
@@ -11,6 +10,7 @@ use std::fmt::Debug;
 use chrono::NaiveDateTime;
 use std::sync::Arc;
 use tracing::info;
+use utils::lsn::AtomicLsn;
 
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
@@ -58,7 +58,12 @@ pub(crate) struct UploadQueueInitialized {
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
     /// Unlike `latest_files` or `latest_metadata`, this value is never ahead.
     /// Safekeeper can rely on it to make decisions for WAL storage.
-    pub(crate) last_uploaded_consistent_lsn: Lsn,
+    ///
+    /// visible_remote_consistent_lsn is only updated after our generation has been validated with
+    /// the control plane (unlesss a timeline's generation is None, in which case
+    /// we skip validation)
+    pub(crate) projected_remote_consistent_lsn: Option<Lsn>,
+    pub(crate) visible_remote_consistent_lsn: Arc<AtomicLsn>,
 
     // Breakdown of different kinds of tasks currently in-progress
     pub(crate) num_inprogress_layer_uploads: usize,
@@ -75,11 +80,27 @@ pub(crate) struct UploadQueueInitialized {
     /// tasks to finish. For example, metadata upload cannot be performed before all
     /// preceding layer file uploads have completed.
     pub(crate) queued_operations: VecDeque<UploadOp>,
+
+    /// Files which have been unlinked but not yet had scheduled a deletion for. Only kept around
+    /// for error logging.
+    ///
+    /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
+    /// bug causing leaks, then it's better to not leave this enabled for production builds.
+    #[cfg(feature = "testing")]
+    pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
 }
 
 impl UploadQueueInitialized {
     pub(super) fn no_pending_work(&self) -> bool {
         self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
+    }
+
+    pub(super) fn get_last_remote_consistent_lsn_visible(&self) -> Lsn {
+        self.visible_remote_consistent_lsn.load()
+    }
+
+    pub(super) fn get_last_remote_consistent_lsn_projected(&self) -> Option<Lsn> {
+        self.projected_remote_consistent_lsn
     }
 }
 
@@ -114,9 +135,8 @@ impl UploadQueue {
             latest_files: HashMap::new(),
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: metadata.clone(),
-            // We haven't uploaded anything yet, so, `last_uploaded_consistent_lsn` must be 0 to prevent
-            // safekeepers from garbage-collecting anything.
-            last_uploaded_consistent_lsn: Lsn(0),
+            projected_remote_consistent_lsn: None,
+            visible_remote_consistent_lsn: Arc::new(AtomicLsn::new(0)),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -124,6 +144,8 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -158,7 +180,10 @@ impl UploadQueue {
             latest_files: files,
             latest_files_changes_since_metadata_upload_scheduled: 0,
             latest_metadata: index_part.metadata.clone(),
-            last_uploaded_consistent_lsn: index_part.metadata.disk_consistent_lsn(),
+            projected_remote_consistent_lsn: Some(index_part.metadata.disk_consistent_lsn()),
+            visible_remote_consistent_lsn: Arc::new(
+                index_part.metadata.disk_consistent_lsn().into(),
+            ),
             // what follows are boring default initializations
             task_counter: 0,
             num_inprogress_layer_uploads: 0,
@@ -166,6 +191,8 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -201,23 +228,22 @@ pub(crate) struct UploadTask {
     pub(crate) op: UploadOp,
 }
 
+/// A deletion of some layers within the lifetime of a timeline.  This is not used
+/// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) file_kind: RemoteOpFileKind,
-    pub(crate) layer_file_name: LayerFileName,
-    pub(crate) scheduled_from_timeline_delete: bool,
-    pub(crate) generation: Generation,
+    pub(crate) layers: Vec<(LayerFileName, Generation)>,
 }
 
 #[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
+    UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
-    /// Delete a layer file
+    /// Delete layer files
     Delete(Delete),
 
     /// Barrier. When the barrier operation is reached,
@@ -227,25 +253,21 @@ pub(crate) enum UploadOp {
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => {
+            UploadOp::UploadLayer(layer, metadata) => {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    path.file_name(),
+                    layer,
                     metadata.file_size(),
-                    metadata.generation,
+                    metadata.generation
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => {
                 write!(f, "UploadMetadata(lsn: {})", lsn)
             }
-            UploadOp::Delete(delete) => write!(
-                f,
-                "Delete(path: {}, scheduled_from_timeline_delete: {}, gen: {:?})",
-                delete.layer_file_name.file_name(),
-                delete.scheduled_from_timeline_delete,
-                delete.generation
-            ),
+            UploadOp::Delete(delete) => {
+                write!(f, "Delete({} layers)", delete.layers.len())
+            }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }

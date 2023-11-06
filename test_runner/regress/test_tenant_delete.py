@@ -30,9 +30,7 @@ from fixtures.types import TenantId
 from fixtures.utils import run_pg_bench_small
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind", [RemoteStorageKind.NOOP, *available_remote_storages()]
-)
+@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_tenant_delete_smoke(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
@@ -43,10 +41,13 @@ def test_tenant_delete_smoke(
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
-
-    # lucky race with stopping from flushing a layer we fail to schedule any uploads
-    env.pageserver.allowed_errors.append(
-        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
+    env.pageserver.allowed_errors.extend(
+        [
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion executor: DeleteObjects request failed.*",
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+        ]
     )
 
     ps_http = env.pageserver.http_client()
@@ -61,6 +62,9 @@ def test_tenant_delete_smoke(
         tenant_id=tenant_id,
         conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
     )
+
+    # Default tenant and the one we created
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
 
     # create two timelines one being the parent of another
     parent = None
@@ -87,7 +91,9 @@ def test_tenant_delete_smoke(
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
@@ -102,6 +108,9 @@ def test_tenant_delete_smoke(
                 )
             ),
         )
+
+    # Deletion updates the tenant count: the one default tenant remains
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
 
 class Check(enum.Enum):
@@ -138,18 +147,12 @@ FAILPOINTS_BEFORE_BACKGROUND = [
 def combinations():
     result = []
 
-    remotes = [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]
+    remotes = [RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
         remotes.append(RemoteStorageKind.REAL_S3)
 
     for remote_storage_kind in remotes:
         for delete_failpoint in FAILPOINTS:
-            if remote_storage_kind is RemoteStorageKind.NOOP and delete_failpoint in (
-                "timeline-delete-before-index-delete",
-            ):
-                # the above failpoint are not relevant for config without remote storage
-                continue
-
             # Simulate failures for only one type of remote storage
             # to avoid log pollution and make tests run faster
             if remote_storage_kind is RemoteStorageKind.MOCK_S3:
@@ -195,27 +198,30 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         ]
     )
 
+    if simulate_failures:
+        env.pageserver.allowed_errors.append(
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion executor: DeleteObjects request failed.*",
+        )
+
     ps_http = env.pageserver.http_client()
 
     timeline_id = env.neon_cli.create_timeline("delete", tenant_id=tenant_id)
     with env.endpoints.create_start("delete", tenant_id=tenant_id) as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())
-        if remote_storage_kind is RemoteStorageKind.NOOP:
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-        else:
-            last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+        last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
-            if remote_storage_kind in available_s3_storages():
-                assert_prefix_not_empty(
-                    neon_env_builder,
-                    prefix="/".join(
-                        (
-                            "tenants",
-                            str(tenant_id),
-                        )
-                    ),
-                )
+        if remote_storage_kind in available_s3_storages():
+            assert_prefix_not_empty(
+                neon_env_builder,
+                prefix="/".join(
+                    (
+                        "tenants",
+                        str(tenant_id),
+                    )
+                ),
+            )
 
     ps_http.configure_failpoints((failpoint, "return"))
 
@@ -243,15 +249,9 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
     if check is Check.RETRY_WITH_RESTART:
-        env.pageserver.stop()
-        env.pageserver.start()
+        env.pageserver.restart()
 
-        if (
-            remote_storage_kind is RemoteStorageKind.NOOP
-            and failpoint == "tenant-delete-before-create-local-mark"
-        ):
-            tenant_delete_wait_completed(ps_http, tenant_id, iterations=iterations)
-        elif failpoint in (
+        if failpoint in (
             "tenant-delete-before-shutdown",
             "tenant-delete-before-create-remote-mark",
         ):
@@ -295,6 +295,10 @@ def test_tenant_delete_is_resumed_on_attach(
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env.pageserver.allowed_errors.append(
+        # lucky race with stopping from flushing a layer we fail to schedule any uploads
+        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
+    )
 
     tenant_id = env.initial_tenant
 
@@ -383,6 +387,7 @@ def test_tenant_delete_is_resumed_on_attach(
     assert not tenant_path.exists()
 
     if remote_storage_kind in available_s3_storages():
+        ps_http.deletion_queue_flush(execute=True)
         assert_prefix_empty(
             neon_env_builder,
             prefix="/".join(

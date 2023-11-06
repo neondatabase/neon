@@ -131,6 +131,7 @@ pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // Export some version independent functions that are used outside of this mod
 pub use v14::xlog_utils::encode_logical_message;
+pub use v14::xlog_utils::from_pg_timestamp;
 pub use v14::xlog_utils::get_current_timestamp;
 pub use v14::xlog_utils::to_pg_timestamp;
 pub use v14::xlog_utils::XLogFileName;

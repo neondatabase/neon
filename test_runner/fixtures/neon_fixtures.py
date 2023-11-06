@@ -37,6 +37,7 @@ from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
+from urllib3.util.retry import Retry
 
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
@@ -59,6 +60,7 @@ from fixtures.utils import (
     allure_attach_from_dir,
     get_self_dir,
     subprocess_capture,
+    wait_until,
 )
 
 """
@@ -460,9 +462,11 @@ class NeonEnvBuilder:
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
 
-    def init_configs(self) -> NeonEnv:
+    def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
+        if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
+            self.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
         self.env = NeonEnv(self)
         return self.env
 
@@ -470,8 +474,19 @@ class NeonEnvBuilder:
         assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
-    def init_start(self, initial_tenant_conf: Optional[Dict[str, str]] = None) -> NeonEnv:
-        env = self.init_configs()
+    def init_start(
+        self,
+        initial_tenant_conf: Optional[Dict[str, str]] = None,
+        default_remote_storage_if_missing: bool = True,
+    ) -> NeonEnv:
+        """
+        Default way to create and start NeonEnv. Also creates the initial_tenant with root initial_timeline.
+
+        To avoid creating initial_tenant, call init_configs to setup the environment.
+
+        Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
+        """
+        env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
         self.start()
 
         # Prepare the default branch to start the postgres on later.
@@ -546,7 +561,7 @@ class NeonEnvBuilder:
         user: RemoteStorageUser,
         bucket_name: Optional[str] = None,
         bucket_region: Optional[str] = None,
-    ) -> Optional[RemoteStorage]:
+    ) -> RemoteStorage:
         ret = kind.configure(
             self.repo_dir,
             self.mock_s3_server,
@@ -611,6 +626,8 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
 
             for pageserver in self.env.pageservers:
+                pageserver.assert_no_metric_errors()
+
                 pageserver.stop(immediate=True)
 
             if self.env.attachment_service is not None:
@@ -889,6 +906,8 @@ def _shared_simple_env(
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
      is set, this is shared by all tests using `neon_simple_env`.
+
+    This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
 
     if os.environ.get("TEST_SHARED_FIXTURES") is None:
@@ -1069,15 +1088,32 @@ class AbstractNeonCli(abc.ABC):
             stderr=subprocess.PIPE,
             timeout=timeout,
         )
+
+        indent = "  "
         if not res.returncode:
-            log.info(f"Run {res.args} success: {res.stdout}")
+            stripped = res.stdout.strip()
+            lines = stripped.splitlines()
+            if len(lines) < 2:
+                log.debug(f"Run {res.args} success: {stripped}")
+            else:
+                log.debug("Run %s success:\n%s" % (res.args, textwrap.indent(stripped, indent)))
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
-            msg = f"""\
-            Run {res.args} failed:
-              stdout: {res.stdout}
-              stderr: {res.stderr}
+            indent = indent * 2
+            msg = textwrap.dedent(
+                """\
+            Run %s failed:
+              stdout:
+            %s
+              stderr:
+            %s
             """
+            )
+            msg = msg % (
+                res.args,
+                textwrap.indent(res.stdout.strip(), indent),
+                textwrap.indent(res.stderr.strip(), indent),
+            )
             log.info(msg)
             raise RuntimeError(msg) from subprocess.CalledProcessError(
                 res.returncode, res.args, res.stdout, res.stderr
@@ -1411,6 +1447,20 @@ class NeonCli(AbstractNeonCli):
         res.check_returncode()
         return res
 
+    def endpoint_reconfigure(
+        self,
+        endpoint_id: str,
+        tenant_id: Optional[TenantId] = None,
+        pageserver_id: Optional[int] = None,
+        check_return_code=True,
+    ) -> "subprocess.CompletedProcess[str]":
+        args = ["endpoint", "reconfigure", endpoint_id]
+        if tenant_id is not None:
+            args.extend(["--tenant-id", str(tenant_id)])
+        if pageserver_id is not None:
+            args.extend(["--pageserver-id", str(pageserver_id)])
+        return self.raw_cli(args, check_return_code=check_return_code)
+
     def endpoint_stop(
         self,
         endpoint_id: str,
@@ -1430,6 +1480,29 @@ class NeonCli(AbstractNeonCli):
             args.append(endpoint_id)
 
         return self.raw_cli(args, check_return_code=check_return_code)
+
+    def map_branch(
+        self, name: str, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> "subprocess.CompletedProcess[str]":
+        """
+        Map tenant id and timeline id to a neon_local branch name. They do not have to exist.
+        Usually needed when creating branches via PageserverHttpClient and not neon_local.
+
+        After creating a name mapping, you can use EndpointFactory.create_start
+        with this registered branch name.
+        """
+        args = [
+            "mappings",
+            "map",
+            "--branch-name",
+            name,
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+        ]
+
+        return self.raw_cli(args, check_return_code=True)
 
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)
@@ -1480,6 +1553,16 @@ class NeonAttachmentService:
             self.env.neon_cli.attachment_service_stop(immediate)
             self.running = False
         return self
+
+    def attach_hook(self, tenant_id: TenantId, pageserver_id: int) -> int:
+        response = requests.post(
+            f"{self.env.control_plane_api}/attach-hook",
+            json={"tenant_id": str(tenant_id), "node_id": pageserver_id},
+        )
+        response.raise_for_status()
+        gen = response.json()["gen"]
+        assert isinstance(gen, int)
+        return gen
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -1550,22 +1633,24 @@ class NeonPageserver(PgProtocol):
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
             ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
-            ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
+            ".*compaction_loop.*Compaction failed.*, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             ".*task iteration took longer than the configured period.*",
             # this is until #3501
-            ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
+            ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
             # these can happen anytime we do compactions from background task and shutdown pageserver
             r".*ERROR.*ancestor timeline \S+ is being stopped",
             # this is expected given our collaborative shutdown approach for the UploadQueue
-            ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
+            ".*Compaction failed.*, retrying in .*: queue is in state Stopped.*",
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
             # these can happen during shutdown, but it should not be a reason to fail a test
             ".*completed, took longer than expected.*",
-            '.*registered custom resource manager "neon".*',
+            # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
+            # and it is not a failure of our code when it happens.
+            ".*DeleteObjects.*We encountered an internal error. Please try again.*",
         ]
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
@@ -1611,6 +1696,40 @@ class NeonPageserver(PgProtocol):
             self.running = False
         return self
 
+    def restart(self, immediate: bool = False):
+        """
+        High level wrapper for restart: restarts the process, and waits for
+        tenant state to stabilize.
+        """
+        self.stop(immediate=immediate)
+        self.start()
+        self.quiesce_tenants()
+
+    def quiesce_tenants(self):
+        """
+        Wait for all tenants to enter a stable state (Active or Broken)
+
+        Call this after restarting the pageserver, or after attaching a tenant,
+        to ensure that it is ready for use.
+        """
+
+        stable_states = {"Active", "Broken"}
+
+        client = self.http_client()
+
+        def complete():
+            log.info("Checking tenants...")
+            tenants = client.tenant_list()
+            log.info(f"Tenant list: {tenants}...")
+            any_unstable = any((t["state"]["slug"] not in stable_states) for t in tenants)
+            if any_unstable:
+                for t in tenants:
+                    log.info(f"Waiting for tenant {t['id']} in state {t['state']['slug']}")
+            log.info(f"any_unstable={any_unstable}")
+            assert not any_unstable
+
+        wait_until(20, 0.5, complete)
+
     def __enter__(self) -> "NeonPageserver":
         return self
 
@@ -1626,11 +1745,14 @@ class NeonPageserver(PgProtocol):
         if '"testing"' not in self.version:
             pytest.skip("pageserver was built without 'testing' feature")
 
-    def http_client(self, auth_token: Optional[str] = None) -> PageserverHttpClient:
+    def http_client(
+        self, auth_token: Optional[str] = None, retries: Optional[Retry] = None
+    ) -> PageserverHttpClient:
         return PageserverHttpClient(
             port=self.service_port.http,
             auth_token=auth_token,
             is_testing_enabled_or_skip=self.is_testing_enabled_or_skip,
+            retries=retries,
         )
 
     @property
@@ -1647,6 +1769,11 @@ class NeonPageserver(PgProtocol):
                 break
 
             if error_or_warn.search(line):
+                # Is this a torn log line?  This happens when force-killing a process and restarting
+                # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+                if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                    continue
+
                 # It's an ERROR or WARN. Is it in the allow-list?
                 for a in self.allowed_errors:
                     if re.match(a, line):
@@ -1658,6 +1785,21 @@ class NeonPageserver(PgProtocol):
             log.info(f"not allowed error: {error.strip()}")
 
         assert not errors
+
+    def assert_no_metric_errors(self):
+        """
+        Certain metrics should _always_ be zero: they track conditions that indicate a bug.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics check on pageserver {self.id}, it is not running")
+            return
+
+        for metric in [
+            "pageserver_tenant_manager_unexpected_errors_total",
+            "pageserver_deletion_queue_unexpected_errors_total",
+        ]:
+            value = self.http_client().get_metric_value(metric)
+            assert value == 0, f"Nonzero {metric} == {value}"
 
     def log_contains(self, pattern: str) -> Optional[str]:
         """Check that the pageserver log contains a line that matches the given regex"""
@@ -1689,12 +1831,7 @@ class NeonPageserver(PgProtocol):
         to call into the pageserver HTTP client.
         """
         if self.env.attachment_service is not None:
-            response = requests.post(
-                f"{self.env.control_plane_api}/attach_hook",
-                json={"tenant_id": str(tenant_id), "pageserver_id": self.id},
-            )
-            response.raise_for_status()
-            generation = response.json()["gen"]
+            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
         else:
             generation = None
 
@@ -2428,6 +2565,10 @@ class Endpoint(PgProtocol):
 
         return self
 
+    def reconfigure(self, pageserver_id: Optional[int] = None):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
+
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""
         # Read config
@@ -2691,6 +2832,20 @@ class Safekeeper:
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
 
+    def timeline_dir(self, tenant_id, timeline_id) -> str:
+        return os.path.join(self.data_dir(), str(tenant_id), str(timeline_id))
+
+    def list_segments(self, tenant_id, timeline_id) -> List[str]:
+        """
+        Get list of segment names of the given timeline.
+        """
+        tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        segments = []
+        for _, _, filenames in os.walk(tli_dir):
+            segments.extend([f for f in filenames if f != "safekeeper.control"])
+        segments.sort()
+        return segments
+
 
 @dataclass
 class SafekeeperTimelineStatus:
@@ -2730,7 +2885,7 @@ class SafekeeperHttpClient(requests.Session):
         params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
-        res_json = res.json()
+        res_json = json.loads(res.text)
         assert isinstance(res_json, dict)
         return res_json
 
@@ -2830,24 +2985,33 @@ class S3Scrubber:
         self.env = env
         self.log_dir = log_dir
 
-    def scrubber_cli(self, args, timeout):
+    def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
 
         env = {
             "REGION": s3_storage.bucket_region,
             "BUCKET": s3_storage.bucket_name,
+            "BUCKET_PREFIX": s3_storage.prefix_in_bucket,
+            "RUST_LOG": "DEBUG",
         }
         env.update(s3_storage.access_env_vars())
 
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [self.env.neon_binpath / "s3_scrubber"]
+        base_args = [str(self.env.neon_binpath / "s3_scrubber")]
         args = base_args + args
 
-        (output_path, _, status_code) = subprocess_capture(
-            self.log_dir, args, echo_stderr=True, echo_stdout=True, env=env, check=False
+        (output_path, stdout, status_code) = subprocess_capture(
+            self.log_dir,
+            args,
+            echo_stderr=True,
+            echo_stdout=True,
+            env=env,
+            check=False,
+            capture_stdout=True,
+            timeout=timeout,
         )
         if status_code:
             log.warning(f"Scrub command {args} failed")
@@ -2856,8 +3020,18 @@ class S3Scrubber:
 
             raise RuntimeError("Remote storage scrub failed")
 
-    def scan_metadata(self):
-        self.scrubber_cli(["scan-metadata"], timeout=30)
+        assert stdout is not None
+        return stdout
+
+    def scan_metadata(self) -> Any:
+        stdout = self.scrubber_cli(["scan-metadata", "--json"], timeout=30)
+
+        try:
+            return json.loads(stdout)
+        except:
+            log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
+            log.error(stdout)
+            raise
 
 
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
@@ -3053,6 +3227,22 @@ def check_restored_datadir_content(
             subprocess.run([cmd], stdout=stdout_f, shell=True)
 
     assert (mismatch, error) == ([], [])
+
+
+def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+    """Wait logical replication subscriber to sync with publisher."""
+    publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    while True:
+        res = subscriber.safe_psql("select latest_end_lsn from pg_catalog.pg_stat_subscription")[0][
+            0
+        ]
+        if res:
+            log.info(f"subscriber_lsn={res}")
+            subscriber_lsn = Lsn(res)
+            log.info(f"Subscriber LSN={subscriber_lsn}, publisher LSN={ publisher_lsn}")
+            if subscriber_lsn >= publisher_lsn:
+                return subscriber_lsn
+        time.sleep(0.5)
 
 
 def wait_for_last_flush_lsn(

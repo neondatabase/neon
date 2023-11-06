@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// See docs/rfcs/025-generation-numbers.md for detail on how generation
 /// numbers are used.
-#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Generation {
     // Generations with this magic value will not add a suffix to S3 keys, and will not
     // be included in persisted index_part.json.  This value is only to be used
@@ -87,6 +87,22 @@ impl Generation {
             }
             Self::None => Self::None,
             Self::Broken => panic!("Attempted to use a broken generation"),
+        }
+    }
+
+    pub fn next(&self) -> Generation {
+        match self {
+            Self::Valid(n) => Self::Valid(*n + 1),
+            Self::None => Self::Valid(1),
+            Self::Broken => panic!("Attempted to use a broken generation"),
+        }
+    }
+
+    pub fn into(self) -> Option<u32> {
+        if let Self::Valid(v) = self {
+            Some(v)
+        } else {
+            None
         }
     }
 }

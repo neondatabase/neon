@@ -10,11 +10,12 @@ use crate::repository::{Key, Value};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
+use crate::tenant::Timeline;
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
@@ -28,7 +29,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use tokio::sync::RwLock;
 
-use super::{DeltaLayer, DeltaLayerWriter, Layer};
+use super::{DeltaLayerWriter, ResidentLayer};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
@@ -207,20 +208,6 @@ impl InMemoryLayer {
     }
 }
 
-#[async_trait::async_trait]
-impl Layer for InMemoryLayer {
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        self.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
-            .await
-    }
-}
-
 impl std::fmt::Display for InMemoryLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let end_lsn = self.end_lsn_or_max();
@@ -229,17 +216,13 @@ impl std::fmt::Display for InMemoryLayer {
 }
 
 impl InMemoryLayer {
-    ///
     /// Get layer size.
-    ///
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
         Ok(inner.file.len())
     }
 
-    ///
     /// Create a new, empty, in-memory layer
-    ///
     pub async fn create(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
@@ -331,7 +314,11 @@ impl InMemoryLayer {
     /// Write this frozen in-memory layer to disk.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub(crate) async fn write_to_disk(&self, ctx: &RequestContext) -> Result<DeltaLayer> {
+    pub(crate) async fn write_to_disk(
+        &self,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> Result<ResidentLayer> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -358,14 +345,19 @@ impl InMemoryLayer {
 
         let cursor = inner.file.block_cursor();
 
-        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
-        keys.sort_by_key(|k| k.0);
+        // Sort the keys because delta layer writer expects them sorted.
+        //
+        // NOTE: this sort can take up significant time if the layer has millions of
+        //       keys. To speed up all the comparisons we convert the key to i128 and
+        //       keep the value as a reference.
+        let mut keys: Vec<_> = inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect();
+        keys.sort_unstable_by_key(|k| k.0);
 
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
         for (key, vec_map) in keys.iter() {
-            let key = **key;
+            let key = Key::from_i128(*key);
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
@@ -376,7 +368,8 @@ impl InMemoryLayer {
             }
         }
 
-        let delta_layer = delta_layer_writer.finish(Key::MAX).await?;
+        // MAX is used here because we identify L0 layers by full key range
+        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline).await?;
         Ok(delta_layer)
     }
 }

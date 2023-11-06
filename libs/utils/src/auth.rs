@@ -2,14 +2,13 @@
 
 use serde;
 use std::fs;
-use std::path::Path;
 
 use anyhow::Result;
+use camino::Utf8Path;
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 
 use crate::id::TenantId;
 
@@ -32,11 +31,9 @@ pub enum Scope {
 }
 
 /// JWT payload. See docs/authentication.md for the format
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Claims {
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub tenant_id: Option<TenantId>,
     pub scope: Scope,
 }
@@ -65,7 +62,7 @@ impl JwtAuth {
         }
     }
 
-    pub fn from_key_path(key_path: &Path) -> Result<Self> {
+    pub fn from_key_path(key_path: &Utf8Path) -> Result<Self> {
         let public_key = fs::read(key_path)?;
         Ok(Self::new(DecodingKey::from_ed_pem(&public_key)?))
     }

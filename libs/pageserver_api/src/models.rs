@@ -6,10 +6,11 @@ use std::{
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use strum_macros;
 use utils::{
     completion,
+    generation::Generation,
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
@@ -109,7 +110,6 @@ impl TenantState {
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
             // tenant mgr startup distinguishes attaching from loading via marker file.
-            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
             Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
@@ -174,25 +174,19 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub new_timeline_id: TimelineId,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_start_lsn: Option<Lsn>,
     pub pg_version: Option<u32>,
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub new_tenant_id: TenantId,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,7 +195,6 @@ pub struct TenantCreateRequest {
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[serde_as]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLoadRequest {
@@ -218,6 +211,8 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
+/// An alternative representation of `pageserver::tenant::TenantConf` with
+/// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
@@ -243,21 +238,59 @@ pub struct TenantConfig {
     pub gc_feedback: Option<bool>,
 }
 
-#[serde_as]
+/// A flattened analog of a `pagesever::tenant::LocationMode`, which
+/// lists out all possible states (and the virtual "Detached" state)
+/// in a flat form rather than using rust-style enums.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LocationConfigMode {
+    AttachedSingle,
+    AttachedMulti,
+    AttachedStale,
+    Secondary,
+    Detached,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfigSecondary {
+    pub warm: bool,
+}
+
+/// An alternative representation of `pageserver::tenant::LocationConf`,
+/// for use in external-facing APIs.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfig {
+    pub mode: LocationConfigMode,
+    /// If attaching, in what generation?
+    #[serde(default)]
+    pub generation: Option<Generation>,
+    #[serde(default)]
+    pub secondary_conf: Option<LocationConfigSecondary>,
+
+    // If requesting mode `Secondary`, configuration for that.
+    // Custom storage configuration for the tenant, if any
+    pub tenant_conf: TenantConfig,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub TenantId);
+pub struct TenantCreateResponse(pub TenantId);
 
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
 }
 
-#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLocationConfigRequest {
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
@@ -329,10 +362,8 @@ pub enum TenantAttachmentStatus {
     Failed { reason: String },
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
-    #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
     // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
@@ -343,28 +374,24 @@ pub struct TenantInfo {
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
 
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
     pub last_record_lsn: Lsn,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub prev_record_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
     pub latest_gc_cutoff_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
+
+    /// The LSN that we have succesfully uploaded to remote storage
     pub remote_consistent_lsn: Lsn,
+
+    /// The LSN that we are advertizing to safekeepers
+    pub remote_consistent_lsn_visible: Lsn,
+
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
@@ -374,7 +401,6 @@ pub struct TimelineInfo {
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
@@ -471,23 +497,13 @@ pub struct LayerAccessStats {
     pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
 }
 
-#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
-    Open {
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_start: Lsn,
-    },
-    Frozen {
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_start: Lsn,
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_end: Lsn,
-    },
+    Open { lsn_start: Lsn },
+    Frozen { lsn_start: Lsn, lsn_end: Lsn },
 }
 
-#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum HistoricLayerInfo {
@@ -495,9 +511,7 @@ pub enum HistoricLayerInfo {
         layer_file_name: String,
         layer_file_size: u64,
 
-        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
-        #[serde_as(as = "DisplayFromStr")]
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
@@ -506,7 +520,6 @@ pub enum HistoricLayerInfo {
         layer_file_name: String,
         layer_file_size: u64,
 
-        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,

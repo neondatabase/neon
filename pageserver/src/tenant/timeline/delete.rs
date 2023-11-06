@@ -14,8 +14,10 @@ use utils::{
 
 use crate::{
     config::PageServerConf,
+    deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
+        debug_assert_current_span_has_tenant_and_timeline_id,
         metadata::TimelineMetadata,
         remote_timeline_client::{
             self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
@@ -29,6 +31,11 @@ use super::{Timeline, TimelineResources};
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+    // Notify any timeline work to drop out of loops/requests
+    tracing::debug!("Cancelling CancellationToken");
+    timeline.cancel.cancel();
+
     // Stop the walreceiver first.
     debug!("waiting for wal receiver to shutdown");
     let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
@@ -36,6 +43,14 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
         walreceiver.stop().await;
     }
     debug!("wal receiver shutdown confirmed");
+
+    // Shut down the layer flush task before the remote client, as one depends on the other
+    task_mgr::shutdown_tasks(
+        Some(TaskKind::LayerFlushTask),
+        Some(timeline.tenant_id),
+        Some(timeline.timeline_id),
+    )
+    .await;
 
     // Prevent new uploads from starting.
     if let Some(remote_client) = timeline.remote_client.as_ref() {
@@ -65,6 +80,11 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
             "failpoint: timeline-delete-before-index-deleted-at"
         ))?
     });
+
+    tracing::debug!("Waiting for gate...");
+    timeline.gate.close().await;
+    tracing::debug!("Shutdown complete");
+
     Ok(())
 }
 
@@ -293,6 +313,7 @@ async fn cleanup_remaining_timeline_fs_traces(
     // Remove delete mark
     tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_id, timeline_id))
         .await
+        .or_else(fs_ext::ignore_not_found)
         .context("remove delete mark")
 }
 
@@ -407,6 +428,7 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: Option<RemoteTimelineClient>,
+        deletion_queue_client: DeletionQueueClient,
         init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
@@ -416,7 +438,10 @@ impl DeleteTimelineFlow {
                 timeline_id,
                 local_metadata,
                 None, // Ancestor is not needed for deletion.
-                TimelineResources { remote_client },
+                TimelineResources {
+                    remote_client,
+                    deletion_queue_client,
+                },
                 init_order,
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.

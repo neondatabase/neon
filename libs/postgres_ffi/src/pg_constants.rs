@@ -220,6 +220,10 @@ pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 
+/* From replication/slot.h */
+pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
+   + 64 /* NameData */  + 4*4;
+
 /* From fsm_internals.h */
 const FSM_NODES_PER_PAGE: usize = BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA - 4;
 const FSM_NON_LEAF_NODES_PER_PAGE: usize = BLCKSZ as usize / 2 - 1;

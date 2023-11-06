@@ -2,14 +2,19 @@
 //! Management HTTP API
 //!
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use futures::TryFutureExt;
+use humantime::format_rfc3339;
+use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest, TenantLoadRequest,
+    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
+    TenantLoadRequest, TenantLocationConfigRequest,
 };
 use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -24,17 +29,19 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::{
-    GetTenantError, SetNewTenantConfigError, TenantMapInsertError, TenantStateError,
+    GetTenantError, SetNewTenantConfigError, TenantMapError, TenantMapInsertError, TenantSlotError,
+    TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::Timeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
@@ -61,6 +68,7 @@ pub struct State {
     remote_storage: Option<GenericRemoteStorage>,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
+    deletion_queue_client: DeletionQueueClient,
 }
 
 impl State {
@@ -70,8 +78,9 @@ impl State {
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
+        deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<Self> {
-        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
+        let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
             .map(|v| v.parse().unwrap())
             .collect::<Vec<_>>();
@@ -82,7 +91,16 @@ impl State {
             remote_storage,
             broker_client,
             disk_usage_eviction_state,
+            deletion_queue_client,
         })
+    }
+
+    fn tenant_resources(&self) -> TenantSharedResources {
+        TenantSharedResources {
+            broker_client: self.broker_client.clone(),
+            remote_storage: self.remote_storage.clone(),
+            deletion_queue_client: self.deletion_queue_client.clone(),
+        }
     }
 }
 
@@ -119,11 +137,9 @@ impl From<PageReconstructError> for ApiError {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
             PageReconstructError::AncestorStopping(_) => {
-                ApiError::InternalServerError(anyhow::Error::new(pre))
+                ApiError::ResourceUnavailable(format!("{pre}").into())
             }
-            PageReconstructError::WalRedo(pre) => {
-                ApiError::InternalServerError(anyhow::Error::new(pre))
-            }
+            PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
 }
@@ -131,13 +147,46 @@ impl From<PageReconstructError> for ApiError {
 impl From<TenantMapInsertError> for ApiError {
     fn from(tmie: TenantMapInsertError) -> ApiError {
         match tmie {
-            TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
-                ApiError::InternalServerError(anyhow::Error::new(tmie))
+            TenantMapInsertError::SlotError(e) => e.into(),
+            TenantMapInsertError::SlotUpsertError(e) => e.into(),
+            TenantMapInsertError::Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
+impl From<TenantSlotError> for ApiError {
+    fn from(e: TenantSlotError) -> ApiError {
+        use TenantSlotError::*;
+        match e {
+            NotFound(tenant_id) => {
+                ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
-            TenantMapInsertError::TenantAlreadyExists(id, state) => {
-                ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
+            e @ (AlreadyExists(_, _) | Conflict(_)) => ApiError::Conflict(format!("{e}")),
+            InProgress => {
+                ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
             }
-            TenantMapInsertError::Closure(e) => ApiError::InternalServerError(e),
+            MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<TenantSlotUpsertError> for ApiError {
+    fn from(e: TenantSlotUpsertError) -> ApiError {
+        use TenantSlotUpsertError::*;
+        match e {
+            InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
+            MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<TenantMapError> for ApiError {
+    fn from(e: TenantMapError) -> ApiError {
+        use TenantMapError::*;
+        match e {
+            StillInitializing | ShuttingDown => {
+                ApiError::ResourceUnavailable(format!("{e}").into())
+            }
         }
     }
 }
@@ -145,8 +194,12 @@ impl From<TenantMapInsertError> for ApiError {
 impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
-            TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            _ => ApiError::InternalServerError(anyhow::Error::new(tse)),
+            TenantStateError::IsStopping(_) => {
+                ApiError::ResourceUnavailable("Tenant is stopping".into())
+            }
+            TenantStateError::SlotError(e) => e.into(),
+            TenantStateError::SlotUpsertError(e) => e.into(),
+            TenantStateError::Other(e) => ApiError::InternalServerError(anyhow!(e)),
         }
     }
 }
@@ -155,15 +208,19 @@ impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
             GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
-            e @ GetTenantError::NotActive(_) => {
+            GetTenantError::Broken(reason) => {
+                ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
+            }
+            GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
                 // in fact exist locally. If we did, the caller could draw the conclusion
                 // that it can attach the tenant to another PS and we'd be in split-brain.
                 //
                 // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
-                ApiError::InternalServerError(anyhow::Error::new(e))
+                ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
+            GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
         }
     }
 }
@@ -218,6 +275,9 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
             Get(g) => ApiError::from(g),
             e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
             Timeline(t) => ApiError::from(t),
+            NotAttached => ApiError::NotFound(anyhow::anyhow!("Tenant is not attached").into()),
+            SlotError(e) => e.into(),
+            SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
         }
@@ -283,7 +343,12 @@ async fn build_timeline_info_common(
     };
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
-    let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+    let remote_consistent_lsn_projected = timeline
+        .get_remote_consistent_lsn_projected()
+        .unwrap_or(Lsn(0));
+    let remote_consistent_lsn_visible = timeline
+        .get_remote_consistent_lsn_visible()
+        .unwrap_or(Lsn(0));
 
     let walreceiver_status = timeline.walreceiver_status();
 
@@ -293,7 +358,8 @@ async fn build_timeline_info_common(
         ancestor_timeline_id,
         ancestor_lsn,
         disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
-        remote_consistent_lsn,
+        remote_consistent_lsn: remote_consistent_lsn_projected,
+        remote_consistent_lsn_visible,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
@@ -338,7 +404,7 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)?;
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -363,6 +429,12 @@ async fn timeline_create_handler(
                     format!("{err:#}")
                 ))
             }
+            Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
+                json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg(e.to_string()))
+            }
+            Err(tenant::CreateTimelineError::ShuttingDown) => {
+                json_response(StatusCode::SERVICE_UNAVAILABLE,HttpErrorBody::from_msg("tenant shutting down".to_string()))
+            }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
@@ -382,7 +454,7 @@ async fn timeline_list_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let response_data = async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)?;
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
@@ -421,7 +493,7 @@ async fn timeline_detail_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let timeline_info = async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -451,6 +523,8 @@ async fn get_lsn_by_timestamp_handler(
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let version: Option<u8> = parse_query_param(&request, "version")?;
+
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
@@ -462,13 +536,57 @@ async fn get_lsn_by_timestamp_handler(
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
 
-    let result = match result {
-        LsnForTimestamp::Present(lsn) => format!("{lsn}"),
-        LsnForTimestamp::Future(_lsn) => "future".into(),
-        LsnForTimestamp::Past(_lsn) => "past".into(),
-        LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-    };
-    json_response(StatusCode::OK, result)
+    if version.unwrap_or(0) > 1 {
+        #[derive(serde::Serialize)]
+        struct Result {
+            lsn: Lsn,
+            kind: &'static str,
+        }
+        let (lsn, kind) = match result {
+            LsnForTimestamp::Present(lsn) => (lsn, "present"),
+            LsnForTimestamp::Future(lsn) => (lsn, "future"),
+            LsnForTimestamp::Past(lsn) => (lsn, "past"),
+            LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
+        };
+        json_response(StatusCode::OK, Result { lsn, kind })
+    } else {
+        // FIXME: this is a temporary crutch not to break backwards compatibility
+        // See https://github.com/neondatabase/neon/pull/5608
+        let result = match result {
+            LsnForTimestamp::Present(lsn) => format!("{lsn}"),
+            LsnForTimestamp::Future(_lsn) => "future".into(),
+            LsnForTimestamp::Past(_lsn) => "past".into(),
+            LsnForTimestamp::NoData(_lsn) => "nodata".into(),
+        };
+        json_response(StatusCode::OK, result)
+    }
+}
+
+async fn get_timestamp_of_lsn_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let lsn_str = must_get_query_param(&request, "lsn")?;
+    let lsn = Lsn::from_str(&lsn_str)
+        .with_context(|| format!("Invalid LSN: {lsn_str:?}"))
+        .map_err(ApiError::BadRequest)?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let result = timeline.get_timestamp_for_lsn(lsn, &ctx).await?;
+
+    match result {
+        Some(time) => {
+            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            json_response(StatusCode::OK, time)
+        }
+        None => json_response(StatusCode::NOT_FOUND, ()),
+    }
 }
 
 async fn tenant_attach_handler(
@@ -492,23 +610,22 @@ async fn tenant_attach_handler(
 
     let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
 
-    if let Some(remote_storage) = &state.remote_storage {
-        mgr::attach_tenant(
-            state.conf,
-            tenant_id,
-            generation,
-            tenant_conf,
-            state.broker_client.clone(),
-            remote_storage.clone(),
-            &ctx,
-        )
-        .instrument(info_span!("tenant_attach", %tenant_id))
-        .await?;
-    } else {
+    if state.remote_storage.is_none() {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
         )));
     }
+
+    mgr::attach_tenant(
+        state.conf,
+        tenant_id,
+        generation,
+        tenant_conf,
+        state.tenant_resources(),
+        &ctx,
+    )
+    .instrument(info_span!("tenant_attach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -540,9 +657,14 @@ async fn tenant_detach_handler(
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
-        .instrument(info_span!("tenant_detach", %tenant_id))
-        .await?;
+    mgr::detach_tenant(
+        conf,
+        tenant_id,
+        detach_ignored.unwrap_or(false),
+        &state.deletion_queue_client,
+    )
+    .instrument(info_span!("tenant_detach", %tenant_id))
+    .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -570,6 +692,7 @@ async fn tenant_load_handler(
         generation,
         state.broker_client.clone(),
         state.remote_storage.clone(),
+        state.deletion_queue_client.clone(),
         &ctx,
     )
     .instrument(info_span!("load", %tenant_id))
@@ -603,8 +726,9 @@ async fn tenant_list_handler(
     let response_data = mgr::list_tenants()
         .instrument(info_span!("tenant_list"))
         .await
-        .map_err(anyhow::Error::new)
-        .map_err(ApiError::InternalServerError)?
+        .map_err(|_| {
+            ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
+        })?
         .iter()
         .map(|(id, state)| TenantInfo {
             id: *id,
@@ -625,7 +749,7 @@ async fn tenant_status(
     check_permission(&request, Some(tenant_id))?;
 
     let tenant_info = async {
-        let tenant = mgr::get_tenant(tenant_id, false).await?;
+        let tenant = mgr::get_tenant(tenant_id, false)?;
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -688,7 +812,7 @@ async fn tenant_size_handler(
     let headers = request.headers();
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_id, true).await?;
+    let tenant = mgr::get_tenant(tenant_id, true)?;
 
     // this can be long operation
     let inputs = tenant
@@ -701,6 +825,10 @@ async fn tenant_size_handler(
         .map_err(ApiError::InternalServerError)?;
 
     let mut sizes = None;
+    let accepts_html = headers
+        .get(header::ACCEPT)
+        .map(|v| v == "text/html")
+        .unwrap_or_default();
     if !inputs_only.unwrap_or(false) {
         let storage_model = inputs
             .calculate_model()
@@ -708,21 +836,19 @@ async fn tenant_size_handler(
         let size = storage_model.calculate();
 
         // If request header expects html, return html
-        if headers["Accept"] == "text/html" {
+        if accepts_html {
             return synthetic_size_html_response(inputs, storage_model, size);
         }
         sizes = Some(size);
-    } else if headers["Accept"] == "text/html" {
+    } else if accepts_html {
         return Err(ApiError::BadRequest(anyhow!(
             "inputs_only parameter is incompatible with html output request"
         )));
     }
 
     /// The type resides in the pageserver not to expose `ModelInputs`.
-    #[serde_with::serde_as]
     #[derive(serde::Serialize)]
     struct TenantHistorySize {
-        #[serde_as(as = "serde_with::DisplayFromStr")]
         id: TenantId,
         /// Size is a mixture of WAL and logical size, so the unit is bytes.
         ///
@@ -863,7 +989,7 @@ fn synthetic_size_html_response(
 pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>, ApiError> {
     let response = Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/html")
+        .header(header::CONTENT_TYPE, "text/html")
         .body(Body::from(data.as_bytes().to_vec()))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
@@ -911,8 +1037,7 @@ async fn tenant_create_handler(
         tenant_conf,
         target_tenant_id,
         generation,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
+        state.tenant_resources(),
         &ctx,
     )
     .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
@@ -944,7 +1069,7 @@ async fn get_tenant_config_handler(
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, false).await?;
+    let tenant = mgr::get_tenant(tenant_id, false)?;
 
     let response = HashMap::from([
         (
@@ -983,6 +1108,56 @@ async fn update_tenant_config_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn put_tenant_location_config_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
+    let tenant_id = request_data.tenant_id;
+    check_permission(&request, Some(tenant_id))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
+    let conf = state.conf;
+
+    // The `Detached` state is special, it doesn't upsert a tenant, it removes
+    // its local disk content and drops it from memory.
+    if let LocationConfigMode::Detached = request_data.config.mode {
+        if let Err(e) = mgr::detach_tenant(conf, tenant_id, true, &state.deletion_queue_client)
+            .instrument(info_span!("tenant_detach", %tenant_id))
+            .await
+        {
+            match e {
+                TenantStateError::SlotError(TenantSlotError::NotFound(_)) => {
+                    // This API is idempotent: a NotFound on a detach is fine.
+                }
+                _ => return Err(e.into()),
+            }
+        }
+        return json_response(StatusCode::OK, ());
+    }
+
+    let location_conf =
+        LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
+
+    mgr::upsert_location(
+        state.conf,
+        tenant_id,
+        location_conf,
+        state.broker_client.clone(),
+        state.remote_storage.clone(),
+        state.deletion_queue_client.clone(),
+        &ctx,
+    )
+    .await
+    // TODO: badrequest assumes the caller was asking for something unreasonable, but in
+    // principle we might have hit something like concurrent API calls to the same tenant,
+    // which is not a 400 but a 409.
+    .map_err(ApiError::BadRequest)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
 async fn handle_tenant_break(
     r: Request<Body>,
@@ -991,7 +1166,6 @@ async fn handle_tenant_break(
     let tenant_id: TenantId = parse_request_param(&r, "tenant_id")?;
 
     let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
-        .await
         .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
 
     tenant.set_broken("broken from test".to_owned()).await;
@@ -1064,7 +1238,7 @@ async fn timeline_compact_handler(
         timeline
             .compact(&cancel, &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_compaction", %tenant_id, %timeline_id))
@@ -1089,7 +1263,7 @@ async fn timeline_checkpoint_handler(
         timeline
             .compact(&cancel, &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
         json_response(StatusCode::OK, ())
     }
@@ -1129,11 +1303,174 @@ async fn timeline_download_remote_layers_handler_get(
     json_response(StatusCode::OK, info)
 }
 
+async fn deletion_queue_flush(
+    r: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&r);
+
+    if state.remote_storage.is_none() {
+        // Nothing to do if remote storage is disabled.
+        return json_response(StatusCode::OK, ());
+    }
+
+    let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
+
+    let flush = async {
+        if execute {
+            state.deletion_queue_client.flush_execute().await
+        } else {
+            state.deletion_queue_client.flush().await
+        }
+    }
+    // DeletionQueueError's only case is shutting down.
+    .map_err(|_| ApiError::ShuttingDown);
+
+    tokio::select! {
+        res = flush => {
+            res.map(|()| json_response(StatusCode::OK, ()))?
+        }
+        _ = cancel.cancelled() => {
+            Err(ApiError::ShuttingDown)
+        }
+    }
+}
+
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+async fn getpage_at_lsn_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    struct Key(crate::repository::Key);
+
+    impl std::str::FromStr for Key {
+        type Err = anyhow::Error;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            crate::repository::Key::from_hex(s).map(Key)
+        }
+    }
+
+    let key: Key = parse_query_param(&request, "key")?
+        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'key' query parameter")))?;
+    let lsn: Lsn = parse_query_param(&request, "lsn")?
+        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+
+        let page = timeline.get(key.0, lsn, &ctx).await?;
+
+        Result::<_, ApiError>::Ok(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(hyper::Body::from(page))
+                .unwrap(),
+        )
+    }
+    .instrument(info_span!("timeline_get", %tenant_id, %timeline_id))
+    .await
+}
+
+async fn timeline_collect_keyspace(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    struct Partitioning {
+        keys: crate::keyspace::KeySpace,
+
+        at_lsn: Lsn,
+    }
+
+    impl serde::Serialize for Partitioning {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_key("keys")?;
+            map.serialize_value(&KeySpace(&self.keys))?;
+            map.serialize_key("at_lsn")?;
+            map.serialize_value(&WithDisplay(&self.at_lsn))?;
+            map.end()
+        }
+    }
+
+    struct WithDisplay<'a, T>(&'a T);
+
+    impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.collect_str(&self.0)
+        }
+    }
+
+    struct KeySpace<'a>(&'a crate::keyspace::KeySpace);
+
+    impl<'a> serde::Serialize for KeySpace<'a> {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(Some(self.0.ranges.len()))?;
+            for kr in &self.0.ranges {
+                seq.serialize_element(&KeyRange(kr))?;
+            }
+            seq.end()
+        }
+    }
+
+    struct KeyRange<'a>(&'a std::ops::Range<crate::repository::Key>);
+
+    impl<'a> serde::Serialize for KeyRange<'a> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeTuple;
+            let mut t = serializer.serialize_tuple(2)?;
+            t.serialize_element(&WithDisplay(&self.0.start))?;
+            t.serialize_element(&WithDisplay(&self.0.end))?;
+            t.end()
+        }
+    }
+
+    let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
+
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+        let at_lsn = at_lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
+        let keys = timeline
+            .collect_keyspace(at_lsn, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        json_response(StatusCode::OK, Partitioning { keys, at_lsn })
+    }
+    .instrument(info_span!("timeline_collect_keyspace", %tenant_id, %timeline_id))
+    .await
+}
+
 async fn active_timeline_of_active_tenant(
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ) -> Result<Arc<Timeline>, ApiError> {
-    let tenant = mgr::get_tenant(tenant_id, true).await?;
+    let tenant = mgr::get_tenant(tenant_id, true)?;
     tenant
         .get_timeline(timeline_id, true)
         .map_err(|e| ApiError::NotFound(e.into()))
@@ -1196,11 +1533,11 @@ async fn disk_usage_eviction_run(
 
     let state = get_state(&r);
 
-    let Some(storage) = state.remote_storage.clone() else {
+    if state.remote_storage.as_ref().is_none() {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
         )));
-    };
+    }
 
     let state = state.disk_usage_eviction_state.clone();
 
@@ -1218,7 +1555,6 @@ async fn disk_usage_eviction_run(
         async move {
             let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
                 &state,
-                &storage,
                 usage,
                 &child_cancel,
             )
@@ -1403,6 +1739,9 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/config", |r| {
             api_handler(r, get_tenant_config_handler)
         })
+        .put("/v1/tenant/:tenant_id/location_config", |r| {
+            api_handler(r, put_tenant_location_config_handler)
+        })
         .get("/v1/tenant/:tenant_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
         })
@@ -1427,6 +1766,10 @@ pub fn make_router(
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
             |r| api_handler(r, get_lsn_by_timestamp_handler),
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/get_timestamp_of_lsn",
+            |r| api_handler(r, get_timestamp_of_lsn_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
             api_handler(r, timeline_gc_handler)
@@ -1463,6 +1806,9 @@ pub fn make_router(
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
         })
+        .put("/v1/deletion_queue/flush", |r| {
+            api_handler(r, deletion_queue_flush)
+        })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
         })
@@ -1470,5 +1816,12 @@ pub fn make_router(
         .post("/v1/tracing/event", |r| {
             testing_api_handler("emit a tracing event", r, post_tracing_event_handler)
         })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/getpage", |r| {
+            testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler)
+        })
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/keyspace",
+            |r| testing_api_handler("read out the keyspace", r, timeline_collect_keyspace),
+        )
         .any(handler_404))
 }
