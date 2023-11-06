@@ -120,9 +120,7 @@ impl AzureBlobStorage {
         while let Some(part) = response.next().await {
             let part = part.map_err(to_download_error)?;
             if let Some(blob_meta) = part.blob.metadata {
-                for (md_key, md_val) in blob_meta.iter() {
-                    metadata.insert(md_key.to_owned(), md_val.to_owned());
-                }
+                metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
             }
             let data = part
                 .data
