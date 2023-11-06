@@ -1875,14 +1875,14 @@ impl Tenant {
 
         // We cancel the Tenant's cancellation token _after_ the timelines have all shut down.  This permits
         // them to continue to do work during their shutdown methods, e.g. flushing data.
-        tracing::info!("Cancelling CancellationToken");
+        tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
         // shutdown all tenant and timeline tasks: gc, compaction, page service
         // No new tasks will be started for this tenant because it's in `Stopping` state.
         //
         // this will additionally shutdown and await all timeline tasks.
-        tracing::info!("Waiting for tasks...");
+        tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
 
         // Wait for any in-flight operations to complete

@@ -892,11 +892,11 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Signal any subscribers to our cancellation token to drop out
-        tracing::info!("Cancelling CancellationToken");
+        tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
         // prevent writes to the InMemoryLayer
-        tracing::info!("Waiting for WalReceiverManager...");
+        tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
             Some(self.tenant_id),
@@ -937,7 +937,7 @@ impl Timeline {
         // while doing so.
         self.last_record_lsn.shutdown();
 
-        tracing::info!("Waiting for tasks...");
+        tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
 
         // Finally wait until any gate-holders are complete
