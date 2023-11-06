@@ -962,6 +962,32 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
     .expect("failed to define a metric")
 });
 
+pub(crate) struct TenantManagerMetrics {
+    pub(crate) tenant_slots: UIntGauge,
+    pub(crate) tenant_slot_writes: IntCounter,
+    pub(crate) unexpected_errors: IntCounter,
+}
+
+pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
+    TenantManagerMetrics {
+    tenant_slots: register_uint_gauge!(
+        "pageserver_tenant_manager_slots",
+        "How many slots currently exist, including all attached, secondary and in-progress operations",
+    )
+    .expect("failed to define a metric"),
+    tenant_slot_writes: register_int_counter!(
+        "pageserver_tenant_manager_slot_writes",
+        "Writes to a tenant slot, including all of create/attach/detach/delete"
+    )
+    .expect("failed to define a metric"),
+    unexpected_errors: register_int_counter!(
+        "pageserver_tenant_manager_unexpected_errors_total",
+        "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
+    )
+    .expect("failed to define a metric"),
+}
+});
+
 pub(crate) struct DeletionQueueMetrics {
     pub(crate) keys_submitted: IntCounter,
     pub(crate) keys_dropped: IntCounter,
@@ -1883,6 +1909,9 @@ pub fn preinitialize_metrics() {
 
     // Deletion queue stats
     Lazy::force(&DELETION_QUEUE);
+
+    // Tenant manager stats
+    Lazy::force(&TENANT_MANAGER);
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]

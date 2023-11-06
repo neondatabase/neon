@@ -14,7 +14,6 @@ use postgres_ffi::XLogSegNo;
 use serde::Deserialize;
 use serde::Serialize;
 
-use serde_with::{serde_as, DisplayFromStr};
 use utils::id::NodeId;
 use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
@@ -136,12 +135,9 @@ pub struct Config {
     pub wal_backup_enabled: bool,
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Timeline {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub control_file: Option<SafeKeeperState>,
     pub memory: Option<Memory>,

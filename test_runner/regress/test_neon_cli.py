@@ -134,6 +134,9 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.pageserver_stop(env.pageserver.id)
     env.neon_cli.safekeeper_stop()
 
+    # Keep NeonEnv state up to date, it usually owns starting/stopping services
+    env.pageserver.running = False
+
     # Default start
     res = env.neon_cli.raw_cli(["start"])
     res.check_returncode()
@@ -154,6 +157,10 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
 
     env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID)
     env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID + 1)
+
+    # Keep NeonEnv state up to date, it usually owns starting/stopping services
+    env.pageservers[0].running = False
+    env.pageservers[1].running = False
 
     # Addressing a nonexistent ID throws
     with pytest.raises(RuntimeError):
