@@ -105,7 +105,7 @@ impl Gate {
 
 #[cfg(test)]
 mod tests {
-    use futures::Future;
+    use futures::FutureExt;
 
     use super::*;
 
@@ -132,13 +132,9 @@ mod tests {
         let guard = gate.enter().unwrap();
 
         let mut close_fut = std::pin::pin!(gate.close());
-        let waker = futures::task::noop_waker_ref();
-        let mut cx = std::task::Context::from_waker(waker);
 
-        assert!(matches!(
-            close_fut.as_mut().poll(&mut cx),
-            std::task::Poll::Pending
-        ));
+        // Close should be blocked
+        assert!(close_fut.as_mut().now_or_never().is_none());
 
         // Attempting to enter() should fail, even though close isn't done yet.
         gate.enter()
@@ -147,10 +143,7 @@ mod tests {
         drop(guard);
 
         // Guard is gone, close should finish
-        assert!(matches!(
-            close_fut.poll(&mut cx),
-            std::task::Poll::Ready(())
-        ));
+        assert!(close_fut.as_mut().now_or_never().is_some());
 
         // Attempting to enter() is still forbidden
         gate.enter().expect_err("enter should fail finishing close");
