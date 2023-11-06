@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod auth;
 pub mod basebackup;
 pub mod config;
