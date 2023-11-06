@@ -161,8 +161,7 @@ impl From<TenantSlotError> for ApiError {
             NotFound(tenant_id) => {
                 ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
-            e @ AlreadyExists(_, _) => ApiError::Conflict(format!("{e}")),
-            e @ Conflict(_) => ApiError::Conflict(format!("{e}")),
+            e @ (AlreadyExists(_, _) | Conflict(_)) => ApiError::Conflict(format!("{e}")),
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
             }

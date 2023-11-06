@@ -381,9 +381,12 @@ impl PageServerHandler {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Make request tracer if needed
-        let tenant =
-            mgr::get_active_tenant_with_timeout(tenant_id, ACTIVE_TENANT_TIMEOUT, &self.cancel)
-                .await?;
+        let tenant = mgr::get_active_tenant_with_timeout(
+            tenant_id,
+            ACTIVE_TENANT_TIMEOUT,
+            &task_mgr::shutdown_token(),
+        )
+        .await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path = tenant
@@ -534,8 +537,12 @@ impl PageServerHandler {
 
         // Create empty timeline
         info!("creating new timeline");
-        let tenant =
-            get_active_tenant_with_timeout(tenant_id, ACTIVE_TENANT_TIMEOUT, &self.cancel).await?;
+        let tenant = get_active_tenant_with_timeout(
+            tenant_id,
+            ACTIVE_TENANT_TIMEOUT,
+            &task_mgr::shutdown_token(),
+        )
+        .await?;
         let timeline = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .await?;
@@ -911,9 +918,13 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
-        let tenant = get_active_tenant_with_timeout(tenant_id, ACTIVE_TENANT_TIMEOUT, &self.cancel)
-            .await
-            .map_err(GetActiveTimelineError::Tenant)?;
+        let tenant = get_active_tenant_with_timeout(
+            tenant_id,
+            ACTIVE_TENANT_TIMEOUT,
+            &task_mgr::shutdown_token(),
+        )
+        .await
+        .map_err(GetActiveTimelineError::Tenant)?;
         let timeline = tenant
             .get_timeline(timeline_id, true)
             .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
@@ -1262,9 +1273,12 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant =
-                get_active_tenant_with_timeout(tenant_id, ACTIVE_TENANT_TIMEOUT, &self.cancel)
-                    .await?;
+            let tenant = get_active_tenant_with_timeout(
+                tenant_id,
+                ACTIVE_TENANT_TIMEOUT,
+                &task_mgr::shutdown_token(),
+            )
+            .await?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
