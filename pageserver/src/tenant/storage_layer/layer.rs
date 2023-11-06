@@ -337,31 +337,39 @@ enum ResidentOrWantedEvicted {
 }
 
 impl ResidentOrWantedEvicted {
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
+    fn get_and_upgrade(&mut self) -> Option<(Arc<DownloadedLayer>, bool)> {
         match self {
-            ResidentOrWantedEvicted::Resident(strong) => Some(strong.clone()),
+            ResidentOrWantedEvicted::Resident(strong) => Some((strong.clone(), false)),
             ResidentOrWantedEvicted::WantedEvicted(weak, _) => match weak.upgrade() {
                 Some(strong) => {
                     LAYER_IMPL_METRICS.inc_raced_wanted_evicted_accesses();
-                    Some(strong)
+
+                    *self = ResidentOrWantedEvicted::Resident(strong.clone());
+
+                    Some((strong, true))
                 }
                 None => None,
             },
         }
     }
+
     /// When eviction is first requested, drop down to holding a [`Weak`].
     ///
-    /// Returns `true` if this was the first time eviction was requested.
-    fn downgrade(&mut self) -> bool {
+    /// Returns `Some` if this was the first time eviction was requested. Care should be taken to
+    /// drop the possibly last strong reference outside of the mutex of
+    /// heavier_once_cell::OnceCell.
+    fn downgrade(&mut self) -> Option<Arc<DownloadedLayer>> {
         match self {
             ResidentOrWantedEvicted::Resident(strong) => {
                 let weak = Arc::downgrade(strong);
-                *self = ResidentOrWantedEvicted::WantedEvicted(weak, strong.version);
-                // returning the weak is not useful, because the drop could had already ran with
-                // the replacement above, and that will take care of cleaning the Option we are in
-                true
+                let mut temp = ResidentOrWantedEvicted::WantedEvicted(weak, strong.version);
+                std::mem::swap(self, &mut temp);
+                match temp {
+                    ResidentOrWantedEvicted::Resident(strong) => Some(strong),
+                    ResidentOrWantedEvicted::WantedEvicted(..) => unreachable!("just swapped"),
+                }
             }
-            ResidentOrWantedEvicted::WantedEvicted(..) => false,
+            ResidentOrWantedEvicted::WantedEvicted(..) => None,
         }
     }
 }
@@ -403,6 +411,10 @@ struct LayerInner {
     version: AtomicUsize,
 
     /// Allow subscribing to when the layer actually gets evicted.
+    ///
+    /// If in future we need to implement "wait until layer instances are gone and done", carrying
+    /// this over to the gc spawn_blocking from LayerInner::drop will do the trick, and adding a
+    /// method for "wait_gc" which will wait to this being closed.
     status: tokio::sync::broadcast::Sender<Status>,
 
     /// Counter for exponential backoff with the download
@@ -553,6 +565,8 @@ impl LayerInner {
         }
     }
 
+    /// Cancellation safe, however dropping the future and calling this method again might result
+    /// in a new attempt to evict OR join the previously started attempt.
     pub(crate) async fn evict_and_wait(
         &self,
         _: &RemoteTimelineClient,
@@ -563,18 +577,20 @@ impl LayerInner {
 
         let mut rx = self.status.subscribe();
 
-        let res =
-            self.wanted_evicted
-                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed);
+        let strong = {
+            match self.inner.get() {
+                Some(mut either) => {
+                    self.wanted_evicted.store(true, Ordering::Relaxed);
+                    either.downgrade()
+                }
+                None => return Err(EvictionError::NotFound),
+            }
+        };
 
-        if res.is_ok() {
+        if strong.is_some() {
+            // drop the DownloadedLayer outside of the holding the guard
+            drop(strong);
             LAYER_IMPL_METRICS.inc_started_evictions();
-        }
-
-        if self.get().is_none() {
-            // it was not evictable in the first place
-            // our store to the wanted_evicted does not matter; it will be reset by next download
-            return Err(EvictionError::NotFound);
         }
 
         match rx.recv().await {
@@ -590,7 +606,8 @@ impl LayerInner {
                 //
                 // use however late (compared to the initial expressing of wanted) as the
                 // "outcome" now
-                match self.get() {
+                LAYER_IMPL_METRICS.inc_broadcast_lagged();
+                match self.inner.get() {
                     Some(_) => Err(EvictionError::Downloaded),
                     None => Ok(()),
                 }
@@ -598,15 +615,17 @@ impl LayerInner {
         }
     }
 
-    /// Should be cancellation safe, but cancellation is troublesome together with the spawned
-    /// download.
+    /// Cancellation safe.
+    #[tracing::instrument(skip_all, fields(layer=%self))]
     async fn get_or_maybe_download(
         self: &Arc<Self>,
         allow_download: bool,
         ctx: Option<&RequestContext>,
     ) -> Result<Arc<DownloadedLayer>, DownloadError> {
+        let mut init_permit = None;
+
         loop {
-            let download = move || async move {
+            let download = move |permit| async move {
                 // disable any scheduled but not yet running eviction deletions for this
                 let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
@@ -627,7 +646,11 @@ impl LayerInner {
                     .await
                     .map_err(DownloadError::PreStatFailed)?;
 
-                if let Some(reason) = needs_download {
+                let permit = if let Some(reason) = needs_download {
+                    if let NeedsDownload::NotFile(ft) = reason {
+                        return Err(DownloadError::NotFile(ft));
+                    }
+
                     // only reset this after we've decided we really need to download. otherwise it'd
                     // be impossible to mark cancelled downloads for eviction, like one could imagine
                     // we would like to do for prefetching which was not needed.
@@ -636,8 +659,6 @@ impl LayerInner {
                     if !can_ever_evict {
                         return Err(DownloadError::NoRemoteStorage);
                     }
-
-                    tracing::debug!(%reason, "downloading layer");
 
                     if let Some(ctx) = ctx {
                         self.check_expected_download(ctx)?;
@@ -649,12 +670,16 @@ impl LayerInner {
                         return Err(DownloadError::DownloadRequired);
                     }
 
-                    self.spawn_download_and_wait(timeline).await?;
+                    tracing::info!(%reason, "downloading on-demand");
+
+                    self.spawn_download_and_wait(timeline, permit).await?
                 } else {
                     // the file is present locally, probably by a previous but cancelled call to
                     // get_or_maybe_download. alternatively we might be running without remote storage.
                     LAYER_IMPL_METRICS.inc_init_needed_no_download();
-                }
+
+                    permit
+                };
 
                 let res = Arc::new(DownloadedLayer {
                     owner: Arc::downgrade(self),
@@ -667,19 +692,60 @@ impl LayerInner {
                     LayerResidenceEventReason::ResidenceChange,
                 );
 
-                Ok(ResidentOrWantedEvicted::Resident(res))
+                let waiters = self.inner.initializer_count();
+                if waiters > 0 {
+                    tracing::info!(waiters, "completing the on-demand download for other tasks");
+                }
+
+                Ok((ResidentOrWantedEvicted::Resident(res), permit))
             };
 
-            let locked = self.inner.get_or_init(download).await?;
-
-            if let Some(strong) = Self::get_or_apply_evictedness(Some(locked), &self.wanted_evicted)
-            {
+            if let Some(init_permit) = init_permit.take() {
+                // use the already held initialization permit because it is impossible to hit the
+                // below paths anymore essentially limiting the max loop iterations to 2.
+                let (value, init_permit) = download(init_permit).await?;
+                let mut guard = self.inner.set(value, init_permit);
+                let (strong, _upgraded) = guard
+                    .get_and_upgrade()
+                    .expect("init creates strong reference, we held the init permit");
                 return Ok(strong);
             }
 
-            // the situation in which we might need to retry is that our init was ready
-            // immediatedly, but the DownloadedLayer had been dropped BUT failed to complete
-            // Self::evict_blocking
+            let (weak, permit) = {
+                let mut locked = self.inner.get_or_init(download).await?;
+
+                if let Some((strong, upgraded)) = locked.get_and_upgrade() {
+                    if upgraded {
+                        // when upgraded back, the Arc<DownloadedLayer> is still available, but
+                        // previously a `evict_and_wait` was received.
+                        self.wanted_evicted.store(false, Ordering::Relaxed);
+
+                        // error out any `evict_and_wait`
+                        drop(self.status.send(Status::Downloaded));
+                        LAYER_IMPL_METRICS
+                            .inc_eviction_cancelled(EvictionCancelled::UpgradedBackOnAccess);
+                    }
+
+                    return Ok(strong);
+                } else {
+                    // path to here: the evict_blocking is stuck on spawn_blocking queue.
+                    //
+                    // reset the contents, deactivating the eviction and causing a
+                    // EvictionCancelled::LostToDownload or EvictionCancelled::VersionCheckFailed.
+                    locked.take_and_deinit()
+                }
+            };
+
+            // unlock first, then drop the weak, but because upgrade failed, we
+            // know it cannot be a problem.
+
+            assert!(
+                matches!(weak, ResidentOrWantedEvicted::WantedEvicted(..)),
+                "unexpected {weak:?}, ResidentOrWantedEvicted::get_and_upgrade has a bug"
+            );
+
+            init_permit = Some(permit);
+
             LAYER_IMPL_METRICS.inc_retried_get_or_maybe_download();
         }
     }
@@ -691,8 +757,8 @@ impl LayerInner {
         match b {
             Download => Ok(()),
             Warn | Error => {
-                tracing::warn!(
-                    "unexpectedly on-demand downloading remote layer {self} for task kind {:?}",
+                tracing::info!(
+                    "unexpectedly on-demand downloading for task kind {:?}",
                     ctx.task_kind()
                 );
                 crate::metrics::UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
@@ -714,14 +780,17 @@ impl LayerInner {
     async fn spawn_download_and_wait(
         self: &Arc<Self>,
         timeline: Arc<Timeline>,
-    ) -> Result<(), DownloadError> {
+        permit: heavier_once_cell::InitPermit,
+    ) -> Result<heavier_once_cell::InitPermit, DownloadError> {
         let task_name = format!("download layer {}", self);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
+
         // this is sadly needed because of task_mgr::shutdown_tasks, otherwise we cannot
         // block tenant::mgr::remove_tenant_from_memory.
 
         let this: Arc<Self> = self.clone();
+
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
@@ -730,6 +799,7 @@ impl LayerInner {
             &task_name,
             false,
             async move {
+
                 let client = timeline
                     .remote_client
                     .as_ref()
@@ -751,9 +821,9 @@ impl LayerInner {
                     }
                 };
 
-                if let Err(res) = tx.send(result) {
+                if let Err(res) = tx.send((result, permit)) {
                     match res {
-                        Ok(()) => {
+                        (Ok(()), _) => {
                             // our caller is cancellation safe so this is fine; if someone
                             // else requests the layer, they'll find it already downloaded
                             // or redownload.
@@ -764,7 +834,7 @@ impl LayerInner {
                             tracing::info!("layer file download completed after requester had cancelled");
                             LAYER_IMPL_METRICS.inc_download_completed_without_requester();
                         },
-                        Err(e) => {
+                        (Err(e), _) => {
                             // our caller is cancellation safe, but we might be racing with
                             // another attempt to initialize. before we have cancellation
                             // token support: these attempts should converge regardless of
@@ -780,7 +850,7 @@ impl LayerInner {
             .in_current_span(),
         );
         match rx.await {
-            Ok(Ok(())) => {
+            Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
                     .needs_download()
                     .await
@@ -791,10 +861,12 @@ impl LayerInner {
                 }
 
                 self.consecutive_failures.store(0, Ordering::Relaxed);
+                tracing::info!("on-demand download successful");
 
-                Ok(())
+                Ok(permit)
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _permit)) => {
+                // FIXME: this should be with the spawned task and be cancellation sensitive
                 let consecutive_failures =
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
@@ -810,33 +882,6 @@ impl LayerInner {
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }
-    }
-
-    /// Access the current state without waiting for the file to be downloaded.
-    ///
-    /// Requires that we've initialized to state which is respective to the
-    /// actual residency state.
-    fn get(&self) -> Option<Arc<DownloadedLayer>> {
-        let locked = self.inner.get();
-        Self::get_or_apply_evictedness(locked, &self.wanted_evicted)
-    }
-
-    fn get_or_apply_evictedness(
-        guard: Option<heavier_once_cell::Guard<'_, ResidentOrWantedEvicted>>,
-        wanted_evicted: &AtomicBool,
-    ) -> Option<Arc<DownloadedLayer>> {
-        if let Some(mut x) = guard {
-            if let Some(won) = x.get() {
-                // there are no guarantees that we will always get to observe a concurrent call
-                // to evict
-                if wanted_evicted.load(Ordering::Acquire) {
-                    x.downgrade();
-                }
-                return Some(won);
-            }
-        }
-
-        None
     }
 
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
@@ -858,7 +903,7 @@ impl LayerInner {
     fn is_file_present_and_good_size(&self, m: &std::fs::Metadata) -> Result<(), NeedsDownload> {
         // in future, this should include sha2-256 validation of the file.
         if !m.is_file() {
-            Err(NeedsDownload::NotFile)
+            Err(NeedsDownload::NotFile(m.file_type()))
         } else if m.len() != self.desc.file_size {
             Err(NeedsDownload::WrongSize {
                 actual: m.len(),
@@ -872,7 +917,9 @@ impl LayerInner {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
-        let remote = self.get().is_none();
+        // this is not accurate: we could have the file locally but there was a cancellation
+        // and now we are not in sync, or we are currently downloading it.
+        let remote = self.inner.get().is_none();
 
         let access_stats = self.access_stats.as_api_model(reset);
 
@@ -1007,11 +1054,14 @@ impl LayerInner {
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("failed to evict file from disk, it was already gone");
+                tracing::error!(
+                    layer_size = %self.desc.file_size,
+                    "failed to evict layer from disk, it was already gone (metrics will be inaccurate)"
+                );
                 Err(EvictionCancelled::FileNotFound)
             }
             Err(e) => {
-                tracing::warn!("failed to evict file from disk: {e:#}");
+                tracing::error!("failed to evict file from disk: {e:#}");
                 Err(EvictionCancelled::RemoveFailed)
             }
         };
@@ -1055,6 +1105,8 @@ enum DownloadError {
     ContextAndConfigReallyDeniesDownloads,
     #[error("downloading is really required but not allowed by this method")]
     DownloadRequired,
+    #[error("layer path exists, but it is not a file: {0:?}")]
+    NotFile(std::fs::FileType),
     /// Why no error here? Because it will be reported by page_service. We should had also done
     /// retries already.
     #[error("downloading evicted layer file failed")]
@@ -1070,7 +1122,7 @@ enum DownloadError {
 #[derive(Debug, PartialEq)]
 pub(crate) enum NeedsDownload {
     NotFound,
-    NotFile,
+    NotFile(std::fs::FileType),
     WrongSize { actual: u64, expected: u64 },
 }
 
@@ -1078,7 +1130,7 @@ impl std::fmt::Display for NeedsDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NeedsDownload::NotFound => write!(f, "file was not found"),
-            NeedsDownload::NotFile => write!(f, "path is not a file"),
+            NeedsDownload::NotFile(ft) => write!(f, "path is not a file; {ft:?}"),
             NeedsDownload::WrongSize { actual, expected } => {
                 write!(f, "file size mismatch {actual} vs. {expected}")
             }
@@ -1089,6 +1141,8 @@ impl std::fmt::Display for NeedsDownload {
 /// Existence of `DownloadedLayer` means that we have the file locally, and can later evict it.
 pub(crate) struct DownloadedLayer {
     owner: Weak<LayerInner>,
+    // Use tokio OnceCell as we do not need to deinitialize this, it'll just get dropped with the
+    // DownloadedLayer
     kind: tokio::sync::OnceCell<anyhow::Result<LayerKind>>,
     version: usize,
 }
@@ -1132,7 +1186,6 @@ impl DownloadedLayer {
                 "these are the same, just avoiding the upgrade"
             );
 
-            // there is nothing async here, but it should be async
             let res = if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_id,
@@ -1231,6 +1284,8 @@ impl std::fmt::Debug for ResidentLayer {
 
 impl ResidentLayer {
     /// Release the eviction guard, converting back into a plain [`Layer`].
+    ///
+    /// You can access the [`Layer`] also by using `as_ref`.
     pub(crate) fn drop_eviction_guard(self) -> Layer {
         self.into()
     }
@@ -1286,7 +1341,7 @@ impl AsRef<Layer> for ResidentLayer {
     }
 }
 
-/// Allow slimming down if we don't want the `2*usize` with eviction candidates?
+/// Drop the eviction guard.
 impl From<ResidentLayer> for Layer {
     fn from(value: ResidentLayer) -> Self {
         value.owner
@@ -1456,6 +1511,13 @@ impl LayerImplMetrics {
             .unwrap()
             .inc();
     }
+
+    fn inc_broadcast_lagged(&self) {
+        self.rare_counters
+            .get_metric_with_label_values(&["broadcast_lagged"])
+            .unwrap()
+            .inc();
+    }
 }
 
 enum EvictionCancelled {
@@ -1467,6 +1529,8 @@ enum EvictionCancelled {
     AlreadyReinitialized,
     /// Not evicted because of a pending reinitialization
     LostToDownload,
+    /// After eviction, there was a new layer access which cancelled the eviction.
+    UpgradedBackOnAccess,
 }
 
 impl EvictionCancelled {
@@ -1479,6 +1543,7 @@ impl EvictionCancelled {
             EvictionCancelled::RemoveFailed => "remove_failed",
             EvictionCancelled::AlreadyReinitialized => "already_reinitialized",
             EvictionCancelled::LostToDownload => "lost_to_download",
+            EvictionCancelled::UpgradedBackOnAccess => "upgraded_back_on_access",
         }
     }
 }

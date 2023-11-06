@@ -155,7 +155,7 @@ pub struct IndexLayerMetadata {
 
     #[serde(default = "Generation::none")]
     #[serde(skip_serializing_if = "Generation::is_none")]
-    pub(super) generation: Generation,
+    pub generation: Generation,
 }
 
 impl From<LayerFileMetadata> for IndexLayerMetadata {
