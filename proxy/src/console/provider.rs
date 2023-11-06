@@ -9,7 +9,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::{sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::info;
 
