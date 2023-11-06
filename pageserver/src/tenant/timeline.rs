@@ -2936,13 +2936,10 @@ struct CompactLevel0Phase1StatsBuilder {
     new_deltas_size: Option<u64>,
 }
 
-#[serde_as]
 #[derive(serde::Serialize)]
 struct CompactLevel0Phase1Stats {
     version: u64,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     tenant_id: TenantId,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_spawn_blocking_startup_micros: RecordedDuration,

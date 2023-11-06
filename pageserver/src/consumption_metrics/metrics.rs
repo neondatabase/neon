@@ -3,7 +3,6 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
-use serde_with::serde_as;
 use std::{sync::Arc, time::SystemTime};
 use utils::{
     id::{TenantId, TimelineId},
@@ -42,13 +41,10 @@ pub(super) enum Name {
 ///
 /// This is a denormalization done at the MetricsKey const methods; these should not be constructed
 /// elsewhere.
-#[serde_with::serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MetricsKey {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub(super) tenant_id: TenantId,
 
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) timeline_id: Option<TimelineId>,
 

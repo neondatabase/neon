@@ -24,6 +24,10 @@ pub mod auth;
 
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
+
+mod hex;
+pub use hex::Hex;
+
 // http endpoint utils
 pub mod http;
 

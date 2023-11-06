@@ -29,7 +29,6 @@ use tenant_size_model::{Segment, StorageModel};
 /// needs. We will convert this into a StorageModel when it's time to perform
 /// the calculation.
 ///
-#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModelInputs {
     pub segments: Vec<SegmentMeta>,
@@ -37,11 +36,9 @@ pub struct ModelInputs {
 }
 
 /// A [`Segment`], with some extra information for display purposes
-#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SegmentMeta {
     pub segment: Segment,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub kind: LsnKind,
 }
@@ -77,32 +74,22 @@ pub enum LsnKind {
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
 /// part of [`ModelInputs`] from the HTTP api, explaining the inputs.
-#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TimelineInputs {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
 
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     pub ancestor_id: Option<TimelineId>,
 
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     ancestor_lsn: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     latest_gc_cutoff: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     horizon_cutoff: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pitr_cutoff: Lsn,
 
     /// Cutoff point based on GC settings
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     next_gc_cutoff: Lsn,
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     retention_param_cutoff: Option<Lsn>,
 }
 

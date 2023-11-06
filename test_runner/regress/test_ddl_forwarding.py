@@ -72,7 +72,7 @@ class DdlForwardingContext:
         self.dbs: Dict[str, str] = {}
         self.roles: Dict[str, str] = {}
         self.fail = False
-        endpoint = "/management/api/v2/roles_and_databases"
+        endpoint = "/test/roles_and_databases"
         ddl_url = f"http://{host}:{port}{endpoint}"
         self.pg.configure(
             [

@@ -17,7 +17,6 @@ use pageserver_api::models::{
     TenantLoadRequest, TenantLocationConfigRequest,
 };
 use remote_storage::GenericRemoteStorage;
-use serde_with::{serde_as, DisplayFromStr};
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -499,10 +498,8 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
 
     if version.unwrap_or(0) > 1 {
-        #[serde_as]
         #[derive(serde::Serialize)]
         struct Result {
-            #[serde_as(as = "DisplayFromStr")]
             lsn: Lsn,
             kind: &'static str,
         }
@@ -811,10 +808,8 @@ async fn tenant_size_handler(
     }
 
     /// The type resides in the pageserver not to expose `ModelInputs`.
-    #[serde_with::serde_as]
     #[derive(serde::Serialize)]
     struct TenantHistorySize {
-        #[serde_as(as = "serde_with::DisplayFromStr")]
         id: TenantId,
         /// Size is a mixture of WAL and logical size, so the unit is bytes.
         ///
