@@ -1,6 +1,6 @@
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
-use crate::{config::MetricCollectionConfig, http};
+use crate::{config::MetricCollectionConfig, console::messages::arcstr, http};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -29,8 +29,10 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct Ids {
-    pub endpoint_id: String,
-    pub branch_id: String,
+    #[serde(with = "arcstr")]
+    pub endpoint_id: Arc<str>,
+    #[serde(with = "arcstr")]
+    pub branch_id: Arc<str>,
 }
 
 #[derive(Debug)]
@@ -290,8 +292,8 @@ mod tests {
 
         // register a new counter
         let counter = metrics.register(Ids {
-            endpoint_id: "e1".to_string(),
-            branch_id: "b1".to_string(),
+            endpoint_id: "e1".into(),
+            branch_id: "b1".into(),
         });
 
         // the counter should be observed despite 0 egress

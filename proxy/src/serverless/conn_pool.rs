@@ -482,8 +482,8 @@ async fn connect_to_compute_once(
         info!(%conn_info, %session, "new connection");
     });
     let ids = Ids {
-        endpoint_id: node_info.aux.endpoint_id.to_string(),
-        branch_id: node_info.aux.branch_id.to_string(),
+        endpoint_id: node_info.aux.endpoint_id.clone(),
+        branch_id: node_info.aux.branch_id.clone(),
     };
 
     tokio::spawn(
