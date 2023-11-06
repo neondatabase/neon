@@ -8,7 +8,9 @@ use crate::{
     compute, scram,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub mod errors {
     use crate::{
@@ -231,4 +233,68 @@ pub trait Api {
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
+}
+
+/// Various caches for [`console`](super).
+pub struct ApiLocks {
+    /// Locks for the `wake_compute` API method.
+    pub node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
+    pub permits: usize,
+}
+
+impl ApiLocks {
+    pub async fn get_wake_compute_permit(&self, key: &Arc<str>) -> WakeComputePermit {
+        if self.permits == 0 {
+            return WakeComputePermit { permit: None };
+        }
+        let semaphore = {
+            // get fast path
+            if let Some(semaphore) = self.node_locks.get(key) {
+                semaphore.clone()
+            } else {
+                self.node_locks
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Semaphore::new(self.permits)))
+                    .clone()
+            }
+        };
+        WakeComputePermit {
+            permit: Some(
+                semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("the semaphore should never be closed"),
+            ),
+        }
+    }
+
+    pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {
+        if self.permits == 0 {
+            return;
+        }
+
+        let mut interval = tokio::time::interval(epoch / (self.node_locks.shards().len()) as u32);
+        loop {
+            for shard in self.node_locks.shards() {
+                interval.tick().await;
+                // temporary lock a single shard and then clear any semaphores that aren't currently checked out
+                // race conditions: if strong_count == 1, there's no way that it can increase while the shard is locked
+                // therefore releasing it is safe from race conditions
+                shard
+                    .write()
+                    .retain(|_, semaphore| Arc::strong_count(semaphore.get_mut()) > 1)
+            }
+        }
+    }
+}
+
+pub struct WakeComputePermit {
+    // None if the lock is disabled
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl WakeComputePermit {
+    pub fn should_check_cache(&self) -> bool {
+        self.permit.is_some()
+    }
 }
