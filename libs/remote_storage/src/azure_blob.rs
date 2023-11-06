@@ -1,5 +1,6 @@
 //! Azure Blob Storage wrapper
 
+use std::collections::HashMap;
 use std::env;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -108,16 +109,21 @@ impl AzureBlobStorage {
 
     async fn download_for_builder(
         &self,
-        metadata: Option<StorageMetadata>,
         builder: GetBlobBuilder,
     ) -> Result<Download, DownloadError> {
         let mut response = builder.into_stream();
 
+        let mut metadata = HashMap::new();
         // TODO give proper streaming response instead of buffering into RAM
         // https://github.com/neondatabase/neon/issues/5563
         let mut buf = Vec::new();
         while let Some(part) = response.next().await {
             let part = part.map_err(to_download_error)?;
+            if let Some(blob_meta) = part.blob.metadata {
+                for (md_key, md_val) in blob_meta.iter() {
+                    metadata.insert(md_key.to_owned(), md_val.to_owned());
+                }
+            }
             let data = part
                 .data
                 .collect()
@@ -127,7 +133,7 @@ impl AzureBlobStorage {
         }
         Ok(Download {
             download_stream: Box::pin(Cursor::new(buf)),
-            metadata,
+            metadata: Some(StorageMetadata(metadata)),
         })
     }
 
@@ -246,10 +252,9 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
-        let metadata = None;
         let builder = blob_client.get();
 
-        self.download_for_builder(metadata, builder).await
+        self.download_for_builder(builder).await
     }
 
     async fn download_byte_range(
@@ -261,7 +266,6 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Get).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
-        let metadata = None;
         let mut builder = blob_client.get();
 
         if let Some(end_exclusive) = end_exclusive {
@@ -276,7 +280,7 @@ impl RemoteStorage for AzureBlobStorage {
             builder = builder.range(Range::new(start_inclusive, end_exclusive));
         }
 
-        self.download_for_builder(metadata, builder).await
+        self.download_for_builder(builder).await
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {

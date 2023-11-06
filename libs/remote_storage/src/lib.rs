@@ -218,9 +218,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
 pub struct Download {
     pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send + Sync>>,
     /// Extra key-value data, associated with the current remote file.
-    /// crate-local because it is never read,
-    /// and Azure blob storage doesn't return any metadata.
-    metadata: Option<StorageMetadata>,
+    pub metadata: Option<StorageMetadata>,
 }
 
 impl Debug for Download {
