@@ -80,6 +80,27 @@ pub enum Outcome {
     Overload,
 }
 
+impl Outcome {
+    fn from_reqwest_error(error: &reqwest_middleware::Error) -> Self {
+        match error {
+            reqwest_middleware::Error::Middleware(_) => Outcome::Success,
+            reqwest_middleware::Error::Reqwest(e) => {
+                if let Some(status) = e.status() {
+                    if status.is_server_error()
+                        || reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16() == status
+                    {
+                        Outcome::Overload
+                    } else {
+                        Outcome::Success
+                    }
+                } else {
+                    Outcome::Success
+                }
+            }
+        }
+    }
+}
+
 impl<T> Limiter<T>
 where
     T: LimitAlgorithm,
@@ -341,11 +362,21 @@ impl<T: LimitAlgorithm + Send + Sync + 'static> reqwest_middleware::Middleware f
         extensions: &mut task_local_extensions::Extensions,
         next: reqwest_middleware::Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
-        let _token = self
+        let token = self
             .acquire_timeout(Duration::from_secs(1)) // TODO
             .await
             .ok_or_else(|| anyhow::Error::msg("Too many concurrent requests"))?;
-        next.run(req, extensions).await
+        match next.run(req, extensions).await {
+            Ok(result) => {
+                self.release(token, Some(Outcome::Success)).await;
+                Ok(result)
+            }
+            Err(e) => {
+                self.release(token, Some(Outcome::from_reqwest_error(&e)))
+                    .await;
+                Err(e)
+            }
+        }
     }
 }
 
