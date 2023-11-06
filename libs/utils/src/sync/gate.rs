@@ -85,6 +85,13 @@ impl Gate {
         warn_if_stuck(self.do_close(), &self.name, Duration::from_millis(1000)).await
     }
 
+    /// Check if [`Self::close()`] has finished waiting for all [`Self::enter()`] users to finish.  This
+    /// is usually analoguous for "Did shutdown finish?" for types that include a Gate, whereas checking
+    /// the CancellationToken on such types is analogous to "Did shutdown start?"
+    pub fn close_complete(&self) -> bool {
+        self.sem.is_closed()
+    }
+
     async fn do_close(&self) {
         tracing::debug!(gate = self.name, "Closing Gate...");
         match self.sem.acquire_many(Self::MAX_UNITS).await {
