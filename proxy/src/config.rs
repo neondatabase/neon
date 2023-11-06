@@ -354,17 +354,29 @@ mod tests {
 
     #[test]
     fn test_parse_lock_options() -> anyhow::Result<()> {
-        let WakeComputeLockOptions { epoch, permits, shards } = "shards=32,permits=4,epoch=10m".parse()?;
-        assert_eq!(epoch, Duration::from_secs(10*60));
+        let WakeComputeLockOptions {
+            epoch,
+            permits,
+            shards,
+        } = "shards=32,permits=4,epoch=10m".parse()?;
+        assert_eq!(epoch, Duration::from_secs(10 * 60));
         assert_eq!(shards, 32);
         assert_eq!(permits, 4);
 
-        let WakeComputeLockOptions { epoch, permits, shards } = "epoch=60s,shards=16,permits=8".parse()?;
+        let WakeComputeLockOptions {
+            epoch,
+            permits,
+            shards,
+        } = "epoch=60s,shards=16,permits=8".parse()?;
         assert_eq!(epoch, Duration::from_secs(60));
         assert_eq!(shards, 16);
         assert_eq!(permits, 8);
 
-        let WakeComputeLockOptions { epoch, permits, shards } = "permits=0".parse()?;
+        let WakeComputeLockOptions {
+            epoch,
+            permits,
+            shards,
+        } = "permits=0".parse()?;
         assert_eq!(epoch, Duration::ZERO);
         assert_eq!(shards, 1);
         assert_eq!(permits, 0);

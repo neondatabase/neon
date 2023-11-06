@@ -1,4 +1,3 @@
-use dashmap::DashMap;
 use futures::future::Either;
 use proxy::auth;
 use proxy::config::AuthenticationConfig;
@@ -230,10 +229,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 epoch,
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(console::locks::ApiLocks {
-                node_locks: DashMap::with_shard_amount(shards),
-                permits,
-            }));
+            let locks = Box::leak(Box::new(
+                console::locks::ApiLocks::new("wake_compute_lock", permits, shards).unwrap(),
+            ));
             tokio::spawn(locks.garbage_collect_worker(epoch));
 
             let url = args.auth_endpoint.parse()?;

@@ -9,8 +9,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::info;
 
 pub mod errors {
     use crate::{
@@ -237,12 +238,54 @@ pub struct ApiCaches {
 
 /// Various caches for [`console`](super).
 pub struct ApiLocks {
-    /// Locks for the `wake_compute` API method.
-    pub node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
-    pub permits: usize,
+    name: &'static str,
+    node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
+    permits: usize,
+    registered: prometheus::IntCounter,
+    unregistered: prometheus::IntCounter,
+    reclamation_lag: prometheus::Histogram,
 }
 
 impl ApiLocks {
+    pub fn new(name: &'static str, permits: usize, shards: usize) -> prometheus::Result<Self> {
+        let registered = prometheus::IntCounter::with_opts(
+            prometheus::Opts::new(
+                "semaphores_registered",
+                "Number of semaphores registered in this api lock",
+            )
+            .namespace(name),
+        )?;
+        prometheus::register(Box::new(registered.clone()))?;
+        let unregistered = prometheus::IntCounter::with_opts(
+            prometheus::Opts::new(
+                "semaphores_unregistered",
+                "Number of semaphores unregistered in this api lock",
+            )
+            .namespace(name),
+        )?;
+        prometheus::register(Box::new(unregistered.clone()))?;
+        let reclamation_lag = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                "reclamation_lag_seconds",
+                "Time it takes to reclaim unused semaphores in the api lock",
+            )
+            .namespace(name)
+            // 1us -> 30ms
+            // benchmarks on my mac indicate it's usually in the range of 256us and 512us
+            .buckets(prometheus::exponential_buckets(1e-6, 2.0, 16)?),
+        )?;
+        prometheus::register(Box::new(reclamation_lag.clone()))?;
+
+        Ok(Self {
+            name,
+            node_locks: DashMap::with_shard_amount(shards),
+            permits,
+            registered,
+            unregistered,
+            reclamation_lag,
+        })
+    }
+
     pub async fn get_wake_compute_permit(&self, key: &Arc<str>) -> WakeComputePermit {
         if self.permits == 0 {
             return WakeComputePermit { permit: None };
@@ -254,7 +297,10 @@ impl ApiLocks {
             } else {
                 self.node_locks
                     .entry(key.clone())
-                    .or_insert_with(|| Arc::new(Semaphore::new(self.permits)))
+                    .or_insert_with(|| {
+                        self.registered.inc();
+                        Arc::new(Semaphore::new(self.permits))
+                    })
                     .clone()
             }
         };
@@ -275,14 +321,24 @@ impl ApiLocks {
 
         let mut interval = tokio::time::interval(epoch / (self.node_locks.shards().len()) as u32);
         loop {
-            for shard in self.node_locks.shards() {
+            for (i, shard) in self.node_locks.shards().iter().enumerate() {
                 interval.tick().await;
                 // temporary lock a single shard and then clear any semaphores that aren't currently checked out
                 // race conditions: if strong_count == 1, there's no way that it can increase while the shard is locked
                 // therefore releasing it is safe from race conditions
-                shard
-                    .write()
-                    .retain(|_, semaphore| Arc::strong_count(semaphore.get_mut()) > 1)
+                info!(
+                    name = self.name,
+                    shard = i,
+                    "performing epoch reclamation on api lock"
+                );
+                let mut lock = shard.write();
+                let timer = self.reclamation_lag.start_timer();
+                let count = lock
+                    .extract_if(|_, semaphore| Arc::strong_count(semaphore.get_mut()) == 1)
+                    .count();
+                drop(lock);
+                self.unregistered.inc_by(count as u64);
+                timer.observe_duration()
             }
         }
     }
