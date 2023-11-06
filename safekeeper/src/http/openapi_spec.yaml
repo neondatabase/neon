@@ -250,18 +250,12 @@ components:
       required:
         - target_timeline_id
         - until_lsn
-        - peer_ids
       properties:
         target_timeline_id:
           type: string
           format: hex
         until_lsn:
           type: string
-        peer_ids:
-          type: array
-          items:
-            type: integer
-            minimum: 0
 
     SkTimelineInfo:
       type: object
