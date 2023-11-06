@@ -8,7 +8,6 @@ use anyhow::{bail, ensure, Context};
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -33,7 +32,6 @@ pub const DEFAULT_PG_VERSION: u32 = 15;
 // to 'neon_local init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
-#[serde_as]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
@@ -59,7 +57,6 @@ pub struct LocalEnv {
     // Default tenant ID to use with the 'neon_local' command line utility, when
     // --tenant_id is not explicitly specified.
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub default_tenant_id: Option<TenantId>,
 
     // used to issue tokens during e.g pg start
@@ -84,7 +81,6 @@ pub struct LocalEnv {
     // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
-    #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr)>>")]
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
 }
 

@@ -4,7 +4,6 @@ use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
@@ -67,11 +66,9 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
 
 /// Same as TermLsn, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[serde_as]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TermSwitchApiEntry {
     pub term: Term,
-    #[serde_as(as = "DisplayFromStr")]
     pub lsn: Lsn,
 }
 
@@ -93,28 +90,18 @@ pub struct AcceptorStateStatus {
 }
 
 /// Info about timeline on safekeeper ready for reporting.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineStatus {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub acceptor_state: AcceptorStateStatus,
     pub pg_info: ServerInfo,
-    #[serde_as(as = "DisplayFromStr")]
     pub flush_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_start_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub local_start_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub commit_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub backup_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub peer_horizon_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
     pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,

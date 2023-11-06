@@ -4682,6 +4682,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_assert"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda563240c1288b044209be1f0d38bb4d15044fb3e00dc354fbc922ab4733e80"
+dependencies = [
+ "hashbrown 0.13.2",
+ "serde",
+]
+
+[[package]]
 name = "serde_derive"
 version = "1.0.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5967,6 +5977,7 @@ dependencies = [
  "routerify",
  "sentry",
  "serde",
+ "serde_assert",
  "serde_json",
  "serde_with",
  "signal-hook",

@@ -6,8 +6,6 @@ use tokio::io::AsyncWriteExt;
 use tracing::info;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
-use serde_with::{serde_as, DisplayFromStr};
-
 use crate::{
     control_file, debug_dump,
     http::routes::TimelineStatus,
@@ -16,12 +14,9 @@ use crate::{
 };
 
 /// Info about timeline on safekeeper ready for reporting.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
 }

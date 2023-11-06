@@ -55,6 +55,7 @@ bytes.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 camino-tempfile.workspace = true
+serde_assert.workspace = true
 
 [[bench]]
 name = "benchmarks"
