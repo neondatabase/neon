@@ -86,6 +86,41 @@ paths:
         default:
           $ref: "#/components/responses/GenericError"
 
+  /v1/tenant/{tenant_id}/timeline/{source_timeline_id}/copy:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: source_timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+
+    post:
+      tags:
+      - "Timeline"
+      summary: Register new timeline as copy of existing timeline
+      description: ""
+      operationId: v1CopyTenantTimeline
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TimelineCopyRequest"
+      responses:
+        "201":
+          description: Timeline created
+          # TODO: return timeline info?
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        default:
+          $ref: "#/components/responses/GenericError"
+
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
@@ -209,6 +244,18 @@ components:
           items:
             type: integer
             minimum: 0
+
+    TimelineCopyRequest:
+      type: object
+      required:
+        - target_timeline_id
+        - until_lsn
+      properties:
+        target_timeline_id:
+          type: string
+          format: hex
+        until_lsn:
+          type: string
 
     SkTimelineInfo:
       type: object
