@@ -47,6 +47,7 @@ pq_proto.workspace = true
 remote_storage.workspace = true
 safekeeper_api.workspace = true
 storage_broker.workspace = true
+tokio-stream.workspace = true
 utils.workspace = true
 
 workspace_hack.workspace = true

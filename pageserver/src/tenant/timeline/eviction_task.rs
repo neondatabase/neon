@@ -277,10 +277,7 @@ impl Timeline {
             Some(c) => c,
         };
 
-        let results = match self
-            .evict_layer_batch(remote_client, &candidates, cancel)
-            .await
-        {
+        let results = match self.evict_layer_batch(remote_client, &candidates).await {
             Err(pre_err) => {
                 stats.errors += candidates.len();
                 error!("could not do any evictions: {pre_err:#}");

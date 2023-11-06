@@ -4,7 +4,6 @@ use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
@@ -13,7 +12,12 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use utils::http::endpoint::request_span;
+
+use std::io::Write as _;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::info_span;
+use utils::http::endpoint::{request_span, ChannelWriter};
 
 use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::Term;
@@ -62,11 +66,9 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
 
 /// Same as TermLsn, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[serde_as]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TermSwitchApiEntry {
     pub term: Term,
-    #[serde_as(as = "DisplayFromStr")]
     pub lsn: Lsn,
 }
 
@@ -88,28 +90,18 @@ pub struct AcceptorStateStatus {
 }
 
 /// Info about timeline on safekeeper ready for reporting.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineStatus {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub acceptor_state: AcceptorStateStatus,
     pub pg_info: ServerInfo,
-    #[serde_as(as = "DisplayFromStr")]
     pub flush_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_start_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub local_start_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub commit_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub backup_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub peer_horizon_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
     pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,
@@ -373,8 +365,52 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    // TODO: use streaming response
-    json_response(StatusCode::OK, resp)
+    let started_at = std::time::Instant::now();
+
+    let (tx, rx) = mpsc::channel(1);
+
+    let body = Body::wrap_stream(ReceiverStream::new(rx));
+
+    let mut writer = ChannelWriter::new(128 * 1024, tx);
+
+    let response = Response::builder()
+        .status(200)
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    let span = info_span!("blocking");
+    tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+
+        let res = serde_json::to_writer(&mut writer, &resp)
+            .map_err(std::io::Error::from)
+            .and_then(|_| writer.flush());
+
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "responded /v1/debug_dump"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("failed to write out /v1/debug_dump response: {e:#}");
+                // semantics of this error are quite... unclear. we want to error the stream out to
+                // abort the response to somehow notify the client that we failed.
+                //
+                // though, most likely the reason for failure is that the receiver is already gone.
+                drop(
+                    writer
+                        .tx
+                        .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
+                );
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 /// Safekeeper http router.

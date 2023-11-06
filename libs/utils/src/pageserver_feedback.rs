@@ -3,7 +3,6 @@ use std::time::{Duration, SystemTime};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use pq_proto::{read_cstr, PG_EPOCH};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use tracing::{trace, warn};
 
 use crate::lsn::Lsn;
@@ -15,21 +14,17 @@ use crate::lsn::Lsn;
 ///
 /// serde Serialize is used only for human readable dump to json (e.g. in
 /// safekeepers debug_dump).
-#[serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageserverFeedback {
     /// Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
     /// LSN last received and ingested by the pageserver. Controls backpressure.
-    #[serde_as(as = "DisplayFromStr")]
     pub last_received_lsn: Lsn,
     /// LSN up to which data is persisted by the pageserver to its local disc.
     /// Controls backpressure.
-    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     /// LSN up to which data is persisted by the pageserver on s3; safekeepers
     /// consider WAL before it can be removed.
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
     // Serialize with RFC3339 format.
     #[serde(with = "serde_systemtime")]

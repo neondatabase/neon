@@ -18,7 +18,6 @@ use hex::FromHex;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
-use serde_with::serde_as;
 use thiserror::Error;
 use tokio;
 use tokio_util::sync::CancellationToken;
@@ -215,7 +214,6 @@ where
 /// during recovery as startup.
 const TEMP_SUFFIX: &str = "tmp";
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 struct DeletionList {
     /// Serialization version, for future use
@@ -244,7 +242,6 @@ struct DeletionList {
     validated: bool,
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 struct DeletionHeader {
     /// Serialization version, for future use
