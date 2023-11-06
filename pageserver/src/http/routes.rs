@@ -35,8 +35,8 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::{
-    GetTenantError, SetNewTenantConfigError, TenantMapError, TenantMapInsertError, TenantSlotError,
-    TenantSlotUpsertError, TenantStateError,
+    GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
+    TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -63,6 +63,7 @@ use super::models::ConfigureFailpointsRequest;
 
 pub struct State {
     conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
@@ -74,6 +75,7 @@ pub struct State {
 impl State {
     pub fn new(
         conf: &'static PageServerConf,
+        tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
@@ -86,6 +88,7 @@ impl State {
             .collect::<Vec<_>>();
         Ok(Self {
             conf,
+            tenant_manager,
             auth,
             allowlist_routes,
             remote_storage,
@@ -1140,20 +1143,14 @@ async fn put_tenant_location_config_handler(
     let location_conf =
         LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    mgr::upsert_location(
-        state.conf,
-        tenant_id,
-        location_conf,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
-        state.deletion_queue_client.clone(),
-        &ctx,
-    )
-    .await
-    // TODO: badrequest assumes the caller was asking for something unreasonable, but in
-    // principle we might have hit something like concurrent API calls to the same tenant,
-    // which is not a 400 but a 409.
-    .map_err(ApiError::BadRequest)?;
+    state
+        .tenant_manager
+        .upsert_location(tenant_id, location_conf, &ctx)
+        .await
+        // TODO: badrequest assumes the caller was asking for something unreasonable, but in
+        // principle we might have hit something like concurrent API calls to the same tenant,
+        // which is not a 400 but a 409.
+        .map_err(ApiError::BadRequest)?;
 
     json_response(StatusCode::OK, ())
 }

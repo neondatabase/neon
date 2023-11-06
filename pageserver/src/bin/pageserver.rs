@@ -410,7 +410,7 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
-    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         TenantSharedResources {
             broker_client: broker_client.clone(),
@@ -420,6 +420,7 @@ fn start_pageserver(
         order,
         shutdown_pageserver.clone(),
     ))?;
+    let tenant_manager = Arc::new(tenant_manager);
 
     BACKGROUND_RUNTIME.spawn({
         let init_done_rx = init_done_rx;
@@ -548,6 +549,7 @@ fn start_pageserver(
         let router_state = Arc::new(
             http::routes::State::new(
                 conf,
+                tenant_manager,
                 http_auth.clone(),
                 remote_storage.clone(),
                 broker_client.clone(),
