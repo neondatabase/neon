@@ -341,20 +341,7 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        //
-        // It is critical we are responsive to cancellation here. Otherwise, we deadlock with
-        // tenant deletion (holds TENANTS in read mode) any other task that attempts to
-        // acquire TENANTS in write mode before we here call get_tenant.
-        // See https://github.com/neondatabase/neon/issues/5284.
-        let res = tokio::select! {
-            _ = cancel.cancelled() => {
-                return ControlFlow::Break(());
-            }
-            res = crate::tenant::mgr::get_tenant(self.tenant_id, true) => {
-                res
-            }
-        };
-        let tenant = match res {
+        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_id, true) {
             Ok(t) => t,
             Err(_) => {
                 return ControlFlow::Break(());

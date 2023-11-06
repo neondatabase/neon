@@ -55,6 +55,8 @@ use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
 use self::metadata::LoadMetadataError;
 use self::metadata::TimelineMetadata;
+use self::mgr::GetActiveTenantError;
+use self::mgr::GetTenantError;
 use self::mgr::TenantsMap;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
@@ -263,6 +265,12 @@ pub struct Tenant {
     pub(crate) gate: Gate,
 }
 
+impl std::fmt::Debug for Tenant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.tenant_id, self.current_state())
+    }
+}
+
 pub(crate) enum WalRedoManager {
     Prod(PostgresRedoManager),
     #[cfg(test)]
@@ -364,34 +372,6 @@ impl Debug for SetStoppingError {
         match self {
             Self::AlreadyStopping(_) => f.debug_tuple("AlreadyStopping").finish(),
             Self::Broken => write!(f, "Broken"),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum WaitToBecomeActiveError {
-    WillNotBecomeActive {
-        tenant_id: TenantId,
-        state: TenantState,
-    },
-    TenantDropped {
-        tenant_id: TenantId,
-    },
-}
-
-impl std::fmt::Display for WaitToBecomeActiveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WaitToBecomeActiveError::WillNotBecomeActive { tenant_id, state } => {
-                write!(
-                    f,
-                    "Tenant {} will not become active. Current state: {:?}",
-                    tenant_id, state
-                )
-            }
-            WaitToBecomeActiveError::TenantDropped { tenant_id } => {
-                write!(f, "Tenant {tenant_id} will not become active (dropped)")
-            }
         }
     }
 }
@@ -537,7 +517,7 @@ impl Tenant {
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
         init_order: Option<InitializationOrder>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -1850,6 +1830,7 @@ impl Tenant {
             }
             Err(SetStoppingError::AlreadyStopping(other)) => {
                 // give caller the option to wait for this this shutdown
+                info!("Tenant::shutdown: AlreadyStopping");
                 return Err(other);
             }
         };
@@ -2048,7 +2029,7 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub(crate) async fn wait_to_become_active(&self) -> Result<(), WaitToBecomeActiveError> {
+    pub(crate) async fn wait_to_become_active(&self) -> Result<(), GetActiveTenantError> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
@@ -2056,11 +2037,9 @@ impl Tenant {
                 TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
                     receiver.changed().await.map_err(
-                        |_e: tokio::sync::watch::error::RecvError| {
-                            WaitToBecomeActiveError::TenantDropped {
-                                tenant_id: self.tenant_id,
-                            }
-                        },
+                        |_e: tokio::sync::watch::error::RecvError|
+                            // Tenant existed but was dropped: report it as non-existent
+                            GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_id))
                     )?;
                 }
                 TenantState::Active { .. } => {
@@ -2068,10 +2047,7 @@ impl Tenant {
                 }
                 TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     // There's no chance the tenant can transition back into ::Active
-                    return Err(WaitToBecomeActiveError::WillNotBecomeActive {
-                        tenant_id: self.tenant_id,
-                        state: current_state,
-                    });
+                    return Err(GetActiveTenantError::WillNotBecomeActive(current_state));
                 }
             }
         }
@@ -2137,6 +2113,9 @@ where
 }
 
 impl Tenant {
+    pub fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.read().unwrap().tenant_conf
     }
@@ -4266,11 +4245,7 @@ mod tests {
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness
-            .try_load_local(&ctx)
-            .await
-            .err()
-            .expect("should fail");
+        let err = harness.try_load_local(&ctx).await.expect_err("should fail");
         // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
         let expected = "failed to load metadata";
