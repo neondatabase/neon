@@ -10,6 +10,7 @@
 //!
 use anyhow::Context;
 use pageserver_api::models;
+use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -85,6 +86,11 @@ pub(crate) enum LocationMode {
 /// but have distinct LocationConf.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LocationConf {
+    /// Detailed identity of this TenantShard.  The shard number and count usually
+    /// appear in the keys of maps containing tenants, but it is convenient to also
+    /// store it here.
+    pub(crate) shard: ShardIdentity,
+
     /// The location-specific part of the configuration, describes the operating
     /// mode of this pageserver for this tenant.
     pub(crate) mode: LocationMode,
@@ -156,6 +162,7 @@ impl LocationConf {
     /// possible state.  This function should eventually be removed.
     pub(crate) fn attached_single(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
         Self {
+            shard: ShardIdentity::none(),
             mode: LocationMode::Attached(AttachedLocationConfig {
                 generation,
                 attach_mode: AttachmentMode::Single,
@@ -226,7 +233,21 @@ impl LocationConf {
             }
         };
 
-        Ok(Self { mode, tenant_conf })
+        let shard = if conf.shard_count == 0 {
+            ShardIdentity::none()
+        } else {
+            ShardIdentity::new(
+                ShardNumber(conf.shard_number),
+                ShardCount(conf.shard_count),
+                ShardStripeSize(conf.shard_stripe_size),
+            )
+        };
+
+        Ok(Self {
+            shard,
+            mode,
+            tenant_conf,
+        })
     }
 }
 
@@ -236,6 +257,7 @@ impl Default for LocationConf {
     // => tech debt since https://github.com/neondatabase/neon/issues/1555
     fn default() -> Self {
         Self {
+            shard: ShardIdentity::none(),
             mode: LocationMode::Attached(AttachedLocationConfig {
                 generation: Generation::none(),
                 attach_mode: AttachmentMode::Single,

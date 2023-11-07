@@ -259,6 +259,9 @@ pub struct LocationConfigSecondary {
 /// for use in external-facing APIs.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LocationConfig {
+    pub shard_number: u8,
+    pub shard_count: u8,
+    pub shard_stripe_size: u32,
     pub mode: LocationConfigMode,
     /// If attaching, in what generation?
     #[serde(default)]
