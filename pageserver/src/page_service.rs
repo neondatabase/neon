@@ -14,6 +14,7 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
@@ -1330,6 +1331,9 @@ impl From<GetActiveTenantError> for QueryError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
+            GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                QueryError::Shutdown
+            }
             e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }
