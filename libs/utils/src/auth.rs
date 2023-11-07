@@ -89,12 +89,17 @@ impl JwtAuth {
     pub fn from_key_path(key_path: &Utf8Path) -> Result<Self> {
         let metadata = key_path.metadata()?;
         let decoding_keys = if metadata.is_dir() {
-            fs::read_dir(key_path)?
-                .map(|entry| {
-                    let public_key = fs::read(entry?.path())?;
-                    Ok(DecodingKey::from_ed_pem(&public_key)?)
-                })
-                .collect::<Result<Vec<_>>>()?
+            let mut keys = Vec::new();
+            for entry in fs::read_dir(key_path)? {
+                let path = entry?.path();
+                if !path.is_file() {
+                    // Ignore directories (don't recurse)
+                    continue;
+                }
+                let public_key = fs::read(path)?;
+                keys.push(DecodingKey::from_ed_pem(&public_key)?);
+            }
+            keys
         } else if metadata.is_file() {
             let public_key = fs::read(key_path)?;
             vec![DecodingKey::from_ed_pem(&public_key)?]
