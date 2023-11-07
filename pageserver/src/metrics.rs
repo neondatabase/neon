@@ -1284,7 +1284,7 @@ impl Default for WalRedoProcessCounters {
 }
 
 pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
-    Lazy::new(|| WalRedoProcessCounters::default());
+    Lazy::new(WalRedoProcessCounters::default);
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
