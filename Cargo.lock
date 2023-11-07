@@ -4058,6 +4058,7 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "aws-smithy-async",
  "aws-smithy-http",
  "aws-types",
  "azure_core",

@@ -4,7 +4,7 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use anyhow::Context;
 use aws_config::{
@@ -15,13 +15,14 @@ use aws_config::{
 };
 use aws_credential_types::cache::CredentialsCache;
 use aws_sdk_s3::{
-    config::{Config, Region},
+    config::{AsyncSleep, Config, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
     primitives::ByteStream,
     types::{Delete, ObjectIdentifier},
     Client,
 };
+use aws_smithy_async::rt::sleep::TokioSleep;
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
 use scopeguard::ScopeGuard;
@@ -84,10 +85,14 @@ impl S3Bucket {
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
+        // AWS SDK requires us to specify how the RetryConfig should sleep when it wants to back off
+        let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
+
         let mut config_builder = Config::builder()
             .region(region)
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider)
+            .sleep_impl(SharedAsyncSleep::from(sleep_impl))
             .retry_config(RetryConfig::adaptive());
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
