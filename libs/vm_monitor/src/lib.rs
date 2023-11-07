@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg(target_os = "linux")]
 

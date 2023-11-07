@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::{bail, Context};
 use itertools::Itertools;

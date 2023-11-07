@@ -1,4 +1,5 @@
 //! Shared code for consumption metics collection
+#![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 use chrono::{DateTime, Utc};
 use rand::Rng;
