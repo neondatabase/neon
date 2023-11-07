@@ -206,7 +206,13 @@ impl UploadQueue {
             UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
-            UploadQueue::Initialized(x) => Ok(x),
+            UploadQueue::Initialized(x) => {
+                if !matches!(x.queued_operations.front(), Some(UploadOp::Shutdown(_))) {
+                    return Ok(x);
+                } else {
+                    anyhow::bail!("queue is shutting down")
+                }
+            }
         }
     }
 
