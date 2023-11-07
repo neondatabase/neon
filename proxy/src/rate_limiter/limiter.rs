@@ -212,7 +212,6 @@ impl<'t> Token<'t> {
     }
 }
 
-
 impl Drop for Token<'_> {
     fn drop(&mut self) {
         self.in_flight.fetch_sub(1, Ordering::AcqRel);
