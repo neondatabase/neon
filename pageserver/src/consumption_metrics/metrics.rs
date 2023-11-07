@@ -202,7 +202,6 @@ pub(super) async fn collect_all_metrics(
             None
         } else {
             crate::tenant::mgr::get_tenant(id, true)
-                .await
                 .ok()
                 .map(|tenant| (id, tenant))
         }

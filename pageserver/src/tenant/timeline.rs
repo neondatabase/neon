@@ -23,7 +23,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::id::TenantTimelineId;
+use utils::{id::TenantTimelineId, sync::gate::Gate};
 
 use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -310,6 +310,13 @@ pub struct Timeline {
     /// Load or creation time information about the disk_consistent_lsn and when the loading
     /// happened. Used for consumption metrics.
     pub(crate) loaded_at: (Lsn, SystemTime),
+
+    /// Gate to prevent shutdown completing while I/O is still happening to this timeline's data
+    pub(crate) gate: Gate,
+
+    /// Cancellation token scoped to this timeline: anything doing long-running work relating
+    /// to the timeline should drop out when this token fires.
+    pub(crate) cancel: CancellationToken,
 }
 
 pub struct WalReceiverInfo {
@@ -786,7 +793,11 @@ impl Timeline {
                 // as an empty timeline. Also in unit tests, when we use the timeline
                 // as a simple key-value store, ignoring the datadir layout. Log the
                 // error but continue.
-                error!("could not compact, repartitioning keyspace failed: {err:?}");
+                //
+                // Suppress error when it's due to cancellation
+                if !self.cancel.is_cancelled() {
+                    error!("could not compact, repartitioning keyspace failed: {err:?}");
+                }
             }
         };
 
@@ -884,7 +895,12 @@ impl Timeline {
     pub async fn shutdown(self: &Arc<Self>, freeze_and_flush: bool) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
+        // Signal any subscribers to our cancellation token to drop out
+        tracing::debug!("Cancelling CancellationToken");
+        self.cancel.cancel();
+
         // prevent writes to the InMemoryLayer
+        tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
             Some(self.tenant_id),
@@ -920,6 +936,16 @@ impl Timeline {
                 warn!("failed to await for frozen and flushed uploads: {e:#}");
             }
         }
+
+        // Page request handlers might be waiting for LSN to advance: they do not respect Timeline::cancel
+        // while doing so.
+        self.last_record_lsn.shutdown();
+
+        tracing::debug!("Waiting for tasks...");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
+
+        // Finally wait until any gate-holders are complete
+        self.gate.close().await;
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -1048,6 +1074,11 @@ impl Timeline {
     /// Like [`evict_layer_batch`](Self::evict_layer_batch), but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        let _gate = self
+            .gate
+            .enter()
+            .map_err(|_| anyhow::anyhow!("Shutting down"))?;
+
         let Some(local_layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
         };
@@ -1063,9 +1094,8 @@ impl Timeline {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
 
-        let cancel = CancellationToken::new();
         let results = self
-            .evict_layer_batch(remote_client, &[local_layer], &cancel)
+            .evict_layer_batch(remote_client, &[local_layer])
             .await?;
         assert_eq!(results.len(), 1);
         let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
@@ -1080,15 +1110,18 @@ impl Timeline {
     pub(crate) async fn evict_layers(
         &self,
         layers_to_evict: &[Layer],
-        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
+        let _gate = self
+            .gate
+            .enter()
+            .map_err(|_| anyhow::anyhow!("Shutting down"))?;
+
         let remote_client = self
             .remote_client
             .as_ref()
             .context("timeline must have RemoteTimelineClient")?;
 
-        self.evict_layer_batch(remote_client, layers_to_evict, cancel)
-            .await
+        self.evict_layer_batch(remote_client, layers_to_evict).await
     }
 
     /// Evict multiple layers at once, continuing through errors.
@@ -1109,7 +1142,6 @@ impl Timeline {
         &self,
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Layer],
-        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
@@ -1157,7 +1189,7 @@ impl Timeline {
         };
 
         tokio::select! {
-            _ = cancel.cancelled() => {},
+            _ = self.cancel.cancelled() => {},
             _ = join => {}
         }
 
@@ -1267,6 +1299,7 @@ impl Timeline {
         initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
         state: TimelineState,
+        cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
         let (state, _) = watch::channel(state);
@@ -1367,6 +1400,8 @@ impl Timeline {
 
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
+                cancel,
+                gate: Gate::new(format!("Timeline<{tenant_id}/{timeline_id}>")),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2030,6 +2065,10 @@ impl Timeline {
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
         'outer: loop {
+            if self.cancel.is_cancelled() {
+                return Err(PageReconstructError::Cancelled);
+            }
+
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
@@ -4366,25 +4405,10 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let cancel = tokio_util::sync::CancellationToken::new();
         let batch = [layer];
 
-        let first = {
-            let cancel = cancel.child_token();
-            async {
-                let cancel = cancel;
-                timeline
-                    .evict_layer_batch(&rc, &batch, &cancel)
-                    .await
-                    .unwrap()
-            }
-        };
-        let second = async {
-            timeline
-                .evict_layer_batch(&rc, &batch, &cancel)
-                .await
-                .unwrap()
-        };
+        let first = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
+        let second = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
 
         let (first, second) = tokio::join!(first, second);
 

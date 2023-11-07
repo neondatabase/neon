@@ -426,7 +426,7 @@ impl ConnectionManagerState {
                     timeline,
                     new_sk.wal_source_connconf,
                     events_sender,
-                    cancellation,
+                    cancellation.clone(),
                     connect_timeout,
                     ctx,
                     node_id,
@@ -447,7 +447,14 @@ impl ConnectionManagerState {
                             }
                             WalReceiverError::Other(e) => {
                                 // give out an error to have task_mgr give it a really verbose logging
-                                Err(e).context("walreceiver connection handling failure")
+                                if cancellation.is_cancelled() {
+                                    // Ideally we would learn about this via some path other than Other, but
+                                    // that requires refactoring all the intermediate layers of ingest code
+                                    // that only emit anyhow::Error
+                                    Ok(())
+                                } else {
+                                    Err(e).context("walreceiver connection handling failure")
+                                }
                             }
                         }
                     }

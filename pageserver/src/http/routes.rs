@@ -35,7 +35,8 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::{
-    GetTenantError, SetNewTenantConfigError, TenantMapInsertError, TenantStateError,
+    GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
+    TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -62,6 +63,7 @@ use super::models::ConfigureFailpointsRequest;
 
 pub struct State {
     conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
@@ -73,6 +75,7 @@ pub struct State {
 impl State {
     pub fn new(
         conf: &'static PageServerConf,
+        tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
@@ -85,6 +88,7 @@ impl State {
             .collect::<Vec<_>>();
         Ok(Self {
             conf,
+            tenant_manager,
             auth,
             allowlist_routes,
             remote_storage,
@@ -146,16 +150,46 @@ impl From<PageReconstructError> for ApiError {
 impl From<TenantMapInsertError> for ApiError {
     fn from(tmie: TenantMapInsertError) -> ApiError {
         match tmie {
-            TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
-                ApiError::ResourceUnavailable(format!("{tmie}").into())
-            }
-            TenantMapInsertError::TenantAlreadyExists(id, state) => {
-                ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
-            }
-            TenantMapInsertError::TenantExistsSecondary(id) => {
-                ApiError::Conflict(format!("tenant {id} already exists as secondary"))
-            }
+            TenantMapInsertError::SlotError(e) => e.into(),
+            TenantMapInsertError::SlotUpsertError(e) => e.into(),
             TenantMapInsertError::Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
+impl From<TenantSlotError> for ApiError {
+    fn from(e: TenantSlotError) -> ApiError {
+        use TenantSlotError::*;
+        match e {
+            NotFound(tenant_id) => {
+                ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
+            }
+            e @ (AlreadyExists(_, _) | Conflict(_)) => ApiError::Conflict(format!("{e}")),
+            InProgress => {
+                ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
+            }
+            MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<TenantSlotUpsertError> for ApiError {
+    fn from(e: TenantSlotUpsertError) -> ApiError {
+        use TenantSlotUpsertError::*;
+        match e {
+            InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
+            MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<TenantMapError> for ApiError {
+    fn from(e: TenantMapError) -> ApiError {
+        use TenantMapError::*;
+        match e {
+            StillInitializing | ShuttingDown => {
+                ApiError::ResourceUnavailable(format!("{e}").into())
+            }
         }
     }
 }
@@ -163,11 +197,12 @@ impl From<TenantMapInsertError> for ApiError {
 impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
-            TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
             TenantStateError::IsStopping(_) => {
                 ApiError::ResourceUnavailable("Tenant is stopping".into())
             }
-            _ => ApiError::InternalServerError(anyhow::Error::new(tse)),
+            TenantStateError::SlotError(e) => e.into(),
+            TenantStateError::SlotUpsertError(e) => e.into(),
+            TenantStateError::Other(e) => ApiError::InternalServerError(anyhow!(e)),
         }
     }
 }
@@ -188,6 +223,7 @@ impl From<GetTenantError> for ApiError {
                 // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
                 ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
+            GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
         }
     }
 }
@@ -242,6 +278,9 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
             Get(g) => ApiError::from(g),
             e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
             Timeline(t) => ApiError::from(t),
+            NotAttached => ApiError::NotFound(anyhow::anyhow!("Tenant is not attached").into()),
+            SlotError(e) => e.into(),
+            SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
         }
@@ -368,7 +407,7 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)?;
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -396,6 +435,9 @@ async fn timeline_create_handler(
             Err(e @ tenant::CreateTimelineError::AncestorNotActive) => {
                 json_response(StatusCode::SERVICE_UNAVAILABLE, HttpErrorBody::from_msg(e.to_string()))
             }
+            Err(tenant::CreateTimelineError::ShuttingDown) => {
+                json_response(StatusCode::SERVICE_UNAVAILABLE,HttpErrorBody::from_msg("tenant shutting down".to_string()))
+            }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
@@ -415,7 +457,7 @@ async fn timeline_list_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let response_data = async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)?;
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
@@ -454,7 +496,7 @@ async fn timeline_detail_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let timeline_info = async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -710,7 +752,7 @@ async fn tenant_status(
     check_permission(&request, Some(tenant_id))?;
 
     let tenant_info = async {
-        let tenant = mgr::get_tenant(tenant_id, false).await?;
+        let tenant = mgr::get_tenant(tenant_id, false)?;
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
@@ -773,7 +815,7 @@ async fn tenant_size_handler(
     let headers = request.headers();
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_id, true).await?;
+    let tenant = mgr::get_tenant(tenant_id, true)?;
 
     // this can be long operation
     let inputs = tenant
@@ -1030,7 +1072,7 @@ async fn get_tenant_config_handler(
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, false).await?;
+    let tenant = mgr::get_tenant(tenant_id, false)?;
 
     let response = HashMap::from([
         (
@@ -1089,7 +1131,7 @@ async fn put_tenant_location_config_handler(
             .await
         {
             match e {
-                TenantStateError::NotFound(_) => {
+                TenantStateError::SlotError(TenantSlotError::NotFound(_)) => {
                     // This API is idempotent: a NotFound on a detach is fine.
                 }
                 _ => return Err(e.into()),
@@ -1101,20 +1143,14 @@ async fn put_tenant_location_config_handler(
     let location_conf =
         LocationConf::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    mgr::upsert_location(
-        state.conf,
-        tenant_id,
-        location_conf,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
-        state.deletion_queue_client.clone(),
-        &ctx,
-    )
-    .await
-    // TODO: badrequest assumes the caller was asking for something unreasonable, but in
-    // principle we might have hit something like concurrent API calls to the same tenant,
-    // which is not a 400 but a 409.
-    .map_err(ApiError::BadRequest)?;
+    state
+        .tenant_manager
+        .upsert_location(tenant_id, location_conf, &ctx)
+        .await
+        // TODO: badrequest assumes the caller was asking for something unreasonable, but in
+        // principle we might have hit something like concurrent API calls to the same tenant,
+        // which is not a 400 but a 409.
+        .map_err(ApiError::BadRequest)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1127,7 +1163,6 @@ async fn handle_tenant_break(
     let tenant_id: TenantId = parse_request_param(&r, "tenant_id")?;
 
     let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
-        .await
         .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
 
     tenant.set_broken("broken from test".to_owned()).await;
@@ -1432,7 +1467,7 @@ async fn active_timeline_of_active_tenant(
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ) -> Result<Arc<Timeline>, ApiError> {
-    let tenant = mgr::get_tenant(tenant_id, true).await?;
+    let tenant = mgr::get_tenant(tenant_id, true)?;
     tenant
         .get_timeline(timeline_id, true)
         .map_err(|e| ApiError::NotFound(e.into()))

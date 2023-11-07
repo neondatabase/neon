@@ -626,6 +626,8 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
 
             for pageserver in self.env.pageservers:
+                pageserver.assert_no_metric_errors()
+
                 pageserver.stop(immediate=True)
 
             if self.env.attachment_service is not None:
@@ -1783,6 +1785,21 @@ class NeonPageserver(PgProtocol):
             log.info(f"not allowed error: {error.strip()}")
 
         assert not errors
+
+    def assert_no_metric_errors(self):
+        """
+        Certain metrics should _always_ be zero: they track conditions that indicate a bug.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics check on pageserver {self.id}, it is not running")
+            return
+
+        for metric in [
+            "pageserver_tenant_manager_unexpected_errors_total",
+            "pageserver_deletion_queue_unexpected_errors_total",
+        ]:
+            value = self.http_client().get_metric_value(metric)
+            assert value == 0, f"Nonzero {metric} == {value}"
 
     def log_contains(self, pattern: str) -> Optional[str]:
         """Check that the pageserver log contains a line that matches the given regex"""
