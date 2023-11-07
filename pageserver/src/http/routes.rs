@@ -641,14 +641,15 @@ async fn timeline_delete_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    check_permission(&request, Some(tenant_id))?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
 
-    mgr::delete_timeline(tenant_id, timeline_id, &ctx)
-        .instrument(info_span!("timeline_delete", %tenant_id, %timeline_id))
+    state.tenant_manager.delete_timeline(tenant_shard_id, timeline_id, &ctx)
+        .instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -1801,7 +1802,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
             |r| api_handler(r, timeline_download_remote_layers_handler_get),
         )
-        .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+        .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id/layer", |r| {

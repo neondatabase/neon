@@ -836,6 +836,17 @@ impl TenantManager {
         }
     }
 
+    pub(crate) async fn delete_timeline(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        _ctx: &RequestContext,
+    ) -> Result<(), DeleteTimelineError> {
+        let tenant = self.get_attached_tenant_shard(tenant_shard_id, true)?;
+        DeleteTimelineFlow::run(&tenant, timeline_id, false).await?;
+        Ok(())
+    }
+
     pub(crate) async fn upsert_location(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1205,16 +1216,6 @@ pub(crate) enum DeleteTimelineError {
 
     #[error("Timeline {0}")]
     Timeline(#[from] crate::tenant::DeleteTimelineError),
-}
-
-pub(crate) async fn delete_timeline(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    _ctx: &RequestContext,
-) -> Result<(), DeleteTimelineError> {
-    let tenant = get_tenant(tenant_id, true)?;
-    DeleteTimelineFlow::run(&tenant, timeline_id, false).await?;
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
