@@ -68,7 +68,7 @@ int			max_reconnect_attempts = 60;
 
 typedef struct
 {
-    LWLock lock;
+    LWLockId lock;
     pg_atomic_uint64 update_counter;
     char pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 } PagestoreShmemState;
@@ -98,10 +98,10 @@ AssignPageserverConnstring(const char *newval, void *extra)
 {
     if(!pagestore_shared)
         return;
-    LWLockAcquire(&pagestore_shared->lock, LW_EXCLUSIVE);
+    LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
     strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
     pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
-    LWLockRelease(&pagestore_shared->lock);
+    LWLockRelease(pagestore_shared->lock);
 }
 
 static bool
@@ -117,10 +117,10 @@ ReloadConnstring()
 {
     if(!pagestore_shared)
         return;
-    LWLockAcquire(&pagestore_shared->lock, LW_SHARED);
+    LWLockAcquire(pagestore_shared->lock, LW_SHARED);
     strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, MAX_PAGESERVER_CONNSTRING_SIZE);
     pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
-    LWLockRelease(&pagestore_shared->lock);
+    LWLockRelease(pagestore_shared->lock);
 }
 
 static bool
@@ -477,7 +477,8 @@ PagestoreShmemInit(void)
                                        &found);
     if(!found)
     {
-        memset(pagestore_shared, 0, PagestoreShmemSize());
+        pagestore_shared->lock = &(GetNamedLWLockTranche("neon_libpagestore")->lock);
+        pg_atomic_init_u64(&pagestore_shared->update_counter, 0);
         AssignPageserverConnstring(page_server_connstring, NULL);
     }
     LWLockRelease(AddinShmemInitLock);
@@ -493,16 +494,17 @@ pagestore_shmem_startup_hook(void)
     PagestoreShmemInit();
 }
 
-#if PG_VERSION_NUM >= 150000
 static void
 pagestore_shmem_request(void)
 {
+#if PG_VERSION_NUM >= 150000
     if(prev_shmem_request_hook)
         prev_shmem_request_hook();
+#endif
 
     RequestAddinShmemSpace(PagestoreShmemSize());
+    RequestNamedLWLockTranche("neon_libpagestore", 1);
 }
-#endif
 
 static void
 pagestore_prepare_shmem(void)
@@ -511,7 +513,7 @@ pagestore_prepare_shmem(void)
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = pagestore_shmem_request;
 #else
-	RequestAddinShmemSpace(PagestoreShmemSize());
+        pagestore_shmem_request();
 #endif
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pagestore_shmem_startup_hook;
