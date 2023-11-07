@@ -1261,6 +1261,15 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static WAL_REDO_PROCESS_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_wal_redo_process_total",
+        "Number of WAL redo process by operation since pageserver startup",
+        &["operation"]
+    )
+    .unwrap()
+});
+
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
