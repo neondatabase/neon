@@ -39,6 +39,8 @@ impl MockLayer {
 }
 
 fn make_simple(n_keys: i128, name: &str) -> MockLayer {
+
+    let now = Instant::now();
     let block_buf = BlockBuf::new();
     let mut writer = DiskBtreeBuilder::<_, 24>::new(block_buf);
     for i in 0..n_keys {
@@ -50,6 +52,11 @@ fn make_simple(n_keys: i128, name: &str) -> MockLayer {
         writer.append(&key_bytes, value).unwrap();
     }
     let (index_root_blk, block_buf) = writer.finish().unwrap();
+    println!("wrote {} keys to BlockBuf in {:?}", n_keys, now.elapsed());
+    // wrote 4_000_000 keys to BlockBuf in 129.980503ms
+    // wrote 40_000_000 keys to BlockBuf in 1.336874876s
+    // (/ 52.0 (+ 0.129 0.062))
+
     let index_start_blk = 0; // ???
     let path = std::env::current_dir().unwrap()
         .parent().unwrap()
@@ -64,11 +71,30 @@ fn make_simple(n_keys: i128, name: &str) -> MockLayer {
         index_root_blk,
     };
 
+    let now = Instant::now();
     let mut file = VirtualFile::create(&path).unwrap();
+    let mut total_len = 0;
     for buf in block_buf.blocks {
         file.write_all(buf.as_ref()).unwrap();
+        total_len += buf.len();
     }
+    println!("flushed {} bytes to disk in {:?}", total_len, now.elapsed());
+    // flushed 52_355_072 bytes to disk in 62.540002ms     => 800 MB/s
+    // flushed 523_411_456 bytes to disk in 551.762844ms   => 800 MB/s
+    // flushed 523_411_456 bytes to disk in 4.989601463s   => 100 MB/s !!!!
 
+    let now = Instant::now();
+    file.sync_all().unwrap();
+    println!("fsynced in {:?}", now.elapsed());
+    // flushed 523411456 bytes to disk in 574.897513ms | fsynced in 45.079831ms
+    // flushed 523411456 bytes to disk in 557.103133ms | fsynced in 56.976345ms
+    // flushed 523411456 bytes to disk in 559.939736ms | fsynced in 58.743932ms
+    // flushed 523411456 bytes to disk in 2.128451459s | fsynced in 1.662821424s
+    // flushed 523411456 bytes to disk in 2.937101445s | fsynced in 1.452016294s
+    // flushed 523411456 bytes to disk in 560.161377ms | fsynced in 63.579154ms
+    // flushed 523411456 bytes to disk in 562.492048ms | fsynced in 46.795958ms
+    // flushed 523411456 bytes to disk in 554.746062ms | fsynced in 69.815532ms
+    // flushed 523411456 bytes to disk in 566.547446ms | fsynced in 52.785175ms
     layer
 }
 
@@ -91,8 +117,12 @@ fn bench_disk_lookup(c: &mut Criterion) {
     let n_layers = 100;
     let n_queries = n_layers;
 
+    let n_keys = 40_000_000;
+    let n_layers = 10;
+
     // Write to disk btree
     let layers = make_many(n_keys, n_layers);
+    return;
 
     // Write to mem btrees
     let mem_btrees: Vec<BTreeMap<i128, u64>> = (0..n_layers)
