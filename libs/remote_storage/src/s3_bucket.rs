@@ -10,7 +10,8 @@ use anyhow::Context;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
-    provider_config::ProviderConfig, web_identity_token::WebIdentityTokenCredentialsProvider,
+    provider_config::ProviderConfig, retry::RetryConfig,
+    web_identity_token::WebIdentityTokenCredentialsProvider,
 };
 use aws_credential_types::cache::CredentialsCache;
 use aws_sdk_s3::{
@@ -86,7 +87,8 @@ impl S3Bucket {
         let mut config_builder = Config::builder()
             .region(region)
             .credentials_cache(CredentialsCache::lazy())
-            .credentials_provider(credentials_provider);
+            .credentials_provider(credentials_provider)
+            .retry_config(RetryConfig::adaptive());
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
             config_builder = config_builder
