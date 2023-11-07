@@ -138,13 +138,12 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             // be something enqueued for deletion, so while this check is valid
                             // for indicating that a layer is garbage, it is not an indicator
                             // of a problem.
-                            //
-                            // In pageserver these are called unlinked layers, produced by:
-                            // 1. gc or compaction unlinks layers from index
-                            // 2. layer drop or deletion queue next flush happens too late into
-                            //    shutdown
                             gen < &index_part_generation)
                         .collect();
+
+                    // unlinked files at the current generation are not considered to be deleted,
+                    // because a pageserver could still have those in its deletion queue or even as
+                    // layers which are being read.
 
                     if !orphan_layers.is_empty() {
                         result.garbage_keys.extend(orphan_layers.iter().map(
