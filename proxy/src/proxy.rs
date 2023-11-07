@@ -16,9 +16,8 @@ use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
-use lazy_static::lazy_static;
 use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use prometheus::{register_histogram_vec, HistogramVec};
 use regex::Regex;
@@ -970,8 +969,8 @@ pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
 }
 
 pub fn is_neon_param(bytes: &str) -> bool {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"^neon_\w+:").unwrap();
-    }
-    RE.is_match(bytes)
+    static RE: OnceCell<Regex> = OnceCell::new();
+    RE.get_or_init(|| Regex::new(r"^neon_\w+:").unwrap());
+
+    RE.get().unwrap().is_match(bytes)
 }
