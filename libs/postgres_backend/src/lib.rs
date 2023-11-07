@@ -2,6 +2,7 @@
 //! To use, create PostgresBackend and run() it, passing the Handler
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
+#![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::Context;
 use bytes::Bytes;
 use futures::pin_mut;

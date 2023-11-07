@@ -1,7 +1,6 @@
-//!
 //! Various tools and helpers to handle cluster / compute node (Postgres)
 //! configuration.
-//!
+#![deny(clippy::undocumented_unsafe_blocks)]
 pub mod checker;
 pub mod config;
 pub mod configurator;

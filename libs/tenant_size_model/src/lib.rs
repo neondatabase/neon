@@ -1,4 +1,5 @@
 //! Synthetic size calculation
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod calculation;
 pub mod svg;

@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::{bail, Context};
 use itertools::Itertools;
 use std::borrow::Cow;

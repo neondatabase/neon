@@ -1,6 +1,5 @@
-//!
 //! Shared code for consumption metics collection
-//!
+#![deny(clippy::undocumented_unsafe_blocks)]
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 pub mod checks;
 pub mod cloud_admin_api;
 pub mod garbage;
