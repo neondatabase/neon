@@ -16,7 +16,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::reltag::RelTag;
+use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -187,7 +187,7 @@ pub struct TimelineCreateRequest {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    pub new_tenant_id: TenantId,
+    pub new_tenant_id: TenantShardId,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<u32>,
