@@ -24,7 +24,7 @@ fn do_control_plane_request(
 ) -> Result<ControlPlaneSpecResponse, (bool, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
-        .header("Authorization", jwt)
+        .header("Authorization", format!("Bearer {}", jwt))
         .send()
         .map_err(|e| {
             (
@@ -68,7 +68,7 @@ pub fn get_spec_from_control_plane(
     base_uri: &str,
     compute_id: &str,
 ) -> Result<Option<ComputeSpec>> {
-    let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
+    let cp_uri = format!("{base_uri}/compute/api/v2/computes/{compute_id}/spec");
     let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
         Ok(v) => v,
         Err(_) => "".to_string(),

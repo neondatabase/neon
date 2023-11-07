@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -19,7 +18,6 @@ pub type PgIdent = String;
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
-#[serde_as]
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ComputeSpec {
     pub format_version: f32,
@@ -50,12 +48,12 @@ pub struct ComputeSpec {
     // these, and instead set the "neon.tenant_id", "neon.timeline_id",
     // etc. GUCs in cluster.settings. TODO: Once the control plane has been
     // updated to fill these fields, we can make these non optional.
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub tenant_id: Option<TenantId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
+
     pub timeline_id: Option<TimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
+
     pub pageserver_connstring: Option<String>,
+
     #[serde(default)]
     pub safekeeper_connstrings: Vec<String>,
 
@@ -140,14 +138,13 @@ impl RemoteExtSpec {
     }
 }
 
-#[serde_as]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeMode {
     /// A read-write node
     #[default]
     Primary,
     /// A read-only node, pinned at a particular LSN
-    Static(#[serde_as(as = "DisplayFromStr")] Lsn),
+    Static(Lsn),
     /// A read-only node that follows the tip of the branch in hot standby mode
     ///
     /// Future versions may want to distinguish between replicas with hot standby

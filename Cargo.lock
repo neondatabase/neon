@@ -3550,7 +3550,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3563,7 +3563,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3574,7 +3574,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -3592,7 +3592,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -4419,6 +4419,7 @@ dependencies = [
  "itertools",
  "pageserver",
  "rand 0.8.5",
+ "remote_storage",
  "reqwest",
  "serde",
  "serde_json",
@@ -4477,6 +4478,7 @@ dependencies = [
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
+ "tokio-stream",
  "toml_edit",
  "tracing",
  "url",
@@ -4677,6 +4679,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32ac8da02677876d532745a130fc9d8e6edfa81a269b107c5b00829b91d8eb3c"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde_assert"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda563240c1288b044209be1f0d38bb4d15044fb3e00dc354fbc922ab4733e80"
+dependencies = [
+ "hashbrown 0.13.2",
+ "serde",
 ]
 
 [[package]]
@@ -5396,7 +5408,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=7434d9388965a17a6d113e5dfc0e65666a03b4c2#7434d9388965a17a6d113e5dfc0e65666a03b4c2"
+source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5965,6 +5977,7 @@ dependencies = [
  "routerify",
  "sentry",
  "serde",
+ "serde_assert",
  "serde_json",
  "serde_with",
  "signal-hook",

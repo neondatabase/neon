@@ -81,7 +81,6 @@ FALLBACK_DURATION = {
     "test_runner/performance/test_seqscans.py::test_seqscans[vanilla-100000-100-0]": 0.55,
     "test_runner/performance/test_seqscans.py::test_seqscans[vanilla-10000000-1-0]": 12.189,
     "test_runner/performance/test_seqscans.py::test_seqscans[vanilla-10000000-1-4]": 13.899,
-    "test_runner/performance/test_startup.py::test_startup": 890.114,
     "test_runner/performance/test_startup.py::test_startup_simple": 2.51,
     "test_runner/performance/test_wal_backpressure.py::test_heavy_write_workload[neon_off-10-5-5]": 527.245,
     "test_runner/performance/test_wal_backpressure.py::test_heavy_write_workload[neon_on-10-5-5]": 583.46,

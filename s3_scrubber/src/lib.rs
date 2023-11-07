@@ -34,6 +34,9 @@ const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
 #[derive(Debug, Clone)]
 pub struct S3Target {
     pub bucket_name: String,
+    /// This `prefix_in_bucket` is only equal to the PS/SK config of the same
+    /// name for the RootTarget: other instances of S3Target will have prefix_in_bucket
+    /// with extra parts.
     pub prefix_in_bucket: String,
     pub delimiter: String,
 }
@@ -77,9 +80,13 @@ impl Display for NodeKind {
 impl S3Target {
     pub fn with_sub_segment(&self, new_segment: &str) -> Self {
         let mut new_self = self.clone();
-        let _ = new_self.prefix_in_bucket.pop();
-        new_self.prefix_in_bucket =
-            [&new_self.prefix_in_bucket, new_segment, ""].join(&new_self.delimiter);
+        if new_self.prefix_in_bucket.is_empty() {
+            new_self.prefix_in_bucket = format!("/{}/", new_segment);
+        } else {
+            let _ = new_self.prefix_in_bucket.pop();
+            new_self.prefix_in_bucket =
+                [&new_self.prefix_in_bucket, new_segment, ""].join(&new_self.delimiter);
+        }
         new_self
     }
 }
@@ -91,10 +98,10 @@ pub enum RootTarget {
 }
 
 impl RootTarget {
-    pub fn tenants_root(&self) -> &S3Target {
+    pub fn tenants_root(&self) -> S3Target {
         match self {
-            Self::Pageserver(root) => root,
-            Self::Safekeeper(root) => root,
+            Self::Pageserver(root) => root.with_sub_segment(TENANTS_SEGMENT_NAME),
+            Self::Safekeeper(root) => root.with_sub_segment("wal"),
         }
     }
 
@@ -133,6 +140,7 @@ impl RootTarget {
 pub struct BucketConfig {
     pub region: String,
     pub bucket: String,
+    pub prefix_in_bucket: Option<String>,
 
     /// Use SSO if this is set, else rely on AWS_* environment vars
     pub sso_account_id: Option<String>,
@@ -155,10 +163,12 @@ impl BucketConfig {
         let sso_account_id = env::var("SSO_ACCOUNT_ID").ok();
         let region = env::var("REGION").context("'REGION' param retrieval")?;
         let bucket = env::var("BUCKET").context("'BUCKET' param retrieval")?;
+        let prefix_in_bucket = env::var("BUCKET_PREFIX").ok();
 
         Ok(Self {
             region,
             bucket,
+            prefix_in_bucket,
             sso_account_id,
         })
     }
@@ -191,14 +201,14 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
         .with_target(false)
         .with_ansi(false)
         .with_writer(file_writer);
-    let stdout_logs = fmt::Layer::new()
-        .with_ansi(std::io::stdout().is_terminal())
+    let stderr_logs = fmt::Layer::new()
+        .with_ansi(std::io::stderr().is_terminal())
         .with_target(false)
-        .with_writer(std::io::stdout);
+        .with_writer(std::io::stderr);
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(file_logs)
-        .with(stdout_logs)
+        .with(stderr_logs)
         .init();
 
     guard
@@ -250,15 +260,20 @@ fn init_remote(
     let bucket_region = Region::new(bucket_config.region);
     let delimiter = "/".to_string();
     let s3_client = Arc::new(init_s3_client(bucket_config.sso_account_id, bucket_region));
+
     let s3_root = match node_kind {
         NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
             bucket_name: bucket_config.bucket,
-            prefix_in_bucket: ["pageserver", "v1", TENANTS_SEGMENT_NAME, ""].join(&delimiter),
+            prefix_in_bucket: bucket_config
+                .prefix_in_bucket
+                .unwrap_or("pageserver/v1".to_string()),
             delimiter,
         }),
         NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
             bucket_name: bucket_config.bucket,
-            prefix_in_bucket: ["safekeeper", "v1", "wal", ""].join(&delimiter),
+            prefix_in_bucket: bucket_config
+                .prefix_in_bucket
+                .unwrap_or("safekeeper/v1".to_string()),
             delimiter,
         }),
     };

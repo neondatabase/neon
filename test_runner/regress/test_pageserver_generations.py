@@ -21,6 +21,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    S3Scrubber,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -234,7 +235,21 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     assert len(suffixed_objects) > 0
     assert len(legacy_objects) > 0
 
+    # Flush through deletions to get a clean state for scrub: we are implicitly validating
+    # that our generations-enabled pageserver was able to do deletions of layers
+    # from earlier which don't have a generation.
+    env.pageserver.http_client().deletion_queue_flush(execute=True)
+
     assert get_deletion_queue_unexpected_errors(env.pageserver.http_client()) == 0
+
+    # Having written a mixture of generation-aware and legacy index_part.json,
+    # ensure the scrubber handles the situation as expected.
+    metadata_summary = S3Scrubber(
+        neon_env_builder.test_output_dir, neon_env_builder
+    ).scan_metadata()
+    assert metadata_summary["count"] == 1  # Scrubber should have seen our timeline
+    assert not metadata_summary["with_errors"]
+    assert not metadata_summary["with_warnings"]
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
