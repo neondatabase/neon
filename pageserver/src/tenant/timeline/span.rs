@@ -18,3 +18,15 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
         panic!("missing extractors: {missing:?}")
     }
 }
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {}
+
+#[cfg(debug_assertions)]
+#[track_caller]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {
+    let fields: [&dyn Extractor; 1] = [&*crate::tenant::span::TENANT_ID_EXTRACTOR];
+    if let Err(missing) = check_fields_present!(fields) {
+        panic!("missing extractors: {missing:?}")
+    }
+}
