@@ -15,6 +15,7 @@ use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use hex::FromHex;
+use pageserver_api::shard::ShardIdentity;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -300,6 +301,7 @@ impl DeletionList {
     fn push(
         &mut self,
         tenant: &TenantId,
+        shard: &ShardIdentity,
         timeline: &TimelineId,
         generation: Generation,
         objects: &mut Vec<RemotePath>,
@@ -326,7 +328,7 @@ impl DeletionList {
 
         let timeline_entry = tenant_entry.timelines.entry(*timeline).or_default();
 
-        let timeline_remote_path = remote_timeline_path(tenant, timeline);
+        let timeline_remote_path = remote_timeline_path(tenant, shard, timeline);
 
         self.size += objects.len();
         timeline_entry.extend(objects.drain(..).map(|p| {
@@ -341,7 +343,9 @@ impl DeletionList {
         let mut result = Vec::new();
         for (tenant, tenant_deletions) in self.tenants.into_iter() {
             for (timeline, timeline_layers) in tenant_deletions.timelines.into_iter() {
-                let timeline_remote_path = remote_timeline_path(&tenant, &timeline);
+                // FIXME: need to update DeletionList definition to store the ShardIdentity for each Tenant
+                let timeline_remote_path =
+                    remote_timeline_path(&tenant, &ShardIdentity::none(), &timeline);
                 result.extend(
                     timeline_layers
                         .into_iter()
@@ -507,6 +511,7 @@ impl DeletionQueueClient {
     pub(crate) async fn push_layers(
         &self,
         tenant_id: TenantId,
+        shard: &ShardIdentity,
         timeline_id: TimelineId,
         current_generation: Generation,
         layers: Vec<(LayerFileName, Generation)>,
@@ -517,6 +522,7 @@ impl DeletionQueueClient {
             for (layer, generation) in layers {
                 layer_paths.push(remote_layer_path(
                     &tenant_id,
+                    shard,
                     &timeline_id,
                     &layer,
                     generation,
@@ -829,7 +835,8 @@ mod test {
             gen: Generation,
         ) -> anyhow::Result<String> {
             let tenant_id = self.harness.tenant_id;
-            let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+            let relative_remote_path =
+                remote_timeline_path(&tenant_id, &ShardIdentity::none(), &TIMELINE_ID);
             let remote_timeline_path = self.remote_fs_dir.join(relative_remote_path.get_path());
             std::fs::create_dir_all(&remote_timeline_path)?;
             let remote_layer_file_name = format!("{}{}", file_name, gen.get_suffix());
@@ -981,7 +988,8 @@ mod test {
         let tenant_id = ctx.harness.tenant_id;
 
         let content: Vec<u8> = "victim1 contents".into();
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path =
+            remote_timeline_path(&tenant_id, &ShardIdentity::none(), &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
@@ -1010,6 +1018,7 @@ mod test {
         client
             .push_layers(
                 tenant_id,
+                &ShardIdentity::none(),
                 TIMELINE_ID,
                 now_generation,
                 [(layer_file_name_1.clone(), layer_generation)].to_vec(),
@@ -1055,7 +1064,8 @@ mod test {
         ctx.set_latest_generation(latest_generation);
 
         let tenant_id = ctx.harness.tenant_id;
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path =
+            remote_timeline_path(&tenant_id, &ShardIdentity::none(), &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
 
         // Initial state: a remote layer exists
@@ -1066,6 +1076,7 @@ mod test {
         client
             .push_layers(
                 tenant_id,
+                &ShardIdentity::none(),
                 TIMELINE_ID,
                 stale_generation,
                 [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
@@ -1081,6 +1092,7 @@ mod test {
         client
             .push_layers(
                 tenant_id,
+                &ShardIdentity::none(),
                 TIMELINE_ID,
                 latest_generation,
                 [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
@@ -1104,7 +1116,8 @@ mod test {
 
         let tenant_id = ctx.harness.tenant_id;
 
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path =
+            remote_timeline_path(&tenant_id, &ShardIdentity::none(), &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
@@ -1119,6 +1132,7 @@ mod test {
         client
             .push_layers(
                 tenant_id,
+                &ShardIdentity::none(),
                 TIMELINE_ID,
                 now_generation.previous(),
                 [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
@@ -1133,6 +1147,7 @@ mod test {
         client
             .push_layers(
                 tenant_id,
+                &ShardIdentity::none(),
                 TIMELINE_ID,
                 now_generation,
                 [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_generation)].to_vec(),
@@ -1228,6 +1243,7 @@ pub(crate) mod mock {
                         for (layer, generation) in op.layers {
                             objects.push(remote_layer_path(
                                 &op.tenant_id,
+                                &ShardIdentity::none(),
                                 &op.timeline_id,
                                 &layer,
                                 generation,

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
+use pageserver_api::shard::ShardIdentity;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +41,7 @@ pub async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     tenant_id: TenantId,
+    shard: &ShardIdentity,
     timeline_id: TimelineId,
     layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
@@ -52,6 +54,7 @@ pub async fn download_layer_file<'a>(
 
     let remote_path = remote_layer_path(
         &tenant_id,
+        shard,
         &timeline_id,
         layer_file_name,
         layer_metadata.generation,
@@ -170,9 +173,10 @@ pub fn is_temp_download_file(path: &Utf8Path) -> bool {
 pub async fn list_remote_timelines(
     storage: &GenericRemoteStorage,
     tenant_id: TenantId,
+    shard: &ShardIdentity,
     cancel: CancellationToken,
 ) -> anyhow::Result<(HashSet<TimelineId>, HashSet<String>)> {
-    let remote_path = remote_timelines_path(&tenant_id);
+    let remote_path = remote_timelines_path(&tenant_id, shard);
 
     fail::fail_point!("storage-sync-list-remote-timelines", |_| {
         anyhow::bail!("storage-sync-list-remote-timelines");
@@ -212,11 +216,12 @@ pub async fn list_remote_timelines(
 async fn do_download_index_part(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
+    shard: &ShardIdentity,
     timeline_id: &TimelineId,
     index_generation: Generation,
     cancel: CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
-    let remote_path = remote_index_path(tenant_id, timeline_id, index_generation);
+    let remote_path = remote_index_path(tenant_id, shard, timeline_id, index_generation);
 
     let index_part_bytes = download_retry_forever(
         || async {
@@ -253,6 +258,7 @@ async fn do_download_index_part(
 pub(super) async fn download_index_part(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
+    shard: &ShardIdentity,
     timeline_id: &TimelineId,
     my_generation: Generation,
     cancel: CancellationToken,
@@ -261,8 +267,15 @@ pub(super) async fn download_index_part(
 
     if my_generation.is_none() {
         // Operating without generations: just fetch the generation-less path
-        return do_download_index_part(storage, tenant_id, timeline_id, my_generation, cancel)
-            .await;
+        return do_download_index_part(
+            storage,
+            tenant_id,
+            shard,
+            timeline_id,
+            my_generation,
+            cancel,
+        )
+        .await;
     }
 
     // Stale case: If we were intentionally attached in a stale generation, there may already be a remote
@@ -272,6 +285,7 @@ pub(super) async fn download_index_part(
     let res = do_download_index_part(
         storage,
         tenant_id,
+        shard,
         timeline_id,
         my_generation,
         cancel.clone(),
@@ -299,6 +313,7 @@ pub(super) async fn download_index_part(
     let res = do_download_index_part(
         storage,
         tenant_id,
+        shard,
         timeline_id,
         my_generation.previous(),
         cancel.clone(),
@@ -321,7 +336,7 @@ pub(super) async fn download_index_part(
 
     // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
     // objects, and select the highest one with a generation <= my_generation.
-    let index_prefix = remote_index_path(tenant_id, timeline_id, Generation::none());
+    let index_prefix = remote_index_path(tenant_id, shard, timeline_id, Generation::none());
     let indices = backoff::retry(
         || async { storage.list_files(Some(&index_prefix)).await },
         |_| false,
@@ -347,14 +362,21 @@ pub(super) async fn download_index_part(
     match max_previous_generation {
         Some(g) => {
             tracing::debug!("Found index_part in generation {g:?}");
-            do_download_index_part(storage, tenant_id, timeline_id, g, cancel).await
+            do_download_index_part(storage, tenant_id, shard, timeline_id, g, cancel).await
         }
         None => {
             // Migration from legacy pre-generation state: we have a generation but no prior
             // attached pageservers did.  Try to load from a no-generation path.
             tracing::info!("No index_part.json* found");
-            do_download_index_part(storage, tenant_id, timeline_id, Generation::none(), cancel)
-                .await
+            do_download_index_part(
+                storage,
+                tenant_id,
+                shard,
+                timeline_id,
+                Generation::none(),
+                cancel,
+            )
+            .await
         }
     }
 }

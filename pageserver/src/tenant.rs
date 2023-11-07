@@ -688,9 +688,11 @@ impl Tenant {
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
+        let shard = self.tenant_conf.read().unwrap().shard.clone();
         let (remote_timeline_ids, other_keys) = remote_timeline_client::list_remote_timelines(
             remote_storage,
             self.tenant_id,
+            &shard,
             cancel.clone(),
         )
         .await?;
@@ -1151,6 +1153,7 @@ impl Tenant {
                 self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
+                self.tenant_conf.read().unwrap().shard.clone(),
                 timeline_id,
                 self.generation,
             );
@@ -2991,6 +2994,7 @@ impl Tenant {
                 self.deletion_queue_client.clone(),
                 self.conf,
                 self.tenant_id,
+                self.tenant_conf.read().unwrap().shard.clone(),
                 timeline_id,
                 self.generation,
             );

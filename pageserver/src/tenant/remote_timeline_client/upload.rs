@@ -3,15 +3,13 @@
 use anyhow::{bail, Context};
 use camino::Utf8Path;
 use fail::fail_point;
+use pageserver_api::shard::ShardIdentity;
 use std::io::ErrorKind;
 use tokio::fs;
 
 use super::Generation;
-use crate::{
-    config::PageServerConf,
-    tenant::remote_timeline_client::{index::IndexPart, remote_index_path, remote_path},
-};
-use remote_storage::GenericRemoteStorage;
+use crate::tenant::remote_timeline_client::{index::IndexPart, remote_index_path};
+use remote_storage::{GenericRemoteStorage, RemotePath};
 use utils::id::{TenantId, TimelineId};
 
 use super::index::LayerFileMetadata;
@@ -22,6 +20,7 @@ use tracing::info;
 pub(super) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_id: &TenantId,
+    shard: &ShardIdentity,
     timeline_id: &TimelineId,
     generation: Generation,
     index_part: &'a IndexPart,
@@ -38,7 +37,7 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
+    let remote_path = remote_index_path(tenant_id, shard, timeline_id, generation);
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
@@ -50,11 +49,10 @@ pub(super) async fn upload_index_part<'a>(
 ///
 /// On an error, bumps the retries count and reschedules the entire task.
 pub(super) async fn upload_timeline_layer<'a>(
-    conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
-    source_path: &'a Utf8Path,
+    source_path: &Utf8Path,
+    remote_path: RemotePath,
     known_metadata: &'a LayerFileMetadata,
-    generation: Generation,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
@@ -62,7 +60,6 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     pausable_failpoint!("before-upload-layer-pausable");
 
-    let storage_path = remote_path(conf, source_path, generation)?;
     let source_file_res = fs::File::open(&source_path).await;
     let source_file = match source_file_res {
         Ok(source_file) => source_file,
@@ -97,7 +94,7 @@ pub(super) async fn upload_timeline_layer<'a>(
         .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
 
     storage
-        .upload(source_file, fs_size, &storage_path, None)
+        .upload(source_file, fs_size, &remote_path, None)
         .await
         .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 

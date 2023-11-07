@@ -188,6 +188,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
+use pageserver_api::shard::ShardIdentity;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff::{
@@ -298,6 +299,7 @@ pub struct RemoteTimelineClient {
     runtime: tokio::runtime::Handle,
 
     tenant_id: TenantId,
+    shard: ShardIdentity,
     timeline_id: TimelineId,
     generation: Generation,
 
@@ -322,9 +324,12 @@ impl RemoteTimelineClient {
         deletion_queue_client: DeletionQueueClient,
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        shard: ShardIdentity,
         timeline_id: TimelineId,
         generation: Generation,
     ) -> RemoteTimelineClient {
+        tracing::info!("RemoteTimelineClient::new shard={}", shard.slug());
+
         RemoteTimelineClient {
             conf,
             runtime: if cfg!(test) {
@@ -334,6 +339,7 @@ impl RemoteTimelineClient {
                 BACKGROUND_RUNTIME.handle().clone()
             },
             tenant_id,
+            shard,
             timeline_id,
             generation,
             storage_impl: remote_storage,
@@ -461,6 +467,7 @@ impl RemoteTimelineClient {
         let index_part = download::download_index_part(
             &self.storage_impl,
             &self.tenant_id,
+            &self.shard,
             &self.timeline_id,
             self.generation,
             cancel,
@@ -503,6 +510,7 @@ impl RemoteTimelineClient {
                 self.conf,
                 &self.storage_impl,
                 self.tenant_id,
+                &self.shard,
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
@@ -893,6 +901,7 @@ impl RemoteTimelineClient {
                 upload::upload_index_part(
                     &self.storage_impl,
                     &self.tenant_id,
+                    &self.shard,
                     &self.timeline_id,
                     self.generation,
                     &index_part_with_deleted_at,
@@ -951,6 +960,7 @@ impl RemoteTimelineClient {
                 .map(|(file_name, meta)| {
                     remote_layer_path(
                         &self.tenant_id,
+                        &self.shard,
                         &self.timeline_id,
                         &file_name,
                         meta.generation,
@@ -964,7 +974,8 @@ impl RemoteTimelineClient {
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
-        let timeline_storage_path = remote_timeline_path(&self.tenant_id, &self.timeline_id);
+        let timeline_storage_path =
+            remote_timeline_path(&self.tenant_id, &self.shard, &self.timeline_id);
 
         // Execute all pending deletions, so that when we proceed to do a list_prefixes below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
@@ -1000,7 +1011,12 @@ impl RemoteTimelineClient {
             .unwrap_or(
                 // No generation-suffixed indices, assume we are dealing with
                 // a legacy index.
-                remote_index_path(&self.tenant_id, &self.timeline_id, Generation::none()),
+                remote_index_path(
+                    &self.tenant_id,
+                    &self.shard,
+                    &self.timeline_id,
+                    Generation::none(),
+                ),
             );
 
         let remaining_layers: Vec<RemotePath> = remaining
@@ -1178,13 +1194,20 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata) => {
-                    let path = layer.local_path();
-                    upload::upload_timeline_layer(
-                        self.conf,
-                        &self.storage_impl,
-                        path,
-                        layer_metadata,
+                    let remote_path = remote_layer_path(
+                        &self.tenant_id,
+                        &self.shard,
+                        &self.timeline_id,
+                        &layer.layer_desc().filename(),
                         self.generation,
+                    );
+
+                    let local_path = layer.local_path();
+                    upload::upload_timeline_layer(
+                        &self.storage_impl,
+                        local_path,
+                        remote_path,
+                        layer_metadata,
                     )
                     .measure_remote_op(
                         self.tenant_id,
@@ -1208,6 +1231,7 @@ impl RemoteTimelineClient {
                     let res = upload::upload_index_part(
                         &self.storage_impl,
                         &self.tenant_id,
+                        &self.shard,
                         &self.timeline_id,
                         self.generation,
                         index_part,
@@ -1233,6 +1257,7 @@ impl RemoteTimelineClient {
                     .deletion_queue_client
                     .push_layers(
                         self.tenant_id,
+                        &self.shard,
                         self.timeline_id,
                         self.generation,
                         delete.layers.clone(),
@@ -1503,24 +1528,33 @@ impl RemoteTimelineClient {
     }
 }
 
-pub fn remote_timelines_path(tenant_id: &TenantId) -> RemotePath {
-    let path = format!("tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}");
+pub fn remote_timelines_path(tenant_id: &TenantId, shard: &ShardIdentity) -> RemotePath {
+    let path = format!(
+        "tenants/{tenant_id}{}/{TIMELINES_SEGMENT_NAME}",
+        shard.slug()
+    );
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
-pub fn remote_timeline_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
-    remote_timelines_path(tenant_id).join(Utf8Path::new(&timeline_id.to_string()))
+pub fn remote_timeline_path(
+    tenant_id: &TenantId,
+    shard: &ShardIdentity,
+    timeline_id: &TimelineId,
+) -> RemotePath {
+    remote_timelines_path(tenant_id, shard).join(Utf8Path::new(&timeline_id.to_string()))
 }
 
 pub fn remote_layer_path(
     tenant_id: &TenantId,
+    shard: &ShardIdentity,
     timeline_id: &TimelineId,
     layer_file_name: &LayerFileName,
     generation: Generation,
 ) -> RemotePath {
     // Generation-aware key format
     let path = format!(
-        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        "tenants/{tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{1}{2}",
+        shard.slug(),
         layer_file_name.file_name(),
         generation.get_suffix()
     );
@@ -1530,11 +1564,13 @@ pub fn remote_layer_path(
 
 pub fn remote_index_path(
     tenant_id: &TenantId,
+    shard: &ShardIdentity,
     timeline_id: &TimelineId,
     generation: Generation,
 ) -> RemotePath {
     RemotePath::from_string(&format!(
-        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        "tenants/{tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{1}{2}",
+        shard.slug(),
         IndexPart::FILE_NAME,
         generation.get_suffix()
     ))
@@ -1556,29 +1592,6 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
         Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
         None => None,
     }
-}
-
-/// Files on the remote storage are stored with paths, relative to the workdir.
-/// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
-///
-/// Errors if the path provided does not start from pageserver's workdir.
-pub fn remote_path(
-    conf: &PageServerConf,
-    local_path: &Utf8Path,
-    generation: Generation,
-) -> anyhow::Result<RemotePath> {
-    let stripped = local_path
-        .strip_prefix(&conf.workdir)
-        .context("Failed to strip workdir prefix")?;
-
-    let suffixed = format!("{0}{1}", stripped, generation.get_suffix());
-
-    RemotePath::new(Utf8Path::new(&suffixed)).with_context(|| {
-        format!(
-            "to resolve remote part of path {:?} for base {:?}",
-            local_path, conf.workdir
-        )
-    })
 }
 
 #[cfg(test)]
@@ -1677,6 +1690,7 @@ mod tests {
                 conf: self.harness.conf,
                 runtime: tokio::runtime::Handle::current(),
                 tenant_id: self.harness.tenant_id,
+                shard: ShardIdentity::none(),
                 timeline_id: TIMELINE_ID,
                 generation,
                 storage_impl: self.harness.remote_storage.clone(),
@@ -2010,7 +2024,13 @@ mod tests {
         std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
 
         let index_path = test_state.harness.remote_fs_dir.join(
-            remote_index_path(&test_state.harness.tenant_id, &TIMELINE_ID, generation).get_path(),
+            remote_index_path(
+                &test_state.harness.tenant_id,
+                &ShardIdentity::none(),
+                &TIMELINE_ID,
+                generation,
+            )
+            .get_path(),
         );
         eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();

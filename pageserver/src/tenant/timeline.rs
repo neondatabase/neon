@@ -1547,7 +1547,6 @@ impl Timeline {
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        let shard = tenant_conf_guard.shard.clone();
         drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::time::Duration;
 
+use pageserver_api::shard::ShardIdentity;
 use regex::Regex;
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
@@ -390,6 +391,8 @@ impl ListWriter {
                     for (layer, generation) in op.layers {
                         layer_paths.push(remote_layer_path(
                             &op.tenant_id,
+                            // TODO: store shard in deletion list
+                            &ShardIdentity::none(),
                             &op.timeline_id,
                             &layer,
                             generation,
@@ -399,6 +402,8 @@ impl ListWriter {
 
                     if !self.pending.push(
                         &op.tenant_id,
+                        // TODO: store shard in deletion list
+                        &ShardIdentity::none(),
                         &op.timeline_id,
                         op.generation,
                         &mut layer_paths,
@@ -406,6 +411,8 @@ impl ListWriter {
                         self.flush().await;
                         let retry_succeeded = self.pending.push(
                             &op.tenant_id,
+                            // TODO: store shard in deletion list
+                            &ShardIdentity::none(),
                             &op.timeline_id,
                             op.generation,
                             &mut layer_paths,
