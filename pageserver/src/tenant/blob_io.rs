@@ -233,8 +233,10 @@ impl BlobWriter<false> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
-    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
+    use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::{BlockReaderRef, FileBlockReader}};
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
@@ -243,6 +245,7 @@ mod tests {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         // Write part (in block to drop the file)
+        let now = Instant::now();
         let mut offsets = Vec::new();
         {
             let file = VirtualFile::create(pathbuf.as_path()).await?;
@@ -255,11 +258,16 @@ mod tests {
             // read again with read_blk
             let offs = wtr.write_blob(&vec![0; PAGE_SZ]).await?;
             println!("Writing final blob at offs={offs}");
+            println!("wrote {}", wtr.size());
             wtr.flush_buffer().await?;
         }
+        println!("write buffered={} time: {:?}", BUFFERED, now.elapsed());
 
+        let now = Instant::now();
         let file = VirtualFile::open(pathbuf.as_path()).await?;
-        let rdr = BlockReaderRef::VirtualFile(&file);
+        // let rdr = BlockReaderRef::VirtualFile(&file);
+        let rdr = FileBlockReader::new(file);
+        let rdr = BlockReaderRef::FileBlockReader(&rdr);
         let rdr = BlockCursor::new(rdr);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
             let blob_read = rdr.read_blob(*offset, &ctx).await?;
@@ -268,6 +276,8 @@ mod tests {
                 "mismatch for idx={idx} at offset={offset}"
             );
         }
+        println!("read buffered={} time: {:?}", BUFFERED, now.elapsed());
+
         Ok(())
     }
 
@@ -301,7 +311,7 @@ mod tests {
     async fn test_really_big_array() -> Result<(), Error> {
         let blobs = &[
             b"test".to_vec(),
-            random_array(10 * PAGE_SZ),
+            random_array(10_000 * PAGE_SZ), // 80MB
             b"foobar".to_vec(),
         ];
         round_trip_test::<false>(blobs).await?;
@@ -322,16 +332,20 @@ mod tests {
     #[tokio::test]
     async fn test_arrays_random_size() -> Result<(), Error> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let blobs = (0..1024)
+        let blobs = (0..1024*1024)
             .map(|_| {
                 let mut sz: u16 = rng.gen();
                 // Make 50% of the arrays small
-                if rng.gen() {
-                    sz |= 63;
+                if true || rng.gen() {
+                    sz &= 63; // TODO why or? should be and?
                 }
                 random_array(sz.into())
             })
             .collect::<Vec<_>>();
+
+        let total_len: usize = blobs.iter().map(|b| b.len()).sum();
+        println!("total_len {}", total_len);
+
         round_trip_test::<false>(&blobs).await?;
         round_trip_test::<true>(&blobs).await?;
         Ok(())
