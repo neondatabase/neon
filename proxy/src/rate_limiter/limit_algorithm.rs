@@ -20,8 +20,9 @@ pub struct Sample {
     pub(crate) outcome: Outcome,
 }
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum RateLimitAlgorithm {
+    #[default]
     None,
     Fixed,
     Aimd,
@@ -36,6 +37,7 @@ impl LimitAlgorithm for Fixed {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RateLimiterConfig {
     pub algorithm: RateLimitAlgorithm,
     pub initial_limit: usize,
@@ -44,18 +46,4 @@ pub struct RateLimiterConfig {
     pub aimd_increase_by: usize,
     pub aimd_decrease_factor: f32,
     pub aimd_min_utilisation_threshold: f32,
-}
-
-impl Default for RateLimiterConfig {
-    fn default() -> Self {
-        Self {
-            algorithm: RateLimitAlgorithm::None,
-            initial_limit: Default::default(),
-            aimd_min_limit: Default::default(),
-            aimd_max_limit: Default::default(),
-            aimd_increase_by: Default::default(),
-            aimd_decrease_factor: Default::default(),
-            aimd_min_utilisation_threshold: Default::default(),
-        }
-    }
 }
