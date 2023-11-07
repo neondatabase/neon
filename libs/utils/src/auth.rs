@@ -1,7 +1,8 @@
 // For details about authentication see docs/authentication.md
 
+use arc_swap::ArcSwap;
 use serde;
-use std::fs;
+use std::{fs, sync::Arc};
 
 use anyhow::Result;
 use camino::Utf8Path;
@@ -44,31 +45,88 @@ impl Claims {
     }
 }
 
+pub struct SwappableJwtAuth(ArcSwap<JwtAuth>);
+
+impl SwappableJwtAuth {
+    pub fn new(jwt_auth: JwtAuth) -> Self {
+        SwappableJwtAuth(ArcSwap::new(Arc::new(jwt_auth)))
+    }
+    pub fn swap(&self, jwt_auth: JwtAuth) {
+        self.0.swap(Arc::new(jwt_auth));
+    }
+    pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
+        self.0.load().decode(token)
+    }
+}
+
+impl std::fmt::Debug for SwappableJwtAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Swappable({:?})", self.0.load())
+    }
+}
+
 pub struct JwtAuth {
-    decoding_key: DecodingKey,
+    decoding_keys: Vec<DecodingKey>,
     validation: Validation,
 }
 
 impl JwtAuth {
-    pub fn new(decoding_key: DecodingKey) -> Self {
+    pub fn new(decoding_keys: Vec<DecodingKey>) -> Self {
         let mut validation = Validation::default();
         validation.algorithms = vec![STORAGE_TOKEN_ALGORITHM];
         // The default 'required_spec_claims' is 'exp'. But we don't want to require
         // expiration.
         validation.required_spec_claims = [].into();
         Self {
-            decoding_key,
+            decoding_keys,
             validation,
         }
     }
 
     pub fn from_key_path(key_path: &Utf8Path) -> Result<Self> {
-        let public_key = fs::read(key_path)?;
-        Ok(Self::new(DecodingKey::from_ed_pem(&public_key)?))
+        let metadata = key_path.metadata()?;
+        let decoding_keys = if metadata.is_dir() {
+            let mut keys = Vec::new();
+            for entry in fs::read_dir(key_path)? {
+                let path = entry?.path();
+                if !path.is_file() {
+                    // Ignore directories (don't recurse)
+                    continue;
+                }
+                let public_key = fs::read(path)?;
+                keys.push(DecodingKey::from_ed_pem(&public_key)?);
+            }
+            keys
+        } else if metadata.is_file() {
+            let public_key = fs::read(key_path)?;
+            vec![DecodingKey::from_ed_pem(&public_key)?]
+        } else {
+            anyhow::bail!("path is neither a directory or a file")
+        };
+        if decoding_keys.is_empty() {
+            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected.");
+        }
+        Ok(Self::new(decoding_keys))
     }
 
+    /// Attempt to decode the token with the internal decoding keys.
+    ///
+    /// The function tries the stored decoding keys in succession,
+    /// and returns the first yielding a successful result.
+    /// If there is no working decoding key, it returns the last error.
     pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
-        Ok(decode(token, &self.decoding_key, &self.validation)?)
+        let mut res = None;
+        for decoding_key in &self.decoding_keys {
+            res = Some(decode(token, decoding_key, &self.validation));
+            if let Some(Ok(res)) = res {
+                return Ok(res);
+            }
+        }
+        if let Some(res) = res {
+            res.map_err(anyhow::Error::new)
+        } else {
+            anyhow::bail!("no JWT decoding keys configured")
+        }
     }
 }
 
@@ -129,7 +187,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let encoded_eddsa = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzY29wZSI6InRlbmFudCIsInRlbmFudF9pZCI6IjNkMWY3NTk1YjQ2ODIzMDMwNGUwYjczY2VjYmNiMDgxIiwiaXNzIjoibmVvbi5jb250cm9scGxhbmUiLCJleHAiOjE3MDkyMDA4NzksImlhdCI6MTY3ODQ0MjQ3OX0.U3eA8j-uU-JnhzeO3EDHRuXLwkAUFCPxtGHEgw6p7Ccc3YRbFs2tmCdbD9PZEXP-XsxSeBQi1FY0YPcT3NXADw";
 
         // Check it can be validated with the public key
-        let auth = JwtAuth::new(DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?);
+        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?]);
         let claims_from_token = auth.decode(encoded_eddsa)?.claims;
         assert_eq!(claims_from_token, expected_claims);
 
@@ -146,7 +204,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519)?;
 
         // decode it back
-        let auth = JwtAuth::new(DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?);
+        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?]);
         let decoded = auth.decode(&encoded)?;
 
         assert_eq!(decoded.claims, claims);

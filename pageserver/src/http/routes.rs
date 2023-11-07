@@ -20,6 +20,7 @@ use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::auth::JwtAuth;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -45,7 +46,7 @@ use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSha
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use utils::{
-    auth::JwtAuth,
+    auth::SwappableJwtAuth,
     generation::Generation,
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
@@ -64,7 +65,7 @@ use super::models::ConfigureFailpointsRequest;
 pub struct State {
     conf: &'static PageServerConf,
     tenant_manager: Arc<TenantManager>,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
     broker_client: storage_broker::BrokerClientChannel,
@@ -76,7 +77,7 @@ impl State {
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
-        auth: Option<Arc<JwtAuth>>,
+        auth: Option<Arc<SwappableJwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
@@ -390,6 +391,32 @@ async fn status_handler(
     check_permission(&request, None)?;
     let config = get_config(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
+}
+
+async fn reload_auth_validation_keys_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let config = get_config(&request);
+    let state = get_state(&request);
+    let Some(shared_auth) = &state.auth else {
+        return json_response(StatusCode::BAD_REQUEST, ());
+    };
+    // unwrap is ok because check is performed when creating config, so path is set and exists
+    let key_path = config.auth_validation_public_key_path.as_ref().unwrap();
+    info!("Reloading public key(s) for verifying JWT tokens from {key_path:?}");
+
+    match JwtAuth::from_key_path(key_path) {
+        Ok(new_auth) => {
+            shared_auth.swap(new_auth);
+            json_response(StatusCode::OK, ())
+        }
+        Err(e) => {
+            warn!("Error reloading public keys from {key_path:?}: {e:}");
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+        }
+    }
 }
 
 async fn timeline_create_handler(
@@ -1692,7 +1719,7 @@ where
 pub fn make_router(
     state: Arc<State>,
     launch_ts: &'static LaunchTimestamp,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -1720,6 +1747,9 @@ pub fn make_router(
         .get("/v1/status", |r| api_handler(r, status_handler))
         .put("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
+        })
+        .post("/v1/reload_auth_validation_keys", |r| {
+            api_handler(r, reload_auth_validation_keys_handler)
         })
         .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
         .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))

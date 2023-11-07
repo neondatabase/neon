@@ -1,4 +1,4 @@
-use crate::auth::{Claims, JwtAuth};
+use crate::auth::{Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
@@ -389,7 +389,7 @@ fn parse_token(header_value: &str) -> Result<&str, ApiError> {
 }
 
 pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-    provide_auth: fn(&Request<Body>) -> Option<&JwtAuth>,
+    provide_auth: fn(&Request<Body>) -> Option<&SwappableJwtAuth>,
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         if let Some(auth) = provide_auth(&req) {

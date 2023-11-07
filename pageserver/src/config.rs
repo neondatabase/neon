@@ -161,7 +161,7 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
-    /// Path to a file containing public key for verifying JWT tokens.
+    /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
 

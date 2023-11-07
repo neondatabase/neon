@@ -39,7 +39,7 @@ use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
-    auth::{Claims, JwtAuth, Scope},
+    auth::{Claims, Scope, SwappableJwtAuth},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     simple_rcu::RcuReadGuard,
@@ -121,7 +121,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
     listener_ctx: RequestContext,
@@ -189,7 +189,7 @@ pub async fn libpq_listener_main(
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
     connection_ctx: RequestContext,
@@ -252,7 +252,7 @@ async fn page_service_conn_main(
 struct PageServerHandler {
     _conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
     /// The context created for the lifetime of the connection
@@ -266,7 +266,7 @@ impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
         broker_client: storage_broker::BrokerClientChannel,
-        auth: Option<Arc<JwtAuth>>,
+        auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {

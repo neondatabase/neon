@@ -52,6 +52,31 @@ paths:
               schema:
                 type: object
 
+  /v1/reload_auth_validation_keys:
+    post:
+      description: Reloads the JWT public keys from their pre-configured location on disk.
+      responses:
+        "200":
+          description: The reload completed successfully.
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error (also hits if no keys were found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}:
     parameters:
       - name: tenant_id
