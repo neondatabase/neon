@@ -19,5 +19,6 @@ strum.workspace = true
 strum_macros.workspace = true
 mur3.workspace = true
 url.workspace = true
+hex.workspace = true
 
 workspace_hack.workspace = true
