@@ -68,7 +68,7 @@ impl Deleter {
                         .remote_errors
                         .with_label_values(&["failpoint"])
                         .inc();
-                    Err(anyhow::anyhow!("failpoint hit"))
+                    Err(anyhow::anyhow!("failpoint: deletion-queue-before-execute"))
                 });
 
                 self.remote_storage.delete_objects(&self.accumulator).await
