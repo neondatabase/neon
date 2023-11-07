@@ -60,6 +60,7 @@ fn make_simple(n_keys: i128, name: &str) -> MockLayer {
     let index_start_blk = 0; // ???
     let path = std::env::current_dir().unwrap()
         .parent().unwrap()
+        .join(".neon") // NOTE this is important because .neon is where I mount the ssd
         .join("test_output")
         .join("bench_disk_lookup")
         .join("disk_btree")
@@ -117,8 +118,8 @@ fn bench_disk_lookup(c: &mut Criterion) {
     let n_layers = 100;
     let n_queries = n_layers;
 
-    let n_keys = 40_000_000;
-    let n_layers = 10;
+    // let n_keys = 40_000_000;
+    // let n_layers = 10;
 
     // Write to disk btree
     let layers = make_many(n_keys, n_layers);
