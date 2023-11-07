@@ -440,6 +440,7 @@ fn helper_create_connect_info(
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
         application_name: Some("TEST"),
+        options: None,
     };
     let creds = auth::BackendType::Test(mechanism);
     (cache, extra, creds)

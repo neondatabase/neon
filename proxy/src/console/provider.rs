@@ -178,6 +178,7 @@ pub struct ConsoleReqExtra<'a> {
     pub session_id: uuid::Uuid,
     /// Name of client application, if set.
     pub application_name: Option<&'a str>,
+    pub options: Option<&'a str>,
 }
 
 /// Auth secret which is managed by the cloud.
