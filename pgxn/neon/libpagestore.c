@@ -118,7 +118,7 @@ ReloadConnstring()
     if(!pagestore_shared)
         return;
     LWLockAcquire(pagestore_shared->lock, LW_SHARED);
-    strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, MAX_PAGESERVER_CONNSTRING_SIZE);
+    strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
     pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
     LWLockRelease(pagestore_shared->lock);
 }
