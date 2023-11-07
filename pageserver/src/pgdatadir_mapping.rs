@@ -589,11 +589,7 @@ impl Timeline {
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self
-                .list_rels(*spcnode, *dbnode, lsn, ctx)
-                .await
-                .context("list rels")?
-            {
+            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
                 if cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
