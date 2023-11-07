@@ -124,21 +124,20 @@ jobs:
       id: pgbench-compare-matrix
       run: |
         matrix='{
-          "platform": [
-            "neon-captest-new",
-            "neon-captest-reuse",
-            "neonvm-captest-new"
-          ],
-          "db_size": [ "10gb" ],
-          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
-                      { "platform": "neon-captest-new",        "db_size": "50gb" },
-                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
-                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
+          "include": [
+            { "platform": "neon-captest-freetier",   "db_size": "3gb",  "compute_units": "[0.25, 0.25]", "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-freetier", "db_size": "3gb",  "compute_units": "[0.25, 0.25]", "provisioner": "k8s-neonvm" },
+            { "platform": "neon-captest-reuse",      "db_size": "10gb", "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
+            { "platform": "neon-captest-new",        "db_size": "10gb", "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-new",      "db_size": "10gb", "compute_units": "[1, 1]",       "provisioner": "k8s-neonvm" },
+            { "platform": "neon-captest-new",        "db_size": "50gb", "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-new",      "db_size": "50gb", "compute_units": "[1, 1]",       "provisioner": "k8s-neonvm" }
+          ]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
+                                                     { "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -154,7 +153,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
-                                                   { "platform": "rds-aurora"   }]')
+                                                     { "platform": "rds-aurora"   }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -173,7 +172,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
-                                                   { "platform": "rds-aurora",   "scale": "10" }]')
+                                                     { "platform": "rds-aurora",   "scale": "10" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -226,8 +225,8 @@ jobs:
         region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-        compute_units: ${{ (matrix.platform == 'neon-captest-freetier' && '[0.25, 0.25]') || '[1, 1]' }}
-        provisioner: ${{ (contains(matrix.platform, 'neonvm-') && 'k8s-neonvm') || 'k8s-pod' }}
+        compute_units: ${{ matrix.compute_units }}
+        provisioner: ${{ matrix.provisioner }}
 
     - name: Set up Connection String
       id: set-up-connstr
