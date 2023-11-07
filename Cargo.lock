@@ -6055,7 +6055,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "workspace_hack",
 ]
 
 [[package]]
