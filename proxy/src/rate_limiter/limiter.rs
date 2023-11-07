@@ -1,17 +1,12 @@
 use std::{
-    future::Future,
-    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex,
+        Arc,
     },
-    task::{self, Poll},
     time::Duration,
 };
 
-use pin_list::PinList;
-use pin_project_lite::pin_project;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Instant};
 
 use super::limit_algorithm::{LimitAlgorithm, Sample};
@@ -26,24 +21,13 @@ use super::limit_algorithm::{LimitAlgorithm, Sample};
 #[derive(Debug)]
 pub struct Limiter<T> {
     limit_algo: AsyncMutex<T>,
-    inner: LimiterInner,
-}
-
-type SemaphoreTypes = dyn pin_list::Types<
-    Id = pin_list::id::Checked,
-    Protected = std::task::Waker,
-    Removed = (),
-    Unprotected = (),
->;
-
-#[derive(Debug)]
-struct LimiterInner {
-    semaphore2: Mutex<PinList<SemaphoreTypes>>,
+    semaphore: std::sync::Arc<Semaphore>,
 
     // ONLY WRITE WHEN LIMIT_ALGO IS LOCKED
     limits: AtomicUsize,
+
     // ONLY USE ATOMIC ADD/SUB
-    in_flight: AtomicUsize,
+    in_flight: Arc<AtomicUsize>,
 
     #[cfg(test)]
     notifier: Option<std::sync::Arc<tokio::sync::Notify>>,
@@ -54,8 +38,9 @@ struct LimiterInner {
 /// Release the token back to the [Limiter] after the job is complete.
 #[derive(Debug)]
 pub struct Token<'t> {
-    limiter: &'t LimiterInner,
+    permit: Option<tokio::sync::SemaphorePermit<'t>>,
     start: Instant,
+    in_flight: Arc<AtomicUsize>,
 }
 
 /// A snapshot of the state of the [Limiter].
@@ -110,58 +95,50 @@ where
         assert!(initial_limit > 0);
         Self {
             limit_algo: AsyncMutex::new(limit_algorithm),
-            inner: LimiterInner {
-                semaphore2: Mutex::new(PinList::new(pin_list::id::Checked::new())),
-                limits: AtomicUsize::new(initial_limit),
-                in_flight: AtomicUsize::new(0),
-
-                #[cfg(test)]
-                notifier: None,
-            },
+            semaphore: Arc::new(Semaphore::new(initial_limit)),
+            limits: AtomicUsize::new(initial_limit),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            notifier: None,
         }
     }
 
     /// In some cases [Token]s are acquired asynchronously when updating the limit.
     #[cfg(test)]
     pub fn with_release_notifier(mut self, n: std::sync::Arc<tokio::sync::Notify>) -> Self {
-        self.inner.notifier = Some(n);
+        self.notifier = Some(n);
         self
     }
 
     /// Try to immediately acquire a concurrency [Token].
     ///
     /// Returns `None` if there are none available.
-    pub fn try_acquire(&self) -> Option<Token<'_>> {
-        let limit = self.inner.limits.load(Ordering::Acquire);
-        self.inner
-            .in_flight
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |in_flight| {
-                if in_flight >= limit {
-                    None
-                } else {
-                    Some(in_flight + 1)
-                }
-            })
-            .map(|_| Token::new(&self.inner))
-            .ok()
+    pub fn try_acquire(&self) -> Option<Token> {
+        let result = self
+            .semaphore
+            .try_acquire()
+            .map(|permit| Token::new(permit, self.in_flight.clone()))
+            .ok();
+        if result.is_some() {
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+        }
+        result
     }
 
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
     ///
     /// Returns `None` if there are none available after `duration`.
     pub async fn acquire_timeout(&self, duration: Duration) -> Option<Token<'_>> {
-        match timeout(
-            duration,
-            Acquire {
-                semaphore: &self.inner,
-                node: pin_list::Node::new(),
-            },
-        )
-        .await
-        {
-            Ok(permit) => Some(permit),
+        let result = match timeout(duration, self.semaphore.acquire()).await {
+            Ok(maybe_permit) => maybe_permit
+                .map(|permit| Token::new(permit, self.in_flight.clone()))
+                .ok(),
             Err(_) => None,
+        };
+        if result.is_some() {
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
         }
+        result
     }
 
     /// Return the concurrency [Token], along with the outcome of the job.
@@ -170,96 +147,54 @@ where
     /// to update the concurrency limit.
     ///
     /// Set the outcome to `None` to ignore the job.
-    pub async fn release(&self, token: Token<'_>, outcome: Option<Outcome>) {
-        let in_flight = self.inner.in_flight.load(Ordering::Acquire);
-        let old_limit = self.inner.limits.load(Ordering::Acquire);
+    pub async fn release(&self, mut token: Token<'_>, outcome: Option<Outcome>) {
+        let in_flight = self.in_flight.load(Ordering::Acquire);
+        let available = self.semaphore.available_permits();
+        let old_limit = self.limits.load(Ordering::Acquire);
+        let total = in_flight + available;
+
+        let mut algo = self.limit_algo.lock().await;
 
         let new_limit = if let Some(outcome) = outcome {
-            let mut algo = self.limit_algo.lock().await;
-
             let sample = Sample {
                 latency: token.start.elapsed(),
                 in_flight,
                 outcome,
             };
-
-            let new_limit = algo.update(old_limit, sample).await;
-            // update limit while locked
-            self.inner.limits.store(new_limit, Ordering::Release);
-            new_limit
+            algo.update(old_limit, sample).await
         } else {
             old_limit
         };
-        std::mem::forget(token);
-
-        self.inner.release(in_flight, new_limit, 1);
-
+        if new_limit < total {
+            token.forget();
+        } else {
+            self.semaphore.add_permits(new_limit - total);
+        }
+        self.limits.store(new_limit, Ordering::Release);
         #[cfg(test)]
-        if let Some(n) = &self.inner.notifier {
+        if let Some(n) = &self.notifier {
             n.notify_one();
         }
     }
 
     /// The current state of the limiter.
     pub fn state(&self) -> LimiterState {
-        let limit = self.inner.limits.load(Ordering::Relaxed);
-        let in_flight = self.inner.in_flight.load(Ordering::Relaxed);
+        let limit = self.limits.load(Ordering::Relaxed);
+        let available = self.semaphore.available_permits();
         LimiterState {
             limit,
-            available: limit.saturating_sub(in_flight),
-            in_flight,
-        }
-    }
-}
-
-impl LimiterInner {
-    // release some permits to the wake list
-    fn release(&self, mut in_flight: usize, mut new_limit: usize, mut extra: usize) {
-        // TODO: use array vec like tokio
-        let mut wakers = Vec::<task::Waker>::new();
-        loop {
-            for waker in wakers.drain(..) {
-                waker.wake()
-            }
-
-            let to_wake = new_limit.saturating_sub(in_flight) + extra;
-            if to_wake == 0 {
-                return;
-            }
-
-            let mut semaphore = self.semaphore2.lock().unwrap();
-            if semaphore.is_empty() {
-                // release the extra tokens
-                if extra > 0 {
-                    self.in_flight.fetch_sub(extra, Ordering::Release);
-                }
-                return;
-            }
-
-            let mut cursor = semaphore.cursor_front_mut();
-            while wakers.len() < usize::min(to_wake, 32) {
-                if let Ok(waker) = cursor.remove_current(()) {
-                    wakers.push(waker);
-                } else {
-                    break;
-                }
-            }
-
-            let to_acquire = wakers.len().saturating_sub(extra);
-            extra = extra.saturating_sub(wakers.len());
-
-            // update in_flight. this can race, but it's not important to be correct. just good enough
-            in_flight = self.in_flight.fetch_add(to_acquire, Ordering::Release) + wakers.len();
-            new_limit = self.limits.load(Ordering::Acquire);
+            available,
+            in_flight: limit.saturating_sub(available),
         }
     }
 }
 
 impl<'t> Token<'t> {
-    fn new(limiter: &'t LimiterInner) -> Self {
+    fn new(permit: SemaphorePermit<'t>, in_flight: Arc<AtomicUsize>) -> Self {
         Self {
-            limiter,
+            permit: Some(permit),
             start: Instant::now(),
+            in_flight,
         }
     }
 
@@ -269,14 +204,18 @@ impl<'t> Token<'t> {
 
         self.start = Instant::now().sub(latency);
     }
+
+    pub fn forget(&mut self) {
+        if let Some(permit) = self.permit.take() {
+            permit.forget();
+        }
+    }
 }
 
+
 impl Drop for Token<'_> {
-    /// Reduces the number of jobs in flight.
     fn drop(&mut self) {
-        let in_flight = self.limiter.in_flight.load(Ordering::Acquire);
-        let limit = self.limiter.limits.load(Ordering::Acquire);
-        self.limiter.release(in_flight, limit, 1);
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -292,65 +231,6 @@ impl LimiterState {
     /// The number of jobs in flight.
     pub fn in_flight(&self) -> usize {
         self.in_flight
-    }
-}
-
-pin_project! {
-    struct Acquire<'s> {
-        semaphore: &'s LimiterInner,
-        #[pin]
-        node: pin_list::Node<SemaphoreTypes>,
-    }
-
-    impl PinnedDrop for Acquire<'_> {
-        fn drop(this: Pin<&mut Self>) {
-            let this = this.project();
-            let node = match this.node.initialized_mut() {
-                // The future was cancelled before it could complete.
-                Some(initialized) => initialized,
-                // The future has completed already (or hasn't started); we don't have to do
-                // anything.
-                None => return,
-            };
-
-            let node = {
-                node.reset(&mut this.semaphore.semaphore2.lock().unwrap()) };
-
-            match node {
-                // If we've cancelled the future like usual, just do that.
-                (pin_list::NodeData::Linked(_waker), ()) => {}
-
-                // Otherwise, we have been woken but aren't around to take the lock. To
-                // prevent deadlocks, pass the notification on to someone else.
-                (pin_list::NodeData::Removed(()), ()) => {
-                    let _ = Token::new(this.semaphore);
-                }
-            }
-        }
-    }
-}
-
-impl<'s> Future for Acquire<'s> {
-    type Output = Token<'s>;
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-
-        let mut inner = this.semaphore.semaphore2.lock().unwrap();
-
-        if let Some(node) = this.node.as_mut().initialized_mut() {
-            // Check whether we've been woken up, only continuing if so.
-            if let Err(node) = node.take_removed(&inner) {
-                // If we haven't been woken, re-register our waker and pend.
-                *node.protected_mut(&mut inner).unwrap() = cx.waker().clone();
-                return Poll::Pending;
-            }
-            return Poll::Ready(Token::new(this.semaphore));
-        }
-
-        // Otherwise, re-register ourselves to be woken when the mutex is unlocked again
-        inner.push_back(this.node, cx.waker().clone(), ());
-
-        Poll::Pending
     }
 }
 
