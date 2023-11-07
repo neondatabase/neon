@@ -125,13 +125,15 @@ jobs:
       run: |
         matrix='{
           "include": [
-            { "platform": "neon-captest-freetier",   "db_size": "3gb",  "compute_units": "[0.25, 0.25]", "provisioner": "k8s-pod"    },
-            { "platform": "neonvm-captest-freetier", "db_size": "3gb",  "compute_units": "[0.25, 0.25]", "provisioner": "k8s-neonvm" },
-            { "platform": "neon-captest-reuse",      "db_size": "10gb", "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
-            { "platform": "neon-captest-new",        "db_size": "10gb", "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
-            { "platform": "neonvm-captest-new",      "db_size": "10gb", "compute_units": "[1, 1]",       "provisioner": "k8s-neonvm" },
-            { "platform": "neon-captest-new",        "db_size": "50gb", "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
-            { "platform": "neonvm-captest-new",      "db_size": "50gb", "compute_units": "[1, 1]",       "provisioner": "k8s-neonvm" }
+            { "platform": "neon-captest-freetier",   "db_size": "3gb",   "compute_units": "[0.25, 0.25]", "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-freetier", "db_size": "3gb",   "compute_units": "[0.25, 0.25]", "provisioner": "k8s-neonvm" },
+            { "platform": "neon-captest-reuse",      "db_size": "10gb",  "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
+            { "platform": "neon-captest-new",        "db_size": "10gb",  "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-new",      "db_size": "10gb",  "compute_units": "[1, 1]",       "provisioner": "k8s-neonvm" },
+            { "platform": "neon-captest-new",        "db_size": "50gb",  "compute_units": "[1, 1]",       "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-new",      "db_size": "50gb",  "compute_units": "[1, 1]",       "provisioner": "k8s-neonvm" },
+            { "platform": "neon-captest-new",        "db_size": "300gb", "compute_units": "[7, 7]",       "provisioner": "k8s-pod"    },
+            { "platform": "neonvm-captest-new",      "db_size": "300gb", "compute_units": "[7, 7]",       "provisioner": "k8s-neonvm" }
           ]
         }'
 
