@@ -880,6 +880,13 @@ impl PageServerConf {
             );
         }
 
+        if let Some(compaction_algorithm) = item.get("compaction_algorithm") {
+            t_conf.compaction_algorithm = Some(
+                deserialize_from_item("compaction_algorithm", compaction_algorithm)
+                    .context("parse compaction_algorithm")?,
+            );
+        }
+
         if let Some(gc_horizon) = item.get("gc_horizon") {
             t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
         }

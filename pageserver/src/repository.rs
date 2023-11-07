@@ -172,6 +172,21 @@ impl Key {
     }
 }
 
+impl pageserver_compaction::interface::CompactionKey for Key {
+    const MIN: Self = Self::MIN;
+    const MAX: Self = Self::MAX;
+
+    fn key_range_size(r: &std::ops::Range<Self>) -> u32 {
+        key_range_size(r)
+    }
+    fn next(&self) -> Key {
+        (self as &Key).next()
+    }
+    fn skip_some(&self) -> Key {
+        self.add(128)
+    }
+}
+
 /// A 'value' stored for a one Key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {

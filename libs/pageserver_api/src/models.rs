@@ -227,6 +227,8 @@ pub struct TenantConfig {
     pub compaction_target_size: Option<u64>,
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
+    // defer parsing compaction_algorithm, like eviction_policy
+    pub compaction_algorithm: Option<serde_json::Value>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -324,6 +326,7 @@ impl TenantConfigRequest {
             compaction_target_size: None,
             compaction_period: None,
             compaction_threshold: None,
+            compaction_algorithm: None,
             gc_horizon: None,
             gc_period: None,
             image_creation_threshold: None,
