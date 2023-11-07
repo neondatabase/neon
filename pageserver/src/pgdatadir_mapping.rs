@@ -44,6 +44,17 @@ pub enum CalculateLogicalSizeError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<PageReconstructError> for CalculateLogicalSizeError {
+    fn from(pre: PageReconstructError) -> Self {
+        match pre {
+            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
+                Self::Cancelled
+            }
+            _ => Self::Other(pre.into()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RelationError {
     #[error("Relation Already Exists")]
@@ -573,24 +584,17 @@ impl Timeline {
         crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await.context("read dbdir")?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self
-                .list_rels(*spcnode, *dbnode, lsn, ctx)
-                .await
-                .context("list rels")?
-            {
+            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
                 if cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self
-                    .get(relsize_key, lsn, ctx)
-                    .await
-                    .with_context(|| format!("read relation size of {rel:?}"))?;
+                let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
                 total_size += relsize as u64;

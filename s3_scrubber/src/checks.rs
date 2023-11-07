@@ -1,13 +1,18 @@
 use std::collections::HashSet;
 
 use anyhow::Context;
-use aws_sdk_s3::Client;
+use aws_sdk_s3::{types::ObjectIdentifier, Client};
 use tracing::{error, info, warn};
+use utils::generation::Generation;
 
 use crate::cloud_admin_api::BranchData;
-use crate::{download_object_with_retries, list_objects_with_retries, RootTarget};
+use crate::metadata_stream::stream_listing;
+use crate::{download_object_with_retries, RootTarget};
+use futures_util::{pin_mut, StreamExt};
+use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
+use remote_storage::RemotePath;
 use utils::id::TenantTimelineId;
 
 pub(crate) struct TimelineAnalysis {
@@ -68,6 +73,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
                     index_part,
+                    index_part_generation,
                     mut s3_layers,
                 } => {
                     if !IndexPart::KNOWN_VERSIONS.contains(&index_part.get_version()) {
@@ -107,33 +113,62 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                         ))
                         }
 
-                        if !s3_layers.remove(&layer) {
+                        let layer_map_key = (layer, metadata.generation);
+                        if !s3_layers.remove(&layer_map_key) {
+                            // FIXME: this will emit false positives if an index was
+                            // uploaded concurrently with our scan.  To make this check
+                            // correct, we need to try sending a HEAD request for the
+                            // layer we think is missing.
                             result.errors.push(format!(
-                                "index_part.json contains a layer {} that is not present in S3",
-                                layer.file_name(),
+                                "index_part.json contains a layer {}{} that is not present in remote storage",
+                                layer_map_key.0.file_name(),
+                                layer_map_key.1.get_suffix()
                             ))
                         }
                     }
 
-                    if !s3_layers.is_empty() {
+                    let orphan_layers: Vec<(LayerFileName, Generation)> = s3_layers
+                        .into_iter()
+                        .filter(|(_layer_name, gen)|
+                            // A layer is only considered orphaned if it has a generation below
+                            // the index.  If the generation is >= the index, then the layer may
+                            // be an upload from a running pageserver, or even an upload from
+                            // a new generation that didn't upload an index yet.
+                            //
+                            // Even so, a layer that is not referenced by the index could just
+                            // be something enqueued for deletion, so while this check is valid 
+                            // for indicating that a layer is garbage, it is not an indicator
+                            // of a problem.
+                            gen < &index_part_generation)
+                        .collect();
+
+                    if !orphan_layers.is_empty() {
                         result.errors.push(format!(
                             "index_part.json does not contain layers from S3: {:?}",
-                            s3_layers
+                            orphan_layers
                                 .iter()
-                                .map(|layer_name| layer_name.file_name())
+                                .map(|(layer_name, gen)| format!(
+                                    "{}{}",
+                                    layer_name.file_name(),
+                                    gen.get_suffix()
+                                ))
                                 .collect::<Vec<_>>(),
                         ));
-                        result
-                            .garbage_keys
-                            .extend(s3_layers.iter().map(|layer_name| {
+                        result.garbage_keys.extend(orphan_layers.iter().map(
+                            |(layer_name, layer_gen)| {
                                 let mut key = s3_root.timeline_root(id).prefix_in_bucket;
                                 let delimiter = s3_root.delimiter();
                                 if !key.ends_with(delimiter) {
                                     key.push_str(delimiter);
                                 }
-                                key.push_str(&layer_name.file_name());
+                                key.push_str(&format!(
+                                    "{}{}",
+                                    &layer_name.file_name(),
+                                    layer_gen.get_suffix()
+                                ));
                                 key
-                            }));
+                            },
+                        ));
                     }
                 }
                 BlobDataParseResult::Incorrect(parse_errors) => result.errors.extend(
@@ -178,9 +213,23 @@ pub(crate) struct S3TimelineBlobData {
 pub(crate) enum BlobDataParseResult {
     Parsed {
         index_part: IndexPart,
-        s3_layers: HashSet<LayerFileName>,
+        index_part_generation: Generation,
+        s3_layers: HashSet<(LayerFileName, Generation)>,
     },
     Incorrect(Vec<String>),
+}
+
+fn parse_layer_object_name(name: &str) -> Result<(LayerFileName, Generation), String> {
+    match name.rsplit_once('-') {
+        // FIXME: this is gross, just use a regex?
+        Some((layer_filename, gen)) if gen.len() == 8 => {
+            let layer = layer_filename.parse::<LayerFileName>()?;
+            let gen =
+                Generation::parse_suffix(gen).ok_or("Malformed generation suffix".to_string())?;
+            Ok((layer, gen))
+        }
+        _ => Ok((name.parse::<LayerFileName>()?, Generation::none())),
+    }
 }
 
 pub(crate) async fn list_timeline_blobs(
@@ -189,58 +238,71 @@ pub(crate) async fn list_timeline_blobs(
     s3_root: &RootTarget,
 ) -> anyhow::Result<S3TimelineBlobData> {
     let mut s3_layers = HashSet::new();
-    let mut index_part_object = None;
-
-    let timeline_dir_target = s3_root.timeline_root(&id);
-    let mut continuation_token = None;
 
     let mut errors = Vec::new();
     let mut keys_to_remove = Vec::new();
 
-    loop {
-        let fetch_response =
-            list_objects_with_retries(s3_client, &timeline_dir_target, continuation_token.clone())
-                .await?;
+    let mut timeline_dir_target = s3_root.timeline_root(&id);
+    timeline_dir_target.delimiter = String::new();
 
-        let subdirectories = fetch_response.common_prefixes().unwrap_or_default();
-        if !subdirectories.is_empty() {
-            errors.push(format!(
-                "S3 list response should not contain any subdirectories, but got {subdirectories:?}"
-            ));
-        }
+    let mut index_parts: Vec<ObjectIdentifier> = Vec::new();
 
-        for (object, key) in fetch_response
-            .contents()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|object| Some((object, object.key()?)))
-        {
-            let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
-            match blob_name {
-                Some("index_part.json") => index_part_object = Some(object.clone()),
-                Some(maybe_layer_name) => match maybe_layer_name.parse::<LayerFileName>() {
-                    Ok(new_layer) => {
-                        s3_layers.insert(new_layer);
-                    }
-                    Err(e) => {
-                        errors.push(
-                            format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
-                        );
-                        keys_to_remove.push(key.to_string());
-                    }
-                },
-                None => {
-                    errors.push(format!("S3 list response got an object with odd key {key}"));
+    let stream = stream_listing(s3_client, &timeline_dir_target);
+    pin_mut!(stream);
+    while let Some(obj) = stream.next().await {
+        let obj = obj?;
+        let key = match obj.key() {
+            Some(k) => k,
+            None => continue,
+        };
+
+        let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
+        match blob_name {
+            Some(name) if name.starts_with("index_part.json") => {
+                tracing::info!("Index key {key}");
+                index_parts.push(obj)
+            }
+            Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
+                Ok((new_layer, gen)) => {
+                    tracing::info!("Parsed layer key: {} {:?}", new_layer, gen);
+                    s3_layers.insert((new_layer, gen));
+                }
+                Err(e) => {
+                    tracing::info!("Error parsing key {maybe_layer_name}");
+                    errors.push(
+                        format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
+                    );
                     keys_to_remove.push(key.to_string());
                 }
+            },
+            None => {
+                tracing::info!("Peculiar key {}", key);
+                errors.push(format!("S3 list response got an object with odd key {key}"));
+                keys_to_remove.push(key.to_string());
             }
         }
-
-        match fetch_response.next_continuation_token {
-            Some(new_token) => continuation_token = Some(new_token),
-            None => break,
-        }
     }
+
+    // Choose the index_part with the highest generation
+    let (index_part_object, index_part_generation) = match index_parts
+        .iter()
+        .filter_map(|k| {
+            let key = k.key().unwrap();
+            // Stripping the index key to the last part, because RemotePath doesn't
+            // like absolute paths, and depending on prefix_in_bucket it's possible
+            // for the keys we read back to start with a slash.
+            let basename = key.rsplit_once('/').unwrap().1;
+            parse_remote_index_path(RemotePath::from_string(basename).unwrap()).map(|g| (k, g))
+        })
+        .max_by_key(|i| i.1)
+        .map(|(k, g)| (k.clone(), g))
+    {
+        Some((key, gen)) => (Some(key), gen),
+        None => {
+            // Legacy/missing case: one or zero index parts, which did not have a generation
+            (index_parts.pop(), Generation::none())
+        }
+    };
 
     if index_part_object.is_none() {
         errors.push("S3 list response got no index_part.json file".to_string());
@@ -261,6 +323,7 @@ pub(crate) async fn list_timeline_blobs(
                 return Ok(S3TimelineBlobData {
                     blob_data: BlobDataParseResult::Parsed {
                         index_part,
+                        index_part_generation,
                         s3_layers,
                     },
                     keys_to_remove,

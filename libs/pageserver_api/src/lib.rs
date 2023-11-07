@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 use const_format::formatcp;
 
 /// Public API types

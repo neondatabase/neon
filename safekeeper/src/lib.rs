@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;

@@ -8,6 +8,7 @@
 // modules included with the postgres_ffi macro depend on the types of the specific version's
 // types, and trigger a too eager lint.
 #![allow(clippy::duplicate_mod)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use bytes::Bytes;
 use utils::bin_ser::SerializeError;
@@ -20,6 +21,7 @@ macro_rules! postgres_ffi {
             pub mod bindings {
                 // bindgen generates bindings for a lot of stuff we don't need
                 #![allow(dead_code)]
+                #![allow(clippy::undocumented_unsafe_blocks)]
 
                 use serde::{Deserialize, Serialize};
                 include!(concat!(

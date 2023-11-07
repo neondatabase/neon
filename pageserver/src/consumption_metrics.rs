@@ -266,7 +266,7 @@ async fn calculate_synthetic_size_worker(
                 continue;
             }
 
-            if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await {
+            if let Ok(tenant) = mgr::get_tenant(tenant_id, true) {
                 // TODO should we use concurrent_background_tasks_rate_limit() here, like the other background tasks?
                 // We can put in some prioritization for consumption metrics.
                 // Same for the loop that fetches computed metrics.

@@ -33,6 +33,7 @@ reqwest = { workspace = true, default-features = false, features = ["rustls-tls"
 aws-config = { workspace = true, default-features = false, features = ["rustls", "credentials-sso"] }
 
 pageserver = { path = "../pageserver" }
+remote_storage = { path = "../libs/remote_storage" }
 
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -596,21 +596,21 @@ trait CloseFileDescriptors: CommandExt {
 
 impl<C: CommandExt> CloseFileDescriptors for C {
     fn close_fds(&mut self) -> &mut Command {
+        // SAFETY: Code executed inside pre_exec should have async-signal-safety,
+        // which means it should be safe to execute inside a signal handler.
+        // The precise meaning depends on platform. See `man signal-safety`
+        // for the linux definition.
+        //
+        // The set_fds_cloexec_threadsafe function is documented to be
+        // async-signal-safe.
+        //
+        // Aside from this function, the rest of the code is re-entrant and
+        // doesn't make any syscalls. We're just passing constants.
+        //
+        // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
+        // which is not async-signal-safe. Be careful.
         unsafe {
             self.pre_exec(move || {
-                // SAFETY: Code executed inside pre_exec should have async-signal-safety,
-                // which means it should be safe to execute inside a signal handler.
-                // The precise meaning depends on platform. See `man signal-safety`
-                // for the linux definition.
-                //
-                // The set_fds_cloexec_threadsafe function is documented to be
-                // async-signal-safe.
-                //
-                // Aside from this function, the rest of the code is re-entrant and
-                // doesn't make any syscalls. We're just passing constants.
-                //
-                // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
-                // which is not async-signal-safe. Be careful.
                 close_fds::set_fds_cloexec_threadsafe(3, &[]);
                 Ok(())
             })
@@ -857,7 +857,8 @@ impl WalRedoProcess {
             let in_revents = stdin_pollfds[0].revents().unwrap();
             if in_revents & (PollFlags::POLLERR | PollFlags::POLLOUT) != PollFlags::empty() {
                 nwrite += proc.stdin.write(&writebuf[nwrite..])?;
-            } else if in_revents.contains(PollFlags::POLLHUP) {
+            }
+            if in_revents.contains(PollFlags::POLLHUP) {
                 // We still have more data to write, but the process closed the pipe.
                 anyhow::bail!("WAL redo process closed its stdin unexpectedly");
             }
@@ -907,7 +908,8 @@ impl WalRedoProcess {
                 let out_revents = stdout_pollfds[0].revents().unwrap();
                 if out_revents & (PollFlags::POLLERR | PollFlags::POLLIN) != PollFlags::empty() {
                     nresult += output.stdout.read(&mut resultbuf[nresult..])?;
-                } else if out_revents.contains(PollFlags::POLLHUP) {
+                }
+                if out_revents.contains(PollFlags::POLLHUP) {
                     anyhow::bail!("WAL redo process closed its stdout unexpectedly");
                 }
             }

@@ -44,8 +44,11 @@ pub struct AppendLogicalMessage {
 
     // fields from AppendRequestHeader
     pub term: Term,
+    #[serde(with = "utils::lsn::serde_as_u64")]
     pub epoch_start_lsn: Lsn,
+    #[serde(with = "utils::lsn::serde_as_u64")]
     pub begin_lsn: Lsn,
+    #[serde(with = "utils::lsn::serde_as_u64")]
     pub truncate_lsn: Lsn,
     pub pg_version: u32,
 }

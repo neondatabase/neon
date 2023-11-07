@@ -2,6 +2,8 @@
 //! To use, create PostgresBackend and run() it, passing the Handler
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::Context;
 use bytes::Bytes;
 use futures::pin_mut;
@@ -728,12 +730,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
                 trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
-                    log_query_error(query_string, &e);
-                    let short_error = short_error(&e);
-                    self.write_message_noflush(&BeMessage::ErrorResponse(
-                        &short_error,
-                        Some(e.pg_error_code()),
-                    ))?;
+                    match e {
+                        QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
+                        e => {
+                            log_query_error(query_string, &e);
+                            let short_error = short_error(&e);
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
+                                &short_error,
+                                Some(e.pg_error_code()),
+                            ))?;
+                        }
+                    }
                 }
                 self.write_message_noflush(&BeMessage::ReadyForQuery)?;
             }

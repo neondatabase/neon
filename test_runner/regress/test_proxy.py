@@ -432,3 +432,47 @@ def test_sql_over_http_pool_idle(static_proxy: NeonProxy):
     query(200, "BEGIN")
     pid2 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
     assert pid1 != pid2
+
+
+@pytest.mark.timeout(60)
+def test_sql_over_http_pool_dos(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    static_proxy.safe_psql("CREATE TYPE foo AS ENUM ('foo')")
+
+    def query(status: int, query: str) -> Any:
+        return static_proxy.http_query(
+            query,
+            [],
+            user="http_auth",
+            password="http",
+            expected_code=status,
+        )
+
+    # query generates a million rows - should hit the 10MB reponse limit quickly
+    response = query(
+        400,
+        "select * from generate_series(1, 5000) a cross join generate_series(1, 5000) b cross join (select 'foo'::foo) c;",
+    )
+    assert "response is too large (max is 10485760 bytes)" in response["message"]
+
+
+def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    static_proxy.safe_psql("CREATE TYPE foo AS ENUM ('foo','bar','baz')")
+
+    def query(status: int, query: str) -> Any:
+        return static_proxy.http_query(
+            query,
+            [],
+            user="http_auth",
+            password="http",
+            expected_code=status,
+        )
+
+    response = query(
+        200,
+        "select array['foo'::foo, 'bar'::foo, 'baz'::foo] as data",
+    )
+    assert response["rows"][0]["data"] == ["foo", "bar", "baz"]
