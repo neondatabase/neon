@@ -1043,6 +1043,29 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 }
 });
 
+pub(crate) struct SecondaryModeMetrics {
+    pub(crate) upload_heatmap: IntCounter,
+    pub(crate) download_heatmap: IntCounter,
+    pub(crate) download_layer: IntCounter,
+}
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+    upload_heatmap: register_int_counter!(
+        "pageserver_secondary_upload_heatmap",
+        "Number of heatmaps written to remote storage by attached tenants"
+    )
+    .expect("failed to define a metric"),
+    download_heatmap: register_int_counter!(
+        "pageserver_secondary_download_heatmap",
+        "Number of downloads of heatmaps by secondary mode locations"
+    )
+    .expect("failed to define a metric"),
+    download_layer: register_int_counter!(
+        "pageserver_secondary_download_layer",
+        "Number of downloads of layers by secondary mode locations"
+    )
+    .expect("failed to define a metric"),
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
