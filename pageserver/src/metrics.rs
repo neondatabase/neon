@@ -1,5 +1,4 @@
 use enum_map::EnumMap;
-use metrics::core::GenericCounter;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -1263,9 +1262,9 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 pub(crate) struct WalRedoProcessCounters {
-    pub(crate) started: GenericCounter<metrics::core::AtomicU64>,
-    pub(crate) shutdown: GenericCounter<metrics::core::AtomicU64>,
-    pub(crate) killed: GenericCounter<metrics::core::AtomicU64>,
+    pub(crate) started: IntCounter,
+    pub(crate) shutdown: IntCounter,
+    pub(crate) killed: IntCounter,
 }
 
 impl Default for WalRedoProcessCounters {
