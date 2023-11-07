@@ -262,7 +262,7 @@ where
     P: Into<Utf8PathBuf>,
 {
     let path: Utf8PathBuf = path.into();
-    // SAFETY
+    // SAFETY:
     // pre_exec is marked unsafe because it runs between fork and exec.
     // Why is that dangerous in various ways?
     // Long answer:  https://github.com/rust-lang/rust/issues/39575
