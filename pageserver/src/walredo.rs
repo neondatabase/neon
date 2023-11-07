@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PageServerConf;
 use crate::metrics::{
-    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTER, WAL_REDO_RECORDS_HISTOGRAM,
+    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORDS_HISTOGRAM,
     WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME, WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
@@ -668,16 +668,12 @@ impl WalRedoProcess {
             .spawn_no_leak_child(tenant_id)
             .context("spawn process")?;
 
-        WAL_REDO_PROCESS_COUNTER
-            .with_label_values(&["started"])
-            .inc();
+        WAL_REDO_PROCESS_COUNTERS.started.inc();
 
         let mut child = scopeguard::guard(child, |child| {
             error!("killing wal-redo-postgres process due to a problem during launch");
             child.kill_and_wait();
-            WAL_REDO_PROCESS_COUNTER
-                .with_label_values(&["killed"])
-                .inc();
+            WAL_REDO_PROCESS_COUNTERS.killed.inc();
         });
 
         let stdin = child.stdin.take().unwrap();
@@ -1009,9 +1005,7 @@ impl Drop for WalRedoProcess {
             .take()
             .expect("we only do this once")
             .kill_and_wait();
-        WAL_REDO_PROCESS_COUNTER
-            .with_label_values(&["shutdown"])
-            .inc();
+        WAL_REDO_PROCESS_COUNTERS.shutdown.inc();
         self.stderr_logger_cancel.cancel();
         // no way to wait for stderr_logger_task from Drop because that is async only
     }

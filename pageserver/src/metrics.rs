@@ -1,4 +1,5 @@
 use enum_map::EnumMap;
+use metrics::core::GenericCounter;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -1261,14 +1262,30 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-pub(crate) static WAL_REDO_PROCESS_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "pageserver_wal_redo_process_total",
-        "Number of WAL redo process by operation since pageserver startup",
-        &["operation"]
-    )
-    .unwrap()
-});
+pub(crate) struct WalRedoProcessCounters {
+    pub(crate) started: GenericCounter<metrics::core::AtomicU64>,
+    pub(crate) shutdown: GenericCounter<metrics::core::AtomicU64>,
+    pub(crate) killed: GenericCounter<metrics::core::AtomicU64>,
+}
+
+impl Default for WalRedoProcessCounters {
+    fn default() -> Self {
+        let wal_redo_process_counter = register_int_counter_vec!(
+            "pageserver_wal_redo_process_total",
+            "Number of WAL redo process by operation since pageserver startup",
+            &["operation"]
+        )
+        .unwrap();
+        Self {
+            started: wal_redo_process_counter.with_label_values(&["started"]),
+            shutdown: wal_redo_process_counter.with_label_values(&["shutdown"]),
+            killed: wal_redo_process_counter.with_label_values(&["killed"]),
+        }
+    }
+}
+
+pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
+    Lazy::new(|| WalRedoProcessCounters::default());
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
