@@ -573,10 +573,10 @@ impl<const L: usize> BuildNode<L> {
         BuildNode {
             num_children: 0,
             level,
-            prefix: Vec::new(),
+            prefix: Vec::with_capacity(16),
             suffix_len: 0,
-            keys: Vec::new(),
-            values: Vec::new(),
+            keys: Vec::with_capacity(5024),
+            values: Vec::with_capacity(3140),
             size: NODE_HDR_SIZE,
         }
     }
