@@ -1446,9 +1446,6 @@ pub struct SlotGuard {
     _completion: utils::completion::Completion,
 }
 
-unsafe impl Send for SlotGuard {}
-unsafe impl Sync for SlotGuard {}
-
 impl SlotGuard {
     fn new(
         tenant_id: TenantId,

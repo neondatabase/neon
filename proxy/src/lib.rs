@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::convert::Infallible;
 
 use anyhow::{bail, Context};

@@ -6,6 +6,8 @@
 //!   * [`s3_bucket`] uses AWS S3 bucket as an external storage
 //!   * [`azure_blob`] allows to use Azure Blob storage as an external storage
 //!
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod azure_blob;
 mod local_fs;
