@@ -251,6 +251,7 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
+            .instrument(tracing::info_span!("get_value_reconstruct_data", layer=%self))
             .await
     }
 
@@ -1293,6 +1294,7 @@ impl ResidentLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    #[tracing::instrument(skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,
