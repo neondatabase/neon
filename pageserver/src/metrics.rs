@@ -1369,6 +1369,8 @@ pub(crate) struct SecondaryModeMetrics {
     pub(crate) upload_heatmap: IntCounter,
     pub(crate) upload_heatmap_errors: IntCounter,
     pub(crate) upload_heatmap_duration: Histogram,
+    pub(crate) download_heatmap: IntCounter,
+    pub(crate) download_layer: IntCounter,
 }
 pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
     upload_heatmap: register_int_counter!(
@@ -1384,6 +1386,16 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| Seco
     upload_heatmap_duration: register_histogram!(
         "pageserver_secondary_upload_heatmap_duration",
         "Time to build and upload a heatmap, including any waiting inside the S3 client"
+    )
+    .expect("failed to define a metric"),
+    download_heatmap: register_int_counter!(
+        "pageserver_secondary_download_heatmap",
+        "Number of downloads of heatmaps by secondary mode locations"
+    )
+    .expect("failed to define a metric"),
+    download_layer: register_int_counter!(
+        "pageserver_secondary_download_layer",
+        "Number of downloads of layers by secondary mode locations"
     )
     .expect("failed to define a metric"),
 });
