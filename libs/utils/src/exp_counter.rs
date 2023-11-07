@@ -32,6 +32,12 @@ pub struct ExpCounter {
 }
 
 impl ExpCounter {
+    /// Creates an iterator that uses `ExpCounter` for the first half of the
+    /// range and a linear range counter for the second half.
+    pub fn with_max_and_linear_search(max: u64) -> impl Iterator<Item = u64> {
+        let linear_start = max / 2;
+        ExpCounter::with_max(linear_start).chain(linear_start..max)
+    }
     /// Creates a new `ExpCounter` instance that counts to the (exclusive) maximum
     pub fn with_max(max: u64) -> Self {
         Self {

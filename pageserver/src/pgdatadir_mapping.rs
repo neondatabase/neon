@@ -370,7 +370,7 @@ impl Timeline {
             // We don't do an explosive search as we want to prove that
             // every single lsn up to high is giving inconclusive results.
             // This can only be done by trying all lsns.
-            for offs in ExpCounter::with_max(high - mid_start) {
+            for offs in ExpCounter::with_max_and_linear_search(high - mid_start) {
                 mid = offs + mid_start;
 
                 // Do the query for mid + 1 instead of mid so that we can make definite statements
