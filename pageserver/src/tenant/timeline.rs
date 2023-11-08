@@ -1026,7 +1026,12 @@ impl Timeline {
             reason,
             backtrace: backtrace_str,
         };
-        self.set_state(broken_state)
+        self.set_state(broken_state);
+
+        // Although the Broken state is not equivalent to shutdown() (shutdown will be called
+        // later when this tenant is detach or the process shuts down), firing the cancellation token
+        // here avoids the need for other tasks to watch for the Broken state explicitly.
+        self.cancel.cancel();
     }
 
     pub fn current_state(&self) -> TimelineState {
@@ -1782,12 +1787,8 @@ impl Timeline {
                 // delay will be terminated by a timeout regardless.
                 let _completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
 
-                // no extra cancellation here, because nothing really waits for this to complete compared
-                // to spawn_ondemand_logical_size_calculation.
-                let cancel = CancellationToken::new();
-
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx, cancel)
+                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx)
                     .await
                 {
                     Ok(s) => s,
@@ -1856,7 +1857,6 @@ impl Timeline {
         lsn: Lsn,
         cause: LogicalSizeCalculationCause,
         ctx: RequestContext,
-        cancel: CancellationToken,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
         let (sender, receiver) = oneshot::channel();
         let self_clone = Arc::clone(self);
@@ -1877,7 +1877,7 @@ impl Timeline {
             false,
             async move {
                 let res = self_clone
-                    .logical_size_calculation_task(lsn, cause, &ctx, cancel)
+                    .logical_size_calculation_task(lsn, cause, &ctx)
                     .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
@@ -1893,58 +1893,28 @@ impl Timeline {
         lsn: Lsn,
         cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
-        cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
         span::debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let mut timeline_state_updates = self.subscribe_for_state_updates();
+        let _guard = self.gate.enter();
+
         let self_calculation = Arc::clone(self);
 
         let mut calculation = pin!(async {
-            let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(lsn, cause, cancel, &ctx)
+                .calculate_logical_size(lsn, cause, &ctx)
                 .await
         });
-        let timeline_state_cancellation = async {
-            loop {
-                match timeline_state_updates.changed().await {
-                    Ok(()) => {
-                        let new_state = timeline_state_updates.borrow().clone();
-                        match new_state {
-                            // we're running this job for active timelines only
-                            TimelineState::Active => continue,
-                            TimelineState::Broken { .. }
-                            | TimelineState::Stopping
-                            | TimelineState::Loading => {
-                                break format!("aborted because timeline became inactive (new state: {new_state:?})")
-                            }
-                        }
-                    }
-                    Err(_sender_dropped_error) => {
-                        // can't happen, the sender is not dropped as long as the Timeline exists
-                        break "aborted because state watch was dropped".to_string();
-                    }
-                }
-            }
-        };
-
-        let taskmgr_shutdown_cancellation = async {
-            task_mgr::shutdown_watcher().await;
-            "aborted because task_mgr shutdown requested".to_string()
-        };
 
         tokio::select! {
             res = &mut calculation => { res }
-            reason = timeline_state_cancellation => {
-                debug!(reason = reason, "cancelling calculation");
-                cancel.cancel();
+            _ = self.cancel.cancelled() => {
+                debug!("cancelling logical size calculation for timeline shutdown");
                 calculation.await
             }
-            reason = taskmgr_shutdown_cancellation => {
-                debug!(reason = reason, "cancelling calculation");
-                cancel.cancel();
+            _ = task_mgr::shutdown_watcher() => {
+                debug!("cancelling logical size calculation for task shutdown");
                 calculation.await
             }
         }
@@ -1958,7 +1928,6 @@ impl Timeline {
         &self,
         up_to_lsn: Lsn,
         cause: LogicalSizeCalculationCause,
-        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         info!(
@@ -2001,7 +1970,7 @@ impl Timeline {
         };
         let timer = storage_time_metrics.start_timer();
         let logical_size = self
-            .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
+            .get_current_logical_size_non_incremental(up_to_lsn, ctx)
             .await?;
         debug!("calculated logical size: {logical_size}");
         timer.stop_and_record();

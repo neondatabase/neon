@@ -326,8 +326,7 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_timeline_cached_layer_accesses(cancel, ctx)
-                    .await;
+                self.imitate_timeline_cached_layer_accesses(ctx).await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
@@ -367,21 +366,12 @@ impl Timeline {
 
     /// Recompute the values which would cause on-demand downloads during restart.
     #[instrument(skip_all)]
-    async fn imitate_timeline_cached_layer_accesses(
-        &self,
-        cancel: &CancellationToken,
-        ctx: &RequestContext,
-    ) {
+    async fn imitate_timeline_cached_layer_accesses(&self, ctx: &RequestContext) {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(
-                lsn,
-                LogicalSizeCalculationCause::EvictionTaskImitation,
-                cancel.clone(),
-                ctx,
-            )
+            .calculate_logical_size(lsn, LogicalSizeCalculationCause::EvictionTaskImitation, ctx)
             .instrument(info_span!("calculate_logical_size"))
             .await;
 
