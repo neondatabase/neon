@@ -82,6 +82,8 @@ use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
 
+use crate::tenant::storage_layer::Layer;
+use crate::tenant::storage_layer::ResidentLayer;
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
@@ -202,6 +204,7 @@ pub(crate) struct TenantPreload {
 pub(crate) enum SpawnMode {
     Normal,
     Create,
+    Duplicate { src_tenant: Arc<Tenant> },
 }
 
 ///
@@ -578,6 +581,33 @@ impl Tenant {
                 let remote_load_completion = init_order
                     .as_mut()
                     .and_then(|x| x.initial_tenant_load_remote.take());
+
+                // if let SpawnMode::Duplicate { src_tenant } = mode {
+                //     let mut layer_guards: HashMap<TimelineId, _> =HashMap::new();
+                //     for (tlid, tl) in src_tenant.timelines.lock().unwrap().iter() {
+                //         // TODO: ensure nobody tries to delete the timeline
+                //         let Ok(guard) = (Arc::clone(&tl)).layers.try_read_owned() else {
+                //             make_broken(&tenant_clone, anyhow::anyhow!("duplicate: failed to lock timeline layers"));
+                //             return Ok(());
+                //         };
+                //         let replace = layer_guards.insert(tlid, guard);
+                //         assert!(replace.is_none(), "duplicate: duplicate timeline id");
+                //     }
+                //     // duplicate each timeline's layers and construct new index parts with this tenant's generation
+                //     for (tlid, layers) in layer_guards {
+
+                //         // TODO: implement a mapping of timeline ids
+
+
+                //         for desc in layers.layer_map().iter_historic_layers() {
+                //             let layer: Layer = layers.get_from_desc(&desc);
+                //             let resident_layer: ResidentLayer = layer.download_and_keep_resident().await?;
+                //             tokio::fs::copy(from, to)
+                //             resident_layer.local_path();
+                //         }
+                //     }
+
+                // }
 
                 let preload = match mode {
                     SpawnMode::Create => {None},
@@ -1599,6 +1629,24 @@ impl Tenant {
         loaded_timeline.activate(broker_client, None, ctx);
 
         Ok(loaded_timeline)
+    }
+
+    pub(crate) fn copy_timelines_from_tenant(&self, src_tenant: Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+        let mut src_timelines: HashMap<TimelineId, (Arc<Timeline>, _)> = HashMap::new();
+        for (tlid, tl) in src_tenant.timelines.lock().unwrap().iter() {
+            // TODO: ensure nobody tries to delete the timeline
+            let Ok(guard) = (Arc::clone(&tl)).layers.try_read_owned() else {
+                make_broken(&tenant_clone, anyhow::anyhow!("duplicate: failed to lock timeline layers"));
+                return Ok(());
+            };
+            let replace = src_timelines.insert(tlid, (Arc::clone(tl), guard));
+            assert!(replace.is_none(), "duplicate: duplicate timeline id");
+        }
+        for (tlid, (tl, layers)) in src_timelines {
+            let utl = self.create_empty_timeline(tlid, tl.initdb_lsn, tl.pg_version, ctx).await?;
+            utl.copy_existing_timeline(tl, layers, ctx).await?;
+
+        }
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.

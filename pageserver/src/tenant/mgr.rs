@@ -741,8 +741,41 @@ pub(crate) async fn create_tenant(
     Ok(created_tenant)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn duplicate_tenant(
+    conf: &'static PageServerConf,
+    tenant_conf: TenantConfOpt,
+    src_tenant_id: TenantId,
+    new_tenant_id: TenantId,
+    generation: Generation,
+    resources: TenantSharedResources,
+    ctx: &RequestContext,
+    cancel: &CancellationToken,
+) -> Result<(), TenantMapInsertError> {
+    let src_tenant = get_tenant(src_tenant_id, true).context("get src tenant")?;
+    // TODO somehow ensure that `src_tenant` can't go away in the meantime.
+
+    let slot_guard = tenant_map_acquire_slot(&new_tenant_id, TenantSlotAcquireMode::MustNotExist)?;
+
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let tenant_path = super::create_tenant_files(conf, &location_conf, &new_tenant_id).await?;
+
+    let new_tenant = Tenant::spawn(
+        conf,
+        new_tenant_id,
+        resources,
+        AttachedTenantConf::try_from(location_conf)?,
+        None,
+        &TENANTS,
+        SpawnMode::Duplicate { src_tenant },
+        ctx,
+    )?;
+
+    slot_guard.upsert(TenantSlot::Attached(new_tenant))?;
+
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn duplicate_tenant_old(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     src_tenant_id: TenantId,
