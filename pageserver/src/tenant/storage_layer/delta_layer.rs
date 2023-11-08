@@ -69,13 +69,13 @@ use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer};
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Summary {
     /// Magic value to identify this as a neon delta file. Always DELTA_FILE_MAGIC.
-    magic: u16,
-    format_version: u16,
+    pub magic: u16,
+    pub format_version: u16,
 
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    key_range: Range<Key>,
-    lsn_range: Range<Lsn>,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub key_range: Range<Key>,
+    pub lsn_range: Range<Lsn>,
 
     /// Block number where the 'index' part of the file begins.
     pub index_start_blk: u32,
@@ -609,14 +609,30 @@ impl Drop for DeltaLayerWriter {
     }
 }
 
+
+#[derive(thiserror::Error, Debug)]
+pub enum RewriteTenantTimelineError {
+    #[error("magic mismatch")]
+    MagicMismatch,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<std::io::Error> for RewriteTenantTimelineError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Other(anyhow::anyhow!(e))
+    }
+}
+
 impl DeltaLayer {
-    /// Assume the file at `path` is corrupt if this function returns with an error.
-    pub(crate) async fn rewrite_tenant_timeline(
+    pub async fn rewrite_summary<F>(
         path: &Utf8Path,
-        new_tenant: TenantId,
-        new_timeline: TimelineId,
+        rewrite: F,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), RewriteTenantTimelineError>
+    where
+        F: Fn(Summary) -> Summary,
+    {
         let file = VirtualFile::open_with_options(
             path,
             &*std::fs::OpenOptions::new().read(true).write(true),
@@ -625,26 +641,23 @@ impl DeltaLayer {
         .with_context(|| format!("Failed to open file '{}'", path))?;
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0, ctx).await?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
         let mut file = file.file;
         if actual_summary.magic != DELTA_FILE_MAGIC {
-            bail!("File '{}' is not a delta layer", path);
+            return Err(RewriteTenantTimelineError::MagicMismatch);
         }
-        let new_summary = Summary {
-            tenant_id: new_tenant,
-            timeline_id: new_timeline,
-            ..actual_summary
-        };
+
+        let new_summary = rewrite(actual_summary);
 
         let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
-        Summary::ser_into(&new_summary, &mut buf)?;
+        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         if buf.spilled() {
-            // The code in ImageLayerWriterInner just warn!()s for this.
+            // The code in DeltaLayerWriterInner just warn!()s for this.
             // It should probably error out as well.
-            anyhow::bail!(
+            return Err(RewriteTenantTimelineError::Other(anyhow::anyhow!(
                 "Used more than one page size for summary buffer: {}",
                 buf.len()
-            );
+            )));
         }
         file.seek(SeekFrom::Start(0)).await?;
         file.write_all(&buf).await?;
