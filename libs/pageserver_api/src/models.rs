@@ -371,6 +371,7 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
+    pub generation: Option<u32>,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -515,6 +516,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        remote_path: Option<String>,
     },
     Image {
         layer_file_name: String,
@@ -523,6 +526,8 @@ pub enum HistoricLayerInfo {
         lsn_start: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        remote_path: Option<String>,
     },
 }
 

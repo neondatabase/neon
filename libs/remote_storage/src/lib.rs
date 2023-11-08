@@ -93,6 +93,12 @@ impl std::fmt::Display for RemotePath {
     }
 }
 
+impl Into<String> for RemotePath {
+    fn into(self) -> String {
+        self.0.into()
+    }
+}
+
 impl RemotePath {
     pub fn new(relative_path: &Utf8Path) -> anyhow::Result<Self> {
         anyhow::ensure!(
