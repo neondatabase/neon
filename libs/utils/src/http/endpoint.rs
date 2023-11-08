@@ -400,9 +400,11 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                     })?;
                     let token = parse_token(header_value)?;
 
-                    let data = auth
-                        .decode(token)
-                        .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
+                    let data = auth.decode(token).map_err(|err| {
+                        warn!("Authentication error: {err}");
+                        // Rely on From<AuthError> for ApiError impl
+                        err
+                    })?;
                     req.set_context(data.claims);
                 }
                 None => {
