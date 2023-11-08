@@ -50,7 +50,9 @@ pub(crate) enum LayerCmd {
     },
     RewriteSummary {
         layer_file_path: Utf8PathBuf,
+        #[clap(long)]
         new_tenant_id: Option<TenantId>,
+        #[clap(long)]
         new_timeline_id: Option<TimelineId>,
     },
 }
@@ -185,6 +187,9 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             new_tenant_id,
             new_timeline_id,
         } => {
+            pageserver::virtual_file::init(10);
+            pageserver::page_cache::init(100);
+
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
             macro_rules! rewrite_closure {

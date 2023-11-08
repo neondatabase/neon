@@ -3,6 +3,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use remote_storage::RemotePath;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -302,6 +303,11 @@ impl Layer {
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.0.path
+    }
+
+    /// This can return None even though it should return Some in some edge cases.
+    pub(crate) fn remote_path(&self) -> Option<RemotePath> {
+        self.0.remote_path()
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
@@ -914,6 +920,17 @@ impl LayerInner {
         }
     }
 
+    /// This can return None even though it should return Some in some edge cases.
+    fn remote_path(&self) -> Option<RemotePath> {
+        let tl = self.timeline.upgrade()?; // TODO: should distinguish this case, but, accuracy doesn't matter for this field.
+        Some(crate::tenant::remote_timeline_client::remote_layer_path(
+            &tl.tenant_id,
+            &tl.timeline_id,
+            &self.desc.filename(),
+            self.generation,
+        ))
+    }
+
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.desc.filename().file_name();
 
@@ -933,6 +950,7 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote,
                 access_stats,
+                remote_path: self.remote_path().map(|p| p.into()),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -943,6 +961,7 @@ impl LayerInner {
                 lsn_start: lsn,
                 remote,
                 access_stats,
+                remote_path: self.remote_path().map(|p| p.into()),
             }
         }
     }
