@@ -2,7 +2,7 @@
 
 use arc_swap::ArcSwap;
 use serde;
-use std::{fs, sync::Arc};
+use std::{borrow::Cow, fmt::Display, fs, sync::Arc};
 
 use anyhow::Result;
 use camino::Utf8Path;
@@ -11,7 +11,7 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::id::TenantId;
+use crate::{http::error::ApiError, id::TenantId};
 
 /// Algorithm to use. We require EdDSA.
 const STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::EdDSA;
@@ -54,7 +54,7 @@ impl SwappableJwtAuth {
     pub fn swap(&self, jwt_auth: JwtAuth) {
         self.0.swap(Arc::new(jwt_auth));
     }
-    pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
+    pub fn decode(&self, token: &str) -> std::result::Result<TokenData<Claims>, AuthError> {
         self.0.load().decode(token)
     }
 }
@@ -62,6 +62,24 @@ impl SwappableJwtAuth {
 impl std::fmt::Debug for SwappableJwtAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Swappable({:?})", self.0.load())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct AuthError(pub Cow<'static, str>);
+
+impl Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<AuthError> for ApiError {
+    fn from(_value: AuthError) -> Self {
+        // Don't pass on the value of the AuthError as a precautionary measure.
+        // Being intentionally vague in public error communication hurts debugability
+        // but it is more secure.
+        ApiError::Forbidden("JWT authentication error".to_string())
     }
 }
 
@@ -114,7 +132,7 @@ impl JwtAuth {
     /// The function tries the stored decoding keys in succession,
     /// and returns the first yielding a successful result.
     /// If there is no working decoding key, it returns the last error.
-    pub fn decode(&self, token: &str) -> Result<TokenData<Claims>> {
+    pub fn decode(&self, token: &str) -> std::result::Result<TokenData<Claims>, AuthError> {
         let mut res = None;
         for decoding_key in &self.decoding_keys {
             res = Some(decode(token, decoding_key, &self.validation));
@@ -123,9 +141,9 @@ impl JwtAuth {
             }
         }
         if let Some(res) = res {
-            res.map_err(anyhow::Error::new)
+            res.map_err(|e| AuthError(Cow::Owned(e.to_string())))
         } else {
-            anyhow::bail!("no JWT decoding keys configured")
+            Err(AuthError(Cow::Borrowed("no JWT decoding keys configured")))
         }
     }
 }
@@ -166,9 +184,9 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
 "#;
 
     #[test]
-    fn test_decode() -> Result<(), anyhow::Error> {
+    fn test_decode() {
         let expected_claims = Claims {
-            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081")?),
+            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
             scope: Scope::Tenant,
         };
 
@@ -187,28 +205,24 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let encoded_eddsa = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzY29wZSI6InRlbmFudCIsInRlbmFudF9pZCI6IjNkMWY3NTk1YjQ2ODIzMDMwNGUwYjczY2VjYmNiMDgxIiwiaXNzIjoibmVvbi5jb250cm9scGxhbmUiLCJleHAiOjE3MDkyMDA4NzksImlhdCI6MTY3ODQ0MjQ3OX0.U3eA8j-uU-JnhzeO3EDHRuXLwkAUFCPxtGHEgw6p7Ccc3YRbFs2tmCdbD9PZEXP-XsxSeBQi1FY0YPcT3NXADw";
 
         // Check it can be validated with the public key
-        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?]);
-        let claims_from_token = auth.decode(encoded_eddsa)?.claims;
+        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);
+        let claims_from_token = auth.decode(encoded_eddsa).unwrap().claims;
         assert_eq!(claims_from_token, expected_claims);
-
-        Ok(())
     }
 
     #[test]
-    fn test_encode() -> Result<(), anyhow::Error> {
+    fn test_encode() {
         let claims = Claims {
-            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081")?),
+            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
             scope: Scope::Tenant,
         };
 
-        let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519)?;
+        let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519).unwrap();
 
         // decode it back
-        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?]);
-        let decoded = auth.decode(&encoded)?;
+        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);
+        let decoded = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);
-
-        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use crate::auth::{Claims, SwappableJwtAuth};
+use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
@@ -400,9 +400,11 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                     })?;
                     let token = parse_token(header_value)?;
 
-                    let data = auth
-                        .decode(token)
-                        .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
+                    let data = auth.decode(token).map_err(|err| {
+                        warn!("Authentication error: {err}");
+                        // Rely on From<AuthError> for ApiError impl
+                        err
+                    })?;
                     req.set_context(data.claims);
                 }
                 None => {
@@ -450,12 +452,11 @@ where
 
 pub fn check_permission_with(
     req: &Request<Body>,
-    check_permission: impl Fn(&Claims) -> Result<(), anyhow::Error>,
+    check_permission: impl Fn(&Claims) -> Result<(), AuthError>,
 ) -> Result<(), ApiError> {
     match req.context::<Claims>() {
-        Some(claims) => {
-            Ok(check_permission(&claims).map_err(|err| ApiError::Forbidden(err.to_string()))?)
-        }
+        Some(claims) => Ok(check_permission(&claims)
+            .map_err(|_err| ApiError::Forbidden("JWT authentication error".to_string()))?),
         None => Ok(()), // claims is None because auth is disabled
     }
 }

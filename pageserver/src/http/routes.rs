@@ -1671,6 +1671,8 @@ where
         );
 
         match handle.await {
+            // TODO: never actually return Err from here, always Ok(...) so that we can log
+            // spanned errors. Call api_error_handler instead and return appropriate Body.
             Ok(result) => result,
             Err(e) => {
                 // The handler task panicked. We have a global panic handler that logs the
