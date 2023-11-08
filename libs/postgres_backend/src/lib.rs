@@ -614,7 +614,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
                     if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                         self.write_message_noflush(&BeMessage::ErrorResponse(
-                            &e.to_string(),
+                            &short_error(&e),
                             Some(e.pg_error_code()),
                         ))?;
                         return Err(e);
@@ -970,7 +970,7 @@ pub fn short_error(e: &QueryError) -> String {
     match e {
         QueryError::Disconnected(connection_error) => connection_error.to_string(),
         QueryError::Shutdown => "shutdown".to_string(),
-        QueryError::Unauthorized(e) => format!("{e}"),
+        QueryError::Unauthorized(e) => "JWT authentication error".to_string(),
         QueryError::Other(e) => format!("{e:#}"),
     }
 }
