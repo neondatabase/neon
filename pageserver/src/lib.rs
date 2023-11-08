@@ -24,6 +24,7 @@ pub mod virtual_file;
 pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
+pub mod profiling;
 
 pub mod failpoint_support;
 

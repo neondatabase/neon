@@ -9,6 +9,7 @@ default = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints"]
+profiling = ["pprof"]
 
 [dependencies]
 anyhow.workspace = true
@@ -82,6 +83,7 @@ enum-map.workspace = true
 enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
+pprof = { git = "https://github.com/neondatabase/pprof-rs.git", branch = "wallclock-profiling", features = ["flamegraph"], optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

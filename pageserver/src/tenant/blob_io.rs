@@ -269,6 +269,8 @@ mod tests {
         let rdr = FileBlockReader::new(file);
         let rdr = BlockReaderRef::FileBlockReader(&rdr);
         let rdr = BlockCursor::new(rdr);
+
+        let prof_guard = crate::profiling::profpoint_start();
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
             let blob_read = rdr.read_blob(*offset, &ctx).await?;
             assert_eq!(
@@ -276,6 +278,7 @@ mod tests {
                 "mismatch for idx={idx} at offset={offset}"
             );
         }
+        drop(prof_guard);
         println!("read buffered={} time: {:?}", BUFFERED, now.elapsed());
 
         Ok(())
@@ -331,6 +334,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_arrays_random_size() -> Result<(), Error> {
+
+        let profiler_guard = crate::profiling::init_profiler();
+
+        // crate::page_cache::init(10000);
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024*1024)
             .map(|_| {
@@ -348,6 +355,9 @@ mod tests {
 
         round_trip_test::<false>(&blobs).await?;
         round_trip_test::<true>(&blobs).await?;
+
+        #[cfg(feature = "profiling")]
+        crate::profiling::exit_profiler(&profiler_guard);
         Ok(())
     }
 
