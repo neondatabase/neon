@@ -1552,14 +1552,7 @@ impl SlotGuard {
     /// is responsible for protecting
     fn old_value_is_shutdown(&self) -> bool {
         match self.old_value.as_ref() {
-            Some(TenantSlot::Attached(tenant)) => {
-                // TODO: PR #5711 will add a gate that enables properly checking that
-                // shutdown completed.
-                matches!(
-                    tenant.current_state(),
-                    TenantState::Stopping { .. } | TenantState::Broken { .. }
-                )
-            }
+            Some(TenantSlot::Attached(tenant)) => tenant.gate.close_complete(),
             Some(TenantSlot::Secondary) => {
                 // TODO: when adding secondary mode tenants, this will check for shutdown
                 // in the same way that we do for `Tenant` above
