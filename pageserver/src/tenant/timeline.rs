@@ -36,7 +36,6 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
 };
-use crate::deletion_queue::DeletionQueueClient;
 use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
@@ -50,6 +49,7 @@ use crate::tenant::{
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
 };
+use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
@@ -891,15 +891,16 @@ impl Timeline {
         self.launch_eviction_task(background_jobs_can_start);
     }
 
+    /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then
+    /// also to remote storage.  This method can easily take multiple seconds for a busy timeline.
+    ///
+    /// While we are flushing, we continue to accept read I/O.
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
-    pub async fn shutdown(self: &Arc<Self>, freeze_and_flush: bool) {
+    pub(crate) async fn flush_and_shutdown(&self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // Signal any subscribers to our cancellation token to drop out
-        tracing::debug!("Cancelling CancellationToken");
-        self.cancel.cancel();
-
-        // prevent writes to the InMemoryLayer
+        // Stop ingesting data, so that we are not still writing to an InMemoryLayer while
+        // trying to flush
         tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
@@ -909,39 +910,66 @@ impl Timeline {
         .await;
 
         // now all writers to InMemory layer are gone, do the final flush if requested
-        if freeze_and_flush {
-            match self.freeze_and_flush().await {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!("failed to freeze and flush: {e:#}");
-                    return; // TODO: should probably drain remote timeline client anyways?
+        match self.freeze_and_flush().await {
+            Ok(_) => {
+                // drain the upload queue
+                if let Some(client) = self.remote_client.as_ref() {
+                    // if we did not wait for completion here, it might be our shutdown process
+                    // didn't wait for remote uploads to complete at all, as new tasks can forever
+                    // be spawned.
+                    //
+                    // what is problematic is the shutting down of RemoteTimelineClient, because
+                    // obviously it does not make sense to stop while we wait for it, but what
+                    // about corner cases like s3 suddenly hanging up?
+                    if let Err(e) = client.wait_completion().await {
+                        // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                        // we have some extra WAL replay to do next time the timeline starts.
+                        warn!("failed to flush to remote storage: {e:#}");
+                    }
                 }
             }
-
-            // drain the upload queue
-            let res = if let Some(client) = self.remote_client.as_ref() {
-                // if we did not wait for completion here, it might be our shutdown process
-                // didn't wait for remote uploads to complete at all, as new tasks can forever
-                // be spawned.
-                //
-                // what is problematic is the shutting down of RemoteTimelineClient, because
-                // obviously it does not make sense to stop while we wait for it, but what
-                // about corner cases like s3 suddenly hanging up?
-                client.wait_completion().await
-            } else {
-                Ok(())
-            };
-
-            if let Err(e) = res {
-                warn!("failed to await for frozen and flushed uploads: {e:#}");
+            Err(e) => {
+                // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
+                // we have some extra WAL replay to do next time the timeline starts.
+                warn!("failed to freeze and flush: {e:#}");
             }
         }
+
+        self.shutdown().await;
+    }
+
+    /// Shut down immediately, without waiting for any open layers to flush to disk.  This is a subset of
+    /// the graceful [`Timeline::flush_and_shutdown`] function.
+    pub(crate) async fn shutdown(&self) {
+        // Signal any subscribers to our cancellation token to drop out
+        tracing::debug!("Cancelling CancellationToken");
+        self.cancel.cancel();
 
         // Page request handlers might be waiting for LSN to advance: they do not respect Timeline::cancel
         // while doing so.
         self.last_record_lsn.shutdown();
 
+        // Shut down the layer flush task before the remote client, as one depends on the other
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::LayerFlushTask),
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
+
+        // Shut down remote timeline client: this gracefully moves its metadata into its Stopping state in
+        // case our caller wants to use that for a deletion
+        if let Some(remote_client) = self.remote_client.as_ref() {
+            match remote_client.stop() {
+                Ok(()) => {}
+                Err(StopError::QueueUninitialized) => {
+                    // Shutting down during initialization is legal
+                }
+            }
+        }
+
         tracing::debug!("Waiting for tasks...");
+
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
 
         // Finally wait until any gate-holders are complete
