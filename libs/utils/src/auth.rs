@@ -184,9 +184,9 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
 "#;
 
     #[test]
-    fn test_decode() -> Result<(), anyhow::Error> {
+    fn test_decode() {
         let expected_claims = Claims {
-            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081")?),
+            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
             scope: Scope::Tenant,
         };
 
@@ -205,28 +205,24 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let encoded_eddsa = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzY29wZSI6InRlbmFudCIsInRlbmFudF9pZCI6IjNkMWY3NTk1YjQ2ODIzMDMwNGUwYjczY2VjYmNiMDgxIiwiaXNzIjoibmVvbi5jb250cm9scGxhbmUiLCJleHAiOjE3MDkyMDA4NzksImlhdCI6MTY3ODQ0MjQ3OX0.U3eA8j-uU-JnhzeO3EDHRuXLwkAUFCPxtGHEgw6p7Ccc3YRbFs2tmCdbD9PZEXP-XsxSeBQi1FY0YPcT3NXADw";
 
         // Check it can be validated with the public key
-        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?]);
-        let claims_from_token = auth.decode(encoded_eddsa)?.claims;
+        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);
+        let claims_from_token = auth.decode(encoded_eddsa).unwrap().claims;
         assert_eq!(claims_from_token, expected_claims);
-
-        Ok(())
     }
 
     #[test]
-    fn test_encode() -> Result<(), anyhow::Error> {
+    fn test_encode() {
         let claims = Claims {
-            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081")?),
+            tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
             scope: Scope::Tenant,
         };
 
-        let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519)?;
+        let encoded = encode_from_key_file(&claims, TEST_PRIV_KEY_ED25519).unwrap();
 
         // decode it back
-        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519)?]);
-        let decoded = auth.decode(&encoded)?;
+        let auth = JwtAuth::new(vec![DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap()]);
+        let decoded = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);
-
-        Ok(())
     }
 }
