@@ -150,7 +150,7 @@ class PageserverHttpClient(requests.Session):
                 # (this may change in future if we do fault injection of a kind that causes
                 #  requests TCP flows to stick)
                 read=False,
-                backoff_factor=0,
+                backoff_factor=0.2,
                 status_forcelist=[503],
                 allowed_methods=None,
                 remove_headers_on_redirect=[],
