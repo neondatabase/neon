@@ -2,11 +2,10 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use tokio::sync::OwnedRwLockReadGuard;
 use tracing::{error, info, info_span, warn};
 use utils::{crashsafe, fs_ext, id::TimelineId, lsn::Lsn};
 
-use crate::{context::RequestContext, import_datadir, tenant::{Tenant, storage_layer::ResidentLayer}};
+use crate::{context::RequestContext, import_datadir, tenant::Tenant};
 
 use super::Timeline;
 
@@ -124,27 +123,6 @@ impl<'t> UninitializedTimeline<'t> {
                 )
             })?
             .0)
-    }
-
-    pub(crate) fn copy_existing_timeline(
-        self,
-        src_timeline: Arc<Timeline>,
-        locked_layers: OwnedRwLockReadGuard<LayerManager>,
-    ) -> anyhow::Result<Arc<Timeline>> {
-        let layers = locked_layers;
-
-        let raw_timeline = self.raw_timeline()?;
-
-        for desc in layers.layer_map().iter_historic_layers() {
-            let layer: Layer = layers.get_from_desc(&desc);
-            let resident_layer: ResidentLayer = layer.download_and_keep_resident().await?;
-
-            tokio::fs::copy(from, to)
-            resident_layer.local_path();
-        }
-
-        raw_timeline.copy_existing_timeline(existing_timeline);
-        self.finish_creation()
     }
 }
 

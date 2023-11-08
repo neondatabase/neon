@@ -1254,18 +1254,6 @@ impl DownloadedLayer {
 
         Ok(())
     }
-
-    async fn duplicate(
-        &self,
-        owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
-        use LayerKind::*;
-        match self.get(owner, ctx).await? {
-            Delta(d) => d.duplicate(ctx).await,
-            Image(i) => i.duplicate(ctx).await,
-        }
-    }
 }
 
 /// Wrapper around an actual layer implementation.
