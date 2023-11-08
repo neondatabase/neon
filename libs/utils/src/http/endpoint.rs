@@ -455,9 +455,8 @@ pub fn check_permission_with(
     check_permission: impl Fn(&Claims) -> Result<(), AuthError>,
 ) -> Result<(), ApiError> {
     match req.context::<Claims>() {
-        Some(claims) => {
-            Ok(check_permission(&claims).map_err(|err| ApiError::Forbidden(err.to_string()))?)
-        }
+        Some(claims) => Ok(check_permission(&claims)
+            .map_err(|_err| ApiError::Forbidden("JWT authentication error".to_string()))?),
         None => Ok(()), // claims is None because auth is disabled
     }
 }

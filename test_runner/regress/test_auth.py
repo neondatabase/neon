@@ -25,7 +25,7 @@ def assert_client_authorized(env: NeonEnv, http_client: PageserverHttpClient):
 def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient):
     with pytest.raises(
         PageserverApiException,
-        match="Unauthorized: malformed jwt token",
+        match="Forbidden: JWT authentication error",
     ):
         assert_client_authorized(env, http_client)
 
@@ -56,9 +56,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     assert_client_authorized(env, pageserver_http_client)
 
     # fail to create branch using token with different tenant_id
-    with pytest.raises(
-        PageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
-    ):
+    with pytest.raises(PageserverApiException, match="Forbidden: JWT authentication error"):
         assert_client_authorized(env, invalid_tenant_http_client)
 
     # create tenant using management token
@@ -67,7 +65,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     # fail to create tenant using tenant token
     with pytest.raises(
         PageserverApiException,
-        match="Forbidden: Attempt to access management api with tenant scope. Permission denied",
+        match="Forbidden: JWT authentication error",
     ):
         tenant_http_client.tenant_create(TenantId.generate())
 
@@ -94,6 +92,7 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
 def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*Authentication error: InvalidSignature.*")
     env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
 
     pageserver_token_old = env.auth_keys.generate_pageserver_token()
@@ -146,6 +145,7 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
 def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.append(".*Authentication error: InvalidSignature.*")
     env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
 
     pageserver_token_old = env.auth_keys.generate_pageserver_token()
@@ -162,7 +162,7 @@ def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
     # Next attempt fails as we use the old auth token
     with pytest.raises(
         PageserverApiException,
-        match="Unauthorized: malformed jwt token",
+        match="Forbidden: JWT authentication error",
     ):
         pageserver_http_client_old.reload_auth_validation_keys()
 
