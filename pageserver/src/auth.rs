@@ -3,11 +3,9 @@ use utils::id::TenantId;
 
 pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<(), AuthError> {
     match (&claims.scope, tenant_id) {
-        (Scope::Tenant, None) => {
-            return Err(AuthError(
-                "Attempt to access management api with tenant scope. Permission denied".into(),
-            ));
-        }
+        (Scope::Tenant, None) => Err(AuthError(
+            "Attempt to access management api with tenant scope. Permission denied".into(),
+        )),
         (Scope::Tenant, Some(tenant_id)) => {
             if claims.tenant_id.unwrap() != tenant_id {
                 return Err(AuthError("Tenant id mismatch. Permission denied".into()));
@@ -16,10 +14,8 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
         }
         (Scope::PageServerApi, None) => Ok(()), // access to management api for PageServerApi scope
         (Scope::PageServerApi, Some(_)) => Ok(()), // access to tenant api using PageServerApi scope
-        (Scope::SafekeeperData, _) => {
-            return Err(AuthError(
-                "SafekeeperData scope makes no sense for Pageserver".into(),
-            ));
-        }
+        (Scope::SafekeeperData, _) => Err(AuthError(
+            "SafekeeperData scope makes no sense for Pageserver".into(),
+        )),
     }
 }
