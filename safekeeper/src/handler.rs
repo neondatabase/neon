@@ -185,7 +185,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         }
 
         debug!(
-            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
+            "jwt scope check succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
 
