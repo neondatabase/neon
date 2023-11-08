@@ -898,7 +898,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<(), QueryError> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -910,7 +910,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
     }
 
     /// Shorthand for getting a reference to a Timeline of an Active tenant.
@@ -949,12 +949,13 @@ where
             .auth
             .as_ref()
             .unwrap()
-            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
+            .map_err(|e| QueryError::Unauthorized(e.0))?;
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "jwt token scope is Tenant, but tenant id is missing"
-            )));
+            return Err(QueryError::Unauthorized(
+                "jwt token scope is Tenant, but tenant id is missing".into(),
+            ));
         }
 
         debug!(

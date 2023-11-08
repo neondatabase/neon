@@ -165,22 +165,23 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             .auth
             .as_ref()
             .expect("auth_type is configured but .auth of handler is missing");
-        let data =
-            auth.decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+        let data = auth
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
+            .map_err(|e| QueryError::Unauthorized(e.0))?;
 
         // The handler might be configured to allow only tenant scope tokens.
         if matches!(allowed_auth_scope, Scope::Tenant)
             && !matches!(data.claims.scope, Scope::Tenant)
         {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "passed JWT token is for full access, but only tenant scope is allowed"
-            )));
+            return Err(QueryError::Unauthorized(
+                "passed JWT token is for full access, but only tenant scope is allowed".into(),
+            ));
         }
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "jwt token scope is Tenant, but tenant id is missing"
-            )));
+            return Err(QueryError::Unauthorized(
+                "jwt token scope is Tenant, but tenant id is missing".into(),
+            ));
         }
 
         info!(
@@ -263,7 +264,7 @@ impl SafekeeperPostgresHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<(), QueryError> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -275,7 +276,7 @@ impl SafekeeperPostgresHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
     }
 
     async fn handle_timeline_status<IO: AsyncRead + AsyncWrite + Unpin>(

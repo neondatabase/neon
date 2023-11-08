@@ -1,4 +1,4 @@
-use crate::auth::{Claims, SwappableJwtAuth};
+use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
@@ -450,7 +450,7 @@ where
 
 pub fn check_permission_with(
     req: &Request<Body>,
-    check_permission: impl Fn(&Claims) -> Result<(), anyhow::Error>,
+    check_permission: impl Fn(&Claims) -> Result<(), AuthError>,
 ) -> Result<(), ApiError> {
     match req.context::<Claims>() {
         Some(claims) => {
