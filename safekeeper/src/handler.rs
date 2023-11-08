@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::str::{self};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, info_span, Instrument};
+use tracing::{debug, info, info_span, Instrument};
 
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
@@ -184,7 +184,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             ));
         }
 
-        info!(
+        debug!(
             "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
