@@ -55,9 +55,9 @@ struct RelTagBlockNo {
 #[derive(clap::Parser)]
 struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
-    ps_endpoint: String,
+    mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
-    pq_client_connstring: String,
+    page_service_connstring: String,
     // tenant_id: String,
     // timeline_id: String,
     num_tasks: usize,
@@ -102,7 +102,7 @@ async fn main() {
         // let timeline_id = "2868f84a8d166779e4c651b116c45059";
 
         let resp = client
-            .get(Uri::try_from(&format!("{}/v1/tenant", args.ps_endpoint)).unwrap())
+            .get(Uri::try_from(&format!("{}/v1/tenant", args.mgmt_api_endpoint)).unwrap())
             .await
             .unwrap();
 
@@ -129,7 +129,7 @@ async fn main() {
             .get(
                 Uri::try_from(&format!(
                     "{}/v1/tenant/{}/timeline",
-                    args.ps_endpoint, tenant_id
+                    args.mgmt_api_endpoint, tenant_id
                 ))
                 .unwrap(),
             )
@@ -193,7 +193,7 @@ fn timeline(
             .get(
                 Uri::try_from(&format!(
                     "{}/v1/tenant/{}/timeline/{}/keyspace",
-                    args.ps_endpoint, tenant_id, timeline_id
+                    args.mgmt_api_endpoint, tenant_id, timeline_id
                 ))
                 .unwrap(),
             )
@@ -249,7 +249,7 @@ fn timeline(
                 let stats = Arc::clone(&stats);
                 async move {
                     let mut client = getpage_client::Client::new(
-                        args.pq_client_connstring.clone(),
+                        args.page_service_connstring.clone(),
                         tenant_id.clone(),
                         timeline_id.clone(),
                     )
