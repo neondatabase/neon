@@ -287,10 +287,13 @@ impl WakeComputeLockOptions {
         let mut permits = None;
         let mut epoch = None;
 
+        dbg!(options);
+
         for option in options.split(',') {
             let (key, value) = option
                 .split_once('=')
                 .with_context(|| format!("bad key-value pair: {option}"))?;
+            dbg!(key, value);
 
             match key {
                 "shards" => shards = Some(value.parse()?),
@@ -303,7 +306,7 @@ impl WakeComputeLockOptions {
         // these dont matter if lock is disabled
         if let Some(0) = permits {
             epoch = Some(Duration::default());
-            shards = Some(1);
+            shards = Some(2);
         }
 
         let out = Self {
@@ -312,7 +315,8 @@ impl WakeComputeLockOptions {
             epoch: epoch.context("missing `epoch`")?,
         };
 
-        ensure!(out.shards > 0, "shard count must be > 0");
+        ensure!(out.shards > 1, "shard count must be > 1");
+        ensure!(out.shards.is_power_of_two(), "shard count must be a power of two");
 
         Ok(out)
     }
