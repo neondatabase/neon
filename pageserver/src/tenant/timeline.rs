@@ -247,7 +247,7 @@ pub struct Timeline {
     /// the flush finishes. You can use that to wait for the flush to finish.
     layer_flush_start_tx: tokio::sync::watch::Sender<u64>,
     /// to be notified when layer flushing has finished, subscribe to the layer_flush_done channel
-    layer_flush_done_tx: tokio::sync::watch::Sender<(u64, anyhow::Result<()>)>,
+    layer_flush_done_tx: tokio::sync::watch::Sender<(u64, Result<(), FlushLayerError>)>,
 
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
@@ -372,6 +372,19 @@ pub enum PageReconstructError {
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+enum FlushLayerError {
+    /// Timeline cancellation token was cancelled
+    #[error("timeline shutting down")]
+    Cancelled,
+
+    #[error(transparent)]
+    PageReconstructError(#[from] PageReconstructError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 impl std::fmt::Debug for PageReconstructError {
@@ -2401,6 +2414,10 @@ impl Timeline {
         info!("started flush loop");
         loop {
             tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    info!("shutting down layer flush task");
+                    break;
+                },
                 _ = task_mgr::shutdown_watcher() => {
                     info!("shutting down layer flush task");
                     break;
@@ -2412,6 +2429,14 @@ impl Timeline {
             let timer = self.metrics.flush_time_histo.start_timer();
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
+                if self.cancel.is_cancelled() {
+                    info!("dropping out of flush loop for timeline shutdown");
+                    // Note: we do not bother transmitting into [`layer_flush_done_tx`], because
+                    // anyone waiting on that will respect self.cancel as well: they will stop
+                    // waiting at the same time we as drop out of this loop.
+                    return;
+                }
+
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
                     guard.layer_map().frozen_layers.front().cloned()
@@ -2420,9 +2445,18 @@ impl Timeline {
                 let Some(layer_to_flush) = layer_to_flush else {
                     break Ok(());
                 };
-                if let Err(err) = self.flush_frozen_layer(layer_to_flush, ctx).await {
-                    error!("could not flush frozen layer: {err:?}");
-                    break Err(err);
+                match self.flush_frozen_layer(layer_to_flush, ctx).await {
+                    Ok(()) => {}
+                    Err(FlushLayerError::Cancelled) => {
+                        info!("dropping out of flush loop for timeline shutdown");
+                        return;
+                    }
+                    err @ Err(
+                        FlushLayerError::Other(_) | FlushLayerError::PageReconstructError(_),
+                    ) => {
+                        error!("could not flush frozen layer: {err:?}");
+                        break err;
+                    }
                 }
             };
             // Notify any listeners that we're done
@@ -2471,7 +2505,17 @@ impl Timeline {
                 }
             }
             trace!("waiting for flush to complete");
-            rx.changed().await?;
+            tokio::select! {
+                rx_e = rx.changed() => {
+                    rx_e?;
+                },
+                // Cancellation safety: we are not leaving an I/O in-flight for the flush, we're just ignoring
+                // the notification from [`flush_loop`] that it completed.
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("Cancelled layer flush due on timeline shutdown");
+                    return Ok(())
+                }
+            };
             trace!("done")
         }
     }
@@ -2486,7 +2530,7 @@ impl Timeline {
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), FlushLayerError> {
         // As a special case, when we have just imported an image into the repository,
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
@@ -2511,6 +2555,11 @@ impl Timeline {
                 let (partitioning, _lsn) = self
                     .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
                     .await?;
+
+                if self.cancel.is_cancelled() {
+                    return Err(FlushLayerError::Cancelled);
+                }
+
                 // For image layers, we add them immediately into the layer map.
                 (
                     self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
@@ -2542,6 +2591,10 @@ impl Timeline {
                 )
             };
 
+        if self.cancel.is_cancelled() {
+            return Err(FlushLayerError::Cancelled);
+        }
+
         let disk_consistent_lsn = Lsn(lsn_range.end.0 - 1);
         let old_disk_consistent_lsn = self.disk_consistent_lsn.load();
 
@@ -2550,6 +2603,10 @@ impl Timeline {
         // the mapping in `create_delta_layer`.
         let metadata = {
             let mut guard = self.layers.write().await;
+
+            if self.cancel.is_cancelled() {
+                return Err(FlushLayerError::Cancelled);
+            }
 
             guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
 
