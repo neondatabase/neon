@@ -382,7 +382,7 @@ mod tests {
             shards,
         } = "permits=0".parse()?;
         assert_eq!(epoch, Duration::ZERO);
-        assert_eq!(shards, 1);
+        assert_eq!(shards, 2);
         assert_eq!(permits, 0);
 
         Ok(())
