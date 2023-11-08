@@ -476,6 +476,12 @@ impl Endpoint {
             }
         }
 
+        // check for file remote_extensions_spec.json
+        // if it is present, read it and pass to compute_ctl
+        let remote_extensions_spec_path = self.endpoint_path().join("remote_extensions_spec.json");
+        let file = std::fs::File::open(remote_extensions_spec_path)?;
+        let remote_extensions = serde_json::from_reader(file)?;
+
         // Create spec file
         let spec = ComputeSpec {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
@@ -497,7 +503,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            remote_extensions: None,
+            remote_extensions,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
