@@ -83,8 +83,6 @@ impl From<AuthError> for ApiError {
     }
 }
 
-//impl std::error::Error for AuthError {}
-
 pub struct JwtAuth {
     decoding_keys: Vec<DecodingKey>,
     validation: Validation,
