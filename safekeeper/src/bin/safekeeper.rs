@@ -38,7 +38,7 @@ use safekeeper::{http, WAL_REMOVER_RUNTIME};
 use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
-use utils::auth::{JwtAuth, Scope};
+use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
@@ -251,10 +251,9 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Some(path) => {
-            info!("loading http auth JWT key from {path}");
-            Some(Arc::new(
-                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-            ))
+            info!("loading http auth JWT key(s) from {path}");
+            let jwt_auth = JwtAuth::from_key_path(path).context("failed to load the auth key")?;
+            Some(Arc::new(SwappableJwtAuth::new(jwt_auth)))
         }
     };
 

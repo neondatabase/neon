@@ -78,7 +78,7 @@ use regex::Regex;
 use remote_storage::*;
 use serde_json;
 use std::io::Read;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::str;
 use tar::Archive;
@@ -281,8 +281,6 @@ pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRem
         max_keys_per_list_response: None,
     };
     let config = RemoteStorageConfig {
-        max_concurrent_syncs: NonZeroUsize::new(100).expect("100 != 0"),
-        max_sync_errors: NonZeroU32::new(100).expect("100 != 0"),
         storage: RemoteStorageKind::AwsS3(config),
     };
     GenericRemoteStorage::from_config(&config)

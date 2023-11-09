@@ -27,6 +27,7 @@ RUN set -e \
 FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
+ARG BUILD_TAG
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
 # Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
@@ -78,9 +79,9 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router  
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
