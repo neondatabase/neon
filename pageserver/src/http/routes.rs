@@ -845,11 +845,12 @@ async fn tenant_list_handler(
             ApiError::ResourceUnavailable("Tenant map is initializing or shutting down".into())
         })?
         .iter()
-        .map(|(id, state)| TenantInfo {
+        .map(|(id, state, gen)| TenantInfo {
             id: *id,
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
+            generation: (*gen).into(),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -879,6 +880,7 @@ async fn tenant_status(
                 state: state.clone(),
                 current_physical_size: Some(current_physical_size),
                 attachment_status: state.attachment_status(),
+                generation: tenant.generation().into(),
             },
             timelines: tenant.list_timeline_ids(),
         })

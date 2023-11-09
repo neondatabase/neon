@@ -1511,8 +1511,8 @@ pub(crate) enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, TenantMapListError>
-{
+pub(crate) async fn list_tenants(
+) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
     let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1520,7 +1520,9 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, 
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
+            TenantSlot::Attached(tenant) => {
+                Some((*id, tenant.current_state(), tenant.generation()))
+            }
             TenantSlot::Secondary => None,
             TenantSlot::InProgress(_) => None,
         })
