@@ -1,5 +1,6 @@
 //! `utils` is intended to be a place to put code that is shared
 //! between other crates in this repository.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod backoff;
 
@@ -24,6 +25,10 @@ pub mod auth;
 
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
+
+mod hex;
+pub use hex::Hex;
+
 // http endpoint utils
 pub mod http;
 
@@ -72,6 +77,9 @@ pub mod completion;
 
 /// Reporting utilities
 pub mod error;
+
+/// async timeout helper
+pub mod timeout;
 
 pub mod sync;
 

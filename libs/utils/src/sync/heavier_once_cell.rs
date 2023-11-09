@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, MutexGuard,
+};
 use tokio::sync::Semaphore;
 
 /// Custom design like [`tokio::sync::OnceCell`] but using [`OwnedSemaphorePermit`] instead of
@@ -10,6 +13,7 @@ use tokio::sync::Semaphore;
 /// [`OwnedSemaphorePermit`]: tokio::sync::OwnedSemaphorePermit
 pub struct OnceCell<T> {
     inner: Mutex<Inner<T>>,
+    initializers: AtomicUsize,
 }
 
 impl<T> Default for OnceCell<T> {
@@ -17,6 +21,7 @@ impl<T> Default for OnceCell<T> {
     fn default() -> Self {
         Self {
             inner: Default::default(),
+            initializers: AtomicUsize::new(0),
         }
     }
 }
@@ -49,6 +54,7 @@ impl<T> OnceCell<T> {
                 init_semaphore: Arc::new(sem),
                 value: Some(value),
             }),
+            initializers: AtomicUsize::new(0),
         }
     }
 
@@ -71,7 +77,11 @@ impl<T> OnceCell<T> {
             guard.init_semaphore.clone()
         };
 
-        let permit = sem.acquire_owned().await;
+        let permit = {
+            // increment the count for the duration of queued
+            let _guard = CountWaitingInitializers::start(self);
+            sem.acquire_owned().await
+        };
 
         match permit {
             Ok(permit) => {
@@ -100,12 +110,13 @@ impl<T> OnceCell<T> {
     ///
     /// If the inner has already been initialized.
     pub fn set(&self, value: T, _permit: InitPermit) -> Guard<'_, T> {
-        // cannot assert that this permit is for self.inner.semaphore
         let guard = self.inner.lock().unwrap();
 
+        // cannot assert that this permit is for self.inner.semaphore, but we can assert it cannot
+        // give more permits right now.
         if guard.init_semaphore.try_acquire().is_ok() {
             drop(guard);
-            panic!("semaphore is of wrong origin");
+            panic!("permit is of wrong origin");
         }
 
         Self::set0(value, guard)
@@ -129,6 +140,28 @@ impl<T> OnceCell<T> {
         } else {
             None
         }
+    }
+
+    /// Return the number of [`Self::get_or_init`] calls waiting for initialization to complete.
+    pub fn initializer_count(&self) -> usize {
+        self.initializers.load(Ordering::Relaxed)
+    }
+}
+
+/// DropGuard counter for queued tasks waiting to initialize, mainly accessible for the
+/// initializing task for example at the end of initialization.
+struct CountWaitingInitializers<'a, T>(&'a OnceCell<T>);
+
+impl<'a, T> CountWaitingInitializers<'a, T> {
+    fn start(target: &'a OnceCell<T>) -> Self {
+        target.initializers.fetch_add(1, Ordering::Relaxed);
+        CountWaitingInitializers(target)
+    }
+}
+
+impl<'a, T> Drop for CountWaitingInitializers<'a, T> {
+    fn drop(&mut self) {
+        self.0.initializers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

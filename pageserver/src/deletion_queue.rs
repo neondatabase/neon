@@ -18,7 +18,6 @@ use hex::FromHex;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
-use serde_with::serde_as;
 use thiserror::Error;
 use tokio;
 use tokio_util::sync::CancellationToken;
@@ -215,7 +214,6 @@ where
 /// during recovery as startup.
 const TEMP_SUFFIX: &str = "tmp";
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 struct DeletionList {
     /// Serialization version, for future use
@@ -244,7 +242,6 @@ struct DeletionList {
     validated: bool,
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 struct DeletionHeader {
     /// Serialization version, for future use
@@ -896,14 +893,6 @@ mod test {
         std::fs::create_dir_all(remote_fs_dir)?;
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
-            max_concurrent_syncs: std::num::NonZeroUsize::new(
-                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-            )
-            .unwrap(),
-            max_sync_errors: std::num::NonZeroU32::new(
-                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-            )
-            .unwrap(),
             storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();

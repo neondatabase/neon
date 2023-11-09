@@ -6,7 +6,7 @@ use std::{
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use strum_macros;
 use utils::{
     completion,
@@ -174,25 +174,19 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub new_timeline_id: TimelineId,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_start_lsn: Option<Lsn>,
     pub pg_version: Option<u32>,
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub new_tenant_id: TenantId,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,7 +195,6 @@ pub struct TenantCreateRequest {
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[serde_as]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLoadRequest {
@@ -278,31 +271,26 @@ pub struct LocationConfig {
     pub tenant_conf: TenantConfig,
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub TenantId);
+pub struct TenantCreateResponse(pub TenantId);
 
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
@@ -374,10 +362,8 @@ pub enum TenantAttachmentStatus {
     Failed { reason: String },
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
-    #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
     // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
@@ -388,33 +374,22 @@ pub struct TenantInfo {
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
 
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
     pub last_record_lsn: Lsn,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub prev_record_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
     pub latest_gc_cutoff_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
 
     /// The LSN that we have succesfully uploaded to remote storage
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
 
     /// The LSN that we are advertizing to safekeepers
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn_visible: Lsn,
 
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
@@ -426,7 +401,6 @@ pub struct TimelineInfo {
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
@@ -523,23 +497,13 @@ pub struct LayerAccessStats {
     pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
 }
 
-#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
-    Open {
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_start: Lsn,
-    },
-    Frozen {
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_start: Lsn,
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_end: Lsn,
-    },
+    Open { lsn_start: Lsn },
+    Frozen { lsn_start: Lsn, lsn_end: Lsn },
 }
 
-#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum HistoricLayerInfo {
@@ -547,9 +511,7 @@ pub enum HistoricLayerInfo {
         layer_file_name: String,
         layer_file_size: u64,
 
-        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
-        #[serde_as(as = "DisplayFromStr")]
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
@@ -558,7 +520,6 @@ pub enum HistoricLayerInfo {
         layer_file_name: String,
         layer_file_size: u64,
 
-        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,

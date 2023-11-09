@@ -596,21 +596,21 @@ trait CloseFileDescriptors: CommandExt {
 
 impl<C: CommandExt> CloseFileDescriptors for C {
     fn close_fds(&mut self) -> &mut Command {
+        // SAFETY: Code executed inside pre_exec should have async-signal-safety,
+        // which means it should be safe to execute inside a signal handler.
+        // The precise meaning depends on platform. See `man signal-safety`
+        // for the linux definition.
+        //
+        // The set_fds_cloexec_threadsafe function is documented to be
+        // async-signal-safe.
+        //
+        // Aside from this function, the rest of the code is re-entrant and
+        // doesn't make any syscalls. We're just passing constants.
+        //
+        // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
+        // which is not async-signal-safe. Be careful.
         unsafe {
             self.pre_exec(move || {
-                // SAFETY: Code executed inside pre_exec should have async-signal-safety,
-                // which means it should be safe to execute inside a signal handler.
-                // The precise meaning depends on platform. See `man signal-safety`
-                // for the linux definition.
-                //
-                // The set_fds_cloexec_threadsafe function is documented to be
-                // async-signal-safe.
-                //
-                // Aside from this function, the rest of the code is re-entrant and
-                // doesn't make any syscalls. We're just passing constants.
-                //
-                // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
-                // which is not async-signal-safe. Be careful.
                 close_fds::set_fds_cloexec_threadsafe(3, &[]);
                 Ok(())
             })

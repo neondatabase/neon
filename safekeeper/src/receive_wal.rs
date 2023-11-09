@@ -111,7 +111,7 @@ impl WalReceivers {
             .count()
     }
 
-    /// Unregister walsender.
+    /// Unregister walreceiver.
     fn unregister(self: &Arc<WalReceivers>, id: WalReceiverId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
@@ -138,8 +138,8 @@ pub enum WalReceiverStatus {
     Streaming,
 }
 
-/// Scope guard to access slot in WalSenders registry and unregister from it in
-/// Drop.
+/// Scope guard to access slot in WalReceivers registry and unregister from
+/// it in Drop.
 pub struct WalReceiverGuard {
     id: WalReceiverId,
     walreceivers: Arc<WalReceivers>,

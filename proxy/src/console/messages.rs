@@ -13,6 +13,7 @@ pub struct ConsoleError {
 #[derive(Deserialize)]
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
+    pub allowed_ips: Option<Vec<Box<str>>>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -184,6 +185,33 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_wake_compute() -> anyhow::Result<()> {
+        let json = json!({
+            "address": "0.0.0.0",
+            "aux": dummy_aux(),
+        });
+        let _: WakeCompute = serde_json::from_str(&json.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn parse_get_role_secret() -> anyhow::Result<()> {
+        // Empty `allowed_ips` field.
+        let json = json!({
+            "role_secret": "secret",
+        });
+        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        // Empty `allowed_ips` field.
+        let json = json!({
+            "role_secret": "secret",
+            "allowed_ips": ["8.8.8.8"],
+        });
+        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
 
         Ok(())
     }

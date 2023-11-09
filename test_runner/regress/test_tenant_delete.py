@@ -63,6 +63,9 @@ def test_tenant_delete_smoke(
         conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
     )
 
+    # Default tenant and the one we created
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
+
     # create two timelines one being the parent of another
     parent = None
     for timeline in ["first", "second"]:
@@ -88,7 +91,9 @@ def test_tenant_delete_smoke(
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
     tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
@@ -103,6 +108,9 @@ def test_tenant_delete_smoke(
                 )
             ),
         )
+
+    # Deletion updates the tenant count: the one default tenant remains
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
 
 class Check(enum.Enum):
