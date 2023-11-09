@@ -93,6 +93,13 @@ impl<'a> WalIngest<'a> {
         modification.lsn = lsn;
         decode_wal_record(recdata, decoded, self.timeline.pg_version)?;
 
+        tracing::trace!(
+            "decoded rmid={} xid={} xl_info={}",
+            decoded.xl_rmid,
+            decoded.xl_xid,
+            decoded.xl_info
+        );
+
         // Fast path: we may skip the entire record if it only references blocks on another shard.
         // Otherwise we proceed, and filter blocks later.
         let any_local_blocks = decoded.blocks.iter().any(|blk| {

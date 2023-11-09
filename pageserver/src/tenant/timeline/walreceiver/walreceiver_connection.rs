@@ -36,7 +36,7 @@ use crate::{
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::waldecoder::WalStreamDecoder;
+
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::NodeId, lsn::Lsn};
 
@@ -244,12 +244,21 @@ pub(super) async fn handle_walreceiver_connection(
 
     info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
-    let query = format!("START_REPLICATION PHYSICAL {startpoint}");
+    let shard = timeline.get_shard();
+    let shard_str = serde_json::to_string(&shard).map_err(|e| {
+        WalReceiverError::Other(anyhow!(
+            "Failed to serialize shard info for walreceiver: {e}"
+        ))
+    })?;
+    info!("starting replication for shard {shard_str}");
+
+    let query = format!(
+        "START_REPLICATION PHYSICAL {startpoint} (shard={})",
+        shard_str
+    );
 
     let copy_stream = replication_client.copy_both_simple(&query).await?;
     let mut physical_stream = pin!(ReplicationStream::new(copy_stream));
-
-    let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
     let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx).await?;
 
@@ -273,9 +282,7 @@ pub(super) async fn handle_walreceiver_connection(
             ReplicationMessage::XLogData(xlog_data) => {
                 connection_status.latest_connection_update = now;
                 connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
-                connection_status.streaming_lsn = Some(Lsn::from(
-                    xlog_data.wal_start() + xlog_data.data().len() as u64,
-                ));
+                connection_status.streaming_lsn = Some(Lsn::from(xlog_data.wal_start()));
                 if !xlog_data.data().is_empty() {
                     connection_status.latest_wal_update = now;
                 }
@@ -293,44 +300,29 @@ pub(super) async fn handle_walreceiver_connection(
 
         let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
-                // Pass the WAL data to the decoder, and see if we can decode
-                // more records as a result.
-                let data = xlog_data.data();
-                let startlsn = Lsn::from(xlog_data.wal_start());
-                let endlsn = startlsn + data.len() as u64;
+                // Process decoded WAL record.
+                let next_lsn = Lsn::from(xlog_data.wal_start());
+                let data = xlog_data.into_data();
 
-                trace!("received XLogData between {startlsn} and {endlsn}");
+                trace!("received XLogData up to {next_lsn}");
 
-                waldecoder.feed_bytes(data);
+                let mut decoded = DecodedWALRecord::default();
+                let mut modification = timeline.begin_modification(next_lsn);
+                walingest
+                    .ingest_record(data, next_lsn, &mut modification, &mut decoded, &ctx)
+                    .await
+                    .with_context(|| format!("could not ingest record at {next_lsn}"))?;
 
-                {
-                    let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification(endlsn);
-                    while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                        // It is important to deal with the aligned records as lsn in getPage@LSN is
-                        // aligned and can be several bytes bigger. Without this alignment we are
-                        // at risk of hitting a deadlock.
-                        if !lsn.is_aligned() {
-                            return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
-                        }
+                fail_point!("walreceiver-after-ingest");
 
-                        walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
-                            .await
-                            .with_context(|| format!("could not ingest record at {lsn}"))?;
+                last_rec_lsn = next_lsn;
 
-                        fail_point!("walreceiver-after-ingest");
-
-                        last_rec_lsn = lsn;
-                    }
-                }
-
-                if !caught_up && endlsn >= end_of_wal {
-                    info!("caught up at LSN {endlsn}");
+                if !caught_up && next_lsn >= end_of_wal {
+                    info!("caught up at LSN {next_lsn}");
                     caught_up = true;
                 }
 
-                Some(endlsn)
+                Some(last_rec_lsn)
             }
 
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {

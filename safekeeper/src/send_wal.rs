@@ -6,13 +6,15 @@ use crate::safekeeper::{Term, TermLsn};
 use crate::timeline::Timeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
-use crate::GlobalTimelines;
+use crate::{send_wal_sharded, GlobalTimelines};
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
+use pageserver_api::shard::ShardIdentity;
 use parking_lot::Mutex;
 use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,12 @@ use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
 use utils::{bin_ser::BeSer, lsn::Lsn};
+
+pub struct ReplicationOptions {
+    pub start_lsn: Lsn,
+    pub term: Option<Term>,
+    pub shard: Option<ShardIdentity>,
+}
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
@@ -349,6 +357,22 @@ impl Drop for WalSenderGuard {
     }
 }
 
+impl WalSenderGuard {
+    pub async fn should_stop(&self, tli: &Arc<Timeline>) -> bool {
+        if let Some(remote_consistent_lsn) = self.walsenders.get_ws_remote_consistent_lsn(self.id) {
+            if tli.should_walsender_stop(remote_consistent_lsn).await {
+                // Terminate if there is nothing more to send.
+                // Note that "ending streaming" part of the string is used by
+                // pageserver to identify WalReceiverError::SuccessfulCompletion,
+                // do not change this string without updating pageserver.
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
 impl SafekeeperPostgresHandler {
     /// Wrapper around handle_start_replication_guts handling result. Error is
     /// handled here while we're still in walsender ttid span; with API
@@ -356,13 +380,9 @@ impl SafekeeperPostgresHandler {
     pub async fn handle_start_replication<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
-        start_pos: Lsn,
-        term: Option<Term>,
+        opts: ReplicationOptions,
     ) -> Result<(), QueryError> {
-        if let Err(end) = self
-            .handle_start_replication_guts(pgb, start_pos, term)
-            .await
-        {
+        if let Err(end) = self.handle_start_replication_guts(pgb, opts).await {
             // Log the result and probably send it to the client, closing the stream.
             pgb.handle_copy_stream_end(end).await;
         }
@@ -372,12 +392,12 @@ impl SafekeeperPostgresHandler {
     pub async fn handle_start_replication_guts<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
-        start_pos: Lsn,
-        term: Option<Term>,
+        opts: ReplicationOptions,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
         let tli =
             GlobalTimelines::get(self.ttid).map_err(|e| CopyStreamHandlerEnd::Other(e.into()))?;
+        let start_pos = opts.start_lsn;
 
         // Use a guard object to remove our entry from the timeline when we are done.
         let ws_guard = Arc::new(tli.get_walsenders().register(
@@ -415,11 +435,13 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}",
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}, addr={}, shard={:?}",
             start_pos,
             end_pos,
             matches!(end_watch, EndWatch::Flush(_)),
-            appname
+            appname,
+            pgb.get_peer_addr(),
+            opts.shard,
         );
 
         // switch to copy
@@ -438,23 +460,49 @@ impl SafekeeperPostgresHandler {
         // not synchronized with sends, so this avoids deadlocks.
         let reader = pgb.split().context("START_REPLICATION split")?;
 
-        let mut sender = WalSender {
-            pgb,
-            tli: tli.clone(),
-            appname,
-            start_pos,
-            end_pos,
-            term,
-            end_watch,
-            ws_guard: ws_guard.clone(),
-            wal_reader,
-            send_buf: [0; MAX_SEND_SIZE],
+        let ws_guard_clone = ws_guard.clone();
+        let sender_future = async {
+            if let Some(_shard) = opts.shard {
+                send_wal_sharded::WalSender {
+                    pgb,
+                    tli: tli.clone(),
+                    appname,
+                    start_pos,
+                    end_pos,
+                    term: opts.term,
+                    end_watch,
+                    ws_guard: ws_guard_clone,
+                    wal_reader,
+                    send_buf: [0; MAX_SEND_SIZE],
+                    waldecoder: WalStreamDecoder::new(
+                        start_pos,
+                        tli.get_state().await.1.server.pg_version / 10000,
+                    ),
+                }
+                .run()
+                .await
+            } else {
+                WalSender {
+                    pgb,
+                    tli: tli.clone(),
+                    appname,
+                    start_pos,
+                    end_pos,
+                    term: opts.term,
+                    end_watch,
+                    ws_guard: ws_guard_clone,
+                    wal_reader,
+                    send_buf: [0; MAX_SEND_SIZE],
+                }
+                .run()
+                .await
+            }
         };
         let mut reply_reader = ReplyReader { reader, ws_guard };
 
         let res = tokio::select! {
             // todo: add read|write .context to these errors
-            r = sender.run() => r,
+            r = sender_future => r,
             r = reply_reader.run() => r,
         };
         // Join pg backend back.
@@ -466,14 +514,14 @@ impl SafekeeperPostgresHandler {
 
 /// Walsender streams either up to commit_lsn (normally) or flush_lsn in the
 /// given term (recovery by walproposer or peer safekeeper).
-enum EndWatch {
+pub enum EndWatch {
     Commit(Receiver<Lsn>),
     Flush(Receiver<TermLsn>),
 }
 
 impl EndWatch {
     /// Get current end of WAL.
-    fn get(&self) -> Lsn {
+    pub fn get(&self) -> Lsn {
         match self {
             EndWatch::Commit(r) => *r.borrow(),
             EndWatch::Flush(r) => r.borrow().lsn,
@@ -481,7 +529,7 @@ impl EndWatch {
     }
 
     /// Wait for the update.
-    async fn changed(&mut self) -> anyhow::Result<()> {
+    pub async fn changed(&mut self) -> anyhow::Result<()> {
         match self {
             EndWatch::Commit(r) => r.changed().await?,
             EndWatch::Flush(r) => r.changed().await?,
@@ -598,21 +646,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             // Check for termination only if we are streaming up to commit_lsn
             // (to pageserver).
             if let EndWatch::Commit(_) = self.end_watch {
-                if let Some(remote_consistent_lsn) = self
-                    .ws_guard
-                    .walsenders
-                    .get_ws_remote_consistent_lsn(self.ws_guard.id)
-                {
-                    if self.tli.should_walsender_stop(remote_consistent_lsn).await {
-                        // Terminate if there is nothing more to send.
-                        // Note that "ending streaming" part of the string is used by
-                        // pageserver to identify WalReceiverError::SuccessfulCompletion,
-                        // do not change this string without updating pageserver.
-                        return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+                if self.ws_guard.should_stop(&self.tli).await {
+                    return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
                         "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
                         self.appname, self.start_pos,
                     )));
-                    }
                 }
             }
 
@@ -685,7 +723,7 @@ const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 /// - Ok(None) if timeout expired;
 /// - Err in case of error -- only if 1) term changed while fetching in recovery
 ///   mode 2) watch channel closed, which must never happen.
-async fn wait_for_lsn(
+pub async fn wait_for_lsn(
     rx: &mut EndWatch,
     client_term: Option<Term>,
     start_pos: Lsn,

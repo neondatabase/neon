@@ -2,6 +2,7 @@
 //! protocol commands.
 
 use anyhow::Context;
+
 use std::str::FromStr;
 use std::str::{self};
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
-use crate::safekeeper::Term;
+use crate::send_wal::ReplicationOptions;
 use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -46,7 +47,7 @@ pub struct SafekeeperPostgresHandler {
 /// Parsed Postgres command.
 enum SafekeeperPostgresCommand {
     StartWalPush,
-    StartReplication { start_lsn: Lsn, term: Option<Term> },
+    StartReplication(ReplicationOptions),
     IdentifySystem,
     TimelineStatus,
     JSONCtrl { cmd: AppendLogicalMessage },
@@ -58,7 +59,7 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     } else if cmd.starts_with("START_REPLICATION") {
         let re = Regex::new(
             // We follow postgres START_REPLICATION LOGICAL options to pass term.
-            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)(?: \(term='(\d+)'\))?",
+            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)(?: \(term='(\d+)'\))?(?: \(shard=(.+)\))?",
         )
         .unwrap();
         let caps = re
@@ -71,7 +72,18 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         } else {
             None
         };
-        Ok(SafekeeperPostgresCommand::StartReplication { start_lsn, term })
+        let shard = if let Some(m) = caps.get(3) {
+            Some(serde_json::from_str(m.as_str())?)
+        } else {
+            None
+        };
+        Ok(SafekeeperPostgresCommand::StartReplication(
+            ReplicationOptions {
+                start_lsn,
+                term,
+                shard,
+            },
+        ))
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
     } else if cmd.starts_with("TIMELINE_STATUS") {
@@ -86,7 +98,7 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     }
 }
 
-fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
+fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &'static str {
     match cmd {
         SafekeeperPostgresCommand::StartWalPush => "START_WAL_PUSH",
         SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
@@ -228,8 +240,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     .instrument(info_span!("WAL receiver"))
                     .await
             }
-            SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
-                self.handle_start_replication(pgb, start_lsn, term)
+            SafekeeperPostgresCommand::StartReplication(opts) => {
+                self.handle_start_replication(pgb, opts)
                     .instrument(info_span!("WAL sender"))
                     .await
             }
