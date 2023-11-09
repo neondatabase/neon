@@ -3299,7 +3299,6 @@ dependencies = [
  "serde_with",
  "strum",
  "strum_macros",
- "url",
  "utils",
  "workspace_hack",
 ]
