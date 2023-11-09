@@ -20,7 +20,7 @@ impl ShardNumber {
 
 /// TenantShardId identify the units of work for the Pageserver.
 ///
-/// These are written as <tenant_id>-<shard number><shard-count>, for example:
+/// These are written as `<tenant_id>-<shard number><shard-count>`, for example:
 ///
 ///   # The second shard in a two-shard tenant
 ///   072f1291a5310026820b2fe4b2968934-0102
