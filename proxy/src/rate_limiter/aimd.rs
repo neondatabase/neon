@@ -131,7 +131,7 @@ mod tests {
 
         let release_notifier = Arc::new(Notify::new());
 
-        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 10, None)
+        let limiter = Limiter::new(aimd, Duration::from_secs(1), 10, None)
             .with_release_notifier(release_notifier.clone());
 
         let token = limiter.try_acquire().unwrap();
@@ -147,7 +147,7 @@ mod tests {
             .increase_by(1)
             .with_min_utilisation_threshold(0.5);
 
-        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 4, None);
+        let limiter = Limiter::new(aimd, Duration::from_secs(1), 4, None);
 
         let token = limiter.try_acquire().unwrap();
         let _token = limiter.try_acquire().unwrap();
@@ -164,7 +164,7 @@ mod tests {
             .increase_by(1)
             .with_min_utilisation_threshold(0.5);
 
-        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 4, None);
+        let limiter = Limiter::new(aimd, Duration::from_secs(1), 4, None);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -180,7 +180,7 @@ mod tests {
     async fn should_not_change_limit_when_no_outcome() {
         let aimd = Aimd::default().decrease_factor(0.5).increase_by(1);
 
-        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 10, None);
+        let limiter = Limiter::new(aimd, Duration::from_secs(1), 10, None);
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, None).await;
