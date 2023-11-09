@@ -24,10 +24,8 @@ pub struct AttachHookResponse {
     pub gen: Option<u32>,
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct InspectRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
 }
 
