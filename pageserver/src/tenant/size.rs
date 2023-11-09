@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::{bail, Context};
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
@@ -350,10 +349,6 @@ async fn fill_logical_sizes(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let cancel = tokio_util::sync::CancellationToken::new();
-    // be sure to cancel all spawned tasks if we are dropped
-    let _dg = cancel.clone().drop_guard();
-
     // For each point that would benefit from having a logical size available,
     // spawn a Task to fetch it, unless we have it cached already.
     for seg in segments.iter() {
@@ -371,15 +366,8 @@ async fn fill_logical_sizes(
                 let parallel_size_calcs = Arc::clone(limit);
                 let ctx = ctx.attached_child();
                 joinset.spawn(
-                    calculate_logical_size(
-                        parallel_size_calcs,
-                        timeline,
-                        lsn,
-                        cause,
-                        ctx,
-                        cancel.child_token(),
-                    )
-                    .in_current_span(),
+                    calculate_logical_size(parallel_size_calcs, timeline, lsn, cause, ctx)
+                        .in_current_span(),
                 );
             }
             e.insert(cached_size);
@@ -487,14 +475,13 @@ async fn calculate_logical_size(
     lsn: utils::lsn::Lsn,
     cause: LogicalSizeCalculationCause,
     ctx: RequestContext,
-    cancel: CancellationToken,
 ) -> Result<TimelineAtLsnSizeResult, RecvError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not had been closed");
 
     let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn, cause, ctx, cancel)
+        .spawn_ondemand_logical_size_calculation(lsn, cause, ctx)
         .instrument(info_span!("spawn_ondemand_logical_size_calculation"))
         .await?;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))

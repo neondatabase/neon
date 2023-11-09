@@ -352,7 +352,8 @@ paths:
           in: query
           required: true
           schema:
-            type: integer
+            type: string
+            format: hex
           description: A LSN to get the timestamp
       responses:
         "200":

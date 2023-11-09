@@ -125,6 +125,9 @@ where
             // Wake everyone with an error.
             let mut internal = self.internal.lock().unwrap();
 
+            // Block any future waiters from starting
+            internal.shutdown = true;
+
             // This will steal the entire waiters map.
             // When we drop it all waiters will be woken.
             mem::take(&mut internal.waiters)
