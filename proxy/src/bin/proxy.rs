@@ -227,10 +227,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 shards,
                 permits,
                 epoch,
+                timeout,
             } = args.wake_compute_lock.parse()?;
             info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(
-                console::locks::ApiLocks::new("wake_compute_lock", permits, shards).unwrap(),
+                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout)
+                    .unwrap(),
             ));
             tokio::spawn(locks.garbage_collect_worker(epoch));
 

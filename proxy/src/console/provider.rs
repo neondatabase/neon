@@ -9,8 +9,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::sync::Arc;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::Instant,
+};
 use tracing::info;
 
 pub mod errors {
@@ -152,12 +155,26 @@ pub mod errors {
 
         #[error(transparent)]
         ApiError(ApiError),
+
+        #[error("Timeout waiting to acquire wake compute lock")]
+        TimeoutError,
     }
 
     // This allows more useful interactions than `#[from]`.
     impl<E: Into<ApiError>> From<E> for WakeComputeError {
         fn from(e: E) -> Self {
             Self::ApiError(e.into())
+        }
+    }
+
+    impl From<tokio::sync::AcquireError> for WakeComputeError {
+        fn from(_: tokio::sync::AcquireError) -> Self {
+            WakeComputeError::TimeoutError
+        }
+    }
+    impl From<tokio::time::error::Elapsed> for WakeComputeError {
+        fn from(_: tokio::time::error::Elapsed) -> Self {
+            WakeComputeError::TimeoutError
         }
     }
 
@@ -170,6 +187,8 @@ pub mod errors {
                 BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
                 // However, API might return a meaningful error.
                 ApiError(e) => e.to_string_client(),
+
+                TimeoutError => "timeout while acquiring the compute resource lock".to_owned(),
             }
         }
     }
@@ -241,13 +260,20 @@ pub struct ApiLocks {
     name: &'static str,
     node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
     permits: usize,
+    timeout: Duration,
     registered: prometheus::IntCounter,
     unregistered: prometheus::IntCounter,
     reclamation_lag: prometheus::Histogram,
+    lock_acquire_lag: prometheus::Histogram,
 }
 
 impl ApiLocks {
-    pub fn new(name: &'static str, permits: usize, shards: usize) -> prometheus::Result<Self> {
+    pub fn new(
+        name: &'static str,
+        permits: usize,
+        shards: usize,
+        timeout: Duration,
+    ) -> prometheus::Result<Self> {
         let registered = prometheus::IntCounter::with_opts(
             prometheus::Opts::new(
                 "semaphores_registered",
@@ -270,26 +296,42 @@ impl ApiLocks {
                 "Time it takes to reclaim unused semaphores in the api lock",
             )
             .namespace(name)
-            // 1us -> 30ms
+            // 1us -> 65ms
             // benchmarks on my mac indicate it's usually in the range of 256us and 512us
             .buckets(prometheus::exponential_buckets(1e-6, 2.0, 16)?),
         )?;
         prometheus::register(Box::new(reclamation_lag.clone()))?;
+        let lock_acquire_lag = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                "semaphore_acquire_seconds",
+                "Time it takes to reclaim unused semaphores in the api lock",
+            )
+            .namespace(name)
+            // 0.1ms -> 6s
+            .buckets(prometheus::exponential_buckets(1e-4, 2.0, 16)?),
+        )?;
+        prometheus::register(Box::new(lock_acquire_lag.clone()))?;
 
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
             permits,
+            timeout,
+            lock_acquire_lag,
             registered,
             unregistered,
             reclamation_lag,
         })
     }
 
-    pub async fn get_wake_compute_permit(&self, key: &Arc<str>) -> WakeComputePermit {
+    pub async fn get_wake_compute_permit(
+        &self,
+        key: &Arc<str>,
+    ) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
-            return WakeComputePermit { permit: None };
+            return Ok(WakeComputePermit { permit: None });
         }
+        let now = Instant::now();
         let semaphore = {
             // get fast path
             if let Some(semaphore) = self.node_locks.get(key) {
@@ -304,14 +346,14 @@ impl ApiLocks {
                     .clone()
             }
         };
-        WakeComputePermit {
-            permit: Some(
-                semaphore
-                    .acquire_owned()
-                    .await
-                    .expect("the semaphore should never be closed"),
-            ),
-        }
+        let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
+
+        self.lock_acquire_lag
+            .observe((Instant::now() - now).as_secs_f64());
+
+        Ok(WakeComputePermit {
+            permit: Some(permit??),
+        })
     }
 
     pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {

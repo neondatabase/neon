@@ -170,7 +170,7 @@ impl super::Api for Api {
 
         let key: Arc<str> = key.into();
 
-        let permit = self.locks.get_wake_compute_permit(&key).await;
+        let permit = self.locks.get_wake_compute_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check
