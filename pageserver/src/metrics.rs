@@ -1225,15 +1225,6 @@ pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the Postgres WAL redo process",
-        redo_histogram_time_buckets!(),
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_records_histogram",
@@ -1928,7 +1919,6 @@ pub fn preinitialize_metrics() {
         &READ_NUM_FS_LAYERS,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
-        &WAL_REDO_WAIT_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
     ]
