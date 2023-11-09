@@ -724,13 +724,10 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
+        self.control_plane_api = None
+        self.attachment_service = None
         if config.enable_generations:
-            attachment_service_port = self.port_distributor.get_port()
-            self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
-            self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
-        else:
-            self.control_plane_api = None
-            self.attachment_service = None
+            self.enable_generations()
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
@@ -818,6 +815,18 @@ class NeonEnv:
 
         log.info(f"Config: {toml}")
         self.neon_cli.init(toml)
+
+    def enable_generations(self, start=False):
+        if not start:
+            # TODO: assert that we haven't `self.start()`ed yet
+            pass
+        assert self.control_plane_api == None
+        assert self.attachment_service == None
+        attachment_service_port = self.port_distributor.get_port()
+        self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
+        self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
+        if start:
+            self.attachment_service.start()
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
