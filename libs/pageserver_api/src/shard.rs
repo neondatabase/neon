@@ -1,7 +1,4 @@
-use std::hash::Hasher;
-
 use crate::key::Key;
-use mur3;
 use serde::{Deserialize, Serialize};
 use utils::id::NodeId;
 
@@ -124,7 +121,7 @@ impl ShardIdentity {
     /// Return true if the key should be ingested by this shard
     pub fn is_key_local(&self, key: &Key) -> bool {
         if self.count < ShardCount(2) || key_is_broadcast(key) {
-            return true;
+            true
         } else {
             key_to_shard_number(self.count, self.stripe_size, key) == self.number
         }
@@ -164,26 +161,50 @@ fn key_is_broadcast(key: &Key) -> bool {
     !is_rel_block_key(key)
 }
 
+/// Provide the same result as the function in postgres `hashfn.h` with the same name
+fn murmurhash32(data: u32) -> u32 {
+    let mut h = data;
+
+    h ^= h >> 16;
+    h *= 0x85ebca6b;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >> 16;
+    h
+}
+
+/// Provide the same result as the function in postgres `hashfn.h` with the same name
+fn hash_combine(mut a: u32, b: u32) -> u32 {
+    a ^= b + 0x9e3779b9 + (a << 6) + (a >> 2);
+    a
+}
+
 /// Where a Key is to be distributed across shards, select the shard.  This function
 /// does not account for keys that should be broadcast across shards.
+///
+/// The hashing in this function must exactly match what we do in postgres smgr
+/// code.  The resulting distribution of pages is intended to preserve locality within
+/// `stripe_size` ranges of contiguous block numbers in the same relation, while otherwise
+/// distributing data pseudo-randomly.
+///
+/// The mapping of key to shard is not stable across changes to ShardCount: this is intentional
+/// and will be handled at higher levels when shards are split.
 fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Key) -> ShardNumber {
     // Fast path for un-sharded tenants or broadcast keys
     if count < ShardCount(2) || key_is_broadcast(key) {
         return ShardNumber(0);
     }
 
-    let mut hasher = mur3::Hasher32::with_seed(0);
-    hasher.write_u8(key.field1);
-    hasher.write_u32(key.field2);
-    hasher.write_u32(key.field3);
-    hasher.write_u32(key.field4);
-    let hash = hasher.finish32();
+    // spcNode
+    let mut hash = murmurhash32(key.field2);
+    // dbNode
+    hash = hash_combine(hash, murmurhash32(key.field3));
+    // relNode
+    hash = hash_combine(hash, murmurhash32(key.field4));
+    // blockNum/stripe size
+    hash = hash_combine(hash, murmurhash32(key.field6 / stripe_size.0));
 
-    let blkno = key.field6;
-
-    let stripe = hash + (blkno / stripe_size.0);
-
-    let shard = stripe as u8 % (count.0 as u8);
+    let shard = (hash % count.0 as u32) as u8;
 
     ShardNumber(shard)
 }
