@@ -654,7 +654,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                 match joined {
                     Ok(()) => {}
                     Err(join_error) if join_error.is_cancelled() => {
-                        unreachable!("we are not cancelling any of the futures");
+                        unreachable!("we are not cancelling any of the tasks");
                     }
                     Err(join_error) if join_error.is_panic() => {
                         // cannot really do anything, as this panic is likely a bug
