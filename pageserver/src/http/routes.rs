@@ -303,11 +303,7 @@ async fn build_timeline_info(
         // we're executing this function, we will outlive the timeline on-disk state.
         info.current_logical_size_non_incremental = Some(
             timeline
-                .get_current_logical_size_non_incremental(
-                    info.last_record_lsn,
-                    CancellationToken::new(),
-                    ctx,
-                )
+                .get_current_logical_size_non_incremental(info.last_record_lsn, ctx)
                 .await?,
         );
     }

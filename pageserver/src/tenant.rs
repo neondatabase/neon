@@ -1841,7 +1841,13 @@ impl Tenant {
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
                 let span = Span::current();
-                js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
+                js.spawn(async move {
+                    if freeze_and_flush {
+                        timeline.flush_and_shutdown().instrument(span).await
+                    } else {
+                        timeline.shutdown().instrument(span).await
+                    }
+                });
             })
         };
         tracing::info!("Waiting for timelines...");
@@ -4727,7 +4733,7 @@ mod tests {
             // Keeps uninit mark in place
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
-                .shutdown(false)
+                .shutdown()
                 .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_id))
                 .await;
             std::mem::forget(tline);

@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -578,7 +577,6 @@ impl Timeline {
     pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
-        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
@@ -590,7 +588,7 @@ impl Timeline {
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
-                if cancel.is_cancelled() {
+                if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
                 let relsize_key = rel_size_to_key(rel);
