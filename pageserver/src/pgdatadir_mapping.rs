@@ -29,9 +29,33 @@ pub type BlockNumber = u32;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
+    /// Found commits both before and after the given timestamp
     Present(Lsn),
+
+    /// Found no commits after the given timestamp, this means
+    /// that the newest data in the branch is older than the given
+    /// timestamp.
+    ///
+    /// All commits <= LSN happened before the given timestamp
     Future(Lsn),
+
+    /// The queried timestamp is past our horizon we look back at (PITR)
+    ///
+    /// All commits > LSN happened after the given timestamp,
+    /// but any commits < LSN might have happened before or after
+    /// the given timestamp. We don't know because no data before
+    /// the given lsn is available.
     Past(Lsn),
+
+    /// We have found no commit with a timestamp,
+    /// so we can't return anything meaningful.
+    ///
+    /// The associated LSN is the lower bound value we can safely
+    /// create branches on, but no statement is made if it is
+    /// older or newer than the timestamp.
+    ///
+    /// This variant can e.g. be returned right after a
+    /// cluster import.
     NoData(Lsn),
 }
 
@@ -324,7 +348,11 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
-        let min_lsn = *gc_cutoff_lsn_guard;
+        // We use this method to figure out the branching LSN for the new branch, but the
+        // GC cutoff could be before the branching point and we cannot create a new branch
+        // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
+        // on the safe side.
+        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
@@ -354,30 +382,32 @@ impl Timeline {
                 low = mid + 1;
             }
         }
+        // If `found_smaller == true`, `low` is the LSN of the last commit record
+        // before or at `search_timestamp`
+        //
+        // FIXME: it would be better to get the LSN of the previous commit.
+        // Otherwise, if you restore to the returned LSN, the database will
+        // include physical changes from later commits that will be marked
+        // as aborted, and will need to be vacuumed away.
+        let commit_lsn = Lsn((low - 1) * 8);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                Ok(LsnForTimestamp::NoData(max_lsn))
-            }
-            (true, false) => {
-                // Didn't find any commit timestamps larger than the request
-                Ok(LsnForTimestamp::Future(max_lsn))
+                Ok(LsnForTimestamp::NoData(min_lsn))
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
-                Ok(LsnForTimestamp::Past(max_lsn))
+                Ok(LsnForTimestamp::Past(min_lsn))
             }
-            (true, true) => {
-                // low is the LSN of the first commit record *after* the search_timestamp,
-                // Back off by one to get to the point just before the commit.
-                //
-                // FIXME: it would be better to get the LSN of the previous commit.
-                // Otherwise, if you restore to the returned LSN, the database will
-                // include physical changes from later commits that will be marked
-                // as aborted, and will need to be vacuumed away.
-                Ok(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
+            (true, false) => {
+                // Only found commits with timestamps smaller than the request.
+                // It's still a valid case for branch creation, return it.
+                // And `update_gc_info()` ignores LSN for a `LsnForTimestamp::Future`
+                // case, anyway.
+                Ok(LsnForTimestamp::Future(commit_lsn))
             }
+            (true, true) => Ok(LsnForTimestamp::Present(commit_lsn)),
         }
     }
 
