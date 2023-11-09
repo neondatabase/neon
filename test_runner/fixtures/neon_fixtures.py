@@ -772,13 +772,10 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
+        self.control_plane_api: Optional[str] = None
+        self.attachment_service: Optional[NeonAttachmentService] = None
         if config.enable_generations:
-            attachment_service_port = self.port_distributor.get_port()
-            self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
-            self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
-        else:
-            self.control_plane_api = None
-            self.attachment_service = None
+            self.enable_generations()
 
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
@@ -846,6 +843,18 @@ class NeonEnv:
 
         log.info(f"Config: {cfg}")
         self.neon_cli.init(cfg)
+
+    def enable_generations(self, start=False):
+        if not start:
+            # TODO: assert that we haven't `self.start()`ed yet
+            pass
+        assert self.control_plane_api is None
+        assert self.attachment_service is None
+        attachment_service_port = self.port_distributor.get_port()
+        self.control_plane_api = f"http://127.0.0.1:{attachment_service_port}"
+        self.attachment_service = NeonAttachmentService(self)
+        if start:
+            self.attachment_service.start()
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
@@ -1579,6 +1588,16 @@ class Pagectl(AbstractNeonCli):
         res.check_returncode()
         parsed = json.loads(res.stdout)
         return IndexPartDump.from_json(parsed)
+
+# class GetpageBenchLibpq(AbstractNeonCli):
+#     """
+#     A typed wrapper around the `getpage_bench_libpq` CLI.
+#     """
+#
+#     COMMAND = "getpage_bench_libpq"
+#
+#     def run(self):
+#         pass
 
 
 class NeonAttachmentService:
