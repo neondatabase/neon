@@ -95,12 +95,7 @@ use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenant
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
     NotStarted,
-    Running {
-        #[cfg(test)]
-        expect_initdb_optimization: bool,
-        #[cfg(test)]
-        initdb_optimization_count: usize,
-    },
+    Running,
     Exited,
 }
 
@@ -1466,7 +1461,7 @@ impl Timeline {
         let mut flush_loop_state = self.flush_loop_state.lock().unwrap();
         match *flush_loop_state {
             FlushLoopState::NotStarted => (),
-            FlushLoopState::Running { .. } => {
+            FlushLoopState::Running => {
                 info!(
                     "skipping attempt to start flush_loop twice {}/{}",
                     self.tenant_id, self.timeline_id
@@ -1486,12 +1481,7 @@ impl Timeline {
         let self_clone = Arc::clone(self);
 
         debug!("spawning flush loop");
-        *flush_loop_state = FlushLoopState::Running {
-            #[cfg(test)]
-            expect_initdb_optimization: false,
-            #[cfg(test)]
-            initdb_optimization_count: 0,
-        };
+        *flush_loop_state = FlushLoopState::Running;
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
@@ -1503,7 +1493,7 @@ impl Timeline {
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
-                assert!(matches!(*flush_loop_state, FlushLoopState::Running{ ..}));
+                assert!(matches!(*flush_loop_state, FlushLoopState::Running));
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
@@ -2450,7 +2440,7 @@ impl Timeline {
         let mut my_flush_request = 0;
 
         let flush_loop_state = { *self.flush_loop_state.lock().unwrap() };
-        if !matches!(flush_loop_state, FlushLoopState::Running { .. }) {
+        if !matches!(flush_loop_state, FlushLoopState::Running) {
             anyhow::bail!("cannot flush frozen layers when flush_loop is not running, state is {flush_loop_state:?}")
         }
 
@@ -2503,65 +2493,8 @@ impl Timeline {
         frozen_layer: Arc<InMemoryLayer>,
         ctx: &RequestContext,
     ) -> Result<(), FlushLayerError> {
-        // As a special case, when we have just imported an image into the repository,
-        // instead of writing out a L0 delta layer, we directly write out image layer
-        // files instead. This is possible as long as *all* the data imported into the
-        // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let (layers_to_upload, delta_layer_to_add) =
-            if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
-                #[cfg(test)]
-                match &mut *self.flush_loop_state.lock().unwrap() {
-                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
-                        panic!("flush loop not running")
-                    }
-                    FlushLoopState::Running {
-                        initdb_optimization_count,
-                        ..
-                    } => {
-                        *initdb_optimization_count += 1;
-                    }
-                }
-                // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
-                // require downloading anything during initial import.
-                let (partitioning, _lsn) = self
-                    .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
-                    .await?;
-
-                if self.cancel.is_cancelled() {
-                    return Err(FlushLayerError::Cancelled);
-                }
-
-                // For image layers, we add them immediately into the layer map.
-                (
-                    self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
-                        .await?,
-                    None,
-                )
-            } else {
-                #[cfg(test)]
-                match &mut *self.flush_loop_state.lock().unwrap() {
-                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
-                        panic!("flush loop not running")
-                    }
-                    FlushLoopState::Running {
-                        expect_initdb_optimization,
-                        ..
-                    } => {
-                        assert!(!*expect_initdb_optimization, "expected initdb optimization");
-                    }
-                }
-                // Normal case, write out a L0 delta layer file.
-                // `create_delta_layer` will not modify the layer map.
-                // We will remove frozen layer and add delta layer in one atomic operation later.
-                let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
-                (
-                    // FIXME: even though we have a single image and single delta layer assumption
-                    // we push them to vec
-                    vec![layer.clone()],
-                    Some(layer),
-                )
-            };
+        let layer = self.create_delta_layer(&frozen_layer, ctx).await?;
 
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
@@ -2580,18 +2513,17 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
+            guard.finish_flush_l0_layer(&layer, &frozen_layer, &self.metrics);
 
             if disk_consistent_lsn != old_disk_consistent_lsn {
                 assert!(disk_consistent_lsn > old_disk_consistent_lsn);
                 self.disk_consistent_lsn.store(disk_consistent_lsn);
 
                 // Schedule remote uploads that will reflect our new disk_consistent_lsn
-                Some(self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?)
+                Some(self.schedule_uploads(disk_consistent_lsn, [layer])?)
             } else {
                 None
             }
-            // release lock on 'layers'
         };
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,

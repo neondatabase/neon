@@ -164,7 +164,7 @@ impl LayerManager {
     /// Flush a frozen layer and add the written delta layer to the layer map.
     pub(crate) fn finish_flush_l0_layer(
         &mut self,
-        delta_layer: Option<&ResidentLayer>,
+        delta_layer: &ResidentLayer,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
         metrics: &TimelineMetrics,
     ) {
@@ -179,12 +179,14 @@ impl LayerManager {
         // layer to disk at the same time, that would not work.
         assert_eq!(Arc::as_ptr(&inmem), Arc::as_ptr(frozen_layer_for_check));
 
-        if let Some(l) = delta_layer {
-            let mut updates = self.layer_map.batch_update();
-            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
-            metrics.record_new_file_metrics(l.layer_desc().file_size);
-            updates.flush();
-        }
+        let mut updates = self.layer_map.batch_update();
+        Self::insert_historic_layer(
+            delta_layer.as_ref().clone(),
+            &mut updates,
+            &mut self.layer_fmgr,
+        );
+        metrics.record_new_file_metrics(delta_layer.layer_desc().file_size);
+        updates.flush();
     }
 
     /// Called when compaction is completed.
