@@ -179,6 +179,11 @@ where
 
             if valid && *validated_generation == tenant_lsn_state.generation {
                 for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
+                    tracing::info!(
+                        "{_timeline_id}: {} => {}",
+                        pending_lsn.result_slot.load(),
+                        pending_lsn.projected
+                    );
                     pending_lsn.result_slot.store(pending_lsn.projected);
                 }
             } else {
