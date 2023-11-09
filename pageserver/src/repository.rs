@@ -138,6 +138,14 @@ pub struct GcResult {
 
     #[serde(serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
+
+    /// The layers which were garbage collected.
+    ///
+    /// Used in `/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc` to wait for the layers to be
+    /// dropped in tests.
+    #[cfg(feature = "testing")]
+    #[serde(skip)]
+    pub(crate) doomed_layers: Vec<crate::tenant::storage_layer::Layer>,
 }
 
 // helper function for `GcResult`, serializing a `Duration` as an integer number of milliseconds
@@ -149,7 +157,7 @@ where
 }
 
 impl AddAssign for GcResult {
-    fn add_assign(&mut self, other: Self) {
+    fn add_assign(&mut self, mut other: Self) {
         self.layers_total += other.layers_total;
         self.layers_needed_by_pitr += other.layers_needed_by_pitr;
         self.layers_needed_by_cutoff += other.layers_needed_by_cutoff;
@@ -158,5 +166,7 @@ impl AddAssign for GcResult {
         self.layers_removed += other.layers_removed;
 
         self.elapsed += other.elapsed;
+
+        self.doomed_layers.append(&mut other.doomed_layers);
     }
 }

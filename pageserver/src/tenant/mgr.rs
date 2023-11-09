@@ -1940,6 +1940,7 @@ use {
     utils::http::error::ApiError,
 };
 
+#[cfg(feature = "testing")]
 pub(crate) async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -1970,12 +1971,25 @@ pub(crate) async fn immediate_gc(
         false,
         async move {
             fail::fail_point!("immediate_gc_task_pre");
-            let result = tenant
+            let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
                 .instrument(info_span!("manual_gc", %tenant_id, %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
                 // better once the types support it.
+
+            if let Ok(result) = result.as_mut() {
+                // why not futures unordered? it seems it needs very much the same task structure
+                // but would only run on single task.
+                let mut js = tokio::task::JoinSet::new();
+                for layer in std::mem::take(&mut result.doomed_layers) {
+                    js.spawn(layer.wait_drop());
+                }
+                tracing::info!(total = js.len(), "starting to wait for the gc'd layers to be dropped");
+                while let Some(res) = js.join_next().await {
+                    res.expect("wait_drop should not panic");
+                }
+            }
             match task_done.send(result) {
                 Ok(_) => (),
                 Err(result) => error!("failed to send gc result: {result:?}"),

@@ -3947,6 +3947,9 @@ impl Timeline {
             //
             // This does not in fact have any effect as we no longer consider local metadata unless
             // running without remote storage.
+            //
+            // This unconditionally schedules also an index_part.json update, even though, we will
+            // be doing one a bit later with the unlinked gc'd layers.
             self.update_metadata_file(self.disk_consistent_lsn.load(), None)
                 .await?;
 
@@ -3961,10 +3964,14 @@ impl Timeline {
                 remote_client.schedule_gc_update(&gc_layers)?;
             }
 
-            guard.finish_gc_timeline(gc_layers);
+            guard.finish_gc_timeline(&gc_layers);
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");
+            }
+
+            if cfg!(feature = "testing") {
+                result.doomed_layers = gc_layers;
             }
         }
 

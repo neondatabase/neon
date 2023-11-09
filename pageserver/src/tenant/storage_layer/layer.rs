@@ -326,6 +326,23 @@ impl Layer {
 
         Ok(())
     }
+
+    /// Waits until this layer has been dropped (and if needed, local garbage collection and remote
+    /// deletion scheduling has completed).
+    ///
+    /// Does not start garbage collection, use [`Self::garbage_collect_on_drop`] for that
+    /// separatedly.
+    pub(crate) fn wait_drop(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let mut rx = self.0.status.subscribe();
+
+        async move {
+            loop {
+                if let Err(tokio::sync::broadcast::error::RecvError::Closed) = rx.recv().await {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
@@ -475,9 +492,13 @@ impl Drop for LayerInner {
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
         let meta = self.metadata();
+        let status = self.status.clone();
 
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
             let _g = span.entered();
+
+            // carry this until we are finished for [`Layer::wait_drop`] support
+            let _status = status;
 
             let removed = match std::fs::remove_file(path) {
                 Ok(()) => true,
