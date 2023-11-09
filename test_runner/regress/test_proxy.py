@@ -8,7 +8,6 @@ import psycopg2
 import pytest
 import requests
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
-import concurrent.futures
 
 GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
 

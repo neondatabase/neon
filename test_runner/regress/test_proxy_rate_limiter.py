@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 import time
-from typing import Any, Iterator
+from typing import Iterator
 
 import pytest
 from fixtures.neon_fixtures import (
