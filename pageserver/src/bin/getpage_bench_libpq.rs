@@ -53,11 +53,13 @@ struct Args {
     page_service_connstring: String,
     // tenant_id: String,
     // timeline_id: String,
+    #[clap(long)]
     num_tasks: usize,
+    #[clap(long)]
     num_requests: usize,
-    tenants: Option<Vec<String>>,
     #[clap(long)]
     pick_n_tenants: Option<usize>,
+    tenants: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]

@@ -3,41 +3,43 @@ from pathlib import Path
 import shutil
 import subprocess
 from fixtures.compare_fixtures import NeonCompare
-from fixtures.remote_storage import LocalFsStorage
-from fixtures.neon_fixtures import last_flush_lsn_upload
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, last_flush_lsn_upload
 from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.types import TenantId
 from fixtures.log_helper import log
+from fixtures.benchmark_fixture import NeonBenchmarker
 
-def test_getpage_throughput(neon_compare: NeonCompare):
-    env = neon_compare.env
-
-    import pdb
-    pdb.set_trace()
+def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, pg_bin: PgBin):
+    neon_env_builder.enable_generations = True
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
 
     remote_storage = env.pageserver_remote_storage
     assert isinstance(remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
 
-    # clean up initial tenant
-    ps_http.tenant_detach(env.initial_tenant)
+    # clean up the useless default tenant
+    ps_http.tenant_delete(env.initial_tenant)
 
     # create our template tenant
-    tenant_config = {
+    tenant_config_mgmt_api = {
         "gc_period" : '0s',
         "checkpoint_timeout" : '3650 day',
         "compaction_period" : '20 s',
-        "compaction_threshold" : "10",
-        "compaction_target_size" : "134217728",
-        "checkpoint_distance" : "268435456",
-        "image_creation_threshold" : "3",
+        "compaction_threshold" : 10,
+        "compaction_target_size" : 134217728,
+        "checkpoint_distance" : 268435456,
+        "image_creation_threshold" : 3,
     }
-    template_tenant, template_timeline = env.neon_cli.create_tenant(conf=tenant_config)
+    tenant_config_cli = { k: str(v) for k, v in tenant_config_mgmt_api.items() }
+
+    template_tenant, template_timeline = env.neon_cli.create_tenant(conf=tenant_config_cli)
+    template_tenant_gen = int(ps_http.tenant_status(template_tenant)["generation"])
     with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
-        neon_compare.pg_bin.run_capture(["pgbench", "-i", "-s50", ep.connstr()])
+        pg_bin.run_capture(["pgbench", "-i", "-s1", ep.connstr()])
         last_flush_lsn_upload(env, ep, template_tenant, template_timeline)
-    template_tenant_gen = ps_http.tenant_status(template_tenant)["generation"]
     ps_http.tenant_detach(template_tenant)
 
     # stop PS just for good measure
@@ -83,7 +85,7 @@ def test_getpage_throughput(neon_compare: NeonCompare):
     env.pageserver.start()
     assert ps_http.tenant_list() == []
     for tenant in tenants:
-        ps_http.tenant_attach(tenant, generation=template_tenant_gen+1, config=tenant_config)
+        ps_http.tenant_attach(tenant, config=tenant_config_mgmt_api, generation=template_tenant_gen+1)
     for tenant in tenants:
         wait_until_tenant_active(ps_http, tenant)
 
@@ -94,12 +96,12 @@ def test_getpage_throughput(neon_compare: NeonCompare):
 
     # run the benchmark
     cmd = [
-        env.neon_binpath / "getpage_bench_libpq",
+        str(env.neon_binpath / "getpage_bench_libpq"),
         "--mgmt-api-endpoint", ps_http.base_url,
         "--page-service-connstring", env.pageserver.connstr(password=None),
         "--num-tasks", "1",
-        "--num-requests", "100000",
-        *tenants,
+        "--num-requests", "10000",
+        *[str(tenant) for tenant in tenants],
     ]
-    basepath = neon_compare.pg_bin.run_capture(cmd)
+    basepath = pg_bin.run_capture(cmd)
     log.info("Benchmark results: %s", basepath + ".stdout")
