@@ -55,6 +55,7 @@ int			flush_every_n_requests = 8;
 
 int			n_reconnect_attempts = 0;
 int			max_reconnect_attempts = 60;
+int			stripe_size;
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
@@ -197,6 +198,7 @@ load_shard_map(shardno_t shard_no, char* connstr)
 	return n_shards;
 }
 
+#define MB (1024*1024)
 shardno_t
 get_shard_number(BufferTag* tag)
 {
@@ -207,12 +209,12 @@ get_shard_number(BufferTag* tag)
 	hash = murmurhash32(tag->rnode.spcNode);
 	hash_combine(hash, murmurhash32(tag->rnode.dbNode));
 	hash_combine(hash, murmurhash32(tag->rnode.relNode));
-	hash_combine(hash, murmurhash32(tag->blockNum/STRIPE_SIZE));
+	hash_combine(hash, murmurhash32(tag->blockNum/(MB/BLCKSZ)/stripe_size));
 #else
 	hash = murmurhash32(tag->spcOid);
 	hash_combine(hash, murmurhash32(tag->dbOid));
 	hash_combine(hash, murmurhash32(tag->relNumber));
-	hash_combine(hash, murmurhash32(tag->blockNum/STRIPE_SIZE));
+	hash_combine(hash, murmurhash32(tag->blockNum/(MB/BLCKSZ)/stripe_size));
 #endif
 
 	return hash % n_shards;
@@ -586,6 +588,15 @@ pg_init_libpagestore(void)
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
 							   check_neon_id, NULL, NULL);
+
+	DefineCustomIntVariable("neon.stripe_size",
+							"sharding sripe size",
+							NULL,
+							&stripe_size,
+							256, 1, INT_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MB,
+							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("neon.max_cluster_size",
 							"cluster size limit",
