@@ -570,6 +570,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             "api_console_other_server_error"
         }
         WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
+        WakeComputeError::TimeoutError => "timeout_error",
     };
     NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
 }

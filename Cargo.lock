@@ -6483,6 +6483,7 @@ dependencies = [
  "clap",
  "clap_builder",
  "crossbeam-utils",
+ "dashmap",
  "either",
  "fail",
  "futures",

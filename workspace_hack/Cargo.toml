@@ -25,6 +25,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8" }
+dashmap = { version = "5", default-features = false, features = ["raw-api"] }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 futures = { version = "0.3" }
