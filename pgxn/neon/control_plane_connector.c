@@ -27,12 +27,14 @@
 #include "commands/defrem.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
+#include "utils/fmgrprotos.h"
 #include "fmgr.h"
 #include "utils/guc.h"
 #include "port.h"
 #include <curl/curl.h>
 #include "utils/jsonb.h"
 #include "libpq/crypt.h"
+#include "pagestore_client.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
@@ -221,6 +223,104 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 	str->str[str->size] = '\0';
 	return nmemb;
 }
+
+
+static size_t
+ResponseWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+	appendBinaryStringInfo((StringInfo)userdata, ptr, size*nmemb);
+	return nmemb;
+}
+
+void
+RequestShardMapFromControlPlane(ShardMap* shard_map)
+{
+	shard_map->n_shards = 0;
+	if (!ConsoleURL)
+	{
+		elog(LOG, "ConsoleURL not set, skipping forwarding");
+		return;
+	}
+	StringInfoData resp;
+	initStringInfo(&resp);
+
+	curl_easy_setopt(CurlHandle, CURLOPT_CUSTOMREQUEST, "GET");
+	curl_easy_setopt(CurlHandle, CURLOPT_URL, ConsoleURL);
+	curl_easy_setopt(CurlHandle, CURLOPT_ERRORBUFFER, CurlErrorBuf);
+	curl_easy_setopt(CurlHandle, CURLOPT_TIMEOUT, 3L /* seconds */ );
+	curl_easy_setopt(CurlHandle, CURLOPT_WRITEDATA, &resp);
+	curl_easy_setopt(CurlHandle, CURLOPT_WRITEFUNCTION, ResponseWriteCallback);
+
+	const int	num_retries = 5;
+	int			curl_status;
+
+	for (int i = 0; i < num_retries; i++)
+	{
+		if ((curl_status = curl_easy_perform(CurlHandle)) == CURLE_OK)
+			break;
+		elog(LOG, "Curl request failed on attempt %d: %s", i, CurlErrorBuf);
+		pg_usleep(1000 * 1000);
+	}
+	if (curl_status != CURLE_OK)
+	{
+		curl_easy_cleanup(CurlHandle);
+		elog(ERROR, "Failed to perform curl request: %s", CurlErrorBuf);
+	}
+	else
+	{
+		long		response_code;
+		if (curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
+		{
+			if (response_code != 200)
+			{
+				bool error_exists = resp.len != 0;
+				if(error_exists)
+				{
+					elog(ERROR,
+						 "[PG_LLM] Received HTTP code %ld from OpenAI: %s",
+						 response_code,
+						 resp.data);
+				}
+				else
+				{
+					elog(ERROR,
+						 "[PG_LLM] Received HTTP code %ld from OpenAI",
+						 response_code);
+				}
+			}
+		}
+		curl_easy_cleanup(CurlHandle);
+
+		JsonbContainer *jsonb = (JsonbContainer *)DatumGetPointer(DirectFunctionCall1(jsonb_in,  CStringGetDatum(resp.data)));
+		JsonbValue	v;
+		JsonbIterator *it;
+		JsonbIteratorToken r;
+
+		it = JsonbIteratorInit(jsonb);
+		r = JsonbIteratorNext(&it, &v, true);
+		if (r != WJB_BEGIN_ARRAY)
+			elog(ERROR, "Array of connection strings expected");
+
+		while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
+		{
+			if (r != WJB_ELEM)
+				continue;
+
+			if (shard_map->n_shards >= MAX_SHARDS)
+				elog(ERROR, "Too manuy shards");
+
+			if (v.type != jbvString)
+				elog(ERROR, "Connection string expected");
+
+			strncpy(shard_map->shard_connstr[shard_map->n_shards++],
+					v.val.string.val,
+					MAX_PS_CONNSTR_LEN);
+		}
+		shard_map->update_counter += 1;
+		pfree(resp.data);
+	}
+}
+
 
 static void
 SendDeltasToControlPlane()

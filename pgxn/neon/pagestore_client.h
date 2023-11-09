@@ -20,11 +20,23 @@
 #include RELFILEINFO_HDR
 #include "storage/block.h"
 #include "storage/smgr.h"
+#include "storage/buf_internals.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "utils/memutils.h"
 
 #include "pg_config.h"
+
+#define MAX_SHARDS 128
+#define MAX_PS_CONNSTR_LEN 128
+
+typedef struct
+{
+	size_t n_shards;
+	size_t update_counter;
+	char   shard_connstr[MAX_SHARDS][MAX_PS_CONNSTR_LEN];
+} ShardMap;
+
 
 typedef enum
 {
@@ -144,11 +156,13 @@ extern char *nm_to_string(NeonMessage * msg);
  * API
  */
 
+typedef unsigned shardno_t;
+
 typedef struct
 {
-	bool		(*send) (NeonRequest * request);
-	NeonResponse *(*receive) (void);
-	bool		(*flush) (void);
+	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
+	NeonResponse *(*receive) (shardno_t shard_no);
+	bool		(*flush) (shardno_t shard_no);
 }			page_server_api;
 
 extern void prefetch_on_ps_disconnect(void);
@@ -164,6 +178,8 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern bool wal_redo;
 extern int32 max_cluster_size;
+
+extern shardno_t get_shard_number(BufferTag* tag);
 
 extern const f_smgr *smgr_neon(BackendId backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
