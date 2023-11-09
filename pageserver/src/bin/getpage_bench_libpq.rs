@@ -66,11 +66,11 @@ struct Args {
 }
 
 #[derive(Debug, Default)]
-struct Stats {
+struct LiveStats {
     completed_requests: AtomicU64,
 }
 
-impl Stats {
+impl LiveStats {
     fn inc(&self) {
         self.completed_requests.fetch_add(1, Ordering::Relaxed);
     }
@@ -136,7 +136,7 @@ async fn main() {
     }
     info!("tenant_timelines:\n{:?}", tenant_timelines);
 
-    let stats = Arc::new(Stats::default());
+    let stats = Arc::new(LiveStats::default());
 
     let num_work_tasks = tenant_timelines.len() * args.num_tasks;
 
@@ -185,7 +185,7 @@ fn timeline(
     tenant_id: String,
     timeline_id: String,
     start_work_barrier: Arc<Barrier>,
-    stats: Arc<Stats>,
+    stats: Arc<LiveStats>,
 ) -> impl Future<Output = ()> + Send + Sync {
     async move {
         let resp = http_client
