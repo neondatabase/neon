@@ -80,7 +80,7 @@ struct ProxyCliArgs {
     /// cache for `wake_compute` api method (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
     wake_compute_cache: String,
-    /// lock for `wake_compute` api method (use `permits=0` to disable)
+    /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
     wake_compute_lock: String,
     /// Allow self-signed certificates for compute nodes (for testing)
