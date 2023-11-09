@@ -18,6 +18,7 @@
 #include "fmgr.h"
 #include "access/xlog.h"
 #include "access/xlogutils.h"
+#include "common/hashfn.h"
 #include "storage/buf_internals.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
@@ -36,21 +37,11 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "neon_utils.h"
+#include "control_plane_connector.h"
 
 #define PageStoreTrace DEBUG5
 
 #define RECONNECT_INTERVAL_USEC 1000000
-
-bool		connected = false;
-PGconn	   *pageserver_conn = NULL;
-
-/*
- * WaitEventSet containing:
- * - WL_SOCKET_READABLE on pageserver_conn,
- * - WL_LATCH_SET on MyLatch, and
- * - WL_EXIT_ON_PM_DEATH.
- */
-WaitEventSet *pageserver_conn_wes = NULL;
 
 /* GUCs */
 char	   *neon_timeline;
@@ -65,86 +56,148 @@ int			flush_every_n_requests = 8;
 int			n_reconnect_attempts = 0;
 int			max_reconnect_attempts = 60;
 
-#define MAX_PAGESERVER_CONNSTRING_SIZE 256
+bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
+
+static bool pageserver_flush(shardno_t shard_no);
+static void pageserver_disconnect(shardno_t shard_no);
+
+static shmem_startup_hook_type prev_shmem_startup_hook;
+#if PG_VERSION_NUM>=150000
+static shmem_request_hook_type prev_shmem_request_hook;
+#endif
+
+static ShardMap* shard_map;
+static LWLockId  shard_map_lock;
+static size_t    shard_map_update_counter;
 
 typedef struct
 {
-	LWLockId	lock;
-	pg_atomic_uint64 update_counter;
-	char		pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
-} PagestoreShmemState;
+	/*
+	 * connection for each shard
+	 */
+	PGconn	   *conn;
+    /*
+	 * WaitEventSet containing:
+	 * - WL_SOCKET_READABLE on pageserver_conn,
+	 * - WL_LATCH_SET on MyLatch, and
+	 * - WL_EXIT_ON_PM_DEATH.
+	 */
+	WaitEventSet    *wes;
+} PageServer;
 
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void walproposer_shmem_request(void);
+static PageServer page_servers[MAX_SHARDS];
+
+static void
+psm_shmem_startup(void)
+{
+	bool found;
+	if (prev_shmem_startup_hook)
+	{
+		prev_shmem_startup_hook();
+	}
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	shard_map = (ShardMap*)ShmemInitStruct("shard_map", sizeof(ShardMap), &found);
+	if (!found)
+	{
+		shard_map_lock = (LWLockId)GetNamedLWLockTranche("shard_map_lock");
+		shard_map->n_shards = 0;
+		shard_map->update_counter = 0;
+	}
+	LWLockRelease(AddinShmemInitLock);
+}
+
+static void
+psm_shmem_request(void)
+{
+#if PG_VERSION_NUM>=150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
 #endif
-static shmem_startup_hook_type prev_shmem_startup_hook;
-static PagestoreShmemState *pagestore_shared;
-static uint64 pagestore_local_counter = 0;
-static char local_pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 
-bool		(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
-
-static bool pageserver_flush(void);
-static void pageserver_disconnect(void);
-
-static bool
-PagestoreShmemIsValid()
-{
-	return pagestore_shared && UsedShmemSegAddr;
-}
-
-static bool
-CheckPageserverConnstring(char **newval, void **extra, GucSource source)
-{
-	return strlen(*newval) < MAX_PAGESERVER_CONNSTRING_SIZE;
+	RequestAddinShmemSpace(sizeof(ShardMap));
+	RequestNamedLWLockTranche("shard_map_lock", 1);
 }
 
 static void
-AssignPageserverConnstring(const char *newval, void *extra)
+psm_init(void)
 {
-	if (!PagestoreShmemIsValid())
-		return;
-	LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
-	strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
-	pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
-	LWLockRelease(pagestore_shared->lock);
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = psm_shmem_startup;
+#if PG_VERSION_NUM>=150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = psm_shmem_request;
+#else
+	psm_shmem_request();
+#endif
 }
+
+shardno_t
+get_shard_number(BufferTag* tag)
+{
+	shardno_t 	shard_no;
+	uint32		hash;
+
+#if PG_MAJORVERSION_NUM < 16
+	hash = murmurhash32(tag->rnode.spcNode);
+	hash_combine(hash, murmurhash32(tag->rnode.dbNode));
+	hash_combine(hash, murmurhash32(tag->rnode.relNode));
+	hash_combine(hash, murmurhash32(tag->blockNum));
+#else
+	hash = murmurhash32(tag->spcOid);
+	hash_combine(hash, murmurhash32(tag->dbOid));
+	hash_combine(hash, murmurhash32(tag->relNumber));
+	hash_combine(hash, murmurhash32(tag->blockNum));
+#endif
+
+	LWLockAcquire(shard_map_lock, LW_SHARED);
+	while (shard_map->n_shards == 0 || shard_map_update_counter != shard_map->update_counter)
+	{
+		/* Close all existed connections */
+		for (shard_no = 0; shard_no < shard_map->n_shards; shard_no++)
+		{
+			if (page_servers[shard_no].conn)
+				pageserver_disconnect(shard_no);
+		}
+
+		/* Request new shard map from control plane under exclusive lock */
+		LWLockRelease(shard_map_lock);
+		LWLockAcquire(shard_map_lock, LW_EXCLUSIVE);
+		if (shard_map->n_shards == 0)
+		{
+			if (*page_server_connstring)
+			{
+				shard_map->n_shards = 1;
+				strncpy(shard_map->shard_connstr[0], page_server_connstring, sizeof shard_map->shard_connstr[0]);
+			}
+			else
+			{
+				RequestShardMapFromControlPlane(shard_map);
+			}
+			shard_map_update_counter = shard_map->update_counter;
+		}
+	}
+	shard_no = hash % shard_map->n_shards;
+
+	LWLockRelease(shard_map_lock);
+
+	return shard_no;
+}
+
 
 static bool
-CheckConnstringUpdated()
-{
-	if (!PagestoreShmemIsValid())
-		return false;
-	return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
-}
-
-static void
-ReloadConnstring()
-{
-	if (!PagestoreShmemIsValid())
-		return;
-	LWLockAcquire(pagestore_shared->lock, LW_SHARED);
-	strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
-	pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
-	LWLockRelease(pagestore_shared->lock);
-}
-
-static bool
-pageserver_connect(int elevel)
+pageserver_connect(shardno_t shard_no, int elevel)
 {
 	char	   *query;
 	int			ret;
 	const char *keywords[3];
 	const char *values[3];
 	int			n;
+	PGconn*		conn;
+	WaitEventSet *wes;
 
-	Assert(!connected);
-
-	if (CheckConnstringUpdated())
-	{
-		ReloadConnstring();
-	}
+	Assert(page_servers[shard_no].conn == NULL);
 
 	/*
 	 * Connect using the connection string we got from the
@@ -164,19 +217,18 @@ pageserver_connect(int elevel)
 		n++;
 	}
 	keywords[n] = "dbname";
-	values[n] = local_pageserver_connstring;
+	values[n] = shard_map->shard_connstr[shard_no];
 	n++;
 	keywords[n] = NULL;
 	values[n] = NULL;
 	n++;
-	pageserver_conn = PQconnectdbParams(keywords, values, 1);
+	conn = PQconnectdbParams(keywords, values, 1);
 
-	if (PQstatus(pageserver_conn) == CONNECTION_BAD)
+	if (PQstatus(conn) == CONNECTION_BAD)
 	{
-		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		char	   *msg = pchomp(PQerrorMessage(conn));
 
-		PQfinish(pageserver_conn);
-		pageserver_conn = NULL;
+		PQfinish(conn);
 
 		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
@@ -184,30 +236,28 @@ pageserver_connect(int elevel)
 				 errdetail_internal("%s", msg)));
 		return false;
 	}
-
 	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
-	ret = PQsendQuery(pageserver_conn, query);
+	ret = PQsendQuery(conn, query);
 	if (ret != 1)
 	{
-		PQfinish(pageserver_conn);
-		pageserver_conn = NULL;
+		PQfinish(conn);
 		neon_log(elevel, "could not send pagestream command to pageserver");
 		return false;
 	}
 
-	pageserver_conn_wes = CreateWaitEventSet(TopMemoryContext, 3);
-	AddWaitEventToSet(pageserver_conn_wes, WL_LATCH_SET, PGINVALID_SOCKET,
+	wes = CreateWaitEventSet(TopMemoryContext, 3);
+	AddWaitEventToSet(wes, WL_LATCH_SET, PGINVALID_SOCKET,
 					  MyLatch, NULL);
-	AddWaitEventToSet(pageserver_conn_wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+	AddWaitEventToSet(wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 					  NULL, NULL);
-	AddWaitEventToSet(pageserver_conn_wes, WL_SOCKET_READABLE, PQsocket(pageserver_conn), NULL, NULL);
+	AddWaitEventToSet(wes, WL_SOCKET_READABLE, PQsocket(conn), NULL, NULL);
 
-	while (PQisBusy(pageserver_conn))
+	while (PQisBusy(conn))
 	{
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -215,14 +265,12 @@ pageserver_connect(int elevel)
 		/* Data available in socket? */
 		if (event.events & WL_SOCKET_READABLE)
 		{
-			if (!PQconsumeInput(pageserver_conn))
+			if (!PQconsumeInput(conn))
 			{
-				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+				char	   *msg = pchomp(PQerrorMessage(conn));
 
-				PQfinish(pageserver_conn);
-				pageserver_conn = NULL;
-				FreeWaitEventSet(pageserver_conn_wes);
-				pageserver_conn_wes = NULL;
+				PQfinish(conn);
+				FreeWaitEventSet(wes);
 
 				neon_log(elevel, "could not complete handshake with pageserver: %s",
 						 msg);
@@ -231,9 +279,10 @@ pageserver_connect(int elevel)
 		}
 	}
 
-	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring);
+	neon_log(LOG, "libpagestore: connected to '%s'", shard_map->shard_connstr[shard_no]);
+	page_servers[shard_no].conn = conn;
+	page_servers[shard_no].wes = wes;
 
-	connected = true;
 	return true;
 }
 
@@ -241,10 +290,10 @@ pageserver_connect(int elevel)
  * A wrapper around PQgetCopyData that checks for interrupts while sleeping.
  */
 static int
-call_PQgetCopyData(char **buffer)
+call_PQgetCopyData(shardno_t shard_no, char **buffer)
 {
 	int			ret;
-
+	PGconn*     pageserver_conn = page_servers[shard_no].conn;
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
 
@@ -253,7 +302,7 @@ retry:
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(pageserver_conn_wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(page_servers[shard_no].wes, -1L, &event, 1, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -279,7 +328,7 @@ retry:
 
 
 static void
-pageserver_disconnect(void)
+pageserver_disconnect(shardno_t shard_no)
 {
 	/*
 	 * If anything goes wrong while we were sending a request, it's not clear
@@ -288,38 +337,32 @@ pageserver_disconnect(void)
 	 * time later after we have already sent a new unrelated request. Close
 	 * the connection to avoid getting confused.
 	 */
-	if (connected)
+	if (page_servers[shard_no].conn)
 	{
 		neon_log(LOG, "dropping connection to page server due to error");
-		PQfinish(pageserver_conn);
-		pageserver_conn = NULL;
-		connected = false;
+		PQfinish(page_servers[shard_no].conn);
+		page_servers[shard_no].conn = NULL;
 
 		prefetch_on_ps_disconnect();
 	}
-	if (pageserver_conn_wes != NULL)
+	if (page_servers[shard_no].wes != NULL)
 	{
-		FreeWaitEventSet(pageserver_conn_wes);
-		pageserver_conn_wes = NULL;
+		FreeWaitEventSet(page_servers[shard_no].wes);
+		page_servers[shard_no].wes = NULL;
 	}
 }
 
 static bool
-pageserver_send(NeonRequest *request)
+pageserver_send(shardno_t shard_no, NeonRequest *request)
 {
 	StringInfoData req_buff;
-
-	if (CheckConnstringUpdated())
-	{
-		pageserver_disconnect();
-		ReloadConnstring();
-	}
+	PGconn* pageserver_conn = page_servers[shard_no].conn;
 
 	/* If the connection was lost for some reason, reconnect */
-	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
+	if (pageserver_conn && PQstatus(pageserver_conn) == CONNECTION_BAD)
 	{
 		neon_log(LOG, "pageserver_send disconnect bad connection");
-		pageserver_disconnect();
+		pageserver_disconnect(shard_no);
 	}
 
 	req_buff = nm_pack_request(request);
@@ -333,9 +376,9 @@ pageserver_send(NeonRequest *request)
 	 * https://github.com/neondatabase/neon/issues/1138 So try to reestablish
 	 * connection in case of failure.
 	 */
-	if (!connected)
+	if (!page_servers[shard_no].conn)
 	{
-		while (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
+		while (!pageserver_connect(shard_no, n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
 			HandleMainLoopInterrupts();
 			n_reconnect_attempts += 1;
@@ -344,7 +387,9 @@ pageserver_send(NeonRequest *request)
 		n_reconnect_attempts = 0;
 	}
 
-	/*
+	pageserver_conn = page_servers[shard_no].conn;
+
+    /*
 	 * Send request.
 	 *
 	 * In principle, this could block if the output buffer is full, and we
@@ -355,8 +400,7 @@ pageserver_send(NeonRequest *request)
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-
-		pageserver_disconnect();
+		pageserver_disconnect(shard_no);
 		neon_log(LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
 		pfree(msg);
 		pfree(req_buff.data);
@@ -376,12 +420,12 @@ pageserver_send(NeonRequest *request)
 }
 
 static NeonResponse *
-pageserver_receive(void)
+pageserver_receive(shardno_t shard_no)
 {
 	StringInfoData resp_buff;
 	NeonResponse *resp;
-
-	if (!connected)
+	PGconn* pageserver_conn = page_servers[shard_no].conn;
+	if (!pageserver_conn)
 		return NULL;
 
 	PG_TRY();
@@ -389,7 +433,7 @@ pageserver_receive(void)
 		/* read response */
 		int			rc;
 
-		rc = call_PQgetCopyData(&resp_buff.data);
+		rc = call_PQgetCopyData(shard_no, &resp_buff.data);
 		if (rc >= 0)
 		{
 			resp_buff.len = rc;
@@ -408,26 +452,26 @@ pageserver_receive(void)
 		else if (rc == -1)
 		{
 			neon_log(LOG, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
-			pageserver_disconnect();
+			pageserver_disconnect(shard_no);
 			resp = NULL;
 		}
 		else if (rc == -2)
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
-			pageserver_disconnect();
+			pageserver_disconnect(shard_no);
 			neon_log(ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
 		}
 		else
 		{
-			pageserver_disconnect();
+			pageserver_disconnect(shard_no);
 			neon_log(ERROR, "pageserver_receive disconnect because unexpected PQgetCopyData return value: %d", rc);
 		}
 	}
 	PG_CATCH();
 	{
 		neon_log(LOG, "pageserver_receive disconnect due to caught exception");
-		pageserver_disconnect();
+		pageserver_disconnect(shard_no);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -437,9 +481,10 @@ pageserver_receive(void)
 
 
 static bool
-pageserver_flush(void)
+pageserver_flush(shardno_t shard_no)
 {
-	if (!connected)
+	PGconn* pageserver_conn = page_servers[shard_no].conn;
+	if (!pageserver_conn)
 	{
 		neon_log(WARNING, "Tried to flush while disconnected");
 	}
@@ -449,7 +494,7 @@ pageserver_flush(void)
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
-			pageserver_disconnect();
+			pageserver_disconnect(shard_no);
 			neon_log(LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
 			pfree(msg);
 			return false;
@@ -632,4 +677,5 @@ pg_init_libpagestore(void)
 	}
 
 	lfc_init();
+	psm_init();
 }
