@@ -116,7 +116,7 @@ fn exactly_one_or_none<'a>(
         (Some(_slot_a), Some(_slot_b)) => {
             // Multiple shards for this tenant: cannot handle this yet.
             // TODO(sharding): callers of get() should be shard-aware.
-            todo!()
+            todo!("Attaching multiple shards in teh same tenant to the same pageserver")
         }
         (None, Some(_)) => unreachable!(),
     }
