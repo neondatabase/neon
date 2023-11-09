@@ -202,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
     logging::init(
         LogFormat::from_config(&args.log_format)?,
         logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
