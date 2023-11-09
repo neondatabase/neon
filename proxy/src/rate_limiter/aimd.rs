@@ -117,7 +117,7 @@ impl LimitAlgorithm for Aimd {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use tokio::sync::Notify;
 
@@ -131,7 +131,8 @@ mod tests {
 
         let release_notifier = Arc::new(Notify::new());
 
-        let limiter = Limiter::new(aimd, 10).with_release_notifier(release_notifier.clone());
+        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 10, None)
+            .with_release_notifier(release_notifier.clone());
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, Some(Outcome::Overload)).await;
@@ -146,7 +147,7 @@ mod tests {
             .increase_by(1)
             .with_min_utilisation_threshold(0.5);
 
-        let limiter = Limiter::new(aimd, 4);
+        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 4, None);
 
         let token = limiter.try_acquire().unwrap();
         let _token = limiter.try_acquire().unwrap();
@@ -163,7 +164,7 @@ mod tests {
             .increase_by(1)
             .with_min_utilisation_threshold(0.5);
 
-        let limiter = Limiter::new(aimd, 4);
+        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 4, None);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -179,7 +180,7 @@ mod tests {
     async fn should_not_change_limit_when_no_outcome() {
         let aimd = Aimd::default().decrease_factor(0.5).increase_by(1);
 
-        let limiter = Limiter::new(aimd, 10);
+        let limiter = Limiter::new(aimd, Duration::frpm_secs(1), 10, None);
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, None).await;
