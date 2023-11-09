@@ -11,13 +11,14 @@ use compute_api::spec::ComputeMode;
 use control_plane::attachment_service::AttachmentService;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::LocalEnv;
-use control_plane::pageserver::PageServerNode;
+use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
+use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
 use pageserver_api::{
-    DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
-    DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
 use postgres_backend::AuthType;
 use safekeeper_api::{
@@ -46,8 +47,8 @@ const DEFAULT_PG_VERSION: &str = "15";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/";
 
-fn default_conf() -> String {
-    format!(
+fn default_conf(num_pageservers: u16) -> String {
+    let mut template = format!(
         r#"
 # Default built-in configuration, defined in main.rs
 control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
@@ -55,21 +56,33 @@ control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
 [broker]
 listen_addr = '{DEFAULT_BROKER_ADDR}'
 
-[[pageservers]]
-id = {DEFAULT_PAGESERVER_ID}
-listen_pg_addr = '{DEFAULT_PAGESERVER_PG_ADDR}'
-listen_http_addr = '{DEFAULT_PAGESERVER_HTTP_ADDR}'
-pg_auth_type = '{trust_auth}'
-http_auth_type = '{trust_auth}'
-
 [[safekeepers]]
 id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
 
 "#,
-        trust_auth = AuthType::Trust,
-    )
+    );
+
+    for i in 0..num_pageservers {
+        let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+        let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+        let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+
+        template += &format!(
+            r#"
+[[pageservers]]
+id = {pageserver_id}
+listen_pg_addr = '127.0.0.1:{pg_port}'
+listen_http_addr = '127.0.0.1:{http_port}'
+pg_auth_type = '{trust_auth}'
+http_auth_type = '{trust_auth}'
+"#,
+            trust_auth = AuthType::Trust,
+        )
+    }
+
+    template
 }
 
 ///
@@ -295,6 +308,9 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId
 }
 
 fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
+    let num_pageservers = init_match
+        .get_one::<u16>("num-pageservers")
+        .expect("num-pageservers arg has a default");
     // Create config file
     let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
         // load and parse the file
@@ -306,7 +322,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         })?
     } else {
         // Built-in default config
-        default_conf()
+        default_conf(*num_pageservers)
     };
 
     let pg_version = init_match
@@ -319,6 +335,9 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let force = init_match.get_flag("force");
     env.init(pg_version, force)
         .context("Failed to initialize neon repository")?;
+
+    // Create remote storage location for default LocalFs remote storage
+    std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
     // Initialize pageserver, create initial tenant and timeline.
     for ps_conf in &env.pageservers {
@@ -433,6 +452,15 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
             println!("tenant {tenant_id} successfully configured on the pageserver");
         }
+        Some(("migrate", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+            let new_pageserver = get_pageserver(env, matches)?;
+            let new_pageserver_id = new_pageserver.conf.id;
+
+            migrate_tenant(env, tenant_id, new_pageserver)?;
+            println!("tenant {tenant_id} migrated to {}", new_pageserver_id);
+        }
+
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
     }
@@ -867,20 +895,20 @@ fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Res
     }
 }
 
+fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
+    let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
+        NodeId(id_str.parse().context("while parsing pageserver id")?)
+    } else {
+        DEFAULT_PAGESERVER_ID
+    };
+
+    Ok(PageServerNode::from_env(
+        env,
+        env.get_pageserver_conf(node_id)?,
+    ))
+}
+
 fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
-        let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
-            NodeId(id_str.parse().context("while parsing pageserver id")?)
-        } else {
-            DEFAULT_PAGESERVER_ID
-        };
-
-        Ok(PageServerNode::from_env(
-            env,
-            env.get_pageserver_conf(node_id)?,
-        ))
-    }
-
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
             if let Err(e) = get_pageserver(env, subcommand_args)?
@@ -904,6 +932,20 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         Some(("restart", subcommand_args)) => {
+            let pageserver = get_pageserver(env, subcommand_args)?;
+            //TODO what shutdown strategy should we use here?
+            if let Err(e) = pageserver.stop(false) {
+                eprintln!("pageserver stop failed: {}", e);
+                exit(1);
+            }
+
+            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+                eprintln!("pageserver start failed: {e}");
+                exit(1);
+            }
+        }
+
+        Some(("migrate", subcommand_args)) => {
             let pageserver = get_pageserver(env, subcommand_args)?;
             //TODO what shutdown strategy should we use here?
             if let Err(e) = pageserver.stop(false) {
@@ -1224,6 +1266,13 @@ fn cli() -> Command {
         .help("Force initialization even if the repository is not empty")
         .required(false);
 
+    let num_pageservers_arg = Arg::new("num-pageservers")
+        .value_parser(value_parser!(u16))
+        .long("num-pageservers")
+        .help("How many pageservers to create (default 1)")
+        .required(false)
+        .default_value("1");
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1231,6 +1280,7 @@ fn cli() -> Command {
             Command::new("init")
                 .about("Initialize a new Neon repository, preparing configs for services to start with")
                 .arg(pageserver_config_args.clone())
+                .arg(num_pageservers_arg.clone())
                 .arg(
                     Arg::new("config")
                         .long("config")
@@ -1301,6 +1351,10 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
+            .subcommand(Command::new("migrate")
+                .about("Migrate a tenant from one pageserver to another")
+                .arg(tenant_id_arg.clone())
+                .arg(pageserver_id_arg.clone()))
         )
         .subcommand(
             Command::new("pageserver")
