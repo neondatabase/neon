@@ -21,3 +21,6 @@ url.workspace = true
 hex.workspace = true
 
 workspace_hack.workspace = true
+
+[dev-dependencies]
+bincode.workspace = true

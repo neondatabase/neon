@@ -18,6 +18,20 @@ impl ShardNumber {
     pub const MAX: Self = Self(u8::MAX);
 }
 
+/// TenantShardId identify the units of work for the Pageserver.
+///
+/// Historically, tenants only had one shard, and were identified
+/// by TenantId.  To support this, TenantShardId has a special legacy
+/// mode where `shard_count` is equal to zero.
+///
+/// The human-readable encoding of TenantShardId, such as used in API URLs,
+/// is both forward and backward compatible: a legacy TenantId can be
+/// decoded as a TenantShardId, and when re-encoded it will be parseable
+/// as a TenantId.
+///
+/// Note that the binary encoding is _not_ backward compatible, because
+/// at the time sharding is introduced, there are no existing binary structures
+/// containing TenantId that we need to handle.
 #[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
 pub struct TenantShardId {
     pub tenant_id: TenantId,
@@ -109,13 +123,12 @@ impl std::str::FromStr for TenantShardId {
 
 impl From<[u8; 18]> for TenantShardId {
     fn from(b: [u8; 18]) -> Self {
-        let mut tenant_id_bytes: [u8; 16] = [0; 16];
-        tenant_id_bytes.copy_from_slice(&b[0..16]);
+        let tenant_id_bytes: [u8; 16] = b[0..16].try_into().unwrap();
 
         Self {
             tenant_id: TenantId::from(tenant_id_bytes),
             shard_number: ShardNumber(b[16]),
-            shard_count: ShardCount(b[16]),
+            shard_count: ShardCount(b[17]),
         }
     }
 }
@@ -181,7 +194,7 @@ impl<'de> Deserialize<'de> for TenantShardId {
             })
         } else {
             deserializer.deserialize_tuple(
-                16,
+                18,
                 IdVisitor {
                     is_human_readable_deserializer: false,
                 },
@@ -194,6 +207,7 @@ impl<'de> Deserialize<'de> for TenantShardId {
 mod tests {
     use std::str::FromStr;
 
+    use bincode;
     use utils::id::TenantId;
 
     use super::*;
@@ -216,7 +230,25 @@ mod tests {
     }
 
     #[test]
-    fn tenant_shard_id_legacy() -> Result<(), hex::FromHexError> {
+    fn tenant_shard_id_binary() -> Result<(), hex::FromHexError> {
+        let example = TenantShardId {
+            tenant_id: TenantId::generate(),
+            shard_count: ShardCount(10),
+            shard_number: ShardNumber(7),
+        };
+
+        let encoded = bincode::serialize(&example).unwrap();
+        let decoded = bincode::deserialize(&encoded).unwrap();
+
+        assert_eq!(example, decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn tenant_shard_id_compat_backward() -> Result<(), hex::FromHexError> {
+        // Test that TenantShardId can decode a TenantId in human
+        // readable form
         let example = TenantId::generate();
         let encoded = format!("{example}");
         let decoded = TenantShardId::from_str(&encoded)?;
@@ -224,6 +256,35 @@ mod tests {
         assert_eq!(example, decoded.tenant_id);
         assert_eq!(decoded.shard_count, ShardCount(0));
         assert_eq!(decoded.shard_number, ShardNumber(0));
+
+        Ok(())
+    }
+
+    #[test]
+    fn tenant_shard_id_compat_forward() -> Result<(), hex::FromHexError> {
+        // Test that a legacy TenantShardId encodes into a form that
+        // can be decoded as TenantId
+        let example_tenant_id = TenantId::generate();
+        let example = TenantShardId::unsharded(example_tenant_id);
+        let encoded = format!("{example}");
+        let decoded = TenantId::from_str(&encoded)?;
+
+        assert_eq!(example_tenant_id, decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn tenant_shard_id_legacy_binary() -> Result<(), hex::FromHexError> {
+        // Unlike in human readable encoding, binary encoding does not
+        // do any special handling of legacy unsharded TenantIds: this test
+        // is equivalent to the main test for binary encoding, just verifying
+        // that the same behavior applies when we have used `unsharded()` to
+        // construct a TenantShardId.
+        let example = TenantShardId::unsharded(TenantId::generate());
+        let encoded = bincode::serialize(&example).unwrap();
+        let decoded = bincode::deserialize::<TenantShardId>(&encoded).unwrap();
+        assert_eq!(example, decoded);
 
         Ok(())
     }
