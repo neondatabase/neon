@@ -1940,7 +1940,6 @@ use {
     utils::http::error::ApiError,
 };
 
-#[cfg(feature = "testing")]
 pub(crate) async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -1962,6 +1961,7 @@ pub(crate) async fn immediate_gc(
     // Run in task_mgr to avoid race with tenant_detach operation
     let ctx = ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    // TODO: spawning is redundant now, need to hold the gate
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
         TaskKind::GarbageCollector,
@@ -1970,7 +1970,10 @@ pub(crate) async fn immediate_gc(
         &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
         false,
         async move {
+            // TODO: why is there a failpoint for cfg(feature = "testing") method
             fail::fail_point!("immediate_gc_task_pre");
+
+            #[allow(unused_mut)] // why is this function not #[cfg(feature = "testing")]?????
             let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
                 .instrument(info_span!("manual_gc", %tenant_id, %timeline_id))
@@ -1978,18 +1981,31 @@ pub(crate) async fn immediate_gc(
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
                 // better once the types support it.
 
-            if let Ok(result) = result.as_mut() {
-                // why not futures unordered? it seems it needs very much the same task structure
-                // but would only run on single task.
-                let mut js = tokio::task::JoinSet::new();
-                for layer in std::mem::take(&mut result.doomed_layers) {
-                    js.spawn(layer.wait_drop());
+            #[cfg(feature = "testing")]
+            {
+                if let Ok(result) = result.as_mut() {
+                    // why not futures unordered? it seems it needs very much the same task structure
+                    // but would only run on single task.
+                    let mut js = tokio::task::JoinSet::new();
+                    for layer in std::mem::take(&mut result.doomed_layers) {
+                        js.spawn(layer.wait_drop());
+                    }
+                    tracing::info!(total = js.len(), "starting to wait for the gc'd layers to be dropped");
+                    while let Some(res) = js.join_next().await {
+                        res.expect("wait_drop should not panic");
+                    }
                 }
-                tracing::info!(total = js.len(), "starting to wait for the gc'd layers to be dropped");
-                while let Some(res) = js.join_next().await {
-                    res.expect("wait_drop should not panic");
+
+                let timeline = tenant.get_timeline(timeline_id, false).ok();
+                let rtc = timeline.as_ref().and_then(|x| x.remote_client.as_ref());
+
+                if let Some(rtc) = rtc {
+                    // layer drops schedule actions on remote timeline client to actually do the
+                    // deletions; don't care just exit fast about the shutdown error
+                    drop(rtc.wait_completion().await);
                 }
             }
+
             match task_done.send(result) {
                 Ok(_) => (),
                 Err(result) => error!("failed to send gc result: {result:?}"),

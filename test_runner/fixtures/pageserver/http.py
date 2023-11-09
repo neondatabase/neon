@@ -416,6 +416,11 @@ class PageserverHttpClient(requests.Session):
     def timeline_gc(
         self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
+        """
+        Unlike most handlers, this will wait for the layers to be actually
+        complete their shutdown up until registering them to the deletion
+        queue.
+        """
         self.is_testing_enabled_or_skip()
 
         log.info(

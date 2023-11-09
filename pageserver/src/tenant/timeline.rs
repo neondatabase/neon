@@ -3970,7 +3970,8 @@ impl Timeline {
                 fail_point!("after-timeline-gc-removed-layers");
             }
 
-            if cfg!(feature = "testing") {
+            #[cfg(feature = "testing")]
+            {
                 result.doomed_layers = gc_layers;
             }
         }

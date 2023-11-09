@@ -157,7 +157,7 @@ where
 }
 
 impl AddAssign for GcResult {
-    fn add_assign(&mut self, mut other: Self) {
+    fn add_assign(&mut self, other: Self) {
         self.layers_total += other.layers_total;
         self.layers_needed_by_pitr += other.layers_needed_by_pitr;
         self.layers_needed_by_cutoff += other.layers_needed_by_cutoff;
@@ -167,6 +167,10 @@ impl AddAssign for GcResult {
 
         self.elapsed += other.elapsed;
 
-        self.doomed_layers.append(&mut other.doomed_layers);
+        #[cfg(feature = "testing")]
+        {
+            let mut other = other;
+            self.doomed_layers.append(&mut other.doomed_layers);
+        }
     }
 }
