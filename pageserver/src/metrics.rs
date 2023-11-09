@@ -1269,16 +1269,22 @@ pub(crate) struct WalRedoProcessCounters {
 
 impl Default for WalRedoProcessCounters {
     fn default() -> Self {
-        let wal_redo_process_counter = register_int_counter_vec!(
-            "pageserver_wal_redo_process_total",
-            "Number of WAL redo process by operation since pageserver startup",
-            &["operation"]
+        let started = register_int_counter!(
+            "pageserver_wal_redo_process_started_total",
+            "Number of WAL redo processes started",
+        )
+        .unwrap();
+
+        let stopped = register_int_counter_vec!(
+            "pageserver_wal_redo_process_stopped_total",
+            "Number of WAL redo processes stopped",
+            &["reason"],
         )
         .unwrap();
         Self {
-            started: wal_redo_process_counter.with_label_values(&["started"]),
-            shutdown: wal_redo_process_counter.with_label_values(&["shutdown"]),
-            killed: wal_redo_process_counter.with_label_values(&["killed"]),
+            started,
+            shutdown: stopped.with_label_values(&["shutdown"]),
+            killed: stopped.with_label_values(&["killed"]),
         }
     }
 }
