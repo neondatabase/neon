@@ -287,13 +287,10 @@ impl WakeComputeLockOptions {
         let mut permits = None;
         let mut epoch = None;
 
-        dbg!(options);
-
         for option in options.split(',') {
             let (key, value) = option
                 .split_once('=')
                 .with_context(|| format!("bad key-value pair: {option}"))?;
-            dbg!(key, value);
 
             match key {
                 "shards" => shards = Some(value.parse()?),
@@ -316,7 +313,10 @@ impl WakeComputeLockOptions {
         };
 
         ensure!(out.shards > 1, "shard count must be > 1");
-        ensure!(out.shards.is_power_of_two(), "shard count must be a power of two");
+        ensure!(
+            out.shards.is_power_of_two(),
+            "shard count must be a power of two"
+        );
 
         Ok(out)
     }
