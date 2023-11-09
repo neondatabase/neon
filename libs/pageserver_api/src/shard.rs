@@ -20,9 +20,15 @@ impl ShardNumber {
 
 /// TenantShardId identify the units of work for the Pageserver.
 ///
-/// Historically, tenants only had one shard, and were identified
+/// These are written as <tenant_id>-<shard number><shard-count>, for example:
+///
+///   # The second shard in a two-shard tenant
+///   072f1291a5310026820b2fe4b2968934-0102
+///
+/// Historically, tenants could not have multiple shards, and were identified
 /// by TenantId.  To support this, TenantShardId has a special legacy
-/// mode where `shard_count` is equal to zero.
+/// mode where `shard_count` is equal to zero: this represents a single-sharded
+/// tenant which should be written as a TenantId with no suffix.
 ///
 /// The human-readable encoding of TenantShardId, such as used in API URLs,
 /// is both forward and backward compatible: a legacy TenantId can be
@@ -246,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn tenant_shard_id_compat_backward() -> Result<(), hex::FromHexError> {
+    fn tenant_shard_id_backward_compat() -> Result<(), hex::FromHexError> {
         // Test that TenantShardId can decode a TenantId in human
         // readable form
         let example = TenantId::generate();
@@ -261,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn tenant_shard_id_compat_forward() -> Result<(), hex::FromHexError> {
+    fn tenant_shard_id_forward_compat() -> Result<(), hex::FromHexError> {
         // Test that a legacy TenantShardId encodes into a form that
         // can be decoded as TenantId
         let example_tenant_id = TenantId::generate();
