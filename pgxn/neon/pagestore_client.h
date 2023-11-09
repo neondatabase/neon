@@ -27,18 +27,6 @@
 
 #include "pg_config.h"
 
-#define MAX_SHARDS 128
-#define STRIPE_SIZE (256 * 1024 / 8) /* TODO: should in betaken from control plane? */
-#define MAX_PS_CONNSTR_LEN 128
-
-typedef struct
-{
-	size_t n_shards;
-	size_t update_counter;
-	char   shard_connstr[MAX_SHARDS][MAX_PS_CONNSTR_LEN];
-} ShardMap;
-
-
 typedef enum
 {
 	/* pagestore_client -> pagestore */
