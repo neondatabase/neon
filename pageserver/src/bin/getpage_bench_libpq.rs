@@ -9,6 +9,7 @@ use pageserver::repository;
 
 use pageserver_api::reltag::RelTag;
 use rand::prelude::*;
+use tokio::sync::Barrier;
 use tracing::info;
 use utils::logging;
 
@@ -137,9 +138,15 @@ async fn main() {
 
     let stats = Arc::new(Stats::default());
 
+    let num_work_tasks = tenant_timelines.len() * args.num_tasks;
+
+    let start_work_barrier = Arc::new(tokio::sync::Barrier::new(num_work_tasks + 1));
+
     tokio::spawn({
         let stats = Arc::clone(&stats);
+        let start_work_barrier = Arc::clone(&start_work_barrier);
         async move {
+            start_work_barrier.wait().await;
             loop {
                 let start = std::time::Instant::now();
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -161,6 +168,7 @@ async fn main() {
             client.clone(),
             tenant_id,
             timeline_id,
+            Arc::clone(&start_work_barrier),
             stats,
         ));
         tasks.push(t);
@@ -176,6 +184,7 @@ fn timeline(
     http_client: Client<HttpConnector, hyper::Body>,
     tenant_id: String,
     timeline_id: String,
+    start_work_barrier: Arc<Barrier>,
     stats: Arc<Stats>,
 ) -> impl Future<Output = ()> + Send + Sync {
     async move {
@@ -227,14 +236,13 @@ fn timeline(
 
         let mut tasks = Vec::<JoinHandle<()>>::new();
 
-        let _start = std::time::Instant::now();
-
         for _i in 0..args.num_tasks {
             let ranges = ranges.clone();
             let _weights = weights.clone();
             let _client = http_client.clone();
             let tenant_id = tenant_id.clone();
             let timeline_id = timeline_id.clone();
+            let start_work_barrier = Arc::clone(&start_work_barrier);
             let task = tokio::spawn({
                 let stats = Arc::clone(&stats);
                 async move {
@@ -245,6 +253,7 @@ fn timeline(
                     )
                     .await
                     .unwrap();
+                    start_work_barrier.wait().await;
                     for _i in 0..args.num_requests {
                         let key = {
                             let mut rng = rand::thread_rng();
