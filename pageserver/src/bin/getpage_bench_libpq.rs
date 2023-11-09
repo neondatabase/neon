@@ -9,6 +9,8 @@ use pageserver::repository;
 
 use pageserver_api::reltag::RelTag;
 use rand::prelude::*;
+use tracing::info;
+use utils::logging;
 
 use std::future::Future;
 use std::str::FromStr;
@@ -75,19 +77,20 @@ impl Stats {
 
 #[tokio::main]
 async fn main() {
-    let args: &'static Args = Box::leak(Box::new(Args::parse()));
+    logging::init(
+        logging::LogFormat::Plain,
+        logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stderr,
+    )
+    .unwrap();
 
-    // std::env::set_var("RUST_LOG", "info,tokio_postgres=trace");
-    // tracing_subscriber::fmt::init();
+    let args: &'static Args = Box::leak(Box::new(Args::parse()));
 
     let client = Client::new();
 
     let tenants = if let Some(tenants) = &args.tenants {
         tenants.clone()
     } else {
-        // let tenant_id = "b97965931096047b2d54958756baee7b";
-        // let timeline_id = "2868f84a8d166779e4c651b116c45059";
-
         let resp = client
             .get(Uri::try_from(&format!("{}/v1/tenant", args.mgmt_api_endpoint)).unwrap())
             .await
@@ -130,7 +133,7 @@ async fn main() {
             tenant_timelines.push((tenant_id.clone(), timeline_id));
         }
     }
-    println!("tenant_timelines:\n{:?}", tenant_timelines);
+    info!("tenant_timelines:\n{:?}", tenant_timelines);
 
     let stats = Arc::new(Stats::default());
 
@@ -142,7 +145,7 @@ async fn main() {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let completed_requests = stats.completed_requests.swap(0, Ordering::Relaxed);
                 let elapsed = start.elapsed();
-                println!(
+                info!(
                     "RPS: {:.0}",
                     completed_requests as f64 / elapsed.as_secs_f64()
                 );
