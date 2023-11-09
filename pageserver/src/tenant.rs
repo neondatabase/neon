@@ -3528,10 +3528,6 @@ pub(crate) mod harness {
             let remote_fs_dir = conf.workdir.join("localfs");
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
-                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();

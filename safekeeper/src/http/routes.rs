@@ -30,7 +30,7 @@ use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use utils::{
-    auth::JwtAuth,
+    auth::SwappableJwtAuth,
     http::{
         endpoint::{self, auth_middleware, check_permission_with},
         error::ApiError,
@@ -428,8 +428,11 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             if ALLOWLIST_ROUTES.contains(request.uri()) {
                 None
             } else {
-                // Option<Arc<JwtAuth>> is always provided as data below, hence unwrap().
-                request.data::<Option<Arc<JwtAuth>>>().unwrap().as_deref()
+                // Option<Arc<SwappableJwtAuth>> is always provided as data below, hence unwrap().
+                request
+                    .data::<Option<Arc<SwappableJwtAuth>>>()
+                    .unwrap()
+                    .as_deref()
             }
         }))
     }

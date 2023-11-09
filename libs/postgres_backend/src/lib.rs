@@ -17,7 +17,7 @@ use std::{fmt, io};
 use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
 use pq_proto::{
@@ -35,6 +35,11 @@ pub enum QueryError {
     /// We were instructed to shutdown while processing the query
     #[error("Shutting down")]
     Shutdown,
+    /// Authentication failure
+    #[error("Unauthorized: {0}")]
+    Unauthorized(std::borrow::Cow<'static, str>),
+    #[error("Simulated Connection Error")]
+    SimulatedConnectionError,
     /// Some other error
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -49,8 +54,9 @@ impl From<io::Error> for QueryError {
 impl QueryError {
     pub fn pg_error_code(&self) -> &'static [u8; 5] {
         match self {
-            Self::Disconnected(_) => b"08006", // connection failure
+            Self::Disconnected(_) | Self::SimulatedConnectionError => b"08006", // connection failure
             Self::Shutdown => SQLSTATE_ADMIN_SHUTDOWN,
+            Self::Unauthorized(_) => SQLSTATE_INTERNAL_ERROR,
             Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
         }
     }
@@ -610,7 +616,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
                     if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
                         self.write_message_noflush(&BeMessage::ErrorResponse(
-                            &e.to_string(),
+                            &short_error(&e),
                             Some(e.pg_error_code()),
                         ))?;
                         return Err(e);
@@ -732,6 +738,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 if let Err(e) = handler.process_query(self, query_string).await {
                     match e {
                         QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
+                        QueryError::SimulatedConnectionError => {
+                            return Err(QueryError::SimulatedConnectionError)
+                        }
                         e => {
                             log_query_error(query_string, &e);
                             let short_error = short_error(&e);
@@ -966,6 +975,8 @@ pub fn short_error(e: &QueryError) -> String {
     match e {
         QueryError::Disconnected(connection_error) => connection_error.to_string(),
         QueryError::Shutdown => "shutdown".to_string(),
+        QueryError::Unauthorized(_e) => "JWT authentication error".to_string(),
+        QueryError::SimulatedConnectionError => "simulated connection error".to_string(),
         QueryError::Other(e) => format!("{e:#}"),
     }
 }
@@ -982,8 +993,14 @@ fn log_query_error(query: &str, e: &QueryError) {
         QueryError::Disconnected(other_connection_error) => {
             error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
         }
+        QueryError::SimulatedConnectionError => {
+            error!("query handler for query '{query}' failed due to a simulated connection error")
+        }
         QueryError::Shutdown => {
             info!("query handler for '{query}' cancelled during tenant shutdown")
+        }
+        QueryError::Unauthorized(e) => {
+            warn!("query handler for '{query}' failed with authentication error: {e}");
         }
         QueryError::Other(e) => {
             error!("query handler for '{query}' failed: {e:?}");

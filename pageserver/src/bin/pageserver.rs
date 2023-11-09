@@ -34,8 +34,11 @@ use postgres_backend::AuthType;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
-    auth::JwtAuth, logging, project_build_tag, project_git_version, sentry_init::init_sentry,
-    signals::Signal, tcp_listener,
+    auth::{JwtAuth, SwappableJwtAuth},
+    logging, project_build_tag, project_git_version,
+    sentry_init::init_sentry,
+    signals::Signal,
+    tcp_listener,
 };
 
 project_git_version!(GIT_VERSION);
@@ -321,13 +324,12 @@ fn start_pageserver(
     let http_auth;
     let pg_auth;
     if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
-        // unwrap is ok because check is performed when creating config, so path is set and file exists
+        // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
-        info!(
-            "Loading public key for verifying JWT tokens from {:#?}",
-            key_path
-        );
-        let auth: Arc<JwtAuth> = Arc::new(JwtAuth::from_key_path(key_path)?);
+        info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
+
+        let jwt_auth = JwtAuth::from_key_path(key_path)?;
+        let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
         http_auth = match &conf.http_auth_type {
             AuthType::Trust => None,

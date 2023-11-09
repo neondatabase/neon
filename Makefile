@@ -72,6 +72,10 @@ neon: postgres-headers walproposer-lib
 #
 $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 	+@echo "Configuring Postgres $* build"
+	@test -s $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure || { \
+		echo "\nPostgres submodule not found in $(ROOT_PROJECT_DIR)/vendor/postgres-$*/, execute "; \
+		echo "'git submodule update --init --recursive --depth 2 --progress .' in project root.\n"; \
+		exit 1; }
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/$*
 	(cd $(POSTGRES_INSTALL_DIR)/build/$* && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure \
