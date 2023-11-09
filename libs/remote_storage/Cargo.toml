@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 once_cell.workspace = true
+aws-smithy-async.workspace = true
 aws-smithy-http.workspace = true
 aws-types.workspace = true
 aws-config.workspace = true

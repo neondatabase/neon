@@ -48,6 +48,7 @@ async-trait = "0.1"
 aws-config = { version = "0.56", default-features = false, features=["rustls"] }
 aws-sdk-s3 = "0.29"
 aws-smithy-http = "0.56"
+aws-smithy-async = { version = "0.56", default-features = false, features=["rt-tokio"] }
 aws-credential-types = "0.56"
 aws-types = "0.56"
 axum = { version = "0.6.20", features = ["ws"] }
