@@ -1254,8 +1254,14 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
-    pub(crate) shutdown: IntCounter,
-    pub(crate) killed: IntCounter,
+    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+}
+
+#[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
+pub(crate) enum WalRedoKillCause {
+    WalRedoProcessDrop,
+    NoLeakChildDrop,
+    Startup,
 }
 
 impl Default for WalRedoProcessCounters {
@@ -1266,16 +1272,19 @@ impl Default for WalRedoProcessCounters {
         )
         .unwrap();
 
-        let stopped = register_int_counter_vec!(
+        let killed = register_int_counter_vec!(
             "pageserver_wal_redo_process_stopped_total",
             "Number of WAL redo processes stopped",
-            &["reason"],
+            &["cause"],
         )
         .unwrap();
         Self {
             started,
-            shutdown: stopped.with_label_values(&["shutdown"]),
-            killed: stopped.with_label_values(&["killed"]),
+            killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
+                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause_str: &'static str = cause.into();
+                killed.with_label_values(&[cause_str])
+            })),
         }
     }
 }
