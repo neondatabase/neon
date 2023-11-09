@@ -17,6 +17,7 @@ use crate::{
     deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
+        debug_assert_current_span_has_tenant_and_timeline_id,
         metadata::TimelineMetadata,
         remote_timeline_client::{
             self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
@@ -30,6 +31,11 @@ use super::{Timeline, TimelineResources};
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+    // Notify any timeline work to drop out of loops/requests
+    tracing::debug!("Cancelling CancellationToken");
+    timeline.cancel.cancel();
+
     // Stop the walreceiver first.
     debug!("waiting for wal receiver to shutdown");
     let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
@@ -74,6 +80,11 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
             "failpoint: timeline-delete-before-index-deleted-at"
         ))?
     });
+
+    tracing::debug!("Waiting for gate...");
+    timeline.gate.close().await;
+    tracing::debug!("Shutdown complete");
+
     Ok(())
 }
 

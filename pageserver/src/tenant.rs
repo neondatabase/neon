@@ -26,6 +26,7 @@ use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
+use utils::sync::gate::Gate;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -54,6 +55,8 @@ use self::config::TenantConf;
 use self::delete::DeleteTenantFlow;
 use self::metadata::LoadMetadataError;
 use self::metadata::TimelineMetadata;
+use self::mgr::GetActiveTenantError;
+use self::mgr::GetTenantError;
 use self::mgr::TenantsMap;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineUninitMark;
@@ -252,6 +255,20 @@ pub struct Tenant {
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
+
+    // Cancellation token fires when we have entered shutdown().  This is a parent of
+    // Timelines' cancellation token.
+    pub(crate) cancel: CancellationToken,
+
+    // Users of the Tenant such as the page service must take this Gate to avoid
+    // trying to use a Tenant which is shutting down.
+    pub(crate) gate: Gate,
+}
+
+impl std::fmt::Debug for Tenant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.tenant_id, self.current_state())
+    }
 }
 
 pub(crate) enum WalRedoManager {
@@ -359,34 +376,6 @@ impl Debug for SetStoppingError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum WaitToBecomeActiveError {
-    WillNotBecomeActive {
-        tenant_id: TenantId,
-        state: TenantState,
-    },
-    TenantDropped {
-        tenant_id: TenantId,
-    },
-}
-
-impl std::fmt::Display for WaitToBecomeActiveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WaitToBecomeActiveError::WillNotBecomeActive { tenant_id, state } => {
-                write!(
-                    f,
-                    "Tenant {} will not become active. Current state: {:?}",
-                    tenant_id, state
-                )
-            }
-            WaitToBecomeActiveError::TenantDropped { tenant_id } => {
-                write!(f, "Tenant {tenant_id} will not become active (dropped)")
-            }
-        }
-    }
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum CreateTimelineError {
     #[error("a timeline with the given ID already exists")]
@@ -395,6 +384,8 @@ pub enum CreateTimelineError {
     AncestorLsn(anyhow::Error),
     #[error("ancestor timeline is not active")]
     AncestorNotActive,
+    #[error("tenant shutting down")]
+    ShuttingDown,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -526,7 +517,7 @@ impl Tenant {
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
         init_order: Option<InitializationOrder>,
-        tenants: &'static tokio::sync::RwLock<TenantsMap>,
+        tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -1524,6 +1515,11 @@ impl Tenant {
             )));
         }
 
+        let _gate = self
+            .gate
+            .enter()
+            .map_err(|_| CreateTimelineError::ShuttingDown)?;
+
         if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
             debug!("timeline {new_timeline_id} already exists");
 
@@ -1808,6 +1804,7 @@ impl Tenant {
         freeze_and_flush: bool,
     ) -> Result<(), completion::Barrier> {
         span::debug_assert_current_span_has_tenant_id();
+
         // Set tenant (and its timlines) to Stoppping state.
         //
         // Since we can only transition into Stopping state after activation is complete,
@@ -1833,6 +1830,7 @@ impl Tenant {
             }
             Err(SetStoppingError::AlreadyStopping(other)) => {
                 // give caller the option to wait for this this shutdown
+                info!("Tenant::shutdown: AlreadyStopping");
                 return Err(other);
             }
         };
@@ -1846,6 +1844,7 @@ impl Tenant {
                 js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
             })
         };
+        tracing::info!("Waiting for timelines...");
         while let Some(res) = js.join_next().await {
             match res {
                 Ok(()) => {}
@@ -1855,11 +1854,20 @@ impl Tenant {
             }
         }
 
+        // We cancel the Tenant's cancellation token _after_ the timelines have all shut down.  This permits
+        // them to continue to do work during their shutdown methods, e.g. flushing data.
+        tracing::debug!("Cancelling CancellationToken");
+        self.cancel.cancel();
+
         // shutdown all tenant and timeline tasks: gc, compaction, page service
         // No new tasks will be started for this tenant because it's in `Stopping` state.
         //
         // this will additionally shutdown and await all timeline tasks.
+        tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
+
+        // Wait for any in-flight operations to complete
+        self.gate.close().await;
 
         Ok(())
     }
@@ -2021,7 +2029,7 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub(crate) async fn wait_to_become_active(&self) -> Result<(), WaitToBecomeActiveError> {
+    pub(crate) async fn wait_to_become_active(&self) -> Result<(), GetActiveTenantError> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
@@ -2029,11 +2037,9 @@ impl Tenant {
                 TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
                     receiver.changed().await.map_err(
-                        |_e: tokio::sync::watch::error::RecvError| {
-                            WaitToBecomeActiveError::TenantDropped {
-                                tenant_id: self.tenant_id,
-                            }
-                        },
+                        |_e: tokio::sync::watch::error::RecvError|
+                            // Tenant existed but was dropped: report it as non-existent
+                            GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_id))
                     )?;
                 }
                 TenantState::Active { .. } => {
@@ -2041,10 +2047,7 @@ impl Tenant {
                 }
                 TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     // There's no chance the tenant can transition back into ::Active
-                    return Err(WaitToBecomeActiveError::WillNotBecomeActive {
-                        tenant_id: self.tenant_id,
-                        state: current_state,
-                    });
+                    return Err(GetActiveTenantError::WillNotBecomeActive(current_state));
                 }
             }
         }
@@ -2110,6 +2113,9 @@ where
 }
 
 impl Tenant {
+    pub fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.read().unwrap().tenant_conf
     }
@@ -2267,6 +2273,7 @@ impl Tenant {
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned().flatten(),
             state,
+            self.cancel.child_token(),
         );
 
         Ok(timeline)
@@ -2356,6 +2363,8 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
+            cancel: CancellationToken::default(),
+            gate: Gate::new(format!("Tenant<{tenant_id}>")),
         }
     }
 
@@ -3519,10 +3528,6 @@ pub(crate) mod harness {
             let remote_fs_dir = conf.workdir.join("localfs");
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
-                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
@@ -3692,7 +3697,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     static TEST_KEY: Lazy<Key> =
-        Lazy::new(|| Key::from_slice(&hex!("112222222233333333444444445500000001")));
+        Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
@@ -3788,9 +3793,9 @@ mod tests {
         let writer = tline.writer().await;
 
         #[allow(non_snake_case)]
-        let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
+        let TEST_KEY_A: Key = Key::from_hex("110000000033333333444444445500000001").unwrap();
         #[allow(non_snake_case)]
-        let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
+        let TEST_KEY_B: Key = Key::from_hex("110000000033333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
         writer
@@ -4236,11 +4241,7 @@ mod tests {
         metadata_bytes[8] ^= 1;
         std::fs::write(metadata_path, metadata_bytes)?;
 
-        let err = harness
-            .try_load_local(&ctx)
-            .await
-            .err()
-            .expect("should fail");
+        let err = harness.try_load_local(&ctx).await.expect_err("should fail");
         // get all the stack with all .context, not only the last one
         let message = format!("{err:#}");
         let expected = "failed to load metadata";
@@ -4374,7 +4375,7 @@ mod tests {
 
         let mut keyspace = KeySpaceAccum::new();
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let mut blknum = 0;
         for _ in 0..50 {
             for _ in 0..10000 {
@@ -4420,7 +4421,7 @@ mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -4501,7 +4502,7 @@ mod tests {
 
         const NUM_KEYS: usize = 1000;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -4592,7 +4593,7 @@ mod tests {
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;
 
-        let mut test_key = Key::from_hex("012222222233333333444444445500000000").unwrap();
+        let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         // Track page mutation lsns across different timelines.
         let mut updated = [[Lsn(0); NUM_KEYS]; NUM_TLINES];
 

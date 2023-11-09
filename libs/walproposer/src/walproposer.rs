@@ -186,7 +186,7 @@ impl Wrapper {
             .unwrap()
             .into_bytes_with_nul();
         assert!(safekeepers_list_vec.len() == safekeepers_list_vec.capacity());
-        let safekeepers_list = safekeepers_list_vec.as_mut_ptr() as *mut i8;
+        let safekeepers_list = safekeepers_list_vec.as_mut_ptr() as *mut std::ffi::c_char;
 
         let callback_data = Box::into_raw(Box::new(api)) as *mut ::std::os::raw::c_void;
 

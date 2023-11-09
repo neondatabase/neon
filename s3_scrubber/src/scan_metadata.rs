@@ -10,8 +10,10 @@ use aws_sdk_s3::Client;
 use futures_util::{pin_mut, StreamExt, TryStreamExt};
 use histogram::Histogram;
 use pageserver::tenant::IndexPart;
+use serde::Serialize;
 use utils::id::TenantTimelineId;
 
+#[derive(Serialize)]
 pub struct MetadataSummary {
     count: usize,
     with_errors: HashSet<TenantTimelineId>,
@@ -25,7 +27,9 @@ pub struct MetadataSummary {
 }
 
 /// A histogram plus minimum and maximum tracking
+#[derive(Serialize)]
 struct MinMaxHisto {
+    #[serde(skip)]
     histo: Histogram,
     min: u64,
     max: u64,
@@ -109,6 +113,7 @@ impl MetadataSummary {
         self.count += 1;
         if let BlobDataParseResult::Parsed {
             index_part,
+            index_part_generation: _,
             s3_layers: _,
         } = &data.blob_data
         {
