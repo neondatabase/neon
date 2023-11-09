@@ -307,7 +307,7 @@ RequestShardMapFromControlPlane(ShardMap* shard_map)
 				continue;
 
 			if (shard_map->n_shards >= MAX_SHARDS)
-				elog(ERROR, "Too manuy shards");
+				elog(ERROR, "Too many shards");
 
 			if (v.type != jbvString)
 				elog(ERROR, "Connection string expected");

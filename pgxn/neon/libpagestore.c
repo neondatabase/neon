@@ -143,12 +143,12 @@ get_shard_number(BufferTag* tag)
 	hash = murmurhash32(tag->rnode.spcNode);
 	hash_combine(hash, murmurhash32(tag->rnode.dbNode));
 	hash_combine(hash, murmurhash32(tag->rnode.relNode));
-	hash_combine(hash, murmurhash32(tag->blockNum));
+	hash_combine(hash, murmurhash32(tag->blockNum/STRIPE_SIZE));
 #else
 	hash = murmurhash32(tag->spcOid);
 	hash_combine(hash, murmurhash32(tag->dbOid));
 	hash_combine(hash, murmurhash32(tag->relNumber));
-	hash_combine(hash, murmurhash32(tag->blockNum));
+	hash_combine(hash, murmurhash32(tag->blockNum/STRIPE_SIZE));
 #endif
 
 	LWLockAcquire(shard_map_lock, LW_SHARED);
@@ -185,6 +185,20 @@ get_shard_number(BufferTag* tag)
 	return shard_no;
 }
 
+static void
+pageserver_sighup_handler(SIGNAL_ARGS)
+{
+	if (prev_signal_handler)
+	{
+        	prev_signal_handler(postgres_signal_arg);
+	}
+	neon_log(LOG, "Received SIGHUP, disconnecting pageserver. New pageserver connstring is %s", page_server_connstring);
+
+	 /* force refetching shard map */
+	LWLockAcquire(shard_map_lock, LW_EXCLUSIVE);
+	shard_map->n_shards = 0;
+	LWLockRelease(shard_map_lock);
+}
 
 static bool
 pageserver_connect(shardno_t shard_no, int elevel)
