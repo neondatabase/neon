@@ -27,14 +27,12 @@
 #include "commands/defrem.h"
 #include "miscadmin.h"
 #include "utils/acl.h"
-#include "utils/fmgrprotos.h"
 #include "fmgr.h"
 #include "utils/guc.h"
 #include "port.h"
 #include <curl/curl.h>
 #include "utils/jsonb.h"
 #include "libpq/crypt.h"
-#include "pagestore_client.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
@@ -223,7 +221,6 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 	str->str[str->size] = '\0';
 	return nmemb;
 }
-
 
 static void
 SendDeltasToControlPlane()
