@@ -230,6 +230,67 @@ jobs:
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
 
+  check-codestyle-rust-arm:
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-arm')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      github.ref_name == 'main'
+    timeout-minutes: 90
+    runs-on: [ self-hosted, dev, arm64 ]
+
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      # Some of our rust modules use FFI and need those to be checked
+      - name: Get postgres headers
+        run: make postgres-headers -j$(nproc)
+
+      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
+      # This will catch compiler & clippy warnings in all feature combinations.
+      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
+      # NB: keep clippy args in sync with ./run_clippy.sh
+      - run: |
+          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
+            echo "No clippy args found in .neon_clippy_args"
+            exit 1
+          fi
+          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
+      - name: Run cargo clippy (debug)
+        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+      - name: Run cargo clippy (release)
+        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
+
+      - name: Check documentation generation
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+
+      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
+      - name: Check formatting
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all -- --check
+
+      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
+      - name: Check rust dependencies
+        if: ${{ !cancelled() }}
+        run: |
+          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
+          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
+
+      # https://github.com/EmbarkStudios/cargo-deny
+      - name: Check rust licenses/bans/advisories/sources
+        if: ${{ !cancelled() }}
+        run: cargo deny check
+
   gather-rust-build-stats:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats')
     runs-on: [ self-hosted, gen3, large ]
