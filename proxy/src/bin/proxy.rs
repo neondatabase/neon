@@ -94,10 +94,13 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
     /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
-    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
+    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::None)]
     rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
+    /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    rate_limiter_timeout: tokio::time::Duration,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
-    #[clap(long, default_value_t = 10)]
+    #[clap(long, default_value_t = 5)]
     initial_limit: usize,
     /// Minimum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
     #[clap(long, default_value_t = 1)]
@@ -234,6 +237,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let rate_limiter_config = RateLimiterConfig {
         algorithm: args.rate_limit_algorithm,
+        timeout: args.rate_limiter_timeout,
         initial_limit: args.initial_limit,
         aimd_min_limit: args.aimd_min_limit,
         aimd_max_limit: args.aimd_max_limit,

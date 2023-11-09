@@ -40,6 +40,7 @@ impl LimitAlgorithm for Fixed {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RateLimiterConfig {
     pub algorithm: RateLimitAlgorithm,
+    pub timeout: Duration,
     pub initial_limit: usize,
     pub aimd_min_limit: usize,
     pub aimd_max_limit: usize,

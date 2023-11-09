@@ -32,10 +32,12 @@ pub fn new_client(rate_limiter_config: &rate_limiter::RateLimiterConfig) -> Clie
         rate_limiter::RateLimitAlgorithm::None => builder,
         rate_limiter::RateLimitAlgorithm::Fixed => builder.with(rate_limiter::Limiter::new(
             rate_limiter::Fixed,
+            rate_limiter_config.timeout,
             rate_limiter_config.initial_limit,
         )),
         rate_limiter::RateLimitAlgorithm::Aimd => builder.with(rate_limiter::Limiter::new(
             rate_limiter::Aimd::new(rate_limiter_config),
+            rate_limiter_config.timeout,
             rate_limiter_config.initial_limit,
         )),
     };

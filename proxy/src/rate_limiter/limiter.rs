@@ -8,6 +8,9 @@ use std::{
 
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Instant};
+use tracing::info;
+
+use crate::console::errors::ApiError;
 
 use super::limit_algorithm::{LimitAlgorithm, Sample};
 
@@ -22,6 +25,7 @@ use super::limit_algorithm::{LimitAlgorithm, Sample};
 pub struct Limiter<T> {
     limit_algo: AsyncMutex<T>,
     semaphore: std::sync::Arc<Semaphore>,
+    timeout: Duration,
 
     // ONLY WRITE WHEN LIMIT_ALGO IS LOCKED
     limits: AtomicUsize,
@@ -84,6 +88,15 @@ impl Outcome {
             }
         }
     }
+    fn from_reqwest_response(response: &reqwest::Response) -> Self {
+        if response.status().is_server_error()
+            || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            Outcome::Overload
+        } else {
+            Outcome::Success
+        }
+    }
 }
 
 impl<T> Limiter<T>
@@ -91,11 +104,12 @@ where
     T: LimitAlgorithm,
 {
     /// Create a limiter with a given limit control algorithm.
-    pub fn new(limit_algorithm: T, initial_limit: usize) -> Self {
+    pub fn new(limit_algorithm: T, timeout: Duration, initial_limit: usize) -> Self {
         assert!(initial_limit > 0);
         Self {
             limit_algo: AsyncMutex::new(limit_algorithm),
             semaphore: Arc::new(Semaphore::new(initial_limit)),
+            timeout,
             limits: AtomicUsize::new(initial_limit),
             in_flight: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -129,6 +143,7 @@ where
     ///
     /// Returns `None` if there are none available after `duration`.
     pub async fn acquire_timeout(&self, duration: Duration) -> Option<Token<'_>> {
+        info!("acquiring token: {:?}", self.semaphore.available_permits());
         let result = match timeout(duration, self.semaphore.acquire()).await {
             Ok(maybe_permit) => maybe_permit
                 .map(|permit| Token::new(permit, self.in_flight.clone()))
@@ -148,6 +163,7 @@ where
     ///
     /// Set the outcome to `None` to ignore the job.
     pub async fn release(&self, mut token: Token<'_>, outcome: Option<Outcome>) {
+        tracing::info!("outcome is {:?}", outcome);
         let in_flight = self.in_flight.load(Ordering::Acquire);
         let available = self.semaphore.available_permits();
         let old_limit = self.limits.load(Ordering::Acquire);
@@ -165,6 +181,7 @@ where
         } else {
             old_limit
         };
+        tracing::info!("new limit is {}", new_limit);
         if new_limit < total {
             token.forget();
         } else {
@@ -242,13 +259,17 @@ impl<T: LimitAlgorithm + Send + Sync + 'static> reqwest_middleware::Middleware f
         next: reqwest_middleware::Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
         let token = self
-            .acquire_timeout(Duration::from_secs(1)) // TODO
+            .acquire_timeout(self.timeout)
             .await
-            .ok_or_else(|| anyhow::Error::msg("Too many concurrent requests"))?;
+            .ok_or_else(|| reqwest_middleware::Error::Middleware(ApiError::Console { // TODO: Should we map it into something meaningful?
+                status: crate::http::StatusCode::TOO_MANY_REQUESTS,
+                text: "Too many requests".into(),
+            }.into()))?;
         match next.run(req, extensions).await {
-            Ok(result) => {
-                self.release(token, Some(Outcome::Success)).await;
-                Ok(result)
+            Ok(response) => {
+                self.release(token, Some(Outcome::from_reqwest_response(&response)))
+                    .await;
+                Ok(response)
             }
             Err(e) => {
                 self.release(token, Some(Outcome::from_reqwest_error(&e)))
@@ -270,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        let limiter = Limiter::new(Fixed, 10);
+        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 10);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -281,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_fair() {
-        let limiter = Limiter::new(Fixed, 1);
+        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 1);
 
         // === TOKEN 1 ===
         let token1 = limiter.try_acquire().unwrap();
