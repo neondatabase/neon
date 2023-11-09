@@ -267,7 +267,7 @@ async fn calculate_synthetic_size_worker(
             }
         };
 
-        for (tenant_shard_id, tenant_state) in tenants {
+        for (tenant_shard_id, tenant_state, _gen) in tenants {
             if tenant_state != TenantState::Active {
                 continue;
             }
