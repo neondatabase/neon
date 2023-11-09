@@ -627,8 +627,6 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                 (total_in_progress, total_attached)
             }
             TenantsMap::ShuttingDown(_) => {
-                // TODO: it is possible that detach and shutdown happen at the same time. as a
-                // result, during shutdown we do not wait for detach.
                 error!("already shutting down, this function isn't supposed to be called more than once");
                 return;
             }
