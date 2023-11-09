@@ -21,7 +21,6 @@ use super::limit_algorithm::{LimitAlgorithm, Sample};
 ///
 /// The limit will be automatically adjusted based on observed latency (delay) and/or failures
 /// caused by overload (loss).
-#[derive(Debug)]
 pub struct Limiter<T> {
     limit_algo: AsyncMutex<T>,
     semaphore: std::sync::Arc<Semaphore>,
@@ -32,6 +31,8 @@ pub struct Limiter<T> {
 
     // ONLY USE ATOMIC ADD/SUB
     in_flight: Arc<AtomicUsize>,
+
+    api_locks: Option<&'static crate::console::locks::ApiLocks>,
 
     #[cfg(test)]
     notifier: Option<std::sync::Arc<tokio::sync::Notify>>,
@@ -104,7 +105,12 @@ where
     T: LimitAlgorithm,
 {
     /// Create a limiter with a given limit control algorithm.
-    pub fn new(limit_algorithm: T, timeout: Duration, initial_limit: usize) -> Self {
+    pub fn new(
+        limit_algorithm: T,
+        timeout: Duration,
+        initial_limit: usize,
+        api_locks: Option<&'static crate::console::locks::ApiLocks>,
+    ) -> Self {
         assert!(initial_limit > 0);
         Self {
             limit_algo: AsyncMutex::new(limit_algorithm),
@@ -112,6 +118,7 @@ where
             timeout,
             limits: AtomicUsize::new(initial_limit),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            api_locks,
             #[cfg(test)]
             notifier: None,
         }
@@ -258,13 +265,21 @@ impl<T: LimitAlgorithm + Send + Sync + 'static> reqwest_middleware::Middleware f
         extensions: &mut task_local_extensions::Extensions,
         next: reqwest_middleware::Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
-        let token = self
-            .acquire_timeout(self.timeout)
-            .await
-            .ok_or_else(|| reqwest_middleware::Error::Middleware(ApiError::Console { // TODO: Should we map it into something meaningful?
-                status: crate::http::StatusCode::TOO_MANY_REQUESTS,
-                text: "Too many requests".into(),
-            }.into()))?;
+        let start = Instant::now();
+        let token = self.acquire_timeout(self.timeout).await.ok_or_else(|| {
+            reqwest_middleware::Error::Middleware(
+                // TODO: Should we map it into user facing errors?
+                ApiError::Console {
+                    status: crate::http::StatusCode::TOO_MANY_REQUESTS,
+                    text: "Too many requests".into(),
+                }
+                .into(),
+            )
+        })?;
+        info!(duration = ?start.elapsed(), "waiting for token to connect to the control plane");
+        if let Some(locks) = self.api_locks {
+            locks.observe_control_plane_acquire(start.elapsed());
+        }
         match next.run(req, extensions).await {
             Ok(response) => {
                 self.release(token, Some(Outcome::from_reqwest_response(&response)))
@@ -291,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 10);
+        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 10, None);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -302,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn is_fair() {
-        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 1);
+        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 1, None);
 
         // === TOKEN 1 ===
         let token1 = limiter.try_acquire().unwrap();

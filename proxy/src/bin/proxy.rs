@@ -103,16 +103,16 @@ struct ProxyCliArgs {
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     rate_limiter_timeout: tokio::time::Duration,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
-    #[clap(long, default_value_t = 5)]
+    #[clap(long, default_value_t = 100)]
     initial_limit: usize,
     /// Minimum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
     #[clap(long, default_value_t = 1)]
     aimd_min_limit: usize,
     /// Maximum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 1000)]
+    #[clap(long, default_value_t = 1500)]
     aimd_max_limit: usize,
     /// Increase AIMD increase by value in case of success. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 1)]
+    #[clap(long, default_value_t = 10)]
     aimd_increase_by: usize,
     /// Decrease AIMD decrease by value in case of timout/429. Makes sense only if `rate_limit_algorithm` is `Aimd`.
     #[clap(long, default_value_t = 0.9)]
@@ -272,7 +272,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             tokio::spawn(locks.garbage_collect_worker(epoch));
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client(&rate_limiter_config));
+            let endpoint =
+                http::Endpoint::new(url, http::new_client(&rate_limiter_config, Some(locks)));
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             auth::BackendType::Console(Cow::Owned(api), ())

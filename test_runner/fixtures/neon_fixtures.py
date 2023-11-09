@@ -2193,6 +2193,7 @@ class NeonProxy(PgProtocol):
                     *["--initial-limit", str(1)],
                     *["--rate-limiter-timeout", "1s"],
                     *["--aimd-min-limit", "0"],
+                    *["--aimd-increase-by", "1"],
                     *["--wake-compute-cache", "size=0"], # Disable cache to test rate limiter.
                 ]
             return args
