@@ -922,6 +922,9 @@ impl Timeline {
         )
         .await;
 
+        // Since we have shut down WAL ingest, we should not let anyone start waiting for the LSN to advance
+        self.last_record_lsn.shutdown();
+
         // now all writers to InMemory layer are gone, do the final flush if requested
         match self.freeze_and_flush().await {
             Ok(_) => {
