@@ -1184,6 +1184,19 @@ async fn put_tenant_location_config_handler(
         // which is not a 400 but a 409.
         .map_err(ApiError::BadRequest)?;
 
+    if let Some(_flush_ms) = flush {
+        match state.secondary_controller.upload_tenant(tenant_id).await {
+            Ok(()) => {
+                tracing::info!("Uploaded heatmap during flush");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to flush heatmap: {e}");
+            }
+        }
+    } else {
+        tracing::info!("No flush requested when configuring");
+    }
+
     json_response(StatusCode::OK, ())
 }
 
@@ -1876,14 +1889,10 @@ pub fn make_router(
             api_handler(r, deletion_queue_flush)
         })
         .post("/v1/secondary/:tenant_id/upload", |r| {
-            testing_api_handler("force heatmap upload", r, secondary_upload_handler)
+            api_handler(r, secondary_upload_handler)
         })
         .post("/v1/secondary/:tenant_id/download", |r| {
-            testing_api_handler(
-                "force secondary layer download",
-                r,
-                secondary_download_handler,
-            )
+            api_handler(r, secondary_download_handler)
         })
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
