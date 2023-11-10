@@ -332,6 +332,7 @@ impl Layer {
     ///
     /// Does not start garbage collection, use [`Self::garbage_collect_on_drop`] for that
     /// separatedly.
+    #[cfg(feature = "testing")]
     pub(crate) fn wait_drop(&self) -> impl std::future::Future<Output = ()> + 'static {
         let mut rx = self.0.status.subscribe();
 
