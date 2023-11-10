@@ -2181,6 +2181,7 @@ class NeonProxy(PgProtocol):
         def __init__(self, endpoint: str, fixed_rate_limit: Optional[int] = None):
             self.endpoint = endpoint
             self.fixed_rate_limit = fixed_rate_limit
+
         def extra_args(self) -> list[str]:
             args = [
                 # Console auth backend params
@@ -2194,7 +2195,7 @@ class NeonProxy(PgProtocol):
                     *["--rate-limiter-timeout", "1s"],
                     *["--aimd-min-limit", "0"],
                     *["--aimd-increase-by", "1"],
-                    *["--wake-compute-cache", "size=0"], # Disable cache to test rate limiter.
+                    *["--wake-compute-cache", "size=0"],  # Disable cache to test rate limiter.
                 ]
             return args
 

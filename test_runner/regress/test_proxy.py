@@ -11,6 +11,7 @@ from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
 
+
 @pytest.mark.asyncio
 async def test_http_pool_begin_1(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
@@ -23,6 +24,7 @@ async def test_http_pool_begin_1(static_proxy: NeonProxy):
             password="http",
             expected_code=200,
         )
+
     query()
     loop = asyncio.get_running_loop()
     tasks = [loop.run_in_executor(None, query) for _ in range(10)]
@@ -31,6 +33,7 @@ async def test_http_pool_begin_1(static_proxy: NeonProxy):
     # Get the results
     results = [task.result() for task in completed]
     print(results)
+
 
 def test_proxy_select_1(static_proxy: NeonProxy):
     """

@@ -19,6 +19,7 @@ def waiting_handler(status_code: int) -> Response:
     time.sleep(2)
     return Response(status=status_code)
 
+
 @pytest.fixture(scope="function")
 def proxy_with_rate_limit(
     port_distributor: PortDistributor,
@@ -64,7 +65,6 @@ async def test_proxy_rate_limit(
     httpserver.expect_ordered_request(uri, method="GET").respond_with_handler(
         lambda _: waiting_handler(500)
     )
-
 
     psql = PSQL(host=proxy_with_rate_limit.host, port=proxy_with_rate_limit.proxy_port)
     f = await psql.run("select 42;")
