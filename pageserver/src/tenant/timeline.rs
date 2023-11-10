@@ -3497,7 +3497,7 @@ impl Timeline {
             }
 
             // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
-            let mut layer_paths: Vec<Utf8PathBuf> = new_layers
+            let layer_paths: Vec<Utf8PathBuf> = new_layers
                 .iter()
                 .map(|l| l.local_path().to_owned())
                 .collect();
@@ -3511,7 +3511,6 @@ impl Timeline {
             par_fsync::par_fsync(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
                 .context("fsync of timeline dir")?;
 
-            layer_paths.pop().unwrap();
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
