@@ -26,6 +26,7 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
+    pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
@@ -397,9 +398,16 @@ impl Timeline {
             if size.is_err() {
                 // ignore, see above comment
             } else {
-                warn!(
-                    "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
-                );
+                match e {
+                    CollectKeySpaceError::Cancelled => {
+                        // Shutting down, ignore
+                    }
+                    err => {
+                        warn!(
+                            "failed to collect keyspace but succeeded in calculating logical size: {err:#}"
+                        );
+                    }
+                }
             }
         }
     }
