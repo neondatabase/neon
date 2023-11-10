@@ -1437,6 +1437,7 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
+        // reminder: this will be pageserver_layer_gcs_count_total with "_total" suffix
         let gcs = metrics::register_int_counter_vec!(
             "pageserver_layer_gcs_count",
             "Garbage collections started and completed in the Layer implementation",
