@@ -1174,23 +1174,16 @@ impl RemoteTimelineClient {
                 break;
             }
 
-            match next_op {
-                UploadOp::Shutdown(maybe_tx) => {
-                    if let Some(tx) = maybe_tx.take() {
-                        if tx.send(()).is_err() {
-                            tracing::error!(
+            if let UploadOp::Shutdown(maybe_tx) = next_op {
+                if let Some(tx) = maybe_tx.take() {
+                    if tx.send(()).is_err() {
+                        tracing::error!(
                                 "RemoteTimelineClient::shutdown has been cancelled; this should never happen."
-                            );
-                        };
-                    }
-                    // leave the op in the queue but do not start more tasks; it will be dropped when
-                    // the stop is called.
-                    break;
+                        );
+                    };
                 }
-                _ => {}
-            }
-
-            if matches!(next_op, UploadOp::Shutdown(_)) {
+                // leave the op in the queue but do not start more tasks; it will be dropped when
+                // the stop is called.
                 break;
             }
 
