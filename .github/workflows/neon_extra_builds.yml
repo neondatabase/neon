@@ -21,7 +21,10 @@ env:
 
 jobs:
   check-macos-build:
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 90
     runs-on: macos-latest
 
@@ -292,7 +295,10 @@ jobs:
         run: cargo deny check
 
   gather-rust-build-stats:
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats')
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      github.ref_name == 'main'
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
