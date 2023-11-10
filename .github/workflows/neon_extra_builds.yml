@@ -23,7 +23,7 @@ jobs:
   check-macos-build:
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 90
     runs-on: macos-latest
@@ -118,7 +118,7 @@ jobs:
   check-linux-arm-build:
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-arm')  ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 90
     runs-on: [ self-hosted, dev, arm64 ]
@@ -236,7 +236,7 @@ jobs:
   check-codestyle-rust-arm:
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-arm')  ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 90
     runs-on: [ self-hosted, dev, arm64 ]
@@ -297,7 +297,7 @@ jobs:
   gather-rust-build-stats:
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
-      contains(github.event.pull_request.labels.*.name, 'run-extra-buils-*') ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     runs-on: [ self-hosted, gen3, large ]
     container:
