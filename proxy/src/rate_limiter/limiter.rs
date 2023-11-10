@@ -209,7 +209,9 @@ impl Limiter {
             token.forget();
             total.saturating_sub(1)
         } else {
-            self.semaphore.add_permits(new_limit.saturating_sub(total));
+            if !self.config.disable {
+                self.semaphore.add_permits(new_limit.saturating_sub(total));
+            }
             new_limit
         };
         crate::proxy::RATE_LIMITER_LIMIT
