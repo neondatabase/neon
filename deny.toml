@@ -96,15 +96,6 @@ name = "async-global-executor"
 name = "async-executor"
 
 [[bans.deny]]
-# please use tokio channels or flume for mpmc channel
-# please use tokio-stream if you really must get channels wrapped as streams
-name = "async-channel"
-
-[[bans.deny]]
-# use tokio locking primitives
-name = "async-lock"
-
-[[bans.deny]]
 name = "smol"
 
 # This section is considered when running `cargo deny check sources`.
