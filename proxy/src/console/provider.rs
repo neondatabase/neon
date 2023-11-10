@@ -266,7 +266,6 @@ pub struct ApiLocks {
     unregistered: prometheus::IntCounter,
     reclamation_lag: prometheus::Histogram,
     lock_acquire_lag: prometheus::Histogram,
-    control_plane_acquire_lag: prometheus::Histogram,
 }
 
 impl ApiLocks {
@@ -313,16 +312,6 @@ impl ApiLocks {
             .buckets(prometheus::exponential_buckets(1e-4, 2.0, 16)?),
         )?;
         prometheus::register(Box::new(lock_acquire_lag.clone()))?;
-        let control_plane_acquire_lag = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                "semaphore_control_plane_token_acquire_seconds",
-                "Time it takes to acquire the semaphore to connect to the control plane",
-            )
-            .namespace(name)
-            // 0.2ms -> 12s, default timeout is 15s
-            .buckets(prometheus::exponential_buckets(2e-4, 2.0, 16)?),
-        )?;
-        prometheus::register(Box::new(control_plane_acquire_lag.clone()))?;
 
         Ok(Self {
             name,
@@ -333,7 +322,6 @@ impl ApiLocks {
             registered,
             unregistered,
             reclamation_lag,
-            control_plane_acquire_lag,
         })
     }
 
@@ -367,11 +355,6 @@ impl ApiLocks {
         Ok(WakeComputePermit {
             permit: Some(permit??),
         })
-    }
-
-    pub fn observe_control_plane_acquire(&self, duration: Duration) {
-        self.control_plane_acquire_lag
-            .observe(duration.as_secs_f64())
     }
 
     pub async fn garbage_collect_worker(&self, epoch: std::time::Duration) {

@@ -2,11 +2,11 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
-use super::limiter::Outcome;
+use super::{limiter::Outcome, Aimd};
 
 /// An algorithm for controlling a concurrency limit.
 #[async_trait]
-pub trait LimitAlgorithm {
+pub trait LimitAlgorithm: Send + Sync + 'static {
     /// Update the concurrency limit in response to a new job completion.
     async fn update(&mut self, old_limit: usize, sample: Sample) -> usize;
 }
@@ -22,9 +22,8 @@ pub struct Sample {
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum RateLimitAlgorithm {
-    #[default]
-    None,
     Fixed,
+    #[default]
     Aimd,
 }
 
@@ -39,6 +38,7 @@ impl LimitAlgorithm for Fixed {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RateLimiterConfig {
+    pub disable: bool,
     pub algorithm: RateLimitAlgorithm,
     pub timeout: Duration,
     pub initial_limit: usize,
@@ -47,4 +47,13 @@ pub struct RateLimiterConfig {
     pub aimd_increase_by: usize,
     pub aimd_decrease_factor: f32,
     pub aimd_min_utilisation_threshold: f32,
+}
+
+impl RateLimiterConfig {
+    pub fn create_rate_limit_algorithm(self) -> Box<dyn LimitAlgorithm> {
+        match self.algorithm {
+            RateLimitAlgorithm::Fixed => Box::new(Fixed),
+            RateLimitAlgorithm::Aimd => Box::new(Aimd::new(self)),
+        }
+    }
 }

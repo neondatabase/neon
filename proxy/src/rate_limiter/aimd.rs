@@ -25,13 +25,7 @@ pub struct Aimd {
 }
 
 impl Aimd {
-    const DEFAULT_DECREASE_FACTOR: f32 = 0.9;
-    const DEFAULT_INCREASE: usize = 1;
-    const DEFAULT_MIN_LIMIT: usize = 1;
-    const DEFAULT_MAX_LIMIT: usize = 1000;
-    const DEFAULT_INCREASE_MIN_UTILISATION: f32 = 0.8;
-
-    pub fn new(config: &RateLimiterConfig) -> Self {
+    pub fn new(config: RateLimiterConfig) -> Self {
         Self {
             min_limit: config.aimd_min_limit,
             max_limit: config.aimd_max_limit,
@@ -75,18 +69,6 @@ impl Aimd {
     }
 }
 
-impl Default for Aimd {
-    fn default() -> Self {
-        Self {
-            min_limit: Self::DEFAULT_MIN_LIMIT,
-            max_limit: Self::DEFAULT_MAX_LIMIT,
-            decrease_factor: Self::DEFAULT_DECREASE_FACTOR,
-            increase_by: Self::DEFAULT_INCREASE,
-            min_utilisation_threshold: Self::DEFAULT_INCREASE_MIN_UTILISATION,
-        }
-    }
-}
-
 #[async_trait]
 impl LimitAlgorithm for Aimd {
     async fn update(&mut self, old_limit: usize, sample: Sample) -> usize {
@@ -123,16 +105,25 @@ mod tests {
 
     use super::*;
 
-    use crate::rate_limiter::Limiter;
+    use crate::rate_limiter::{Limiter, RateLimitAlgorithm};
 
     #[tokio::test]
     async fn should_decrease_limit_on_overload() {
-        let aimd = Aimd::default().decrease_factor(0.5).increase_by(1);
+        let config = RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Aimd,
+            timeout: Duration::from_secs(1),
+            initial_limit: 10,
+            aimd_min_limit: 1,
+            aimd_max_limit: 1000,
+            aimd_increase_by: 1,
+            aimd_decrease_factor: 0.5,
+            aimd_min_utilisation_threshold: 0.8,
+            disable: false,
+        };
 
         let release_notifier = Arc::new(Notify::new());
 
-        let limiter = Limiter::new(aimd, Duration::from_secs(1), 10, None)
-            .with_release_notifier(release_notifier.clone());
+        let limiter = Limiter::new(config).with_release_notifier(release_notifier.clone());
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, Some(Outcome::Overload)).await;
@@ -142,12 +133,19 @@ mod tests {
 
     #[tokio::test]
     async fn should_increase_limit_on_success_when_using_gt_util_threshold() {
-        let aimd = Aimd::default()
-            .decrease_factor(0.5)
-            .increase_by(1)
-            .with_min_utilisation_threshold(0.5);
+        let config = RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Aimd,
+            timeout: Duration::from_secs(1),
+            initial_limit: 4,
+            aimd_min_limit: 1,
+            aimd_max_limit: 1000,
+            aimd_increase_by: 1,
+            aimd_decrease_factor: 0.5,
+            aimd_min_utilisation_threshold: 0.5,
+            disable: false,
+        };
 
-        let limiter = Limiter::new(aimd, Duration::from_secs(1), 4, None);
+        let limiter = Limiter::new(config);
 
         let token = limiter.try_acquire().unwrap();
         let _token = limiter.try_acquire().unwrap();
@@ -159,12 +157,19 @@ mod tests {
 
     #[tokio::test]
     async fn should_not_change_limit_on_success_when_using_lt_util_threshold() {
-        let aimd = Aimd::default()
-            .decrease_factor(0.5)
-            .increase_by(1)
-            .with_min_utilisation_threshold(0.5);
+        let config = RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Aimd,
+            timeout: Duration::from_secs(1),
+            initial_limit: 4,
+            aimd_min_limit: 1,
+            aimd_max_limit: 1000,
+            aimd_increase_by: 1,
+            aimd_decrease_factor: 0.5,
+            aimd_min_utilisation_threshold: 0.5,
+            disable: false,
+        };
 
-        let limiter = Limiter::new(aimd, Duration::from_secs(1), 4, None);
+        let limiter = Limiter::new(config);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -178,9 +183,19 @@ mod tests {
 
     #[tokio::test]
     async fn should_not_change_limit_when_no_outcome() {
-        let aimd = Aimd::default().decrease_factor(0.5).increase_by(1);
+        let config = RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Aimd,
+            timeout: Duration::from_secs(1),
+            initial_limit: 10,
+            aimd_min_limit: 1,
+            aimd_max_limit: 1000,
+            aimd_increase_by: 1,
+            aimd_decrease_factor: 0.5,
+            aimd_min_utilisation_threshold: 0.5,
+            disable: false,
+        };
 
-        let limiter = Limiter::new(aimd, Duration::from_secs(1), 10, None);
+        let limiter = Limiter::new(config);
 
         let token = limiter.try_acquire().unwrap();
         limiter.release(token, None).await;

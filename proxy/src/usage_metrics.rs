@@ -279,7 +279,7 @@ mod tests {
         tokio::spawn(server);
 
         let metrics = Metrics::default();
-        let client = http::new_client(&RateLimiterConfig::default(), None);
+        let client = http::new_client(RateLimiterConfig::default());
         let endpoint = Url::parse(&format!("http://{addr}")).unwrap();
         let now = Utc::now();
 

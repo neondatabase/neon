@@ -10,9 +10,10 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Instant};
 use tracing::info;
 
-use crate::console::errors::ApiError;
-
-use super::limit_algorithm::{LimitAlgorithm, Sample};
+use super::{
+    limit_algorithm::{LimitAlgorithm, Sample},
+    RateLimiterConfig,
+};
 
 /// Limits the number of concurrent jobs.
 ///
@@ -21,18 +22,16 @@ use super::limit_algorithm::{LimitAlgorithm, Sample};
 ///
 /// The limit will be automatically adjusted based on observed latency (delay) and/or failures
 /// caused by overload (loss).
-pub struct Limiter<T> {
-    limit_algo: AsyncMutex<T>,
+pub struct Limiter {
+    limit_algo: AsyncMutex<Box<dyn LimitAlgorithm>>,
     semaphore: std::sync::Arc<Semaphore>,
-    timeout: Duration,
+    config: RateLimiterConfig,
 
     // ONLY WRITE WHEN LIMIT_ALGO IS LOCKED
     limits: AtomicUsize,
 
     // ONLY USE ATOMIC ADD/SUB
     in_flight: Arc<AtomicUsize>,
-
-    api_locks: Option<&'static crate::console::locks::ApiLocks>,
 
     #[cfg(test)]
     notifier: Option<std::sync::Arc<tokio::sync::Notify>>,
@@ -100,29 +99,33 @@ impl Outcome {
     }
 }
 
-impl<T> Limiter<T>
-where
-    T: LimitAlgorithm,
-{
+impl Limiter {
     /// Create a limiter with a given limit control algorithm.
-    pub fn new(
-        limit_algorithm: T,
-        timeout: Duration,
-        initial_limit: usize,
-        api_locks: Option<&'static crate::console::locks::ApiLocks>,
-    ) -> Self {
-        assert!(initial_limit > 0);
+    pub fn new(config: RateLimiterConfig) -> Self {
+        assert!(config.initial_limit > 0);
         Self {
-            limit_algo: AsyncMutex::new(limit_algorithm),
-            semaphore: Arc::new(Semaphore::new(initial_limit)),
-            timeout,
-            limits: AtomicUsize::new(initial_limit),
+            limit_algo: AsyncMutex::new(config.create_rate_limit_algorithm()),
+            semaphore: Arc::new(Semaphore::new(config.initial_limit)),
+            config,
+            limits: AtomicUsize::new(config.initial_limit),
             in_flight: Arc::new(AtomicUsize::new(0)),
-            api_locks,
             #[cfg(test)]
             notifier: None,
         }
     }
+    // pub fn new(limit_algorithm: T, timeout: Duration, initial_limit: usize) -> Self {
+    //     assert!(initial_limit > 0);
+
+    //     Self {
+    //         limit_algo: AsyncMutex::new(limit_algorithm),
+    //         semaphore: Arc::new(Semaphore::new(initial_limit)),
+    //         timeout,
+    //         limits: AtomicUsize::new(initial_limit),
+    //         in_flight: Arc::new(AtomicUsize::new(0)),
+    //         #[cfg(test)]
+    //         notifier: None,
+    //     }
+    // }
 
     /// In some cases [Token]s are acquired asynchronously when updating the limit.
     #[cfg(test)]
@@ -135,11 +138,15 @@ where
     ///
     /// Returns `None` if there are none available.
     pub fn try_acquire(&self) -> Option<Token> {
-        let result = self
-            .semaphore
-            .try_acquire()
-            .map(|permit| Token::new(permit, self.in_flight.clone()))
-            .ok();
+        let result = if self.config.disable {
+            // If the rate limiter is disabled, we can always acquire a token.
+            Some(Token::new(None, self.in_flight.clone()))
+        } else {
+            self.semaphore
+                .try_acquire()
+                .map(|permit| Token::new(Some(permit), self.in_flight.clone()))
+                .ok()
+        };
         if result.is_some() {
             self.in_flight.fetch_add(1, Ordering::AcqRel);
         }
@@ -151,11 +158,16 @@ where
     /// Returns `None` if there are none available after `duration`.
     pub async fn acquire_timeout(&self, duration: Duration) -> Option<Token<'_>> {
         info!("acquiring token: {:?}", self.semaphore.available_permits());
-        let result = match timeout(duration, self.semaphore.acquire()).await {
-            Ok(maybe_permit) => maybe_permit
-                .map(|permit| Token::new(permit, self.in_flight.clone()))
-                .ok(),
-            Err(_) => None,
+        let result = if self.config.disable {
+            // If the rate limiter is disabled, we can always acquire a token.
+            Some(Token::new(None, self.in_flight.clone()))
+        } else {
+            match timeout(duration, self.semaphore.acquire()).await {
+                Ok(maybe_permit) => maybe_permit
+                    .map(|permit| Token::new(Some(permit), self.in_flight.clone()))
+                    .ok(),
+                Err(_) => None,
+            }
         };
         if result.is_some() {
             self.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -172,8 +184,12 @@ where
     pub async fn release(&self, mut token: Token<'_>, outcome: Option<Outcome>) {
         tracing::info!("outcome is {:?}", outcome);
         let in_flight = self.in_flight.load(Ordering::Acquire);
-        let available = self.semaphore.available_permits();
         let old_limit = self.limits.load(Ordering::Acquire);
+        let available = if self.config.disable {
+            0 // This is not used in the algorithm and can be anything. If the config disable it makes sense to set it to 0.
+        } else {
+            self.semaphore.available_permits()
+        };
         let total = in_flight + available;
 
         let mut algo = self.limit_algo.lock().await;
@@ -189,11 +205,19 @@ where
             old_limit
         };
         tracing::info!("new limit is {}", new_limit);
-        if new_limit < total {
+        let actual_limit = if new_limit < total {
             token.forget();
+            total.saturating_sub(1)
         } else {
-            self.semaphore.add_permits(new_limit - total);
-        }
+            self.semaphore.add_permits(new_limit.saturating_sub(total));
+            new_limit
+        };
+        crate::proxy::RATE_LIMITER_LIMIT
+            .with_label_values(&["expected"])
+            .set(new_limit as i64);
+        crate::proxy::RATE_LIMITER_LIMIT
+            .with_label_values(&["actual"])
+            .set(actual_limit as i64);
         self.limits.store(new_limit, Ordering::Release);
         #[cfg(test)]
         if let Some(n) = &self.notifier {
@@ -204,19 +228,19 @@ where
     /// The current state of the limiter.
     pub fn state(&self) -> LimiterState {
         let limit = self.limits.load(Ordering::Relaxed);
-        let available = self.semaphore.available_permits();
+        let in_flight = self.in_flight.load(Ordering::Relaxed);
         LimiterState {
             limit,
-            available,
-            in_flight: limit.saturating_sub(available),
+            available: limit.saturating_sub(in_flight),
+            in_flight,
         }
     }
 }
 
 impl<'t> Token<'t> {
-    fn new(permit: SemaphorePermit<'t>, in_flight: Arc<AtomicUsize>) -> Self {
+    fn new(permit: Option<SemaphorePermit<'t>>, in_flight: Arc<AtomicUsize>) -> Self {
         Self {
-            permit: Some(permit),
+            permit,
             start: Instant::now(),
             in_flight,
         }
@@ -258,7 +282,7 @@ impl LimiterState {
 }
 
 #[async_trait::async_trait]
-impl<T: LimitAlgorithm + Send + Sync + 'static> reqwest_middleware::Middleware for Limiter<T> {
+impl reqwest_middleware::Middleware for Limiter {
     async fn handle(
         &self,
         req: reqwest::Request,
@@ -266,20 +290,21 @@ impl<T: LimitAlgorithm + Send + Sync + 'static> reqwest_middleware::Middleware f
         next: reqwest_middleware::Next<'_>,
     ) -> reqwest_middleware::Result<reqwest::Response> {
         let start = Instant::now();
-        let token = self.acquire_timeout(self.timeout).await.ok_or_else(|| {
-            reqwest_middleware::Error::Middleware(
-                // TODO: Should we map it into user facing errors?
-                ApiError::Console {
-                    status: crate::http::StatusCode::TOO_MANY_REQUESTS,
-                    text: "Too many requests".into(),
-                }
-                .into(),
-            )
-        })?;
+        let token = self
+            .acquire_timeout(self.config.timeout)
+            .await
+            .ok_or_else(|| {
+                reqwest_middleware::Error::Middleware(
+                    // TODO: Should we map it into user facing errors?
+                    crate::console::errors::ApiError::Console {
+                        status: crate::http::StatusCode::TOO_MANY_REQUESTS,
+                        text: "Too many requests".into(),
+                    }
+                    .into(),
+                )
+            })?;
         info!(duration = ?start.elapsed(), "waiting for token to connect to the control plane");
-        if let Some(locks) = self.api_locks {
-            locks.observe_control_plane_acquire(start.elapsed());
-        }
+        crate::proxy::RATE_LIMITER_ACQUIRE_LATENCY.observe(start.elapsed().as_secs_f64());
         match next.run(req, extensions).await {
             Ok(response) => {
                 self.release(token, Some(Outcome::from_reqwest_response(&response)))
@@ -302,11 +327,18 @@ mod tests {
     use futures::{task::noop_waker_ref, Future};
 
     use super::{Limiter, Outcome};
-    use crate::rate_limiter::limit_algorithm::Fixed;
+    use crate::rate_limiter::RateLimitAlgorithm;
 
     #[tokio::test]
     async fn it_works() {
-        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 10, None);
+        let config = super::RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Fixed,
+            timeout: Duration::from_secs(1),
+            initial_limit: 10,
+            disable: false,
+            ..Default::default()
+        };
+        let limiter = Limiter::new(config);
 
         let token = limiter.try_acquire().unwrap();
 
@@ -317,7 +349,14 @@ mod tests {
 
     #[tokio::test]
     async fn is_fair() {
-        let limiter = Limiter::new(Fixed, Duration::from_secs(1), 1, None);
+        let config = super::RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Fixed,
+            timeout: Duration::from_secs(1),
+            initial_limit: 1,
+            disable: false,
+            ..Default::default()
+        };
+        let limiter = Limiter::new(config);
 
         // === TOKEN 1 ===
         let token1 = limiter.try_acquire().unwrap();
@@ -375,5 +414,26 @@ mod tests {
         // === TOKEN 4 ===
         let token4 = limiter.try_acquire().unwrap();
         limiter.release(token4, Some(Outcome::Success)).await;
+    }
+
+    #[tokio::test]
+    async fn disable() {
+        let config = super::RateLimiterConfig {
+            algorithm: RateLimitAlgorithm::Fixed,
+            timeout: Duration::from_secs(1),
+            initial_limit: 1,
+            disable: true,
+            ..Default::default()
+        };
+        let limiter = Limiter::new(config);
+
+        // === TOKEN 1 ===
+        let token1 = limiter.try_acquire().unwrap();
+        let token2 = limiter.try_acquire().unwrap();
+        let state = limiter.state();
+        assert_eq!(state.limit(), 1);
+        assert_eq!(state.in_flight(), 2); // For disabled limiter, it's expected.
+        limiter.release(token1, None).await;
+        limiter.release(token2, None).await;
     }
 }

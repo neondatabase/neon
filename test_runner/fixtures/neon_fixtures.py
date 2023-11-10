@@ -2190,6 +2190,7 @@ class NeonProxy(PgProtocol):
             ]
             if self.fixed_rate_limit is not None:
                 args += [
+                    *["--disable-dynamic-rate-limiter", "false"],
                     *["--rate-limit-algorithm", "aimd"],
                     *["--initial-limit", str(1)],
                     *["--rate-limiter-timeout", "1s"],
