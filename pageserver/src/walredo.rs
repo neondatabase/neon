@@ -43,7 +43,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PageServerConf;
 use crate::metrics::{
-    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
+    WalRedoKillCause, WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTERS,
+    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
@@ -662,10 +663,10 @@ impl WalRedoProcess {
             .close_fds()
             .spawn_no_leak_child(tenant_id)
             .context("spawn process")?;
-
+        WAL_REDO_PROCESS_COUNTERS.started.inc();
         let mut child = scopeguard::guard(child, |child| {
             error!("killing wal-redo-postgres process due to a problem during launch");
-            child.kill_and_wait();
+            child.kill_and_wait(WalRedoKillCause::Startup);
         });
 
         let stdin = child.stdin.take().unwrap();
@@ -996,7 +997,7 @@ impl Drop for WalRedoProcess {
         self.child
             .take()
             .expect("we only do this once")
-            .kill_and_wait();
+            .kill_and_wait(WalRedoKillCause::WalRedoProcessDrop);
         self.stderr_logger_cancel.cancel();
         // no way to wait for stderr_logger_task from Drop because that is async only
     }
@@ -1032,16 +1033,19 @@ impl NoLeakChild {
         })
     }
 
-    fn kill_and_wait(mut self) {
+    fn kill_and_wait(mut self, cause: WalRedoKillCause) {
         let child = match self.child.take() {
             Some(child) => child,
             None => return,
         };
-        Self::kill_and_wait_impl(child);
+        Self::kill_and_wait_impl(child, cause);
     }
 
-    #[instrument(skip_all, fields(pid=child.id()))]
-    fn kill_and_wait_impl(mut child: Child) {
+    #[instrument(skip_all, fields(pid=child.id(), ?cause))]
+    fn kill_and_wait_impl(mut child: Child, cause: WalRedoKillCause) {
+        scopeguard::defer! {
+            WAL_REDO_PROCESS_COUNTERS.killed_by_cause[cause].inc();
+        }
         let res = child.kill();
         if let Err(e) = res {
             // This branch is very unlikely because:
@@ -1086,7 +1090,7 @@ impl Drop for NoLeakChild {
                 // This thread here is going to outlive of our dropper.
                 let span = tracing::info_span!("walredo", %tenant_id);
                 let _entered = span.enter();
-                Self::kill_and_wait_impl(child);
+                Self::kill_and_wait_impl(child, WalRedoKillCause::NoLeakChildDrop);
             })
             .await
         });

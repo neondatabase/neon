@@ -175,7 +175,7 @@ jobs:
         run: cargo deny check
 
   build-neon:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -187,6 +187,7 @@ jobs:
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
     steps:
       - name: Fix git ownership
