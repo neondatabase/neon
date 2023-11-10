@@ -208,7 +208,7 @@ impl UploadQueue {
             }
             UploadQueue::Initialized(x) => {
                 if !matches!(x.queued_operations.front(), Some(UploadOp::Shutdown(_))) {
-                    return Ok(x);
+                    Ok(x)
                 } else {
                     anyhow::bail!("queue is shutting down")
                 }
