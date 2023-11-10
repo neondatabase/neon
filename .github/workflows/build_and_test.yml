@@ -172,7 +172,7 @@ jobs:
       # https://github.com/EmbarkStudios/cargo-deny
       - name: Check rust licenses/bans/advisories/sources
         if: ${{ !cancelled() }}
-        run: cargo deny check
+        run: cargo deny check --hide-inclusion-graph
 
   build-neon:
     needs: [ check-permissions, tag ]
