@@ -56,29 +56,23 @@ message TenantTimelineId {
 }
 
 message FilterTenantTimelineId {
-    enum Mode {
-        // Invalid mode.
-        INVALID = 0;
+    // If true, only messages related to `tenant_timeline_id` will be emitted.
+    // Otherwise, messages for all timelines will be emitted.
+    bool enabled = 1;
+    TenantTimelineId tenant_timeline_id = 2;
+}
 
-        // Subscribe to all timelines.
-        ALL_TIMELINES = 1;
-
-        // Subscribe to a specific timeline.
-        SPECIFIC_TIMELINE = 2;
-    }
-
-    Mode mode = 1;
-
-    // Valid only if mode == SPECIFIC_TIMELINE.
-    optional TenantTimelineId tenant_timeline_id = 2;
+message TypeSubscription {
+    MessageType type = 1;
 }
 
 message SubscribeByFilterRequest {
-    // Subscription will emit messages only of the specified types.
-    repeated MessageType types = 1;
+    // Subscription will emit messages only of the specified types. You need to specify
+    // at least one type to receive any messages.
+    repeated TypeSubscription types = 1;
 
-    // Subscription will emit messages only for the specified tenant/timeline.
-    FilterTenantTimelineId tenant_timeline_id = 2;
+    // If set and enabled, subscription will emit messages only for the specified tenant/timeline.
+    optional FilterTenantTimelineId tenant_timeline_id = 2;
 }
 
 enum MessageType {

@@ -6,8 +6,8 @@ use clap::Parser;
 
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::{
-    filter_tenant_timeline_id, FilterTenantTimelineId, MessageType, SubscribeByFilterRequest,
-    TenantTimelineId as ProtoTenantTimelineId, TypedMessage,
+    FilterTenantTimelineId, MessageType, SubscribeByFilterRequest,
+    TenantTimelineId as ProtoTenantTimelineId, TypeSubscription, TypedMessage,
 };
 
 use storage_broker::{BrokerClientChannel, DEFAULT_ENDPOINT};
@@ -100,9 +100,11 @@ async fn subscribe(client: Option<BrokerClientChannel>, counter: Arc<AtomicU64>,
     };
 
     let request = SubscribeByFilterRequest {
-        types: vec![MessageType::SafekeeperTimelineInfo.into()],
+        types: vec![TypeSubscription {
+            r#type: MessageType::SafekeeperTimelineInfo.into(),
+        }],
         tenant_timeline_id: Some(FilterTenantTimelineId {
-            mode: filter_tenant_timeline_id::Mode::SpecificTimeline.into(),
+            enabled: true,
             tenant_timeline_id: Some(ttid),
         }),
     };

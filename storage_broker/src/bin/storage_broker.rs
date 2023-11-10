@@ -39,9 +39,8 @@ use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 use storage_broker::proto::{
-    filter_tenant_timeline_id, FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest,
-    SafekeeperDiscoveryResponse, SafekeeperTimelineInfo, SubscribeByFilterRequest,
-    SubscribeSafekeeperInfoRequest, TypedMessage,
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
+    SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
 use storage_broker::{
     parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
@@ -147,34 +146,30 @@ impl Message {
 
     /// Convert internal message to the protobuf struct.
     pub fn as_typed_message(&self) -> TypedMessage {
+        let mut res = TypedMessage {
+            r#type: self.message_type() as i32,
+            ..Default::default()
+        };
         match self {
-            Message::SafekeeperTimelineInfo(msg) => TypedMessage {
-                r#type: MessageType::SafekeeperTimelineInfo as i32,
-                safekeeper_timeline_info: Some(msg.clone()),
-                safekeeper_discovery_request: None,
-                safekeeper_discovery_response: None,
-            },
-            Message::SafekeeperDiscoveryRequest(msg) => TypedMessage {
-                r#type: MessageType::SafekeeperDiscoveryRequest as i32,
-                safekeeper_timeline_info: None,
-                safekeeper_discovery_request: Some(msg.clone()),
-                safekeeper_discovery_response: None,
-            },
-            Message::SafekeeperDiscoveryResponse(msg) => TypedMessage {
-                r#type: MessageType::SafekeeperDiscoveryResponse as i32,
-                safekeeper_timeline_info: None,
-                safekeeper_discovery_request: None,
-                safekeeper_discovery_response: Some(msg.clone()),
-            },
+            Message::SafekeeperTimelineInfo(msg) => {
+                res.safekeeper_timeline_info = Some(msg.clone())
+            }
+            Message::SafekeeperDiscoveryRequest(msg) => {
+                res.safekeeper_discovery_request = Some(msg.clone())
+            }
+            Message::SafekeeperDiscoveryResponse(msg) => {
+                res.safekeeper_discovery_response = Some(msg.clone())
+            }
         }
+        res
     }
 
     /// Get the message type.
-    pub fn message_type(&self) -> &MessageType {
+    pub fn message_type(&self) -> MessageType {
         match self {
-            Message::SafekeeperTimelineInfo(_) => &MessageType::SafekeeperTimelineInfo,
-            Message::SafekeeperDiscoveryRequest(_) => &MessageType::SafekeeperDiscoveryRequest,
-            Message::SafekeeperDiscoveryResponse(_) => &MessageType::SafekeeperDiscoveryResponse,
+            Message::SafekeeperTimelineInfo(_) => MessageType::SafekeeperTimelineInfo,
+            Message::SafekeeperDiscoveryRequest(_) => MessageType::SafekeeperDiscoveryRequest,
+            Message::SafekeeperDiscoveryResponse(_) => MessageType::SafekeeperDiscoveryResponse,
         }
     }
 }
@@ -200,19 +195,15 @@ impl SubscriptionKey {
     pub fn from_proto_filter_tenant_timeline_id(
         f: &FilterTenantTimelineId,
     ) -> Result<Self, Status> {
-        match f.mode() {
-            filter_tenant_timeline_id::Mode::AllTimelines => Ok(SubscriptionKey::All),
-            filter_tenant_timeline_id::Mode::SpecificTimeline => {
-                let ttid = parse_proto_ttid(f.tenant_timeline_id.as_ref().ok_or_else(|| {
-                    Status::new(Code::InvalidArgument, "missing tenant_timeline_id")
-                })?)?;
-                Ok(SubscriptionKey::Timeline(ttid))
-            }
-            filter_tenant_timeline_id::Mode::Invalid => Err(Status::new(
-                Code::InvalidArgument,
-                format!("invalid filter mode: {:?}", f.mode),
-            )),
+        if !f.enabled {
+            return Ok(SubscriptionKey::All);
         }
+
+        let ttid =
+            parse_proto_ttid(f.tenant_timeline_id.as_ref().ok_or_else(|| {
+                Status::new(Code::InvalidArgument, "missing tenant_timeline_id")
+            })?)?;
+        Ok(SubscriptionKey::Timeline(ttid))
     }
 }
 
@@ -543,7 +534,9 @@ impl BrokerService for Broker {
 
         let sub_key = SubscriptionKey::from_proto_filter_tenant_timeline_id(ttid_filter)?;
         let types_set = proto_filter
-            .types()
+            .types
+            .iter()
+            .map(|t| t.r#type)
             .collect::<std::collections::HashSet<_>>();
 
         let mut subscriber = self.registry.register_subscriber(sub_key, remote_addr);
@@ -555,7 +548,8 @@ impl BrokerService for Broker {
             loop {
                 match subscriber.sub_rx.recv().await {
                     Ok(msg) => {
-                        if types_set.contains(msg.message_type()) {
+                        let msg_type = msg.message_type() as i32;
+                        if types_set.contains(&msg_type) {
                             yield msg.as_typed_message();
                         }
                     },
