@@ -2,7 +2,8 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
-use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_api::key::Key;
+use pageserver_api::shard::{ShardIdentity, ShardNumber, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -130,6 +131,18 @@ pub(crate) enum TenantsMapRemoveResult {
     InProgress(utils::completion::Barrier),
 }
 
+/// When resolving a TenantId to a shard, we may be looking for the 0th
+/// shard, or we might be looking for whichever shard holds a particular page.
+pub(crate) enum ShardSelector {
+    /// Only return the 0th shard, if it is present.  If a non-0th shard is present,
+    /// ignore it.
+    Zero,
+    /// Pick the first shard we find for the TenantId
+    First,
+    /// Pick the shard that holds this key
+    Page(Key),
+}
+
 impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
@@ -140,6 +153,45 @@ impl TenantsMap {
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 // TODO(sharding): callers of get() should be shard-aware.
                 exactly_one_or_none(m, tenant_id).and_then(|(_, slot)| slot.get_attached())
+            }
+        }
+    }
+
+    /// A page service client sends a TenantId, and to look up the correct Tenant we must
+    /// resolve this to a fully qualified TenantShardId.
+    fn resolve_shard(&self, tenant_id: &TenantId, mode: ShardSelector) -> Option<TenantShardId> {
+        let mut want_shard = None;
+        match self {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
+                for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
+                    match mode {
+                        ShardSelector::First => return Some(*slot.0),
+                        ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
+                            return Some(*slot.0)
+                        }
+                        ShardSelector::Page(key) => {
+                            if let Some(tenant) = slot.1.get_attached() {
+                                // First slot we see for this tenant, calculate the expected shard number
+                                // for the key: we will use this for checking if this and subsequent
+                                // slots contain the key, rather than recalculating the hash each time.
+                                if want_shard.is_none() {
+                                    want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                                }
+
+                                if Some(tenant.shard_identity.number) == want_shard {
+                                    return Some(*slot.0);
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+
+                // Fall through: we didn't find an acceptable shard
+                None
             }
         }
     }
@@ -866,6 +918,7 @@ impl TenantManager {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(crate) async fn upsert_location(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1108,6 +1161,7 @@ pub(crate) enum GetActiveTenantError {
 /// then wait for up to `timeout` (minus however long we waited for the slot).
 pub(crate) async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
+    resolve_mode: ShardSelector,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
@@ -1116,15 +1170,17 @@ pub(crate) async fn get_active_tenant_with_timeout(
         Tenant(Arc<Tenant>),
     }
 
-    // TODO(sharding): make page service interface sharding-aware (page service should apply ShardIdentity to the key
-    // to decide which shard services the request)
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
     let wait_start = Instant::now();
     let deadline = wait_start + timeout;
 
-    let wait_for = {
+    let (wait_for, tenant_shard_id) = {
         let locked = TENANTS.read().unwrap();
+
+        // Resolve TenantId to TenantShardId
+        let tenant_shard_id = locked.resolve_shard(&tenant_id, resolve_mode).ok_or(
+            GetActiveTenantError::NotFound(GetTenantError::NotFound(tenant_id)),
+        )?;
+
         let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
             .map_err(GetTenantError::MapState)?;
         match peek_slot {
@@ -1134,7 +1190,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
                         // Fast path: we don't need to do any async waiting.
                         return Ok(tenant.clone());
                     }
-                    _ => WaitFor::Tenant(tenant.clone()),
+                    _ => (WaitFor::Tenant(tenant.clone()), tenant_shard_id),
                 }
             }
             Some(TenantSlot::Secondary) => {
@@ -1142,7 +1198,9 @@ pub(crate) async fn get_active_tenant_with_timeout(
                     tenant_id,
                 )))
             }
-            Some(TenantSlot::InProgress(barrier)) => WaitFor::Barrier(barrier.clone()),
+            Some(TenantSlot::InProgress(barrier)) => {
+                (WaitFor::Barrier(barrier.clone()), tenant_shard_id)
+            }
             None => {
                 return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
                     tenant_id,

@@ -1570,7 +1570,7 @@ fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
     }
 }
 
-fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
+pub(crate) fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x00,
         field2: rel.spcnode,
