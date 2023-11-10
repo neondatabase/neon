@@ -36,7 +36,7 @@ impl LimitAlgorithm for Fixed {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct RateLimiterConfig {
     pub disable: bool,
     pub algorithm: RateLimitAlgorithm,
@@ -54,6 +54,22 @@ impl RateLimiterConfig {
         match self.algorithm {
             RateLimitAlgorithm::Fixed => Box::new(Fixed),
             RateLimitAlgorithm::Aimd => Box::new(Aimd::new(self)),
+        }
+    }
+}
+
+impl Default for RateLimiterConfig {
+    fn default() -> Self {
+        Self {
+            disable: false,
+            algorithm: RateLimitAlgorithm::Aimd,
+            timeout: Duration::from_secs(1),
+            initial_limit: 100,
+            aimd_min_limit: 1,
+            aimd_max_limit: 1500,
+            aimd_increase_by: 10,
+            aimd_decrease_factor: 0.9,
+            aimd_min_utilisation_threshold: 0.8,
         }
     }
 }
