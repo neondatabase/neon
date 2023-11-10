@@ -11,6 +11,7 @@ use std::io::{BufReader, Write};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::time::Duration;
 use std::{io, result};
 
 use anyhow::{bail, Context};
@@ -531,17 +532,33 @@ impl PageServerNode {
         &self,
         tenant_id: TenantId,
         config: LocationConfig,
+        flush_ms: Option<Duration>,
     ) -> anyhow::Result<()> {
         let req_body = TenantLocationConfigRequest { tenant_id, config };
 
+        let path = format!(
+            "{}/tenant/{}/location_config",
+            self.http_base_url, tenant_id
+        );
+        let path = if let Some(flush_ms) = flush_ms {
+            format!("{}?flush_ms={}", path, flush_ms.as_millis())
+        } else {
+            path
+        };
+
+        self.http_request(Method::PUT, path)?
+            .json(&req_body)
+            .send()?
+            .error_from_body()?;
+
+        Ok(())
+    }
+
+    pub fn secondary_download(&self, tenant_id: TenantId) -> anyhow::Result<()> {
         self.http_request(
-            Method::PUT,
-            format!(
-                "{}/tenant/{}/location_config",
-                self.http_base_url, tenant_id
-            ),
+            Method::POST,
+            format!("{}/secondary/{}/download", self.http_base_url, tenant_id),
         )?
-        .json(&req_body)
         .send()?
         .error_from_body()?;
 

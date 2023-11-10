@@ -41,9 +41,9 @@ fn await_lsn(
     loop {
         let latest = match get_lsns(tenant_id, pageserver) {
             Ok(l) => l,
-            Err(e) => {
+            Err(_e) => {
                 println!(
-                    "🕑 Can't get LSNs on pageserver {} yet, waiting ({e})",
+                    "🕑 Waiting for pageserver {} to activate...",
                     pageserver.conf.id
                 );
                 std::thread::sleep(Duration::from_millis(500));
@@ -90,10 +90,10 @@ pub fn migrate_tenant(
     tenant_id: TenantId,
     dest_ps: PageServerNode,
 ) -> anyhow::Result<()> {
-    // Get a new generation
+    println!("🤔 Checking existing status...");
     let attachment_service = AttachmentService::from_env(env);
-
     let previous = attachment_service.inspect(tenant_id)?;
+
     let mut baseline_lsns = None;
     if let Some((generation, origin_ps_id)) = &previous {
         let origin_ps = PageServerNode::from_env(env, env.get_pageserver_conf(*origin_ps_id)?);
@@ -107,7 +107,7 @@ pub fn migrate_tenant(
                 secondary_conf: None,
                 tenant_conf: TenantConfig::default(),
             };
-            dest_ps.location_config(tenant_id, dest_conf)?;
+            dest_ps.location_config(tenant_id, dest_conf, None)?;
             println!("✅ Migration complete");
             return Ok(());
         }
@@ -120,11 +120,23 @@ pub fn migrate_tenant(
             secondary_conf: None,
             tenant_conf: TenantConfig::default(),
         };
-        origin_ps.location_config(tenant_id, stale_conf)?;
+        origin_ps.location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps)?);
     }
 
+    println!(
+        "🔁 Downloading latest layers to destination pageserver {}",
+        dest_ps.conf.id
+    );
+    match dest_ps.secondary_download(tenant_id) {
+        Ok(()) => {}
+        Err(_) => {
+            println!("  (skipping, destination wasn't in secondary mode)")
+        }
+    }
+
+    // Get a new generation
     let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
     let dest_conf = LocationConfig {
         mode: LocationConfigMode::AttachedMulti,
@@ -134,7 +146,7 @@ pub fn migrate_tenant(
     };
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
-    dest_ps.location_config(tenant_id, dest_conf)?;
+    dest_ps.location_config(tenant_id, dest_conf, None)?;
 
     if let Some(baseline) = baseline_lsns {
         println!("🕑 Waiting for LSN to catch up...");
@@ -181,7 +193,7 @@ pub fn migrate_tenant(
             "💤 Switching to secondary mode on pageserver {}",
             other_ps.conf.id
         );
-        other_ps.location_config(tenant_id, secondary_conf)?;
+        other_ps.location_config(tenant_id, secondary_conf, None)?;
     }
 
     println!(
@@ -194,7 +206,7 @@ pub fn migrate_tenant(
         secondary_conf: None,
         tenant_conf: TenantConfig::default(),
     };
-    dest_ps.location_config(tenant_id, dest_conf)?;
+    dest_ps.location_config(tenant_id, dest_conf, None)?;
 
     println!("✅ Migration complete");
 
