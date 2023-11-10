@@ -2,8 +2,7 @@ use std::usize;
 
 use async_trait::async_trait;
 
-use super::limit_algorithm::{LimitAlgorithm, Sample};
-use super::RateLimiterConfig;
+use super::limit_algorithm::{AimdConfig, LimitAlgorithm, Sample};
 
 use super::limiter::Outcome;
 
@@ -25,7 +24,7 @@ pub struct Aimd {
 }
 
 impl Aimd {
-    pub fn new(config: RateLimiterConfig) -> Self {
+    pub fn new(config: AimdConfig) -> Self {
         Self {
             min_limit: config.aimd_min_limit,
             max_limit: config.aimd_max_limit,
@@ -99,26 +98,24 @@ impl LimitAlgorithm for Aimd {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     use tokio::sync::Notify;
 
     use super::*;
 
-    use crate::rate_limiter::{Limiter, RateLimitAlgorithm};
+    use crate::rate_limiter::{Limiter, RateLimiterConfig};
 
     #[tokio::test]
     async fn should_decrease_limit_on_overload() {
         let config = RateLimiterConfig {
-            algorithm: RateLimitAlgorithm::Aimd,
-            timeout: Duration::from_secs(1),
             initial_limit: 10,
-            aimd_min_limit: 1,
-            aimd_max_limit: 1000,
-            aimd_increase_by: 1,
-            aimd_decrease_factor: 0.5,
-            aimd_min_utilisation_threshold: 0.8,
+            aimd_config: Some(AimdConfig {
+                aimd_decrease_factor: 0.5,
+                ..Default::default()
+            }),
             disable: false,
+            ..Default::default()
         };
 
         let release_notifier = Arc::new(Notify::new());
@@ -134,15 +131,15 @@ mod tests {
     #[tokio::test]
     async fn should_increase_limit_on_success_when_using_gt_util_threshold() {
         let config = RateLimiterConfig {
-            algorithm: RateLimitAlgorithm::Aimd,
-            timeout: Duration::from_secs(1),
             initial_limit: 4,
-            aimd_min_limit: 1,
-            aimd_max_limit: 1000,
-            aimd_increase_by: 1,
-            aimd_decrease_factor: 0.5,
-            aimd_min_utilisation_threshold: 0.5,
+            aimd_config: Some(AimdConfig {
+                aimd_decrease_factor: 0.5,
+                aimd_min_utilisation_threshold: 0.5,
+                aimd_increase_by: 1,
+                ..Default::default()
+            }),
             disable: false,
+            ..Default::default()
         };
 
         let limiter = Limiter::new(config);
@@ -158,15 +155,14 @@ mod tests {
     #[tokio::test]
     async fn should_not_change_limit_on_success_when_using_lt_util_threshold() {
         let config = RateLimiterConfig {
-            algorithm: RateLimitAlgorithm::Aimd,
-            timeout: Duration::from_secs(1),
             initial_limit: 4,
-            aimd_min_limit: 1,
-            aimd_max_limit: 1000,
-            aimd_increase_by: 1,
-            aimd_decrease_factor: 0.5,
-            aimd_min_utilisation_threshold: 0.5,
+            aimd_config: Some(AimdConfig {
+                aimd_decrease_factor: 0.5,
+                aimd_min_utilisation_threshold: 0.5,
+                ..Default::default()
+            }),
             disable: false,
+            ..Default::default()
         };
 
         let limiter = Limiter::new(config);
@@ -184,15 +180,14 @@ mod tests {
     #[tokio::test]
     async fn should_not_change_limit_when_no_outcome() {
         let config = RateLimiterConfig {
-            algorithm: RateLimitAlgorithm::Aimd,
-            timeout: Duration::from_secs(1),
             initial_limit: 10,
-            aimd_min_limit: 1,
-            aimd_max_limit: 1000,
-            aimd_increase_by: 1,
-            aimd_decrease_factor: 0.5,
-            aimd_min_utilisation_threshold: 0.5,
+            aimd_config: Some(AimdConfig {
+                aimd_decrease_factor: 0.5,
+                aimd_min_utilisation_threshold: 0.5,
+                ..Default::default()
+            }),
             disable: false,
+            ..Default::default()
         };
 
         let limiter = Limiter::new(config);

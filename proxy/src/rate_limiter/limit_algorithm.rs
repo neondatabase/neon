@@ -42,18 +42,14 @@ pub struct RateLimiterConfig {
     pub algorithm: RateLimitAlgorithm,
     pub timeout: Duration,
     pub initial_limit: usize,
-    pub aimd_min_limit: usize,
-    pub aimd_max_limit: usize,
-    pub aimd_increase_by: usize,
-    pub aimd_decrease_factor: f32,
-    pub aimd_min_utilisation_threshold: f32,
+    pub aimd_config: Option<AimdConfig>,
 }
 
 impl RateLimiterConfig {
     pub fn create_rate_limit_algorithm(self) -> Box<dyn LimitAlgorithm> {
         match self.algorithm {
             RateLimitAlgorithm::Fixed => Box::new(Fixed),
-            RateLimitAlgorithm::Aimd => Box::new(Aimd::new(self)),
+            RateLimitAlgorithm::Aimd => Box::new(Aimd::new(self.aimd_config.unwrap())), // For aimd algorithm config is mandatory.
         }
     }
 }
@@ -61,10 +57,37 @@ impl RateLimiterConfig {
 impl Default for RateLimiterConfig {
     fn default() -> Self {
         Self {
-            disable: false,
+            disable: true,
             algorithm: RateLimitAlgorithm::Aimd,
             timeout: Duration::from_secs(1),
             initial_limit: 100,
+            aimd_config: Some(AimdConfig::default()),
+        }
+    }
+}
+
+#[derive(clap::Parser, Clone, Copy, Debug)]
+pub struct AimdConfig {
+    /// Minimum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 1)]
+    pub aimd_min_limit: usize,
+    /// Maximum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 1500)]
+    pub aimd_max_limit: usize,
+    /// Increase AIMD increase by value in case of success. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 10)]
+    pub aimd_increase_by: usize,
+    /// Decrease AIMD decrease by value in case of timout/429. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 0.9)]
+    pub aimd_decrease_factor: f32,
+    /// A threshold below which the limit won't be increased. Makes sense only if `rate_limit_algorithm` is `Aimd`.
+    #[clap(long, default_value_t = 0.8)]
+    pub aimd_min_utilisation_threshold: f32,
+}
+
+impl Default for AimdConfig {
+    fn default() -> Self {
+        Self {
             aimd_min_limit: 1,
             aimd_max_limit: 1500,
             aimd_increase_by: 10,

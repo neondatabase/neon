@@ -108,21 +108,8 @@ struct ProxyCliArgs {
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
     initial_limit: usize,
-    /// Minimum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 1)]
-    aimd_min_limit: usize,
-    /// Maximum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 1500)]
-    aimd_max_limit: usize,
-    /// Increase AIMD increase by value in case of success. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 10)]
-    aimd_increase_by: usize,
-    /// Decrease AIMD decrease by value in case of timout/429. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 0.9)]
-    aimd_decrease_factor: f32,
-    /// A threshold below which the limit won't be increased. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 0.8)]
-    aimd_min_utilisation_threshold: f32,
+    #[clap(flatten)]
+    aimd_config: proxy::rate_limiter::AimdConfig,
 }
 
 #[tokio::main]
@@ -246,11 +233,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         algorithm: args.rate_limit_algorithm,
         timeout: args.rate_limiter_timeout,
         initial_limit: args.initial_limit,
-        aimd_min_limit: args.aimd_min_limit,
-        aimd_max_limit: args.aimd_max_limit,
-        aimd_increase_by: args.aimd_increase_by,
-        aimd_decrease_factor: args.aimd_decrease_factor,
-        aimd_min_utilisation_threshold: args.aimd_min_utilisation_threshold,
+        aimd_config: Some(args.aimd_config),
     };
 
     let auth_backend = match &args.auth_backend {
