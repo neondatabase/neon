@@ -3504,8 +3504,6 @@ impl Timeline {
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            //
-            // FIXME: spawn_blocking above for this
             par_fsync::par_fsync_async(&layer_paths)
                 .await
                 .context("fsync all new layers")?;
