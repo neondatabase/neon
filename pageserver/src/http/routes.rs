@@ -1478,7 +1478,7 @@ async fn timeline_collect_keyspace(
         let keys = timeline
             .collect_keyspace(at_lsn, &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
         json_response(StatusCode::OK, Partitioning { keys, at_lsn })
     }
