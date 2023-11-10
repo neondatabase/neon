@@ -3506,11 +3506,15 @@ impl Timeline {
             // minimize latency.
             //
             // FIXME: spawn_blocking above for this
-            par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
+            par_fsync::par_fsync_async(&layer_paths)
+                .await
+                .context("fsync all new layers")?;
 
-            par_fsync::par_fsync(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
+            let timeline_dir = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+
+            par_fsync::par_fsync_async(&[timeline_dir])
+                .await
                 .context("fsync of timeline dir")?;
-
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
