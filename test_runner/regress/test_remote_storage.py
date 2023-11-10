@@ -841,7 +841,8 @@ def test_compaction_waits_for_upload(
             return 0
         return int(m)
 
-    assert gcs_completed() == 0
+    # if initdb created an initial delta layer, it might already be gc'd
+    assert gcs_completed() <= 1
 
     client.configure_failpoints(("before-upload-layer-pausable", "off"))
 
