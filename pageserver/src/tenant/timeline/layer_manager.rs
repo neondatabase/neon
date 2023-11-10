@@ -209,7 +209,7 @@ impl LayerManager {
     pub(crate) fn finish_gc_timeline(&mut self, gc_layers: &[Layer]) {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
-            Self::delete_historic_layer(&doomed_layer, &mut updates, &mut self.layer_fmgr);
+            Self::delete_historic_layer(doomed_layer, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush()
     }
