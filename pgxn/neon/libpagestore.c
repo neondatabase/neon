@@ -174,6 +174,8 @@ load_shard_map(shardno_t shard_no, char* connstr)
 			{
 				sep = strchr(shard_connstr, ',');
 				connstr_len = sep != NULL ? sep - shard_connstr : strlen(shard_connstr);
+				if (connstr_len == 0)
+					break; /* trailing comma */
 				if (shard_map->n_shards >= MAX_SHARDS)
 					elog(ERROR, "Too many shards");
 				if (connstr_len >= MAX_PS_CONNSTR_LEN)
@@ -181,6 +183,9 @@ load_shard_map(shardno_t shard_no, char* connstr)
 				memcpy(shard_map->shard_connstr[shard_map->n_shards++], shard_connstr, connstr_len+1);
 				shard_connstr = sep + 1;
 			} while (sep != NULL);
+
+			if (shard_map->n_shards == 0)
+				elog(ERROR, "No shards were speciified");
 
 			shard_map->update_counter += 1;
 		}
@@ -199,6 +204,7 @@ load_shard_map(shardno_t shard_no, char* connstr)
 }
 
 #define MB (1024*1024)
+
 shardno_t
 get_shard_number(BufferTag* tag)
 {
@@ -316,7 +322,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 	}
 
-	neon_log(LOG, "libpagestore: connected to '%s'", shard_map->shard_connstr[shard_no]);
+	neon_log(LOG, "libpagestore: connected to '%s'", connstr);
 	page_servers[shard_no].conn = conn;
 	page_servers[shard_no].wes = wes;
 	max_attached_shard_no = Max(shard_no+1, max_attached_shard_no);
