@@ -1450,6 +1450,45 @@ walprop_pg_add_safekeeper_event_set(Safekeeper *sk, uint32 events)
 	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk), NULL, sk);
 }
 
+/*
+ * Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
+ *
+ * Note: Internally, this completely reconstructs the event set. It should be avoided if possible.
+ */
+static void
+walprop_pg_rm_safekeeper_event_set(Safekeeper *to_remove)
+{
+	WalProposer *wp = to_remove->wp;
+
+	/* Remove the existing event set, assign sk->eventPos = -1 */
+	walprop_pg_free_event_set(wp);
+
+	/* Re-initialize it without adding any safekeeper events */
+	wp->api.init_event_set(wp);
+
+	/*
+	 * loop through the existing safekeepers. If they aren't the one we're
+	 * removing, and if they have a socket we can use, re-add the applicable
+	 * events.
+	 */
+	for (int i = 0; i < wp->n_safekeepers; i++)
+	{
+		uint32		desired_events = WL_NO_EVENTS;
+		Safekeeper *sk = &wp->safekeeper[i];
+
+		if (sk == to_remove)
+			continue;
+
+		/* If this safekeeper isn't offline, add an event for it! */
+		if (sk->state != SS_OFFLINE)
+		{
+			desired_events = SafekeeperStateDesiredEvents(sk->state);
+			/* will set sk->eventPos */
+			wp->api.add_safekeeper_event_set(sk, desired_events);
+		}
+	}
+}
+
 static int
 walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32 *events)
 {
@@ -1713,10 +1752,10 @@ static const walproposer_api walprop_pg = {
 	.recovery_download = WalProposerRecovery,
 	.wal_read = walprop_pg_wal_read,
 	.wal_reader_allocate = walprop_pg_wal_reader_allocate,
-	.free_event_set = walprop_pg_free_event_set,
 	.init_event_set = walprop_pg_init_event_set,
 	.update_event_set = walprop_pg_update_event_set,
 	.add_safekeeper_event_set = walprop_pg_add_safekeeper_event_set,
+	.rm_safekeeper_event_set = walprop_pg_rm_safekeeper_event_set,
 	.wait_event_set = walprop_pg_wait_event_set,
 	.strong_random = walprop_pg_strong_random,
 	.get_redo_start_lsn = walprop_pg_get_redo_start_lsn,

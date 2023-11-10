@@ -516,9 +516,6 @@ typedef struct walproposer_api
 	/* Allocate WAL reader. */
 	void		(*wal_reader_allocate) (Safekeeper *sk);
 
-	/* Deallocate event set. */
-	void		(*free_event_set) (WalProposer *wp);
-
 	/* Initialize event set. */
 	void		(*init_event_set) (WalProposer *wp);
 
@@ -527,6 +524,9 @@ typedef struct walproposer_api
 
 	/* Add a new safekeeper connection to the event set. */
 	void		(*add_safekeeper_event_set) (Safekeeper *sk, uint32 events);
+
+	/* Remove safekeeper connection from event set */
+	void		(*rm_safekeeper_event_set) (Safekeeper *sk);
 
 	/*
 	 * Wait until some event happens: - timeout is reached - socket event for
@@ -712,6 +712,11 @@ extern void WalProposerStart(WalProposer *wp);
 extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
+/*
+ * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to
+ * recreate set from scratch, hence the export.
+ */
+extern uint32 SafekeeperStateDesiredEvents(SafekeeperState state);
 
 
 #define WPEVENT		1337		/* special log level for walproposer internal

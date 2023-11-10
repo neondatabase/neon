@@ -43,7 +43,6 @@
 
 /* Prototypes for private functions */
 static void WalProposerLoop(WalProposer *wp);
-static void HackyRemoveWalProposerEvent(Safekeeper *to_remove);
 static void ShutdownConnection(Safekeeper *sk);
 static void ResetConnection(Safekeeper *sk);
 static long TimeToReconnect(WalProposer *wp, TimestampTz now);
@@ -78,7 +77,6 @@ static bool AsyncFlush(Safekeeper *sk);
 static int	CompareLsn(const void *a, const void *b);
 static char *FormatSafekeeperState(SafekeeperState state);
 static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
-static uint32 SafekeeperStateDesiredEvents(SafekeeperState state);
 static char *FormatEvents(WalProposer *wp, uint32 events);
 
 WalProposer *
@@ -303,43 +301,6 @@ WalProposerLoop(WalProposer *wp)
 		WalProposerPoll(wp);
 }
 
-/*
- * Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
- *
- * Note: Internally, this completely reconstructs the event set. It should be avoided if possible.
- */
-static void
-HackyRemoveWalProposerEvent(Safekeeper *to_remove)
-{
-	WalProposer *wp = to_remove->wp;
-
-	/* Remove the existing event set, assign sk->eventPos = -1 */
-	wp->api.free_event_set(wp);
-	/* Re-initialize it without adding any safekeeper events */
-	wp->api.init_event_set(wp);
-
-	/*
-	 * loop through the existing safekeepers. If they aren't the one we're
-	 * removing, and if they have a socket we can use, re-add the applicable
-	 * events.
-	 */
-	for (int i = 0; i < wp->n_safekeepers; i++)
-	{
-		uint32		desired_events = WL_NO_EVENTS;
-		Safekeeper *sk = &wp->safekeeper[i];
-
-		if (sk == to_remove)
-			continue;
-
-		/* If this safekeeper isn't offline, add an event for it! */
-		if (sk->state != SS_OFFLINE)
-		{
-			desired_events = SafekeeperStateDesiredEvents(sk->state);
-			/* will set sk->eventPos */
-			wp->api.add_safekeeper_event_set(sk, desired_events);
-		}
-	}
-}
 
 /* Shuts down and cleans up the connection for a safekeeper. Sets its state to SS_OFFLINE */
 static void
@@ -354,7 +315,7 @@ ShutdownConnection(Safekeeper *sk)
 		pfree(sk->voteResponse.termHistory.entries);
 	sk->voteResponse.termHistory.entries = NULL;
 
-	HackyRemoveWalProposerEvent(sk);
+	sk->wp->api.rm_safekeeper_event_set(sk);
 
 	if (sk->xlogreader)
 	{
@@ -626,7 +587,7 @@ HandleConnectionEvent(Safekeeper *sk)
 	 * Because PQconnectPoll can change the socket, we have to un-register the
 	 * old event and re-register an event on the new socket.
 	 */
-	HackyRemoveWalProposerEvent(sk);
+	wp->api.rm_safekeeper_event_set(sk);
 	wp->api.add_safekeeper_event_set(sk, new_events);
 
 	/* If we successfully connected, send START_WAL_PUSH query */
@@ -2033,7 +1994,7 @@ AssertEventsOkForState(uint32 events, Safekeeper *sk)
 /* Returns the set of events a safekeeper in this state should be waiting on
  *
  * This will return WL_NO_EVENTS (= 0) for some events. */
-static uint32
+uint32
 SafekeeperStateDesiredEvents(SafekeeperState state)
 {
 	uint32		result = WL_NO_EVENTS;
