@@ -35,7 +35,10 @@ use tracing::*;
 use utils::signals::ShutdownSignals;
 
 use metrics::{Encoder, TextEncoder};
-use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
+use storage_broker::metrics::{
+    BROADCASTED_MESSAGES_TOTAL, BROADCAST_DROPPED_MESSAGES_TOTAL, NUM_PUBS, NUM_SUBS_ALL,
+    NUM_SUBS_TIMELINE, PROCESSED_MESSAGES_TOTAL, PUBLISHED_ONEOFF_MESSAGES_TOTAL,
+};
 use storage_broker::proto::broker_service_server::{BrokerService, BrokerServiceServer};
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 use storage_broker::proto::{
@@ -376,8 +379,10 @@ impl Registry {
         );
     }
 
-    // Send msg to relevant subscribers.
+    /// Send msg to relevant subscribers.
     pub fn send_msg(&self, msg: &Message) -> Result<(), Status> {
+        PROCESSED_MESSAGES_TOTAL.inc();
+
         // send message to subscribers for everything
         let shared_state = self.shared_state.read();
         // Err means there is no subscribers, it is fine.
@@ -425,7 +430,7 @@ struct Publisher {
 }
 
 impl Publisher {
-    // Send msg to relevant subscribers.
+    /// Send msg to relevant subscribers.
     pub fn send_msg(&mut self, msg: &Message) -> Result<(), Status> {
         self.registry.send_msg(msg)
     }
@@ -493,8 +498,10 @@ impl BrokerService for Broker {
                             Message::SafekeeperTimelineInfo(info) => yield info,
                             _ => {},
                         }
+                        BROADCASTED_MESSAGES_TOTAL.inc();
                     },
                     Err(RecvError::Lagged(skipped_msg)) => {
+                        BROADCAST_DROPPED_MESSAGES_TOTAL.inc_by(skipped_msg);
                         missed_msgs += skipped_msg;
                         if (futures::poll!(Box::pin(warn_interval.tick()))).is_ready() {
                             warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
@@ -551,9 +558,11 @@ impl BrokerService for Broker {
                         let msg_type = msg.message_type() as i32;
                         if types_set.contains(&msg_type) {
                             yield msg.as_typed_message();
+                            BROADCASTED_MESSAGES_TOTAL.inc();
                         }
                     },
                     Err(RecvError::Lagged(skipped_msg)) => {
+                        BROADCAST_DROPPED_MESSAGES_TOTAL.inc_by(skipped_msg);
                         missed_msgs += skipped_msg;
                         if (futures::poll!(Box::pin(warn_interval.tick()))).is_ready() {
                             warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
@@ -579,8 +588,8 @@ impl BrokerService for Broker {
         &self,
         request: Request<TypedMessage>,
     ) -> std::result::Result<Response<()>, Status> {
-        // TODO: update metrics?
         let msg = Message::from(request.into_inner())?;
+        PUBLISHED_ONEOFF_MESSAGES_TOTAL.inc();
         self.registry.send_msg(&msg)?;
         Ok(Response::new(()))
     }
