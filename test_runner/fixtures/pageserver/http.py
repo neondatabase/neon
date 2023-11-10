@@ -4,7 +4,7 @@ import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -99,6 +99,15 @@ class LayerMapInfo:
         for hist_layer in self.historic_layers:
             counts[hist_layer.kind] += 1
         return counts
+
+    def delta_layers(self) -> List[HistoricLayerInfo]:
+        return [x for x in self.historic_layers if x.kind == "Delta"]
+
+    def image_layers(self) -> List[HistoricLayerInfo]:
+        return [x for x in self.historic_layers if x.kind == "Image"]
+
+    def historic_by_name(self) -> Set[str]:
+        return set(x.layer_file_name for x in self.historic_layers)
 
 
 @dataclass
