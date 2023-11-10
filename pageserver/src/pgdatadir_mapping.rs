@@ -22,6 +22,7 @@ use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use tracing::{debug, trace, warn};
+use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 /// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
@@ -65,6 +66,25 @@ pub enum CalculateLogicalSizeError {
     Cancelled,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CollectKeySpaceError {
+    #[error(transparent)]
+    Decode(#[from] DeserializeError),
+    #[error(transparent)]
+    PageRead(PageReconstructError),
+    #[error("cancelled")]
+    Cancelled,
+}
+
+impl From<PageReconstructError> for CollectKeySpaceError {
+    fn from(err: PageReconstructError) -> Self {
+        match err {
+            PageReconstructError::Cancelled => Self::Cancelled,
+            err => Self::PageRead(err),
+        }
+    }
 }
 
 impl From<PageReconstructError> for CalculateLogicalSizeError {
@@ -635,11 +655,11 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub async fn collect_keyspace(
+    pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<KeySpace> {
+    ) -> Result<KeySpace, CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -648,7 +668,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -681,7 +701,7 @@ impl Timeline {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
             let buf = self.get(slrudir_key, lsn, ctx).await?;
-            let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
+            let dir = SlruSegmentDirectory::des(&buf)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
@@ -699,7 +719,7 @@ impl Timeline {
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {
