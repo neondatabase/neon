@@ -251,6 +251,7 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
+            .instrument(tracing::info_span!("get_value_reconstruct_data", layer=%self))
             .await
     }
 
@@ -1211,8 +1212,10 @@ impl DownloadedLayer {
             // this will be a permanent failure
             .context("load layer");
 
-            if res.is_err() {
+            if let Err(e) = res.as_ref() {
                 LAYER_IMPL_METRICS.inc_permanent_loading_failures();
+                // TODO(#5815): we are not logging all errors, so temporarily log them here as well
+                tracing::error!("layer loading failed permanently: {e:#}");
             }
             res
         };
@@ -1291,6 +1294,7 @@ impl ResidentLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    #[tracing::instrument(skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,

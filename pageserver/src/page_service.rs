@@ -512,7 +512,11 @@ impl PageServerHandler {
             };
 
             if let Err(e) = &response {
-                if timeline.cancel.is_cancelled() {
+                // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
+                // because wait_lsn etc will drop out
+                // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
+                // is_canceled(): [`Timeline::shutdown`]` has entered
+                if timeline.cancel.is_cancelled() || timeline.is_stopping() {
                     // If we fail to fulfil a request during shutdown, which may be _because_ of
                     // shutdown, then do not send the error to the client.  Instead just drop the
                     // connection.

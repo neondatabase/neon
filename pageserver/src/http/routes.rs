@@ -303,11 +303,7 @@ async fn build_timeline_info(
         // we're executing this function, we will outlive the timeline on-disk state.
         info.current_logical_size_non_incremental = Some(
             timeline
-                .get_current_logical_size_non_incremental(
-                    info.last_record_lsn,
-                    CancellationToken::new(),
-                    ctx,
-                )
+                .get_current_logical_size_non_incremental(info.last_record_lsn, ctx)
                 .await?,
         );
     }
@@ -1482,7 +1478,7 @@ async fn timeline_collect_keyspace(
         let keys = timeline
             .collect_keyspace(at_lsn, &ctx)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
         json_response(StatusCode::OK, Partitioning { keys, at_lsn })
     }

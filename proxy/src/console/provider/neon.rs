@@ -3,12 +3,12 @@
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    ApiCaches, ApiLocks, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -17,12 +17,17 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     caches: &'static ApiCaches,
+    locks: &'static ApiLocks,
     jwt: String,
 }
 
 impl Api {
     /// Construct an API object containing the auth parameters.
-    pub fn new(endpoint: http::Endpoint, caches: &'static ApiCaches) -> Self {
+    pub fn new(
+        endpoint: http::Endpoint,
+        caches: &'static ApiCaches,
+        locks: &'static ApiLocks,
+    ) -> Self {
         let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,
             Err(_) => "".to_string(),
@@ -30,6 +35,7 @@ impl Api {
         Self {
             endpoint,
             caches,
+            locks,
             jwt,
         }
     }
@@ -163,9 +169,22 @@ impl super::Api for Api {
             return Ok(cached);
         }
 
+        let key: Arc<str> = key.into();
+
+        let permit = self.locks.get_wake_compute_permit(&key).await?;
+
+        // after getting back a permit - it's possible the cache was filled
+        // double check
+        if permit.should_check_cache() {
+            if let Some(cached) = self.caches.node_info.get(&key) {
+                info!(key = &*key, "found cached compute node info");
+                return Ok(cached);
+            }
+        }
+
         let node = self.do_wake_compute(extra, creds).await?;
-        let (_, cached) = self.caches.node_info.insert(key.into(), node);
-        info!(key = key, "created a cache entry for compute node info");
+        let (_, cached) = self.caches.node_info.insert(key.clone(), node);
+        info!(key = &*key, "created a cache entry for compute node info");
 
         Ok(cached)
     }

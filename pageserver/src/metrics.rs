@@ -1225,15 +1225,6 @@ pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the Postgres WAL redo process",
-        redo_histogram_time_buckets!(),
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_records_histogram",
@@ -1260,6 +1251,46 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub(crate) struct WalRedoProcessCounters {
+    pub(crate) started: IntCounter,
+    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+}
+
+#[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
+pub(crate) enum WalRedoKillCause {
+    WalRedoProcessDrop,
+    NoLeakChildDrop,
+    Startup,
+}
+
+impl Default for WalRedoProcessCounters {
+    fn default() -> Self {
+        let started = register_int_counter!(
+            "pageserver_wal_redo_process_started_total",
+            "Number of WAL redo processes started",
+        )
+        .unwrap();
+
+        let killed = register_int_counter_vec!(
+            "pageserver_wal_redo_process_stopped_total",
+            "Number of WAL redo processes stopped",
+            &["cause"],
+        )
+        .unwrap();
+        Self {
+            started,
+            killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
+                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause_str: &'static str = cause.into();
+                killed.with_label_values(&[cause_str])
+            })),
+        }
+    }
+}
+
+pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
+    Lazy::new(WalRedoProcessCounters::default);
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
@@ -1928,7 +1959,6 @@ pub fn preinitialize_metrics() {
         &READ_NUM_FS_LAYERS,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
-        &WAL_REDO_WAIT_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
     ]

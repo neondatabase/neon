@@ -26,6 +26,7 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
+    pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
@@ -326,8 +327,7 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_timeline_cached_layer_accesses(cancel, ctx)
-                    .await;
+                self.imitate_timeline_cached_layer_accesses(ctx).await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
@@ -367,21 +367,12 @@ impl Timeline {
 
     /// Recompute the values which would cause on-demand downloads during restart.
     #[instrument(skip_all)]
-    async fn imitate_timeline_cached_layer_accesses(
-        &self,
-        cancel: &CancellationToken,
-        ctx: &RequestContext,
-    ) {
+    async fn imitate_timeline_cached_layer_accesses(&self, ctx: &RequestContext) {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(
-                lsn,
-                LogicalSizeCalculationCause::EvictionTaskImitation,
-                cancel.clone(),
-                ctx,
-            )
+            .calculate_logical_size(lsn, LogicalSizeCalculationCause::EvictionTaskImitation, ctx)
             .instrument(info_span!("calculate_logical_size"))
             .await;
 
@@ -407,9 +398,16 @@ impl Timeline {
             if size.is_err() {
                 // ignore, see above comment
             } else {
-                warn!(
-                    "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
-                );
+                match e {
+                    CollectKeySpaceError::Cancelled => {
+                        // Shutting down, ignore
+                    }
+                    err => {
+                        warn!(
+                            "failed to collect keyspace but succeeded in calculating logical size: {err:#}"
+                        );
+                    }
+                }
             }
         }
     }
