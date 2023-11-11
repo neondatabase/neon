@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// See docs/rfcs/025-generation-numbers.md for detail on how generation
 /// numbers are used.
-#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Generation {
     // Generations with this magic value will not add a suffix to S3 keys, and will not
     // be included in persisted index_part.json.  This value is only to be used

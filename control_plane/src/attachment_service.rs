@@ -2,7 +2,6 @@ use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::{path::PathBuf, process::Child};
 use utils::id::{NodeId, TenantId};
 
@@ -14,10 +13,8 @@ pub struct AttachmentService {
 
 const COMMAND: &str = "attachment_service";
 
-#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     pub node_id: Option<NodeId>,
 }

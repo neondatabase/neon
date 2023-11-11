@@ -1,6 +1,7 @@
 //! Postgres protocol messages serialization-deserialization. See
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod framed;
 

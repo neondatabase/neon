@@ -55,21 +55,24 @@ impl Deleter {
 
     /// Wrap the remote `delete_objects` with a failpoint
     async fn remote_delete(&self) -> Result<(), anyhow::Error> {
-        fail::fail_point!("deletion-queue-before-execute", |_| {
-            info!("Skipping execution, failpoint set");
-            metrics::DELETION_QUEUE
-                .remote_errors
-                .with_label_values(&["failpoint"])
-                .inc();
-            Err(anyhow::anyhow!("failpoint hit"))
-        });
-
         // A backoff::retry is used here for two reasons:
         // - To provide a backoff rather than busy-polling the API on errors
         // - To absorb transient 429/503 conditions without hitting our error
         //   logging path for issues deleting objects.
         backoff::retry(
-            || async { self.remote_storage.delete_objects(&self.accumulator).await },
+            || async {
+                fail::fail_point!("deletion-queue-before-execute", |_| {
+                    info!("Skipping execution, failpoint set");
+
+                    metrics::DELETION_QUEUE
+                        .remote_errors
+                        .with_label_values(&["failpoint"])
+                        .inc();
+                    Err(anyhow::anyhow!("failpoint: deletion-queue-before-execute"))
+                });
+
+                self.remote_storage.delete_objects(&self.accumulator).await
+            },
             |_| false,
             3,
             10,

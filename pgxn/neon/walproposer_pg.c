@@ -88,7 +88,7 @@ static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
 static void XLogBroadcastWalProposer(WalProposer *wp);
 
-static void XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr);
+static void XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr);
 static void XLogWalPropClose(XLogRecPtr recptr);
 
 static void
@@ -1241,7 +1241,7 @@ WalProposerRecovery(Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XL
 				rec_end_lsn = rec_start_lsn + len - XLOG_HDR_SIZE;
 
 				/* write WAL to disk */
-				XLogWalPropWrite(&buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
+				XLogWalPropWrite(sk->wp, &buf[XLOG_HDR_SIZE], len - XLOG_HDR_SIZE, rec_start_lsn);
 
 				ereport(DEBUG1,
 						(errmsg("Recover message %X/%X length %d",
@@ -1283,10 +1283,23 @@ static XLogSegNo walpropSegNo = 0;
  * Write XLOG data to disk.
  */
 static void
-XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr)
+XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr)
 {
 	int			startoff;
 	int			byteswritten;
+
+	/*
+	 * Apart from walproposer, basebackup LSN page is also written out by
+	 * postgres itself which writes WAL only in pages, and in basebackup it is
+	 * inherently dummy (only safekeepers have historic WAL). Update WAL buffers
+	 * here to avoid dummy page overwriting correct one we download here. Ugly,
+	 * but alternatives are about the same ugly. We won't need that if we switch
+	 * to on-demand WAL download from safekeepers, without writing to disk.
+	 *
+	 * https://github.com/neondatabase/neon/issues/5749
+	 */
+	if (!wp->config->syncSafekeepers)
+		XLogUpdateWalBuffers(buf, recptr, nbytes);
 
 	while (nbytes > 0)
 	{

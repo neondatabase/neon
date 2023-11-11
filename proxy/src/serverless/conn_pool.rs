@@ -22,7 +22,10 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth, console,
-    proxy::{LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
+    proxy::{
+        neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
+        NUM_DB_CONNECTIONS_OPENED_COUNTER,
+    },
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -41,6 +44,7 @@ pub struct ConnInfo {
     pub dbname: String,
     pub hostname: String,
     pub password: String,
+    pub options: Option<String>,
 }
 
 impl ConnInfo {
@@ -401,26 +405,25 @@ async fn connect_to_compute(
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
 
-    let credential_params = StartupMessageParams::new([
+    let params = StartupMessageParams::new([
         ("user", &conn_info.username),
         ("database", &conn_info.dbname),
         ("application_name", APP_NAME),
+        ("options", conn_info.options.as_deref().unwrap_or("")),
     ]);
 
     let creds = config
         .auth_backend
         .as_ref()
-        .map(|_| {
-            auth::ClientCredentials::parse(
-                &credential_params,
-                Some(&conn_info.hostname),
-                common_names,
-            )
-        })
+        .map(|_| auth::ClientCredentials::parse(&params, Some(&conn_info.hostname), common_names))
         .transpose()?;
+
+    let console_options = neon_options(&params);
+
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
         application_name: Some(APP_NAME),
+        options: console_options.as_deref(),
     };
 
     let node_info = creds

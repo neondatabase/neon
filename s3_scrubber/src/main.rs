@@ -31,7 +31,10 @@ enum Command {
         #[arg(short, long, default_value_t = PurgeMode::DeletedOnly)]
         mode: PurgeMode,
     },
-    ScanMetadata {},
+    ScanMetadata {
+        #[arg(short, long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -54,13 +57,17 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     match cli.command {
-        Command::ScanMetadata {} => match scan_metadata(bucket_config).await {
+        Command::ScanMetadata { json } => match scan_metadata(bucket_config).await {
             Err(e) => {
                 tracing::error!("Failed: {e}");
                 Err(e)
             }
             Ok(summary) => {
-                println!("{}", summary.summary_string());
+                if json {
+                    println!("{}", serde_json::to_string(&summary).unwrap())
+                } else {
+                    println!("{}", summary.summary_string());
+                }
                 if summary.is_fatal() {
                     Err(anyhow::anyhow!("Fatal scrub errors detected"))
                 } else {

@@ -26,6 +26,7 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
+    pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
@@ -277,10 +278,7 @@ impl Timeline {
             Some(c) => c,
         };
 
-        let results = match self
-            .evict_layer_batch(remote_client, &candidates, cancel)
-            .await
-        {
+        let results = match self.evict_layer_batch(remote_client, &candidates).await {
             Err(pre_err) => {
                 stats.errors += candidates.len();
                 error!("could not do any evictions: {pre_err:#}");
@@ -329,8 +327,7 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_timeline_cached_layer_accesses(cancel, ctx)
-                    .await;
+                self.imitate_timeline_cached_layer_accesses(ctx).await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
@@ -344,20 +341,7 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        //
-        // It is critical we are responsive to cancellation here. Otherwise, we deadlock with
-        // tenant deletion (holds TENANTS in read mode) any other task that attempts to
-        // acquire TENANTS in write mode before we here call get_tenant.
-        // See https://github.com/neondatabase/neon/issues/5284.
-        let res = tokio::select! {
-            _ = cancel.cancelled() => {
-                return ControlFlow::Break(());
-            }
-            res = crate::tenant::mgr::get_tenant(self.tenant_id, true) => {
-                res
-            }
-        };
-        let tenant = match res {
+        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_id, true) {
             Ok(t) => t,
             Err(_) => {
                 return ControlFlow::Break(());
@@ -383,21 +367,12 @@ impl Timeline {
 
     /// Recompute the values which would cause on-demand downloads during restart.
     #[instrument(skip_all)]
-    async fn imitate_timeline_cached_layer_accesses(
-        &self,
-        cancel: &CancellationToken,
-        ctx: &RequestContext,
-    ) {
+    async fn imitate_timeline_cached_layer_accesses(&self, ctx: &RequestContext) {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(
-                lsn,
-                LogicalSizeCalculationCause::EvictionTaskImitation,
-                cancel.clone(),
-                ctx,
-            )
+            .calculate_logical_size(lsn, LogicalSizeCalculationCause::EvictionTaskImitation, ctx)
             .instrument(info_span!("calculate_logical_size"))
             .await;
 
@@ -423,9 +398,16 @@ impl Timeline {
             if size.is_err() {
                 // ignore, see above comment
             } else {
-                warn!(
-                    "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
-                );
+                match e {
+                    CollectKeySpaceError::Cancelled => {
+                        // Shutting down, ignore
+                    }
+                    err => {
+                        warn!(
+                            "failed to collect keyspace but succeeded in calculating logical size: {err:#}"
+                        );
+                    }
+                }
             }
         }
     }
