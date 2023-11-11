@@ -2,7 +2,6 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! a neon Timeline.
 //!
-use std::io::IoSlice;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{self, Poll};

@@ -12,6 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
@@ -23,6 +24,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
@@ -2915,11 +2917,23 @@ impl Tenant {
         // Upload the created data dir to S3
         if let Some(storage) = &self.remote_storage {
             let pgdata_zstd = import_datadir::create_tar_zst(pgdata_path).await?;
-            self::remote_timeline_client::upload_initdb_dir(
-                storage,
-                &self.tenant_id,
-                &timeline_id,
-                pgdata_zstd,
+            let pgdata_zstd = Bytes::from(pgdata_zstd);
+            backoff::retry(
+                || async {
+                    self::remote_timeline_client::upload_initdb_dir(
+                        storage,
+                        &self.tenant_id,
+                        &timeline_id,
+                        pgdata_zstd.clone(),
+                    )
+                    .await
+                },
+                |_| false,
+                3,
+                u32::MAX,
+                "persist_initdb_tar_zst",
+                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
             )
             .await?;
         }

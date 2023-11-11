@@ -1,6 +1,7 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
 use std::io::ErrorKind;
@@ -111,7 +112,7 @@ pub(crate) async fn upload_initdb_dir(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-    initdb_dir: Vec<u8>,
+    initdb_dir: Bytes,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading initdb dir");
 
@@ -120,7 +121,7 @@ pub(crate) async fn upload_initdb_dir(
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     storage
-        .upload_storage_object(Box::new(bytes), size, &remote_path)
+        .upload_storage_object(bytes, size, &remote_path)
         .await
         .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }
