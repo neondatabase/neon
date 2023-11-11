@@ -6030,6 +6030,9 @@ dependencies = [
  "tungstenite",
  "url",
  "uuid",
+ "zstd",
+ "zstd-safe",
+ "zstd-sys",
 ]
 
 [[package]]
