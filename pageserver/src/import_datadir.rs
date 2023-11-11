@@ -626,6 +626,13 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
 }
 
 /// An in-memory buffer implementing `AsyncWrite`, inserting yields every now and then
+///
+/// The number of yields is bounded by above by the number of times poll_write is called,
+/// so calling it with 8 KB chunks and 8 MB chunks gives the same number of yields in total.
+/// This is an explicit choice as the `YieldingVec` is meant to give the async executor
+/// breathing room between units of CPU intensive preparation of buffers to be written.
+/// Once a write call is issued, the whole buffer has been prepared already, so there is no
+/// gain in splitting up the memcopy further.
 struct YieldingVec {
     yield_budget: usize,
     // the buffer written into
