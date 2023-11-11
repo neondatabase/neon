@@ -14,6 +14,7 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
@@ -39,7 +40,7 @@ use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
-    auth::{Claims, JwtAuth, Scope},
+    auth::{Claims, Scope, SwappableJwtAuth},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     simple_rcu::RcuReadGuard,
@@ -121,7 +122,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
     listener_ctx: RequestContext,
@@ -189,7 +190,7 @@ pub async fn libpq_listener_main(
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
     connection_ctx: RequestContext,
@@ -217,9 +218,27 @@ async fn page_service_conn_main(
     // no write timeout is used, because the kernel is assumed to error writes after some time.
     let mut socket = tokio_io_timeout::TimeoutReader::new(socket);
 
-    // timeout should be lower, but trying out multiple days for
-    // <https://github.com/neondatabase/neon/issues/4205>
-    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 60 * 24 * 3)));
+    let default_timeout_ms = 10 * 60 * 1000; // 10 minutes by default
+    let socket_timeout_ms = (|| {
+        fail::fail_point!("simulated-bad-compute-connection", |avg_timeout_ms| {
+            // Exponential distribution for simulating
+            // poor network conditions, expect about avg_timeout_ms to be around 15
+            // in tests
+            if let Some(avg_timeout_ms) = avg_timeout_ms {
+                let avg = avg_timeout_ms.parse::<i64>().unwrap() as f32;
+                let u = rand::random::<f32>();
+                ((1.0 - u).ln() / (-avg)) as u64
+            } else {
+                default_timeout_ms
+            }
+        });
+        default_timeout_ms
+    })();
+
+    // A timeout here does not mean the client died, it can happen if it's just idle for
+    // a while: we will tear down this PageServerHandler and instantiate a new one if/when
+    // they reconnect.
+    socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
     let socket = std::pin::pin!(socket);
 
     // XXX: pgbackend.run() should take the connection_ctx,
@@ -252,7 +271,7 @@ async fn page_service_conn_main(
 struct PageServerHandler {
     _conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
-    auth: Option<Arc<JwtAuth>>,
+    auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
     /// The context created for the lifetime of the connection
@@ -266,7 +285,7 @@ impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
         broker_client: storage_broker::BrokerClientChannel,
-        auth: Option<Arc<JwtAuth>>,
+        auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
@@ -493,7 +512,11 @@ impl PageServerHandler {
             };
 
             if let Err(e) = &response {
-                if timeline.cancel.is_cancelled() {
+                // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
+                // because wait_lsn etc will drop out
+                // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
+                // is_canceled(): [`Timeline::shutdown`]` has entered
+                if timeline.cancel.is_cancelled() || timeline.is_stopping() {
                     // If we fail to fulfil a request during shutdown, which may be _because_ of
                     // shutdown, then do not send the error to the client.  Instead just drop the
                     // connection.
@@ -897,7 +920,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<(), QueryError> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -909,7 +932,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
     }
 
     /// Shorthand for getting a reference to a Timeline of an Active tenant.
@@ -948,16 +971,17 @@ where
             .auth
             .as_ref()
             .unwrap()
-            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
+            .map_err(|e| QueryError::Unauthorized(e.0))?;
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "jwt token scope is Tenant, but tenant id is missing"
-            )));
+            return Err(QueryError::Unauthorized(
+                "jwt token scope is Tenant, but tenant id is missing".into(),
+            ));
         }
 
-        info!(
-            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
+        debug!(
+            "jwt scope check succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
 
@@ -979,9 +1003,13 @@ where
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
+        fail::fail_point!("simulated-bad-compute-connection", |_| {
+            info!("Hit failpoint for bad connection");
+            Err(QueryError::SimulatedConnectionError)
+        });
+
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
@@ -1330,6 +1358,9 @@ impl From<GetActiveTenantError> for QueryError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
+            GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                QueryError::Shutdown
+            }
             e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }

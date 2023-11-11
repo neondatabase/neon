@@ -188,6 +188,7 @@ extern "C" fn recovery_download(
     }
 }
 
+#[allow(clippy::unnecessary_cast)]
 extern "C" fn wal_read(
     sk: *mut Safekeeper,
     buf: *mut ::std::os::raw::c_char,
@@ -421,6 +422,7 @@ impl std::fmt::Display for Level {
 }
 
 /// Take ownership of `Vec<u8>` from StringInfoData.
+#[allow(clippy::unnecessary_cast)]
 pub(crate) fn take_vec_u8(pg: &mut StringInfoData) -> Option<Vec<u8>> {
     if pg.data.is_null() {
         return None;

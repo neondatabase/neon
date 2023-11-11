@@ -200,6 +200,22 @@ async fn unsafe_create_dir_all(path: &Utf8PathBuf) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The TenantManager is responsible for storing and mutating the collection of all tenants
+/// that this pageserver process has state for.  Every Tenant and SecondaryTenant instance
+/// lives inside the TenantManager.
+///
+/// The most important role of the TenantManager is to prevent conflicts: e.g. trying to attach
+/// the same tenant twice concurrently, or trying to configure the same tenant into secondary
+/// and attached modes concurrently.
+pub struct TenantManager {
+    conf: &'static PageServerConf,
+    // TODO: currently this is a &'static pointing to TENANTs.  When we finish refactoring
+    // out of that static variable, the TenantManager can own this.
+    // See https://github.com/neondatabase/neon/issues/5796
+    tenants: &'static std::sync::RwLock<TenantsMap>,
+    resources: TenantSharedResources,
+}
+
 fn emergency_generations(
     tenant_confs: &HashMap<TenantId, anyhow::Result<LocationConf>>,
 ) -> HashMap<TenantId, Generation> {
@@ -366,7 +382,7 @@ pub async fn init_tenant_mgr(
     resources: TenantSharedResources,
     init_order: InitializationOrder,
     cancel: CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<TenantManager> {
     let mut tenants = HashMap::new();
 
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
@@ -468,7 +484,12 @@ pub async fn init_tenant_mgr(
     assert!(matches!(&*tenants_map, &TenantsMap::Initializing));
     METRICS.tenant_slots.set(tenants.len() as u64);
     *tenants_map = TenantsMap::Open(tenants);
-    Ok(())
+
+    Ok(TenantManager {
+        conf,
+        tenants: &TENANTS,
+        resources,
+    })
 }
 
 /// Wrapper for Tenant::spawn that checks invariants before running, and inserts
@@ -545,8 +566,10 @@ pub(crate) async fn shutdown_all_tenants() {
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
     use utils::completion;
 
-    // Atomically, 1. extract the list of tenants to shut down and 2. prevent creation of new tenants.
-    let (in_progress_ops, tenants_to_shut_down) = {
+    let mut join_set = JoinSet::new();
+
+    // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
+    let (total_in_progress, total_attached) = {
         let mut m = tenants.write().unwrap();
         match &mut *m {
             TenantsMap::Initializing => {
@@ -556,77 +579,66 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
             }
             TenantsMap::Open(tenants) => {
                 let mut shutdown_state = HashMap::new();
-                let mut in_progress_ops = Vec::new();
-                let mut tenants_to_shut_down = Vec::new();
+                let mut total_in_progress = 0;
+                let mut total_attached = 0;
 
-                for (k, v) in tenants.drain() {
+                for (tenant_id, v) in tenants.drain() {
                     match v {
                         TenantSlot::Attached(t) => {
-                            tenants_to_shut_down.push(t.clone());
-                            shutdown_state.insert(k, TenantSlot::Attached(t));
+                            shutdown_state.insert(tenant_id, TenantSlot::Attached(t.clone()));
+                            join_set.spawn(
+                                async move {
+                                    let freeze_and_flush = true;
+
+                                    let res = {
+                                        let (_guard, shutdown_progress) = completion::channel();
+                                        t.shutdown(shutdown_progress, freeze_and_flush).await
+                                    };
+
+                                    if let Err(other_progress) = res {
+                                        // join the another shutdown in progress
+                                        other_progress.wait().await;
+                                    }
+
+                                    // we cannot afford per tenant logging here, because if s3 is degraded, we are
+                                    // going to log too many lines
+                                    debug!("tenant successfully stopped");
+                                }
+                                .instrument(info_span!("shutdown", %tenant_id)),
+                            );
+
+                            total_attached += 1;
                         }
                         TenantSlot::Secondary => {
-                            shutdown_state.insert(k, TenantSlot::Secondary);
+                            shutdown_state.insert(tenant_id, TenantSlot::Secondary);
                         }
                         TenantSlot::InProgress(notify) => {
                             // InProgress tenants are not visible in TenantsMap::ShuttingDown: we will
                             // wait for their notifications to fire in this function.
-                            in_progress_ops.push(notify);
+                            join_set.spawn(async move {
+                                notify.wait().await;
+                            });
+
+                            total_in_progress += 1;
                         }
                     }
                 }
                 *m = TenantsMap::ShuttingDown(shutdown_state);
-                (in_progress_ops, tenants_to_shut_down)
+                (total_in_progress, total_attached)
             }
             TenantsMap::ShuttingDown(_) => {
-                // TODO: it is possible that detach and shutdown happen at the same time. as a
-                // result, during shutdown we do not wait for detach.
                 error!("already shutting down, this function isn't supposed to be called more than once");
                 return;
             }
         }
     };
 
+    let started_at = std::time::Instant::now();
+
     info!(
         "Waiting for {} InProgress tenants and {} Attached tenants to shut down",
-        in_progress_ops.len(),
-        tenants_to_shut_down.len()
+        total_in_progress, total_attached
     );
-
-    for barrier in in_progress_ops {
-        barrier.wait().await;
-    }
-
-    info!(
-        "InProgress tenants shut down, waiting for {} Attached tenants to shut down",
-        tenants_to_shut_down.len()
-    );
-    let started_at = std::time::Instant::now();
-    let mut join_set = JoinSet::new();
-    for tenant in tenants_to_shut_down {
-        let tenant_id = tenant.get_tenant_id();
-        join_set.spawn(
-            async move {
-                let freeze_and_flush = true;
-
-                let res = {
-                    let (_guard, shutdown_progress) = completion::channel();
-                    tenant.shutdown(shutdown_progress, freeze_and_flush).await
-                };
-
-                if let Err(other_progress) = res {
-                    // join the another shutdown in progress
-                    other_progress.wait().await;
-                }
-
-                // we cannot afford per tenant logging here, because if s3 is degraded, we are
-                // going to log too many lines
-
-                debug!("tenant successfully stopped");
-            }
-            .instrument(info_span!("shutdown", %tenant_id)),
-        );
-    }
 
     let total = join_set.len();
     let mut panicked = 0;
@@ -640,7 +652,7 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
                 match joined {
                     Ok(()) => {}
                     Err(join_error) if join_error.is_cancelled() => {
-                        unreachable!("we are not cancelling any of the futures");
+                        unreachable!("we are not cancelling any of the tasks");
                     }
                     Err(join_error) if join_error.is_panic() => {
                         // cannot really do anything, as this panic is likely a bug
@@ -742,139 +754,134 @@ pub(crate) async fn set_new_tenant_config(
     Ok(())
 }
 
-#[instrument(skip_all, fields(%tenant_id))]
-pub(crate) async fn upsert_location(
-    conf: &'static PageServerConf,
-    tenant_id: TenantId,
-    new_location_config: LocationConf,
-    broker_client: storage_broker::BrokerClientChannel,
-    remote_storage: Option<GenericRemoteStorage>,
-    deletion_queue_client: DeletionQueueClient,
-    ctx: &RequestContext,
-) -> Result<(), anyhow::Error> {
-    info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
+impl TenantManager {
+    #[instrument(skip_all, fields(%tenant_id))]
+    pub(crate) async fn upsert_location(
+        &self,
+        tenant_id: TenantId,
+        new_location_config: LocationConf,
+        ctx: &RequestContext,
+    ) -> Result<(), anyhow::Error> {
+        info!("configuring tenant location {tenant_id} to state {new_location_config:?}");
 
-    // Special case fast-path for updates to Tenant: if our upsert is only updating configuration,
-    // then we do not need to set the slot to InProgress, we can just call into the
-    // existng tenant.
-    {
-        let locked = TENANTS.read().unwrap();
-        let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, TenantSlotPeekMode::Write)?;
-        match (&new_location_config.mode, peek_slot) {
-            (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
-                if attach_conf.generation == tenant.generation {
-                    // A transition from Attached to Attached in the same generation, we may
-                    // take our fast path and just provide the updated configuration
-                    // to the tenant.
-                    tenant.set_new_location_config(AttachedTenantConf::try_from(
-                        new_location_config,
-                    )?);
+        // Special case fast-path for updates to Tenant: if our upsert is only updating configuration,
+        // then we do not need to set the slot to InProgress, we can just call into the
+        // existng tenant.
+        {
+            let locked = self.tenants.read().unwrap();
+            let peek_slot = tenant_map_peek_slot(&locked, &tenant_id, TenantSlotPeekMode::Write)?;
+            match (&new_location_config.mode, peek_slot) {
+                (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
+                    if attach_conf.generation == tenant.generation {
+                        // A transition from Attached to Attached in the same generation, we may
+                        // take our fast path and just provide the updated configuration
+                        // to the tenant.
+                        tenant.set_new_location_config(AttachedTenantConf::try_from(
+                            new_location_config,
+                        )?);
 
-                    // Persist the new config in the background, to avoid holding up any
-                    // locks while we do so.
-                    // TODO
+                        // Persist the new config in the background, to avoid holding up any
+                        // locks while we do so.
+                        // TODO
 
-                    return Ok(());
-                } else {
-                    // Different generations, fall through to general case
+                        return Ok(());
+                    } else {
+                        // Different generations, fall through to general case
+                    }
+                }
+                _ => {
+                    // Not an Attached->Attached transition, fall through to general case
                 }
             }
-            _ => {
-                // Not an Attached->Attached transition, fall through to general case
-            }
         }
-    }
 
-    // General case for upserts to TenantsMap, excluding the case above: we will substitute an
-    // InProgress value to the slot while we make whatever changes are required.  The state for
-    // the tenant is inaccessible to the outside world while we are doing this, but that is sensible:
-    // the state is ill-defined while we're in transition.  Transitions are async, but fast: we do
-    // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
-    let mut slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::Any)?;
+        // General case for upserts to TenantsMap, excluding the case above: we will substitute an
+        // InProgress value to the slot while we make whatever changes are required.  The state for
+        // the tenant is inaccessible to the outside world while we are doing this, but that is sensible:
+        // the state is ill-defined while we're in transition.  Transitions are async, but fast: we do
+        // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
+        let mut slot_guard = tenant_map_acquire_slot(&tenant_id, TenantSlotAcquireMode::Any)?;
 
-    if let Some(TenantSlot::Attached(tenant)) = slot_guard.get_old_value() {
-        // The case where we keep a Tenant alive was covered above in the special case
-        // for Attached->Attached transitions in the same generation.  By this point,
-        // if we see an attached tenant we know it will be discarded and should be
-        // shut down.
-        let (_guard, progress) = utils::completion::channel();
+        if let Some(TenantSlot::Attached(tenant)) = slot_guard.get_old_value() {
+            // The case where we keep a Tenant alive was covered above in the special case
+            // for Attached->Attached transitions in the same generation.  By this point,
+            // if we see an attached tenant we know it will be discarded and should be
+            // shut down.
+            let (_guard, progress) = utils::completion::channel();
 
-        match tenant.get_attach_mode() {
-            AttachmentMode::Single | AttachmentMode::Multi => {
-                // Before we leave our state as the presumed holder of the latest generation,
-                // flush any outstanding deletions to reduce the risk of leaking objects.
-                deletion_queue_client.flush_advisory()
+            match tenant.get_attach_mode() {
+                AttachmentMode::Single | AttachmentMode::Multi => {
+                    // Before we leave our state as the presumed holder of the latest generation,
+                    // flush any outstanding deletions to reduce the risk of leaking objects.
+                    self.resources.deletion_queue_client.flush_advisory()
+                }
+                AttachmentMode::Stale => {
+                    // If we're stale there's not point trying to flush deletions
+                }
+            };
+
+            info!("Shutting down attached tenant");
+            match tenant.shutdown(progress, false).await {
+                Ok(()) => {}
+                Err(barrier) => {
+                    info!("Shutdown already in progress, waiting for it to complete");
+                    barrier.wait().await;
+                }
             }
-            AttachmentMode::Stale => {
-                // If we're stale there's not point trying to flush deletions
+            slot_guard.drop_old_value().expect("We just shut it down");
+        }
+
+        let tenant_path = self.conf.tenant_path(&tenant_id);
+
+        let new_slot = match &new_location_config.mode {
+            LocationMode::Secondary(_) => {
+                let tenant_path = self.conf.tenant_path(&tenant_id);
+                // Directory doesn't need to be fsync'd because if we crash it can
+                // safely be recreated next time this tenant location is configured.
+                unsafe_create_dir_all(&tenant_path)
+                    .await
+                    .with_context(|| format!("Creating {tenant_path}"))?;
+
+                Tenant::persist_tenant_config(self.conf, &tenant_id, &new_location_config)
+                    .await
+                    .map_err(SetNewTenantConfigError::Persist)?;
+
+                TenantSlot::Secondary
+            }
+            LocationMode::Attached(_attach_config) => {
+                let timelines_path = self.conf.timelines_path(&tenant_id);
+
+                // Directory doesn't need to be fsync'd because we do not depend on
+                // it to exist after crashes: it may be recreated when tenant is
+                // re-attached, see https://github.com/neondatabase/neon/issues/5550
+                unsafe_create_dir_all(&timelines_path)
+                    .await
+                    .with_context(|| format!("Creating {timelines_path}"))?;
+
+                Tenant::persist_tenant_config(self.conf, &tenant_id, &new_location_config)
+                    .await
+                    .map_err(SetNewTenantConfigError::Persist)?;
+
+                let tenant = tenant_spawn(
+                    self.conf,
+                    tenant_id,
+                    &tenant_path,
+                    self.resources.clone(),
+                    AttachedTenantConf::try_from(new_location_config)?,
+                    None,
+                    self.tenants,
+                    SpawnMode::Normal,
+                    ctx,
+                )?;
+
+                TenantSlot::Attached(tenant)
             }
         };
 
-        info!("Shutting down attached tenant");
-        match tenant.shutdown(progress, false).await {
-            Ok(()) => {}
-            Err(barrier) => {
-                info!("Shutdown already in progress, waiting for it to complete");
-                barrier.wait().await;
-            }
-        }
-        slot_guard.drop_old_value().expect("We just shut it down");
+        slot_guard.upsert(new_slot)?;
+
+        Ok(())
     }
-
-    let tenant_path = conf.tenant_path(&tenant_id);
-
-    let new_slot = match &new_location_config.mode {
-        LocationMode::Secondary(_) => {
-            let tenant_path = conf.tenant_path(&tenant_id);
-            // Directory doesn't need to be fsync'd because if we crash it can
-            // safely be recreated next time this tenant location is configured.
-            unsafe_create_dir_all(&tenant_path)
-                .await
-                .with_context(|| format!("Creating {tenant_path}"))?;
-
-            Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
-                .await
-                .map_err(SetNewTenantConfigError::Persist)?;
-
-            TenantSlot::Secondary
-        }
-        LocationMode::Attached(_attach_config) => {
-            let timelines_path = conf.timelines_path(&tenant_id);
-
-            // Directory doesn't need to be fsync'd because we do not depend on
-            // it to exist after crashes: it may be recreated when tenant is
-            // re-attached, see https://github.com/neondatabase/neon/issues/5550
-            unsafe_create_dir_all(&timelines_path)
-                .await
-                .with_context(|| format!("Creating {timelines_path}"))?;
-
-            Tenant::persist_tenant_config(conf, &tenant_id, &new_location_config)
-                .await
-                .map_err(SetNewTenantConfigError::Persist)?;
-
-            let tenant = tenant_spawn(
-                conf,
-                tenant_id,
-                &tenant_path,
-                TenantSharedResources {
-                    broker_client,
-                    remote_storage,
-                    deletion_queue_client,
-                },
-                AttachedTenantConf::try_from(new_location_config)?,
-                None,
-                &TENANTS,
-                SpawnMode::Normal,
-                ctx,
-            )?;
-
-            TenantSlot::Attached(tenant)
-        }
-    };
-
-    slot_guard.upsert(new_slot)?;
-
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1430,9 +1437,6 @@ pub struct SlotGuard {
     _completion: utils::completion::Completion,
 }
 
-unsafe impl Send for SlotGuard {}
-unsafe impl Sync for SlotGuard {}
-
 impl SlotGuard {
     fn new(
         tenant_id: TenantId,
@@ -1539,14 +1543,7 @@ impl SlotGuard {
     /// is responsible for protecting
     fn old_value_is_shutdown(&self) -> bool {
         match self.old_value.as_ref() {
-            Some(TenantSlot::Attached(tenant)) => {
-                // TODO: PR #5711 will add a gate that enables properly checking that
-                // shutdown completed.
-                matches!(
-                    tenant.current_state(),
-                    TenantState::Stopping { .. } | TenantState::Broken { .. }
-                )
-            }
+            Some(TenantSlot::Attached(tenant)) => tenant.gate.close_complete(),
             Some(TenantSlot::Secondary) => {
                 // TODO: when adding secondary mode tenants, this will check for shutdown
                 // in the same way that we do for `Tenant` above

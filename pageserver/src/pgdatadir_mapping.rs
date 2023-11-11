@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
+use utils::bin_ser::DeserializeError;
 use utils::exp_counter::ExpCounter;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -34,18 +34,30 @@ pub enum LsnForTimestamp {
     /// Found commits both before and after the given timestamp
     Present(Lsn),
 
+    /// Found no commits after the given timestamp, this means
+    /// that the newest data in the branch is older than the given
+    /// timestamp.
+    ///
     /// All commits <= LSN happened before the given timestamp
     Future(Lsn),
 
+    /// The queried timestamp is past our horizon we look back at (PITR)
+    ///
     /// All commits > LSN happened after the given timestamp,
-    /// but any commits older than the returned LSN
-    /// might have happened before or after the given timestamp.
-    /// We don't know because no data before the given lsn is available
+    /// but any commits < LSN might have happened before or after
+    /// the given timestamp. We don't know because no data before
+    /// the given lsn is available.
     Past(Lsn),
 
     /// We have found no commit with a timestamp,
     /// so we can't return anything meaningful.
-    /// The associated LSN is a lower bound value.
+    ///
+    /// The associated LSN is the lower bound value we can safely
+    /// create branches on, but no statement is made if it is
+    /// older or newer than the timestamp.
+    ///
+    /// This variant can e.g. be returned right after a
+    /// cluster import.
     NoData(Lsn),
 }
 
@@ -55,6 +67,25 @@ pub enum CalculateLogicalSizeError {
     Cancelled,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CollectKeySpaceError {
+    #[error(transparent)]
+    Decode(#[from] DeserializeError),
+    #[error(transparent)]
+    PageRead(PageReconstructError),
+    #[error("cancelled")]
+    Cancelled,
+}
+
+impl From<PageReconstructError> for CollectKeySpaceError {
+    fn from(err: PageReconstructError) -> Self {
+        match err {
+            PageReconstructError::Cancelled => Self::Cancelled,
+            err => Self::PageRead(err),
+        }
+    }
 }
 
 impl From<PageReconstructError> for CalculateLogicalSizeError {
@@ -407,6 +438,11 @@ impl Timeline {
         }
         // If `found_smaller == true`, `low` is the LSN of the last commit record
         // before or at `search_timestamp`
+        //
+        // FIXME: it would be better to get the LSN of the previous commit.
+        // Otherwise, if you restore to the returned LSN, the database will
+        // include physical changes from later commits that will be marked
+        // as aborted, and will need to be vacuumed away.
         let commit_lsn = Lsn(low * 8);
         match (found_smaller, found_larger) {
             (false, false) => {
@@ -419,7 +455,7 @@ impl Timeline {
                 Ok(LsnForTimestamp::Past(min_lsn))
             }
             (true, false) => {
-                // Only found a commit with timestamp smaller than the request.
+                // Only found commits with timestamps smaller than the request.
                 // It's still a valid case for branch creation, return it.
                 // And `update_gc_info()` ignores LSN for a `LsnForTimestamp::Future`
                 // case, anyway.
@@ -599,7 +635,6 @@ impl Timeline {
     pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
-        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
@@ -610,12 +645,8 @@ impl Timeline {
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self
-                .list_rels(*spcnode, *dbnode, lsn, ctx)
-                .await
-                .context("list rels")?
-            {
-                if cancel.is_cancelled() {
+            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
+                if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
                 let relsize_key = rel_size_to_key(rel);
@@ -632,11 +663,11 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub async fn collect_keyspace(
+    pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<KeySpace> {
+    ) -> Result<KeySpace, CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -645,7 +676,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -678,7 +709,7 @@ impl Timeline {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
             let buf = self.get(slrudir_key, lsn, ctx).await?;
-            let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
+            let dir = SlruSegmentDirectory::des(&buf)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
@@ -696,7 +727,7 @@ impl Timeline {
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {

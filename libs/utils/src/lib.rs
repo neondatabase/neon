@@ -1,5 +1,6 @@
 //! `utils` is intended to be a place to put code that is shared
 //! between other crates in this repository.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod backoff;
 
