@@ -667,22 +667,6 @@ impl AsyncWrite for YieldingVec {
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut task::Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<std::io::Result<usize>> {
-        if self.should_yield(bufs.iter().map(|b| b.len()).sum()) {
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        Poll::Ready(std::io::Write::write_vectored(&mut self.buf, bufs))
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        true
-    }
-
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut task::Context<'_>) -> Poll<std::io::Result<()>> {
         Poll::Ready(Ok(()))
     }
