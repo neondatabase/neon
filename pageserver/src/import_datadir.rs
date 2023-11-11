@@ -625,29 +625,31 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     Ok(Bytes::from(buf))
 }
 
-/// A buffer that yields writes at repeated intervals
+/// An in-memory buffer implementing `AsyncWrite`, inserting yields every now and then
 struct YieldingVec {
-    yld_len: usize,
+    yield_budget: usize,
+    // the buffer written into
     buf: Vec<u8>,
 }
 
 impl YieldingVec {
     fn new() -> Self {
         Self {
-            yld_len: 0,
+            yield_budget: 0,
             buf: Vec::new(),
         }
     }
+    // Whether we should yield for a read operation of given size
     fn should_yield(&mut self, add_buf_len: usize) -> bool {
         // Set this limit to a small value so that we are a
         // good async citizen and yield repeatedly (but not
         // too often for many small writes to cause many yields)
         const YIELD_DIST: usize = 1024;
 
-        let tgt_buf_len = self.buf.len() + add_buf_len;
-        let ret = self.yld_len / YIELD_DIST < tgt_buf_len / YIELD_DIST;
-        if self.yld_len < tgt_buf_len {
-            self.yld_len += add_buf_len;
+        let target_buf_len = self.buf.len() + add_buf_len;
+        let ret = self.yield_budget / YIELD_DIST < target_buf_len / YIELD_DIST;
+        if self.yield_budget < target_buf_len {
+            self.yield_budget += add_buf_len;
         }
         ret
     }
