@@ -402,8 +402,9 @@ impl Timeline {
                 low = mid + 1;
             }
         }
-        // If `found_smaller == true`, `low` is the LSN of the last commit record
-        // before or at `search_timestamp`
+        // If `found_smaller == true`, `low = t + 1` where `t` is the target LSN,
+        // so the LSN of the last commit record before or at `search_timestamp`.
+        // Remove one from `low` to get `t`.
         //
         // FIXME: it would be better to get the LSN of the previous commit.
         // Otherwise, if you restore to the returned LSN, the database will
