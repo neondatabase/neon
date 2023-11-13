@@ -87,11 +87,12 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
+        commit: bool,
     ) -> anyhow::Result<()> {
         WAL_INGEST.records_received.inc();
         let pg_version = modification.tline.pg_version;
 
-        modification.lsn = lsn;
+        modification.set_lsn(lsn)?;
         decode_wal_record(recdata, decoded, pg_version)?;
 
         let mut buf = decoded.record.clone();
@@ -409,6 +410,9 @@ impl WalIngest {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN.
+        if commit {
+            modification.commit(ctx).await?;
+        }
 
         Ok(())
     }
@@ -1488,7 +1492,6 @@ impl WalIngest {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let last_lsn = modification.lsn;
 
         // Get current size and put rel creation if rel doesn't exist
         //
@@ -1496,26 +1499,28 @@ impl WalIngest {
         //       check the cache too. This is because eagerly checking the cache results in
         //       less work overall and 10% better performance. It's more work on cache miss
         //       but cache miss is rare.
-        let old_nblocks =
-            if let Some(nblocks) = modification.tline.get_cached_rel_size(&rel, last_lsn) {
-                nblocks
-            } else if !modification
+        let old_nblocks = if let Some(nblocks) = modification
+            .tline
+            .get_cached_rel_size(&rel, modification.get_lsn())
+        {
+            nblocks
+        } else if !modification
+            .tline
+            .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+            .await?
+        {
+            // create it with 0 size initially, the logic below will extend it
+            modification
+                .put_rel_creation(rel, 0, ctx)
+                .await
+                .context("Relation Error")?;
+            0
+        } else {
+            modification
                 .tline
-                .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+                .get_rel_size(rel, Version::Modified(modification), true, ctx)
                 .await?
-            {
-                // create it with 0 size initially, the logic below will extend it
-                modification
-                    .put_rel_creation(rel, 0, ctx)
-                    .await
-                    .context("Relation Error")?;
-                0
-            } else {
-                modification
-                    .tline
-                    .get_rel_size(rel, Version::Modified(modification), true, ctx)
-                    .await?
-            };
+        };
 
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
@@ -2248,7 +2253,7 @@ mod tests {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx, true)
                     .await
                     .unwrap();
             }

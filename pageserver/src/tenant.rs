@@ -3716,6 +3716,7 @@ pub(crate) mod harness {
                 ),
                 gc_feedback: Some(tenant_conf.gc_feedback),
                 heatmap_period: Some(tenant_conf.heatmap_period),
+                ingest_batch_size: Some(tenant_conf.ingest_batch_size),
             }
         }
     }

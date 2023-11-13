@@ -118,6 +118,7 @@ pub mod defaults {
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 #gc_feedback = false
+#ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 

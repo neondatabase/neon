@@ -238,6 +238,7 @@ pub struct TenantConfig {
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
+    pub ingest_batch_size: Option<NonZeroU64>,
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which

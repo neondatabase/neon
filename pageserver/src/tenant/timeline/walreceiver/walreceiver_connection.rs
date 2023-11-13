@@ -2,6 +2,7 @@
 
 use std::{
     error::Error,
+    num::NonZeroU64,
     pin::pin,
     str::FromStr,
     sync::Arc,
@@ -106,6 +107,7 @@ impl From<WalDecodeError> for WalReceiverError {
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
@@ -114,6 +116,7 @@ pub(super) async fn handle_walreceiver_connection(
     connect_timeout: Duration,
     ctx: RequestContext,
     node: NodeId,
+    ingest_batch_size: NonZeroU64,
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -305,7 +308,8 @@ pub(super) async fn handle_walreceiver_connection(
 
                 {
                     let mut decoded = DecodedWALRecord::default();
-                    let mut modification = timeline.begin_modification(endlsn);
+                    let mut modification = timeline.begin_modification(startlsn);
+                    let mut uncommitted_records = 0;
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
@@ -314,14 +318,34 @@ pub(super) async fn handle_walreceiver_connection(
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
+                        // Ingest the records without immediately committing them.
                         walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                            .ingest_record(
+                                recdata,
+                                lsn,
+                                &mut modification,
+                                &mut decoded,
+                                &ctx,
+                                false,
+                            )
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
 
                         fail_point!("walreceiver-after-ingest");
 
                         last_rec_lsn = lsn;
+
+                        uncommitted_records += 1;
+                        // Commit every ingest_batch_size records.
+                        if uncommitted_records >= ingest_batch_size.get() {
+                            modification.commit(&ctx).await?;
+                            uncommitted_records = 0;
+                        }
+                    }
+
+                    // Commit the remaining records.
+                    if uncommitted_records > 0 {
+                        modification.commit(&ctx).await?;
                     }
                 }
 

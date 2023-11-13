@@ -408,6 +408,11 @@ impl PageServerNode {
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+            ingest_batch_size: settings
+                .remove("ingest_batch_size")
+                .map(|x| x.parse::<NonZeroU64>())
+                .transpose()
+                .context("Failed to parse 'ingest_batch_size' as integer")?,
         };
 
         let request = models::TenantCreateRequest {
@@ -506,6 +511,11 @@ impl PageServerNode {
                     .transpose()
                     .context("Failed to parse 'gc_feedback' as bool")?,
                 heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                ingest_batch_size: settings
+                    .remove("ingest_batch_size")
+                    .map(|x| x.parse::<NonZeroU64>())
+                    .transpose()
+                    .context("Failed to parse 'ingest_batch_size' as integer")?,
             }
         };
 

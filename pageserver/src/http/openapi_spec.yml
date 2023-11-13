@@ -1397,6 +1397,8 @@ components:
           type: string
         image_creation_threshold:
           type: integer
+        ingest_batch_size:
+          type: integer
         walreceiver_connect_timeout:
           type: string
         lagging_wal_timeout:

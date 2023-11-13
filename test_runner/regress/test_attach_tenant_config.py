@@ -171,6 +171,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "min_resident_size_override": 23,
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
+        "ingest_batch_size": 100,
     }
 
     ps_http = env.pageserver.http_client()
