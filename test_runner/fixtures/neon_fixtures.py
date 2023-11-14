@@ -1871,6 +1871,8 @@ def append_pageserver_param_overrides(
         params_to_update.append(
             f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
         )
+    else:
+        params_to_update.append('--pageserver-config-override=remote_storage=""')
 
     env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
     if env_overrides is not None:

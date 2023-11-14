@@ -9,6 +9,7 @@ pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
     path: PathBuf,
+    client: reqwest::blocking::Client,
 }
 
 const COMMAND: &str = "attachment_service";
@@ -22,6 +23,16 @@ pub struct AttachHookRequest {
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookResponse {
     pub gen: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct InspectRequest {
+    pub tenant_id: TenantId,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct InspectResponse {
+    pub attachment: Option<(u32, NodeId)>,
 }
 
 impl AttachmentService {
@@ -42,6 +53,9 @@ impl AttachmentService {
             env: env.clone(),
             path,
             listen,
+            client: reqwest::blocking::ClientBuilder::new()
+                .build()
+                .expect("Failed to construct http client"),
         }
     }
 
@@ -84,21 +98,40 @@ impl AttachmentService {
             .unwrap()
             .join("attach-hook")
             .unwrap();
-        let client = reqwest::blocking::ClientBuilder::new()
-            .build()
-            .expect("Failed to construct http client");
 
         let request = AttachHookRequest {
             tenant_id,
             node_id: Some(pageserver_id),
         };
 
-        let response = client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send()?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
 
         let response = response.json::<AttachHookResponse>()?;
         Ok(response.gen)
+    }
+
+    pub fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
+        use hyper::StatusCode;
+
+        let url = self
+            .env
+            .control_plane_api
+            .clone()
+            .unwrap()
+            .join("inspect")
+            .unwrap();
+
+        let request = InspectRequest { tenant_id };
+
+        let response = self.client.post(url).json(&request).send()?;
+        if response.status() != StatusCode::OK {
+            return Err(anyhow!("Unexpected status {}", response.status()));
+        }
+
+        let response = response.json::<InspectResponse>()?;
+        Ok(response.attachment)
     }
 }
