@@ -1406,17 +1406,19 @@ use metrics::{IntCounter, IntCounterVec};
 struct LayerImplMetrics {
     started_evictions: IntCounter,
     completed_evictions: IntCounter,
-    cancelled_evictions: IntCounterVec,
+    cancelled_evictions: enum_map::EnumMap<EvictionCancelled, IntCounter>,
 
     started_gcs: IntCounter,
     completed_gcs: IntCounter,
-    failed_gcs: IntCounterVec,
+    failed_gcs: enum_map::EnumMap<GcFailed, IntCounter>,
 
     rare_counters: IntCounterVec,
 }
 
 impl Default for LayerImplMetrics {
     fn default() -> Self {
+        use enum_map::Enum;
+
         let started_evictions = metrics::register_int_counter!(
             "pageserver_layer_started_evictions",
             "Evictions started in the Layer implementation"
@@ -1434,6 +1436,12 @@ impl Default for LayerImplMetrics {
             &["reason"]
         )
         .unwrap();
+
+        let cancelled_evictions = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+            let reason = EvictionCancelled::from_usize(i);
+            let s = reason.as_str();
+            cancelled_evictions.with_label_values(&[s])
+        }));
 
         let started_gcs = metrics::register_int_counter!(
             "pageserver_layer_started_gcs",
@@ -1453,6 +1461,12 @@ impl Default for LayerImplMetrics {
             &["reason"]
         )
         .unwrap();
+
+        let failed_gcs = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+            let reason = GcFailed::from_usize(i);
+            let s = reason.as_str();
+            failed_gcs.with_label_values(&[s])
+        }));
 
         let rare_counters = metrics::register_int_counter_vec!(
             "pageserver_layer_assumed_rare_count",
@@ -1483,10 +1497,7 @@ impl LayerImplMetrics {
         self.completed_evictions.inc();
     }
     fn inc_eviction_cancelled(&self, reason: EvictionCancelled) {
-        self.cancelled_evictions
-            .get_metric_with_label_values(&[reason.as_str()])
-            .unwrap()
-            .inc()
+        self.cancelled_evictions[reason].inc()
     }
 
     fn inc_started_gcs(&self) {
@@ -1496,10 +1507,7 @@ impl LayerImplMetrics {
         self.completed_gcs.inc();
     }
     fn inc_gcs_failed(&self, reason: GcFailed) {
-        self.failed_gcs
-            .get_metric_with_label_values(&[reason.as_str()])
-            .unwrap()
-            .inc();
+        self.failed_gcs[reason].inc();
     }
 
     /// Counted separatedly from failed gcs because we will complete the gc attempt regardless of
@@ -1572,6 +1580,7 @@ impl LayerImplMetrics {
     }
 }
 
+#[derive(enum_map::Enum)]
 enum EvictionCancelled {
     LayerGone,
     TimelineGone,
@@ -1600,6 +1609,7 @@ impl EvictionCancelled {
     }
 }
 
+#[derive(enum_map::Enum)]
 enum GcFailed {
     TimelineGone,
     DeleteSchedulingFailed,
