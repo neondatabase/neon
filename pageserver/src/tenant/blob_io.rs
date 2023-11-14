@@ -327,7 +327,7 @@ mod tests {
                 let mut sz: u16 = rng.gen();
                 // Make 50% of the arrays small
                 if rng.gen() {
-                    sz |= 63;
+                    sz &= 63;
                 }
                 random_array(sz.into())
             })

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::env;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -469,8 +469,6 @@ fn create_azure_client(
     let random = rand::thread_rng().gen::<u32>();
 
     let remote_storage_config = RemoteStorageConfig {
-        max_concurrent_syncs: NonZeroUsize::new(100).unwrap(),
-        max_sync_errors: NonZeroU32::new(5).unwrap(),
         storage: RemoteStorageKind::AzureContainer(AzureConfig {
             container_name: remote_storage_azure_container,
             container_region: remote_storage_azure_region,

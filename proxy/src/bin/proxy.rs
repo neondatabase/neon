@@ -80,6 +80,9 @@ struct ProxyCliArgs {
     /// cache for `wake_compute` api method (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
     wake_compute_cache: String,
+    /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
+    #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
+    wake_compute_lock: String,
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
@@ -220,10 +223,23 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 node_info: console::caches::NodeInfoCache::new("node_info_cache", size, ttl),
             }));
 
+            let config::WakeComputeLockOptions {
+                shards,
+                permits,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(
+                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout)
+                    .unwrap(),
+            ));
+            tokio::spawn(locks.garbage_collect_worker(epoch));
+
             let url = args.auth_endpoint.parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client());
 
-            let api = console::provider::neon::Api::new(endpoint, caches);
+            let api = console::provider::neon::Api::new(endpoint, caches, locks);
             auth::BackendType::Console(Cow::Owned(api), ())
         }
         AuthBackend::Postgres => {

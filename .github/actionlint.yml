@@ -1,5 +1,7 @@
 self-hosted-runner:
   labels:
+    - arm64
+    - dev
     - gen3
     - large
     - small
