@@ -9,6 +9,7 @@ pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
     path: PathBuf,
+    client: reqwest::blocking::Client,
 }
 
 const COMMAND: &str = "attachment_service";
@@ -52,6 +53,9 @@ impl AttachmentService {
             env: env.clone(),
             path,
             listen,
+            client: reqwest::blocking::ClientBuilder::new()
+                .build()
+                .expect("Failed to construct http client"),
         }
     }
 
@@ -94,16 +98,13 @@ impl AttachmentService {
             .unwrap()
             .join("attach-hook")
             .unwrap();
-        let client = reqwest::blocking::ClientBuilder::new()
-            .build()
-            .expect("Failed to construct http client");
 
         let request = AttachHookRequest {
             tenant_id,
             node_id: Some(pageserver_id),
         };
 
-        let response = client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send()?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
@@ -122,13 +123,10 @@ impl AttachmentService {
             .unwrap()
             .join("inspect")
             .unwrap();
-        let client = reqwest::blocking::ClientBuilder::new()
-            .build()
-            .expect("Failed to construct http client");
 
         let request = InspectRequest { tenant_id };
 
-        let response = client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send()?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
