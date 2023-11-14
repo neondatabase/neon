@@ -1401,7 +1401,7 @@ impl From<ResidentLayer> for Layer {
     }
 }
 
-use metrics::{IntCounter, IntCounterVec};
+use metrics::IntCounter;
 
 struct LayerImplMetrics {
     started_evictions: IntCounter,
@@ -1412,7 +1412,7 @@ struct LayerImplMetrics {
     completed_gcs: IntCounter,
     failed_gcs: enum_map::EnumMap<GcFailed, IntCounter>,
 
-    rare_counters: IntCounterVec,
+    rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
 }
 
 impl Default for LayerImplMetrics {
@@ -1475,6 +1475,12 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
+        let rare_counters = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+            let event = RareEvent::from_usize(i);
+            let s = event.as_str();
+            rare_counters.with_label_values(&[s])
+        }));
+
         Self {
             started_evictions,
             completed_evictions,
@@ -1513,35 +1519,23 @@ impl LayerImplMetrics {
     /// Counted separatedly from failed gcs because we will complete the gc attempt regardless of
     /// failure to delete local file.
     fn inc_gc_removes_failed(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["gc_remove_failed"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::GcRemoveFailed].inc();
     }
 
     /// Expected rare because requires a race with `evict_blocking` and
     /// `get_or_maybe_download`.
     fn inc_retried_get_or_maybe_download(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["retried_gomd"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::RetriedGetOrMaybeDownload].inc();
     }
 
     /// Expected rare because cancellations are unexpected
     fn inc_download_completed_without_requester(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["download_completed_without"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::DownloadFailedWithoutRequester].inc();
     }
 
     /// Expected rare because cancellations are unexpected
     fn inc_download_failed_without_requester(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["download_failed_without"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::DownloadFailedWithoutRequester].inc();
     }
 
     /// The Weak in ResidentOrWantedEvicted::WantedEvicted was successfully upgraded.
@@ -1549,34 +1543,22 @@ impl LayerImplMetrics {
     /// If this counter is always zero, we should replace ResidentOrWantedEvicted type with an
     /// Option.
     fn inc_raced_wanted_evicted_accesses(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["raced_wanted_evicted"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::UpgradedWantedEvicted].inc();
     }
 
     /// These are only expected for [`Self::inc_download_completed_without_requester`] amount when
     /// running with remote storage.
     fn inc_init_needed_no_download(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["init_needed_no_download"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::InitWithoutDownload].inc();
     }
 
     /// Expected rare because all layer files should be readable and good
     fn inc_permanent_loading_failures(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["permanent_loading_failure"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::PermanentLoadingFailure].inc();
     }
 
     fn inc_broadcast_lagged(&self) {
-        self.rare_counters
-            .get_metric_with_label_values(&["broadcast_lagged"])
-            .unwrap()
-            .inc();
+        self.rare_counters[RareEvent::EvictAndWaitLagged].inc();
     }
 }
 
@@ -1620,6 +1602,33 @@ impl GcFailed {
         match self {
             GcFailed::TimelineGone => "timeline_gone",
             GcFailed::DeleteSchedulingFailed => "delete_scheduling_failed",
+        }
+    }
+}
+
+#[derive(enum_map::Enum)]
+enum RareEvent {
+    GcRemoveFailed,
+    RetriedGetOrMaybeDownload,
+    DownloadFailedWithoutRequester,
+    UpgradedWantedEvicted,
+    InitWithoutDownload,
+    PermanentLoadingFailure,
+    EvictAndWaitLagged,
+}
+
+impl RareEvent {
+    fn as_str(&self) -> &'static str {
+        use RareEvent::*;
+
+        match self {
+            GcRemoveFailed => "gc_remove_failed",
+            RetriedGetOrMaybeDownload => "retried_gomd",
+            DownloadFailedWithoutRequester => "download_failed_without",
+            UpgradedWantedEvicted => "raced_wanted_evicted",
+            InitWithoutDownload => "init_needed_no_download",
+            PermanentLoadingFailure => "permanent_loading_failure",
+            EvictAndWaitLagged => "broadcast_lagged",
         }
     }
 }
