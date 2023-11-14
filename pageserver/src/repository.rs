@@ -174,6 +174,7 @@ impl Key {
 
 /// A 'value' stored for a one Key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub enum Value {
     /// An Image value contains a full copy of the value
     Image(Bytes),
@@ -194,6 +195,70 @@ impl Value {
             Value::Image(_) => true,
             Value::WalRecord(rec) => rec.will_init(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use bytes::Bytes;
+    use utils::bin_ser::BeSer;
+
+    macro_rules! roundtrip {
+        ($orig:expr, $expected:expr) => {{
+            let orig: Value = $orig;
+
+            let actual = Value::ser(&orig).unwrap();
+            let expected: &[u8] = &$expected;
+
+            assert_eq!(utils::Hex(&actual), utils::Hex(expected));
+
+            let deser = Value::des(&actual).unwrap();
+
+            assert_eq!(orig, deser);
+        }};
+    }
+
+    #[test]
+    fn image_roundtrip() {
+        let image = Bytes::from_static(b"foobar");
+        let image = Value::Image(image);
+
+        #[rustfmt::skip]
+        let expected = [
+            // top level discriminator of 4 bytes
+            0x00, 0x00, 0x00, 0x00,
+            // 8 byte length
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,
+            // foobar
+            0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72
+        ];
+
+        roundtrip!(image, expected);
+    }
+
+    #[test]
+    fn walrecord_postgres_roundtrip() {
+        let rec = NeonWalRecord::Postgres {
+            will_init: true,
+            rec: Bytes::from_static(b"foobar"),
+        };
+        let rec = Value::WalRecord(rec);
+
+        #[rustfmt::skip]
+        let expected = [
+            // flattened discriminator of total 8 bytes
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            // will_init
+            0x01,
+            // 8 byte length
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06,
+            // foobar
+            0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72
+        ];
+
+        roundtrip!(rec, expected);
     }
 }
 
