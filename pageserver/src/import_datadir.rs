@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::*;
+use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
 use crate::walrecord::DecodedWALRecord;
@@ -714,5 +715,10 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     builder.finish().await?;
     let zstd = builder.into_inner().await?;
     let compressed = zstd.into_inner();
+    let compressed_len = compressed.buf.len();
+    const INITDB_TAR_ZST_WARN_LIMIT: usize = 2_000_000;
+    if compressed_len > INITDB_TAR_ZST_WARN_LIMIT {
+        warn!("compressed {INITDB_PATH} size of {compressed_len} is above limit {INITDB_TAR_ZST_WARN_LIMIT}.");
+    }
     Ok(compressed.buf)
 }

@@ -250,6 +250,8 @@ pub(crate) const FAILED_REMOTE_OP_RETRIES: u32 = 10;
 // retries. Uploads and deletions are retried forever, though.
 pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
+pub(crate) const INITDB_PATH: &str = "initdb.tar.zst";
+
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
@@ -1530,7 +1532,6 @@ pub fn remote_layer_path(
 }
 
 pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
-    const INITDB_PATH: &str = "initdb.tar.zst";
     RemotePath::from_string(&format!(
         "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{INITDB_PATH}"
     ))
