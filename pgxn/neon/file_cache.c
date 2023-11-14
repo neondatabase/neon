@@ -94,7 +94,7 @@ static shmem_request_hook_type prev_shmem_request_hook;
 void FileCacheMonitorMain(Datum main_arg);
 
 /*
- * Local file cache is mandatory and Neon can work without it.
+ * Local file cache is not mandatory and Neon can work without it.
  * In case of any any errors with this cache, we should disable it but to not throw error.
  * Also we should allow  re-enable it if source of failure (lack of disk space, permissions,...) is fixed.
  * All cache content should be invalidated to avoid reading of stale or corrupted data
