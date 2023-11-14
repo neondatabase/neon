@@ -1875,7 +1875,7 @@ mod tests {
 
     use super::{super::harness::TenantHarness, TenantsMap};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_awaits_in_progress_tenant() {
         // Test that if an InProgress tenant is in the map during shutdown, the shutdown will gracefully
         // wait for it to complete before proceeding.
