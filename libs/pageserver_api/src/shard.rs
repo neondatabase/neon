@@ -214,19 +214,24 @@ mod tests {
     use std::str::FromStr;
 
     use bincode;
-    use utils::id::TenantId;
+    use utils::{id::TenantId, Hex};
 
     use super::*;
+
+    const EXAMPLE_TENANT_ID: &str = "1f359dd625e519a1a4e8d7509690f6fc";
 
     #[test]
     fn tenant_shard_id_string() -> Result<(), hex::FromHexError> {
         let example = TenantShardId {
-            tenant_id: TenantId::generate(),
+            tenant_id: TenantId::from_str(EXAMPLE_TENANT_ID).unwrap(),
             shard_count: ShardCount(10),
             shard_number: ShardNumber(7),
         };
 
         let encoded = format!("{example}");
+
+        let expected = format!("{EXAMPLE_TENANT_ID}-070a");
+        assert_eq!(&encoded, &expected);
 
         let decoded = TenantShardId::from_str(&encoded)?;
 
@@ -238,12 +243,18 @@ mod tests {
     #[test]
     fn tenant_shard_id_binary() -> Result<(), hex::FromHexError> {
         let example = TenantShardId {
-            tenant_id: TenantId::generate(),
+            tenant_id: TenantId::from_str(EXAMPLE_TENANT_ID).unwrap(),
             shard_count: ShardCount(10),
             shard_number: ShardNumber(7),
         };
 
         let encoded = bincode::serialize(&example).unwrap();
+        let expected: [u8; 18] = [
+            0x1f, 0x35, 0x9d, 0xd6, 0x25, 0xe5, 0x19, 0xa1, 0xa4, 0xe8, 0xd7, 0x50, 0x96, 0x90,
+            0xf6, 0xfc, 0x07, 0x0a,
+        ];
+        assert_eq!(Hex(&encoded), Hex(&expected));
+
         let decoded = bincode::deserialize(&encoded).unwrap();
 
         assert_eq!(example, decoded);
@@ -255,8 +266,11 @@ mod tests {
     fn tenant_shard_id_backward_compat() -> Result<(), hex::FromHexError> {
         // Test that TenantShardId can decode a TenantId in human
         // readable form
-        let example = TenantId::generate();
+        let example = TenantId::from_str(EXAMPLE_TENANT_ID).unwrap();
         let encoded = format!("{example}");
+
+        assert_eq!(&encoded, EXAMPLE_TENANT_ID);
+
         let decoded = TenantShardId::from_str(&encoded)?;
 
         assert_eq!(example, decoded.tenant_id);
@@ -270,9 +284,12 @@ mod tests {
     fn tenant_shard_id_forward_compat() -> Result<(), hex::FromHexError> {
         // Test that a legacy TenantShardId encodes into a form that
         // can be decoded as TenantId
-        let example_tenant_id = TenantId::generate();
+        let example_tenant_id = TenantId::from_str(EXAMPLE_TENANT_ID).unwrap();
         let example = TenantShardId::unsharded(example_tenant_id);
         let encoded = format!("{example}");
+
+        assert_eq!(&encoded, EXAMPLE_TENANT_ID);
+
         let decoded = TenantId::from_str(&encoded)?;
 
         assert_eq!(example_tenant_id, decoded);
@@ -287,8 +304,15 @@ mod tests {
         // is equivalent to the main test for binary encoding, just verifying
         // that the same behavior applies when we have used `unsharded()` to
         // construct a TenantShardId.
-        let example = TenantShardId::unsharded(TenantId::generate());
+        let example = TenantShardId::unsharded(TenantId::from_str(EXAMPLE_TENANT_ID).unwrap());
         let encoded = bincode::serialize(&example).unwrap();
+
+        let expected: [u8; 18] = [
+            0x1f, 0x35, 0x9d, 0xd6, 0x25, 0xe5, 0x19, 0xa1, 0xa4, 0xe8, 0xd7, 0x50, 0x96, 0x90,
+            0xf6, 0xfc, 0x00, 0x00,
+        ];
+        assert_eq!(Hex(&encoded), Hex(&expected));
+
         let decoded = bincode::deserialize::<TenantShardId>(&encoded).unwrap();
         assert_eq!(example, decoded);
 
