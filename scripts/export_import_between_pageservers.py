@@ -18,7 +18,7 @@
 # 6. We wait for the new pageserver's remote_consistent_lsn to catch up
 #
 # For more context on how to use this, see:
-# https://github.com/neondatabase/cloud/wiki/Storage-format-migration
+# https://www.notion.so/neondatabase/Storage-format-migration-9a8eba33ccf8417ea8cf50e6a0c542cf
 
 import argparse
 import os

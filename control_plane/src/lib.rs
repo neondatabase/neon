@@ -14,3 +14,4 @@ pub mod local_env;
 pub mod pageserver;
 pub mod postgresql_conf;
 pub mod safekeeper;
+pub mod tenant_migration;
