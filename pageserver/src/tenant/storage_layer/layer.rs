@@ -1417,19 +1417,16 @@ struct LayerImplMetrics {
 
 impl Default for LayerImplMetrics {
     fn default() -> Self {
-        let evictions = metrics::register_int_counter_vec!(
-            "pageserver_layer_evictions_count",
-            "Evictions started and completed in the Layer implementation",
-            &["state"]
+        let started_evictions = metrics::register_int_counter!(
+            "pageserver_layer_started_evictions",
+            "Evictions started in the Layer implementation"
         )
         .unwrap();
-
-        let started_evictions = evictions
-            .get_metric_with_label_values(&["started"])
-            .unwrap();
-        let completed_evictions = evictions
-            .get_metric_with_label_values(&["completed"])
-            .unwrap();
+        let completed_evictions = metrics::register_int_counter!(
+            "pageserver_layer_completed_evictions",
+            "Evictions completed in the Layer implementation"
+        )
+        .unwrap();
 
         let cancelled_evictions = metrics::register_int_counter_vec!(
             "pageserver_layer_cancelled_evictions_count",
@@ -1438,17 +1435,18 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
-        // reminder: this will be pageserver_layer_gcs_count_total with "_total" suffix
-        let gcs = metrics::register_int_counter_vec!(
-            "pageserver_layer_gcs_count",
-            "Garbage collections started and completed in the Layer implementation",
-            &["state"]
+        let started_gcs = metrics::register_int_counter!(
+            "pageserver_layer_started_gcs",
+            "Garbage collections pending in the Layer implementation"
+        )
+        .unwrap();
+        let completed_gcs = metrics::register_int_counter!(
+            "pageserver_layer_completed_gcs",
+            "Garbage collections completed in the Layer implementation"
         )
         .unwrap();
 
-        let started_gcs = gcs.get_metric_with_label_values(&["pending"]).unwrap();
-        let completed_gcs = gcs.get_metric_with_label_values(&["completed"]).unwrap();
-
+        // reminder: this will be pageserver_layer_gcs_count_total with "_total" suffix
         let failed_gcs = metrics::register_int_counter_vec!(
             "pageserver_layer_failed_gcs_count",
             "Different reasons for garbage collections to have failed",
