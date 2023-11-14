@@ -15,7 +15,9 @@ use std::{io, result};
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{self, TenantInfo, TimelineInfo};
+use pageserver_api::models::{
+    self, LocationConfig, TenantInfo, TenantLocationConfigRequest, TimelineInfo,
+};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -30,6 +32,9 @@ use utils::{
 
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
+
+/// Directory within .neon which will be used by default for LocalFs remote storage.
+pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/pageserver";
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -98,8 +103,10 @@ impl PageServerNode {
         }
     }
 
-    // pageserver conf overrides defined by neon_local configuration.
-    fn neon_local_overrides(&self) -> Vec<String> {
+    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
+    ///
+    /// These all end up on the command line of the `pageserver` binary.
+    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
         let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
@@ -132,12 +139,25 @@ impl PageServerNode {
             ));
         }
 
+        if !cli_overrides
+            .iter()
+            .any(|c| c.starts_with("remote_storage"))
+        {
+            overrides.push(format!(
+                "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
+            ));
+        }
+
         if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
         {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
         }
+
+        // Apply the user-provided overrides
+        overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
+
         overrides
     }
 
@@ -203,9 +223,6 @@ impl PageServerNode {
     }
 
     fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
-
         let datadir = self.repo_path();
         print!(
             "Starting pageserver node {} at '{}' in {:?}",
@@ -248,8 +265,7 @@ impl PageServerNode {
     ) -> Vec<Cow<'a, str>> {
         let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
 
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+        let overrides = self.neon_local_overrides(config_overrides);
         for config_override in overrides {
             args.push(Cow::Borrowed("-c"));
             args.push(Cow::Owned(config_override));
@@ -497,6 +513,27 @@ impl PageServerNode {
             .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
+
+        Ok(())
+    }
+
+    pub fn location_config(
+        &self,
+        tenant_id: TenantId,
+        config: LocationConfig,
+    ) -> anyhow::Result<()> {
+        let req_body = TenantLocationConfigRequest { tenant_id, config };
+
+        self.http_request(
+            Method::PUT,
+            format!(
+                "{}/tenant/{}/location_config",
+                self.http_base_url, tenant_id
+            ),
+        )?
+        .json(&req_body)
+        .send()?
+        .error_from_body()?;
 
         Ok(())
     }
