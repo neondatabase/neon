@@ -16,7 +16,6 @@ use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::id::TenantTimelineId;
 use utils::lsn::AtomicLsn;
@@ -313,10 +312,8 @@ impl WalSendersShared {
 }
 
 // Serialized is used only for pretty printing in json.
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalSenderState {
-    #[serde_as(as = "DisplayFromStr")]
     ttid: TenantTimelineId,
     addr: SocketAddr,
     conn_id: ConnectionId,

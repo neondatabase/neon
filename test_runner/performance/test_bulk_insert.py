@@ -1,8 +1,10 @@
 from contextlib import closing
 
+from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import NeonCompare, PgCompare
 from fixtures.pageserver.utils import wait_tenant_status_404
 from fixtures.pg_version import PgVersion
+from fixtures.types import Lsn
 
 
 #
@@ -18,6 +20,8 @@ from fixtures.pg_version import PgVersion
 def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
+    start_lsn = Lsn(env.pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0])
+
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("create table huge (i int, j int);")
@@ -30,6 +34,13 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
 
             env.report_peak_memory_use()
             env.report_size()
+
+    # Report amount of wal written. Useful for comparing vanilla wal format vs
+    # neon wal format, measuring neon write amplification, etc.
+    end_lsn = Lsn(env.pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0])
+    wal_written_bytes = end_lsn - start_lsn
+    wal_written_mb = round(wal_written_bytes / (1024 * 1024))
+    env.zenbenchmark.record("wal_written", wal_written_mb, "MB", MetricReport.TEST_PARAM)
 
     # When testing neon, also check how long it takes the pageserver to reingest the
     # wal from safekeepers. If this number is close to total runtime, then the pageserver

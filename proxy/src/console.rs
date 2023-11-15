@@ -13,5 +13,10 @@ pub mod caches {
     pub use super::provider::{ApiCaches, NodeInfoCache};
 }
 
+/// Various cache-related types.
+pub mod locks {
+    pub use super::provider::ApiLocks;
+}
+
 /// Console's management API.
 pub mod mgmt;

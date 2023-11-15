@@ -32,7 +32,9 @@ use pageserver_api::control_api::{
     ValidateResponseTenant,
 };
 
-use control_plane::attachment_service::{AttachHookRequest, AttachHookResponse};
+use control_plane::attachment_service::{
+    AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -255,12 +257,28 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
     )
 }
 
+async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let inspect_req = json_request::<InspectRequest>(&mut req).await?;
+
+    let state = get_state(&req).inner.clone();
+    let locked = state.write().await;
+    let tenant_state = locked.tenants.get(&inspect_req.tenant_id);
+
+    json_response(
+        StatusCode::OK,
+        InspectResponse {
+            attachment: tenant_state.and_then(|s| s.pageserver.map(|ps| (s.generation, ps))),
+        },
+    )
+}
+
 fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, ApiError> {
     endpoint::make_router()
         .data(Arc::new(State::new(persistent_state)))
         .post("/re-attach", |r| request_span(r, handle_re_attach))
         .post("/validate", |r| request_span(r, handle_validate))
         .post("/attach-hook", |r| request_span(r, handle_attach_hook))
+        .post("/inspect", |r| request_span(r, handle_inspect))
 }
 
 #[tokio::main]

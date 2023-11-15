@@ -57,7 +57,10 @@ impl ControlPlaneClient {
 
         if let Some(jwt) = &conf.control_plane_api_token {
             let mut headers = hyper::HeaderMap::new();
-            headers.insert("Authorization", jwt.get_contents().parse().unwrap());
+            headers.insert(
+                "Authorization",
+                format!("Bearer {}", jwt.get_contents()).parse().unwrap(),
+            );
             client = client.default_headers(headers);
         }
 

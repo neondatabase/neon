@@ -361,7 +361,6 @@ class PgProtocol:
 
 @dataclass
 class AuthKeys:
-    pub: str
     priv: str
 
     def generate_token(self, *, scope: str, **token_data: str) -> str:
@@ -626,6 +625,8 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
 
             for pageserver in self.env.pageservers:
+                pageserver.assert_no_metric_errors()
+
                 pageserver.stop(immediate=True)
 
             if self.env.attachment_service is not None:
@@ -875,9 +876,31 @@ class NeonEnv:
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
-        pub = (Path(self.repo_dir) / "auth_public_key.pem").read_text()
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
-        return AuthKeys(pub=pub, priv=priv)
+        return AuthKeys(priv=priv)
+
+    def regenerate_keys_at(self, privkey_path: Path, pubkey_path: Path):
+        # compare generate_auth_keys() in local_env.rs
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ed25519", "-out", privkey_path],
+            cwd=self.repo_dir,
+            check=True,
+        )
+
+        subprocess.run(
+            [
+                "openssl",
+                "pkey",
+                "-in",
+                privkey_path,
+                "-pubout",
+                "-out",
+                pubkey_path,
+            ],
+            cwd=self.repo_dir,
+            check=True,
+        )
+        del self.auth_keys
 
     def generate_endpoint_id(self) -> str:
         """
@@ -1784,6 +1807,21 @@ class NeonPageserver(PgProtocol):
 
         assert not errors
 
+    def assert_no_metric_errors(self):
+        """
+        Certain metrics should _always_ be zero: they track conditions that indicate a bug.
+        """
+        if not self.running:
+            log.info(f"Skipping metrics check on pageserver {self.id}, it is not running")
+            return
+
+        for metric in [
+            "pageserver_tenant_manager_unexpected_errors_total",
+            "pageserver_deletion_queue_unexpected_errors_total",
+        ]:
+            value = self.http_client().get_metric_value(metric)
+            assert value == 0, f"Nonzero {metric} == {value}"
+
     def log_contains(self, pattern: str) -> Optional[str]:
         """Check that the pageserver log contains a line that matches the given regex"""
         logfile = open(os.path.join(self.workdir, "pageserver.log"), "r")
@@ -1833,6 +1871,8 @@ def append_pageserver_param_overrides(
         params_to_update.append(
             f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
         )
+    else:
+        params_to_update.append('--pageserver-config-override=remote_storage=""')
 
     env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
     if env_overrides is not None:
@@ -2138,6 +2178,29 @@ class NeonProxy(PgProtocol):
                 *["--uri", NeonProxy.link_auth_uri],
                 *["--allow-self-signed-compute", "true"],
             ]
+
+    class Console(AuthBackend):
+        def __init__(self, endpoint: str, fixed_rate_limit: Optional[int] = None):
+            self.endpoint = endpoint
+            self.fixed_rate_limit = fixed_rate_limit
+
+        def extra_args(self) -> list[str]:
+            args = [
+                # Console auth backend params
+                *["--auth-backend", "console"],
+                *["--auth-endpoint", self.endpoint],
+            ]
+            if self.fixed_rate_limit is not None:
+                args += [
+                    *["--disable-dynamic-rate-limiter", "false"],
+                    *["--rate-limit-algorithm", "aimd"],
+                    *["--initial-limit", str(1)],
+                    *["--rate-limiter-timeout", "1s"],
+                    *["--aimd-min-limit", "0"],
+                    *["--aimd-increase-by", "1"],
+                    *["--wake-compute-cache", "size=0"],  # Disable cache to test rate limiter.
+                ]
+            return args
 
     @dataclass(frozen=True)
     class Postgres(AuthBackend):
@@ -2868,7 +2931,7 @@ class SafekeeperHttpClient(requests.Session):
         params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
-        res_json = res.json()
+        res_json = json.loads(res.text)
         assert isinstance(res_json, dict)
         return res_json
 
@@ -2968,24 +3031,33 @@ class S3Scrubber:
         self.env = env
         self.log_dir = log_dir
 
-    def scrubber_cli(self, args, timeout):
+    def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
 
         env = {
             "REGION": s3_storage.bucket_region,
             "BUCKET": s3_storage.bucket_name,
+            "BUCKET_PREFIX": s3_storage.prefix_in_bucket,
+            "RUST_LOG": "DEBUG",
         }
         env.update(s3_storage.access_env_vars())
 
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [self.env.neon_binpath / "s3_scrubber"]
+        base_args = [str(self.env.neon_binpath / "s3_scrubber")]
         args = base_args + args
 
-        (output_path, _, status_code) = subprocess_capture(
-            self.log_dir, args, echo_stderr=True, echo_stdout=True, env=env, check=False
+        (output_path, stdout, status_code) = subprocess_capture(
+            self.log_dir,
+            args,
+            echo_stderr=True,
+            echo_stdout=True,
+            env=env,
+            check=False,
+            capture_stdout=True,
+            timeout=timeout,
         )
         if status_code:
             log.warning(f"Scrub command {args} failed")
@@ -2994,8 +3066,18 @@ class S3Scrubber:
 
             raise RuntimeError("Remote storage scrub failed")
 
-    def scan_metadata(self):
-        self.scrubber_cli(["scan-metadata"], timeout=30)
+        assert stdout is not None
+        return stdout
+
+    def scan_metadata(self) -> Any:
+        stdout = self.scrubber_cli(["scan-metadata", "--json"], timeout=30)
+
+        try:
+            return json.loads(stdout)
+        except:
+            log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
+            log.error(stdout)
+            raise
 
 
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:

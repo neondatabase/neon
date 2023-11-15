@@ -35,6 +35,7 @@ def subprocess_capture(
     echo_stderr=False,
     echo_stdout=False,
     capture_stdout=False,
+    timeout=None,
     **kwargs: Any,
 ) -> Tuple[str, Optional[str], int]:
     """Run a process and bifurcate its output to files and the `log` logger
@@ -104,7 +105,7 @@ def subprocess_capture(
                 stderr_handler = OutputHandler(p.stderr, stderr_f, echo=echo_stderr, capture=False)
                 stderr_handler.start()
 
-                r = p.wait()
+                r = p.wait(timeout=timeout)
 
                 stdout_handler.join()
                 stderr_handler.join()

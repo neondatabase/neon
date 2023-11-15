@@ -13,10 +13,10 @@ pub fn stream_tenants<'a>(
 ) -> impl Stream<Item = anyhow::Result<TenantId>> + 'a {
     try_stream! {
         let mut continuation_token = None;
+        let tenants_target = target.tenants_root();
         loop {
-            let tenants_target = target.tenants_root();
             let fetch_response =
-                list_objects_with_retries(s3_client, tenants_target, continuation_token.clone()).await?;
+                list_objects_with_retries(s3_client, &tenants_target, continuation_token.clone()).await?;
 
             let new_entry_ids = fetch_response
                 .common_prefixes()

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::error::Error as StdError;
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -118,6 +118,9 @@ pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
     // Print a stack trace for Internal Server errors
 
     match api_error {
+        ApiError::Forbidden(_) | ApiError::Unauthorized(_) => {
+            warn!("Error processing HTTP request: {api_error:#}")
+        }
         ApiError::ResourceUnavailable(_) => info!("Error processing HTTP request: {api_error:#}"),
         ApiError::NotFound(_) => info!("Error processing HTTP request: {api_error:#}"),
         ApiError::InternalServerError(_) => error!("Error processing HTTP request: {api_error:?}"),
