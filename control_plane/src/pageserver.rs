@@ -18,6 +18,7 @@ use camino::Utf8PathBuf;
 use pageserver_api::models::{
     self, LocationConfig, TenantInfo, TenantLocationConfigRequest, TimelineInfo,
 };
+use pageserver_api::shard::TenantShardId;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -408,7 +409,7 @@ impl PageServerNode {
         };
 
         let request = models::TenantCreateRequest {
-            new_tenant_id,
+            new_tenant_id: TenantShardId::unsharded(new_tenant_id),
             generation,
             config,
         };

@@ -16,6 +16,7 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
 };
+use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
@@ -419,9 +420,9 @@ async fn timeline_create_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
-    check_permission(&request, Some(tenant_id))?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let new_timeline_id = request_data.new_timeline_id;
 
@@ -430,7 +431,7 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = mgr::get_tenant(tenant_id, true)?;
+        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, true)?;
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -464,7 +465,10 @@ async fn timeline_create_handler(
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
-    .instrument(info_span!("timeline_create", %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+    .instrument(info_span!("timeline_create",
+        tenant_id = %tenant_shard_id.tenant_id,
+        shard = %tenant_shard_id.shard_slug(),
+        timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
 
@@ -660,14 +664,15 @@ async fn timeline_delete_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    check_permission(&request, Some(tenant_id))?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
 
-    mgr::delete_timeline(tenant_id, timeline_id, &ctx)
-        .instrument(info_span!("timeline_delete", %tenant_id, %timeline_id))
+    state.tenant_manager.delete_timeline(tenant_shard_id, timeline_id, &ctx)
+        .instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -681,11 +686,14 @@ async fn tenant_detach_handler(
     check_permission(&request, Some(tenant_id))?;
     let detach_ignored: Option<bool> = parse_query_param(&request, "detach_ignored")?;
 
+    // This is a legacy API (`/location_conf` is the replacement).  It only supports unsharded tenants
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
     let state = get_state(&request);
     let conf = state.conf;
     mgr::detach_tenant(
         conf,
-        tenant_id,
+        tenant_shard_id,
         detach_ignored.unwrap_or(false),
         &state.deletion_queue_client,
     )
@@ -802,13 +810,16 @@ async fn tenant_delete_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     // TODO openapi spec
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let state = get_state(&request);
 
-    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_id)
-        .instrument(info_span!("tenant_delete_handler", %tenant_id))
+    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
+        .instrument(info_span!("tenant_delete_handler",
+            tenant_id = %tenant_shard_id.tenant_id,
+            shard = tenant_shard_id.shard_slug()
+        ))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -1138,9 +1149,10 @@ async fn put_tenant_location_config_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+
     let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
-    let tenant_id = request_data.tenant_id;
-    check_permission(&request, Some(tenant_id))?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
     let state = get_state(&request);
@@ -1149,9 +1161,13 @@ async fn put_tenant_location_config_handler(
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
-        if let Err(e) = mgr::detach_tenant(conf, tenant_id, true, &state.deletion_queue_client)
-            .instrument(info_span!("tenant_detach", %tenant_id))
-            .await
+        if let Err(e) =
+            mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
+                .instrument(info_span!("tenant_detach",
+                    tenant_id = %tenant_shard_id.tenant_id,
+                    shard = tenant_shard_id.shard_slug()
+                ))
+                .await
         {
             match e {
                 TenantStateError::SlotError(TenantSlotError::NotFound(_)) => {
@@ -1168,7 +1184,7 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_id, location_conf, &ctx)
+        .upsert_location(tenant_shard_id, location_conf, &ctx)
         .await
         // TODO: badrequest assumes the caller was asking for something unreasonable, but in
         // principle we might have hit something like concurrent API calls to the same tenant,
@@ -1752,7 +1768,7 @@ pub fn make_router(
         .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
         .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))
         .get("/v1/tenant/:tenant_id", |r| api_handler(r, tenant_status))
-        .delete("/v1/tenant/:tenant_id", |r| {
+        .delete("/v1/tenant/:tenant_shard_id", |r| {
             api_handler(r, tenant_delete_handler)
         })
         .get("/v1/tenant/:tenant_id/synthetic_size", |r| {
@@ -1764,13 +1780,13 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_id/config", |r| {
             api_handler(r, get_tenant_config_handler)
         })
-        .put("/v1/tenant/:tenant_id/location_config", |r| {
+        .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             api_handler(r, put_tenant_location_config_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
         })
-        .post("/v1/tenant/:tenant_id/timeline", |r| {
+        .post("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_create_handler)
         })
         .post("/v1/tenant/:tenant_id/attach", |r| {
@@ -1814,7 +1830,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
             |r| api_handler(r, timeline_download_remote_layers_handler_get),
         )
-        .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+        .delete("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_delete_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id/layer", |r| {
