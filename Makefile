@@ -88,6 +88,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 # I'm not sure why it wouldn't work, but this is the only place (apart from
 # the "build-all-versions" entry points) where direct mention of PostgreSQL
 # versions is used.
+.PHONY: postgres-configure-v17
+postgres-configure-v17: $(POSTGRES_INSTALL_DIR)/build/v17/config.status
 .PHONY: postgres-configure-v16
 postgres-configure-v16: $(POSTGRES_INSTALL_DIR)/build/v16/config.status
 .PHONY: postgres-configure-v15
@@ -212,38 +214,44 @@ walproposer-lib-clean:
 neon-pg-ext: \
 	neon-pg-ext-v14 \
 	neon-pg-ext-v15 \
-	neon-pg-ext-v16
+	neon-pg-ext-v16 \
+	neon-pg-ext-v17
 
 .PHONY: neon-pg-ext-clean
 neon-pg-ext-clean: \
 	neon-pg-ext-clean-v14 \
 	neon-pg-ext-clean-v15 \
-	neon-pg-ext-clean-v16
+	neon-pg-ext-clean-v16 \
+	neon-pg-ext-clean-v17
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
 postgres: \
 	postgres-v14 \
 	postgres-v15 \
-	postgres-v16
+	postgres-v16 \
+	postgres-v17
 
 .PHONY: postgres-headers
 postgres-headers: \
 	postgres-headers-v14 \
 	postgres-headers-v15 \
-	postgres-headers-v16
+	postgres-headers-v16 \
+	postgres-headers-v17
 
 .PHONY: postgres-clean
 postgres-clean: \
 	postgres-clean-v14 \
 	postgres-clean-v15 \
-	postgres-clean-v16
+	postgres-clean-v16 \
+	postgres-clean-v17
 
 .PHONY: postgres-check
 postgres-check: \
 	postgres-check-v14 \
 	postgres-check-v15 \
-	postgres-check-v16
+	postgres-check-v16 \
+	postgres-check-v17
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
