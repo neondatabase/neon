@@ -586,10 +586,13 @@ jobs:
         id: upload-coverage-report-new
         env:
           BUCKET: neon-github-public-dev
+          # A differential coverage report is available only for PRs.
+          # (i.e. for pushes into main/release branches we have a regular coverage report)
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
         run: |
-          BASELINE="$(git merge-base HEAD origin/main)"
           CURRENT="${COMMIT_SHA}"
+          BASELINE="$(git merge-base $BASE_SHA $CURRENT)"
 
           cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
 
