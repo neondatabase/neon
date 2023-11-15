@@ -16,7 +16,7 @@ aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 bytes.workspace = true
 camino.workspace = true
-hyper = { workspace = true, features = ["stream"] }
+hyper = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "io-util"] }

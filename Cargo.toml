@@ -86,7 +86,7 @@ hostname = "0.3.1"
 http-types = { version = "2", default-features = false }
 humantime = "2.1"
 humantime-serde = "1.1.1"
-hyper = "0.14"
+hyper = { version = "0.14", features=["backports"] }
 hyper-tungstenite = "0.11"
 inotify = "0.10.2"
 itertools = "0.10"
