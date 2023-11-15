@@ -3,6 +3,8 @@ use std::{env, path::PathBuf, process::Command};
 use anyhow::{anyhow, Context};
 use bindgen::CargoCallbacks;
 
+const WALPROPOSER_PG_VERSION: &str = "v17";
+
 fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=bindgen_deps.h");
@@ -31,7 +33,10 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-lib=static=walproposer");
     println!("cargo:rustc-link-search={walproposer_lib_search_str}");
 
-    let pg_config_bin = pg_install_abs.join("v16").join("bin").join("pg_config");
+    let pg_config_bin = pg_install_abs
+        .join(WALPROPOSER_PG_VERSION)
+        .join("bin")
+        .join("pg_config");
     let inc_server_path: String = if pg_config_bin.exists() {
         let output = Command::new(pg_config_bin)
             .arg("--includedir-server")
@@ -48,7 +53,7 @@ fn main() -> anyhow::Result<()> {
             .into()
     } else {
         let server_path = pg_install_abs
-            .join("v16")
+            .join(WALPROPOSER_PG_VERSION)
             .join("include")
             .join("postgresql")
             .join("server")

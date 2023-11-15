@@ -176,7 +176,7 @@ impl<'a> WalIngest<'a> {
                             .await?;
                     }
                 }
-            } else if self.timeline.pg_version == 16 {
+            } else if self.timeline.pg_version >= 16 {
                 if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG
                 {
@@ -590,7 +590,7 @@ impl<'a> WalIngest<'a> {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
-            16 => {
+            v if v >= 16 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
@@ -764,7 +764,7 @@ impl<'a> WalIngest<'a> {
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match self.timeline.pg_version {
-            16 => {
+            v if v >= 16 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
                 match info {
