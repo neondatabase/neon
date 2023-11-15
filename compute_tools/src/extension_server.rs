@@ -126,6 +126,7 @@ fn parse_pg_version(human_version: &str) -> &str {
             "14" => return "v14",
             "15" => return "v15",
             "16" => return "v16",
+            "16" => return "v17",
             _ => {}
         },
         _ => {}
