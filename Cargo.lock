@@ -3519,6 +3519,7 @@ dependencies = [
  "sha2",
  "socket2 0.5.3",
  "sync_wrapper",
+ "task-local-extensions",
  "thiserror",
  "tls-listener",
  "tokio",

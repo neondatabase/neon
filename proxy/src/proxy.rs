@@ -19,7 +19,10 @@ use itertools::Itertools;
 use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
 use once_cell::sync::{Lazy, OnceCell};
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{
+    register_histogram, register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec,
+    IntGaugeVec,
+};
 use regex::Regex;
 use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
@@ -103,6 +106,25 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         &["protocol", "cache_miss", "pool_miss", "outcome"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "semaphore_control_plane_token_acquire_seconds",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 2^16 * 0.5ms = 32s
+        exponential_buckets(0.0005, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_LIMIT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "semaphore_control_plane_limit",
+        "Current limit of the semaphore control plane",
+        &["limit"], // 2 counters
     )
     .unwrap()
 });

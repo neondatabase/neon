@@ -4,6 +4,7 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::http;
+use proxy::rate_limiter::RateLimiterConfig;
 use proxy::usage_metrics;
 
 use anyhow::bail;
@@ -95,6 +96,20 @@ struct ProxyCliArgs {
     /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
+    /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    disable_dynamic_rate_limiter: bool,
+    /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
+    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
+    rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
+    /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    rate_limiter_timeout: tokio::time::Duration,
+    /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
+    #[clap(long, default_value_t = 100)]
+    initial_limit: usize,
+    #[clap(flatten)]
+    aimd_config: proxy::rate_limiter::AimdConfig,
 }
 
 #[tokio::main]
@@ -213,6 +228,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
+    let rate_limiter_config = RateLimiterConfig {
+        disable: args.disable_dynamic_rate_limiter,
+        algorithm: args.rate_limit_algorithm,
+        timeout: args.rate_limiter_timeout,
+        initial_limit: args.initial_limit,
+        aimd_config: Some(args.aimd_config),
+    };
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
@@ -237,7 +259,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             tokio::spawn(locks.garbage_collect_worker(epoch));
 
             let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client());
+            let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
 
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             auth::BackendType::Console(Cow::Owned(api), ())

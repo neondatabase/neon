@@ -2179,6 +2179,29 @@ class NeonProxy(PgProtocol):
                 *["--allow-self-signed-compute", "true"],
             ]
 
+    class Console(AuthBackend):
+        def __init__(self, endpoint: str, fixed_rate_limit: Optional[int] = None):
+            self.endpoint = endpoint
+            self.fixed_rate_limit = fixed_rate_limit
+
+        def extra_args(self) -> list[str]:
+            args = [
+                # Console auth backend params
+                *["--auth-backend", "console"],
+                *["--auth-endpoint", self.endpoint],
+            ]
+            if self.fixed_rate_limit is not None:
+                args += [
+                    *["--disable-dynamic-rate-limiter", "false"],
+                    *["--rate-limit-algorithm", "aimd"],
+                    *["--initial-limit", str(1)],
+                    *["--rate-limiter-timeout", "1s"],
+                    *["--aimd-min-limit", "0"],
+                    *["--aimd-increase-by", "1"],
+                    *["--wake-compute-cache", "size=0"],  # Disable cache to test rate limiter.
+                ]
+            return args
+
     @dataclass(frozen=True)
     class Postgres(AuthBackend):
         pg_conn_url: str
