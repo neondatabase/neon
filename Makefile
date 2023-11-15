@@ -62,7 +62,7 @@ all: neon postgres neon-pg-ext
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: neon
-neon: postgres-headers walproposer-lib
+neon: postgres-headers walproposer-lib-v17
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 
@@ -207,6 +207,34 @@ endif
 .PHONY: walproposer-lib-clean
 walproposer-lib-clean:
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config \
+		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
+
+
+.PHONY: walproposer-lib-v17
+walproposer-lib-v17: neon-pg-ext
+	+@echo "Compiling walproposer-lib"
+	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+ifeq ($(UNAME_S),Linux)
+	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
+		pg_strong_random.o
+	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
+		pg_crc32c.o \
+		hmac_openssl.o \
+		cryptohash_openssl.o \
+		scram-common.o \
+		md5_common.o \
+		checksum_helper.o
+endif
+
+.PHONY: walproposer-lib-clean-v17
+walproposer-lib-clean-v17:
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
 
