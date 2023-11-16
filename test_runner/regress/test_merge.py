@@ -26,7 +26,7 @@ def test_merge(neon_env_builder: NeonEnvBuilder):
     log.info("postgres is running on 'ws' branch")
 
     ws_cur = ws_branch.connect().cursor()
-
+    ws_cur.execute("select pg_create_logical_replication_slot('merge_slot_postgres', 'pgoutput')")
     ws_cur.execute("INSERT INTO t values(generate_series(10001, 20000))")
 
     env.neon_cli.merge(ws_branch, main_branch)
