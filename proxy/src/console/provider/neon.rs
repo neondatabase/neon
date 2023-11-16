@@ -266,6 +266,7 @@ impl super::Api for Api {
     }
 
     /// Get the password for the RLS user
+    #[tracing::instrument(skip_all)]
     async fn ensure_row_level(
         &self,
         extra: &ConsoleReqExtra<'_>,
