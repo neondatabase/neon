@@ -1,7 +1,7 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use futures::{future::poll_fn, TryStreamExt};
+use futures::future::poll_fn;
 use parking_lot::RwLock;
 use pbkdf2::{
     password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
@@ -553,7 +553,7 @@ pub struct Discard<'a> {
 }
 
 impl Client {
-    pub async fn new(
+    pub(self) async fn new(
         mut inner: ClientInner,
         pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
     ) -> Self {
@@ -571,7 +571,7 @@ impl Client {
             pool,
             conn_id,
             span: _,
-            pid: -1,
+            pid: _,
         } = self;
         (
             &mut inner
@@ -628,10 +628,11 @@ impl Drop for Client {
             .expect("client inner should not be removed");
         if let Some((conn_info, conn_pool)) = self.pool.take() {
             let current_span = self.span.clone();
+            let pid = self.pid;
             // return connection to the pool
             tokio::task::spawn_blocking(move || {
                 let _span = current_span.enter();
-                let _ = conn_pool.put(&conn_info, client, self.pid);
+                let _ = conn_pool.put(&conn_info, client, pid);
             });
         }
     }
