@@ -1041,7 +1041,10 @@ LIMIT 100",
     }
 
     pub async fn ensure_row_level_sec(&self, params: RowLevelParams) -> Result<bool> {
-        let conn_str = self.connstr.as_str().replace("/postgres", &format!("/{}", params.database_name));
+        let conn_str = self
+            .connstr
+            .as_str()
+            .replace("/postgres", &format!("/{}", params.database_name));
         let connect_result = tokio_postgres::connect(&conn_str, NoTls).await;
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
@@ -1057,7 +1060,13 @@ CREATE USER $2 WITH PASSWORD $3 IN GROUP $4;
 CREATE POLICY neon_row_level ON $1 TO $4
     USING ($5 = current_user);
 COMMIT;",
-&[&params.table_name, &params.user_name, &params.password,&params.role, &params.column_name],
+                &[
+                    &params.table_name,
+                    &params.user_name,
+                    &params.password,
+                    &params.role,
+                    &params.column_name,
+                ],
             )
             .await;
         Ok(result.is_ok())

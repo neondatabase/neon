@@ -210,7 +210,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return err_resp;
             }
             let body_bytes: Vec<u8> = hyper::body::to_bytes(req.into_body()).await.unwrap().into();
-            let params: RowLevelParams = serde_json::from_str(&String::from_utf8(body_bytes).unwrap()).unwrap();
+            let params: RowLevelParams =
+                serde_json::from_str(&String::from_utf8(body_bytes).unwrap()).unwrap();
 
             let res = compute.ensure_row_level_sec(params).await;
             if !res.is_ok() {
