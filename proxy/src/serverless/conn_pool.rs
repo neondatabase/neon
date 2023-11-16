@@ -528,7 +528,9 @@ impl ClientInner {
                 rows.len()
             ))
         } else {
-            Ok(rows[0].get(0))
+            let pid = rows[0].get(0);
+            info!(%pid, "got pid");
+            Ok(pid)
         }
     }
 }
