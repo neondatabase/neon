@@ -553,7 +553,10 @@ pub struct Discard<'a> {
 }
 
 impl Client {
-    pub async fn new(mut inner: ClientInner, pool: Option<(ConnInfo, Arc<GlobalConnPool>)>) -> Self {
+    pub async fn new(
+        mut inner: ClientInner,
+        pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
+    ) -> Self {
         Self {
             conn_id: inner.conn_id,
             pid: inner.get_pid().await.unwrap_or(-1),
