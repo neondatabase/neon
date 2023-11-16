@@ -48,19 +48,25 @@ files:
       }
   - filename: postgres_exporter_queries.yml
     content: |
-      postgres_exporter_pg_database_size:
-        query: "SELECT pg_database.datname, pg_database_size(pg_database.datname) as bytes, 42 as fourtytwo FROM pg_database"
+      pg_wait_sampling:
+        query: "select pid, event_type, event, queryid, count from pg_wait_sampling_profile"
         cache_seconds: 30
         metrics:
-          - datname:
+          - pid:
               usage: "LABEL"
-              description: "Name of the database"
-          - bytes:
+              description: "backend pid"
+          - event_type:
+              usage: "LABEL"
+              description: "event type"
+          - event:
+              usage: "LABEL"
+              description: "event"
+          - queryid:
+              usage: "LABEL"
+              description: "queryid"
+          - count:
               usage: "GAUGE"
-              description: "Disk space used by the database"
-          - fourtytwo:
-              usage: "GAUGE"
-              description: "fourtytwo"
+              description: "count"
 build: |
   # Build cgroup-tools
   #
