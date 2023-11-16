@@ -3,7 +3,7 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::{ClientCredentials, backend::Policy},
+    auth::{backend::Policy, ClientCredentials},
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
@@ -256,7 +256,7 @@ pub trait Api {
         creds: &ClientCredentials,
         dbname: String,
         username: String,
-        policies: Vec<Policy>
+        policies: Vec<Policy>,
     ) -> anyhow::Result<String>;
 }
 
