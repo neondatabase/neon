@@ -129,6 +129,15 @@ pub static RATE_LIMITER_LIMIT: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static NUM_CONNECTION_BY_SNI: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connections_by_sni",
+        "Number of connections (per sni).",
+        &["kind"],
+    )
+    .unwrap()
+});
+
 pub struct LatencyTimer {
     // time since the stopwatch was started
     start: Option<Instant>,
