@@ -1,7 +1,9 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param, error::UserFacingError, proxy::{neon_options, NUM_CONNECTION_BY_SNI},
+    auth::password_hack::parse_endpoint_param,
+    error::UserFacingError,
+    proxy::{neon_options, NUM_CONNECTION_BY_SNI},
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -131,7 +133,9 @@ impl<'a> ClientCredentials<'a> {
             NUM_CONNECTION_BY_SNI.with_label_values(&["no_sni"]).inc();
             info!("Connection without sni");
         } else {
-            NUM_CONNECTION_BY_SNI.with_label_values(&["password_hack"]).inc();
+            NUM_CONNECTION_BY_SNI
+                .with_label_values(&["password_hack"])
+                .inc();
             info!("Connection with password hack");
         }
 
