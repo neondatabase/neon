@@ -99,6 +99,18 @@ impl ComputeControlPlane {
         })
     }
 
+    pub fn endpoint_from_timeline(&self, timeline_id : TimelineId) -> Result<Arc<Endpoint>>
+    {
+        for (_, value) in self.endpoints.iter()
+        {
+            if value.timeline_id == timeline_id && value.mode == ComputeMode::Primary
+            {
+                return Ok(value.clone());
+            }
+        }
+        bail!("Endpoint not found with current timeline")
+    }
+
     fn get_port(&mut self) -> u16 {
         1 + self
             .endpoints
@@ -661,6 +673,30 @@ impl Endpoint {
             ))
             .send()?;
 
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text() {
+                Ok(err_body) => format!("Error: {}", err_body),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
+    pub fn merge_from(&self, merge_from: Arc<Endpoint>) -> Result<()>
+    {
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(format!(
+                "http://{}:{}/merge",
+                self.http_address.ip(),
+                self.http_address.port()
+            ))
+            .body(merge_from.connstr())
+            .send()?;
         let status = response.status();
         if !(status.is_client_error() || status.is_server_error()) {
             Ok(())

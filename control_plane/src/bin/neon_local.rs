@@ -587,6 +587,28 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 timeline_info.timeline_id
             );
         }
+        Some(("merge", branch_match)) =>
+        {
+            let tenant_id = get_tenant_id(branch_match, env)?;
+            let branch_name = branch_match
+                .get_one::<String>("branch-name")
+                .map(|s| s.as_str())
+                .unwrap_or(DEFAULT_BRANCH_NAME);
+            let from_branch_name = branch_match
+                .get_one::<String>("from-branch-name")
+                .map(|s| s.as_str())
+                .ok_or(anyhow!("No branch name provided"))?;
+            let cplane = ComputeControlPlane::load(env.clone())?;
+            let into_timeline = env
+                .get_branch_timeline_id(branch_name, tenant_id)
+                .ok_or(anyhow!("Timeline not found for given branch/tenant"))?;
+            let from_timeline = env
+                .get_branch_timeline_id(from_branch_name, tenant_id)
+                .ok_or(anyhow!("Timeline not found for given from-branch/tenant"))?;
+            let into_ep = cplane.endpoint_from_timeline(into_timeline)?;
+            let from_ep = cplane.endpoint_from_timeline(from_timeline)?;
+            into_ep.merge_from(from_ep)?;
+        }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{sub_name}'"),
         None => bail!("no tenant subcommand provided"),
     }
@@ -1305,6 +1327,12 @@ fn cli() -> Command {
                     .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
                 .arg(Arg::new("ancestor-start-lsn").long("ancestor-start-lsn")
                     .help("When using another timeline as base, use a specific Lsn in it instead of the latest one").required(false)))
+            .subcommand(Command::new("merge")
+                        .about("Merge changes from one branch into another")
+                        .arg(tenant_id_arg.clone())
+                        .arg(branch_name_arg.clone())
+                        .arg(Arg::new("from-branch-name").long("from-branch-name").help("Branch to read from").required(true))
+            )
             .subcommand(Command::new("create")
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
