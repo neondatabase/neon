@@ -3,6 +3,7 @@ use crate::{
     cancellation::CancelClosure,
     console::errors::WakeComputeError,
     error::{io_error, UserFacingError},
+    proxy::is_neon_param,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
@@ -278,7 +279,7 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     #[allow(unstable_name_collisions)]
     let options: String = params
         .options_raw()?
-        .filter(|opt| parse_endpoint_param(opt).is_none())
+        .filter(|opt| parse_endpoint_param(opt).is_none() && !is_neon_param(opt))
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 
@@ -312,6 +313,12 @@ mod tests {
         assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
 
         let params = StartupMessageParams::new([("options", "project = foo")]);
+        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+
+        let params = StartupMessageParams::new([(
+            "options",
+            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
+        )]);
         assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
     }
 }

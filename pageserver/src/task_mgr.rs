@@ -299,10 +299,6 @@ pub enum TaskKind {
 
 #[derive(Default)]
 struct MutableTaskState {
-    /// Tenant and timeline that this task is associated with.
-    tenant_id: Option<TenantId>,
-    timeline_id: Option<TimelineId>,
-
     /// Handle for waiting for the task to exit. It can be None, if the
     /// the task has already exited.
     join_handle: Option<JoinHandle<()>>,
@@ -318,6 +314,11 @@ struct PageServerTask {
 
     // To request task shutdown, just cancel this token.
     cancel: CancellationToken,
+
+    /// Tasks may optionally be launched for a particular tenant/timeline, enabling
+    /// later cancelling tasks for that tenant/timeline in [`shutdown_tasks`]
+    tenant_id: Option<TenantId>,
+    timeline_id: Option<TimelineId>,
 
     mutable: Mutex<MutableTaskState>,
 }
@@ -344,11 +345,9 @@ where
         kind,
         name: name.to_string(),
         cancel: cancel.clone(),
-        mutable: Mutex::new(MutableTaskState {
-            tenant_id,
-            timeline_id,
-            join_handle: None,
-        }),
+        tenant_id,
+        timeline_id,
+        mutable: Mutex::new(MutableTaskState { join_handle: None }),
     });
 
     TASKS.lock().unwrap().insert(task_id, Arc::clone(&task));
@@ -418,8 +417,6 @@ async fn task_finish(
 
     let mut shutdown_process = false;
     {
-        let task_mut = task.mutable.lock().unwrap();
-
         match result {
             Ok(Ok(())) => {
                 debug!("Task '{}' exited normally", task_name);
@@ -428,13 +425,13 @@ async fn task_finish(
                 if shutdown_process_on_error {
                     error!(
                         "Shutting down: task '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
+                        task_name, task.tenant_id, task.timeline_id, err
                     );
                     shutdown_process = true;
                 } else {
                     error!(
                         "Task '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
+                        task_name, task.tenant_id, task.timeline_id, err
                     );
                 }
             }
@@ -442,13 +439,13 @@ async fn task_finish(
                 if shutdown_process_on_error {
                     error!(
                         "Shutting down: task '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
+                        task_name, task.tenant_id, task.timeline_id, err
                     );
                     shutdown_process = true;
                 } else {
                     error!(
                         "Task '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
-                        task_name, task_mut.tenant_id, task_mut.timeline_id, err
+                        task_name, task.tenant_id, task.timeline_id, err
                     );
                 }
             }
@@ -459,17 +456,6 @@ async fn task_finish(
         shutdown_pageserver(None, 1).await;
     }
 }
-
-// expected to be called from the task of the given id.
-pub fn associate_with(tenant_id: Option<TenantId>, timeline_id: Option<TimelineId>) {
-    CURRENT_TASK.with(|ct| {
-        let mut task_mut = ct.mutable.lock().unwrap();
-        task_mut.tenant_id = tenant_id;
-        task_mut.timeline_id = timeline_id;
-    });
-}
-
-/// Is there a task running that matches the criteria
 
 /// Signal and wait for tasks to shut down.
 ///
@@ -493,17 +479,16 @@ pub async fn shutdown_tasks(
     {
         let tasks = TASKS.lock().unwrap();
         for task in tasks.values() {
-            let task_mut = task.mutable.lock().unwrap();
             if (kind.is_none() || Some(task.kind) == kind)
-                && (tenant_id.is_none() || task_mut.tenant_id == tenant_id)
-                && (timeline_id.is_none() || task_mut.timeline_id == timeline_id)
+                && (tenant_id.is_none() || task.tenant_id == tenant_id)
+                && (timeline_id.is_none() || task.timeline_id == timeline_id)
             {
                 task.cancel.cancel();
                 victim_tasks.push((
                     Arc::clone(task),
                     task.kind,
-                    task_mut.tenant_id,
-                    task_mut.timeline_id,
+                    task.tenant_id,
+                    task.timeline_id,
                 ));
             }
         }

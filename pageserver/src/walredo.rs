@@ -43,8 +43,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::PageServerConf;
 use crate::metrics::{
-    WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
-    WAL_REDO_WAIT_TIME,
+    WalRedoKillCause, WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTERS,
+    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
@@ -207,11 +207,8 @@ impl PostgresRedoManager {
     ) -> anyhow::Result<Bytes> {
         let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
-        let start_time = Instant::now();
         let mut n_attempts = 0u32;
         loop {
-            let lock_time = Instant::now();
-
             // launch the WAL redo process on first use
             let proc: Arc<WalRedoProcess> = {
                 let proc_guard = self.redo_process.read().unwrap();
@@ -236,7 +233,7 @@ impl PostgresRedoManager {
                 }
             };
 
-            WAL_REDO_WAIT_TIME.observe(lock_time.duration_since(start_time).as_secs_f64());
+            let started_at = std::time::Instant::now();
 
             // Relational WAL records are applied using wal-redo-postgres
             let buf_tag = BufferTag { rel, blknum };
@@ -244,8 +241,7 @@ impl PostgresRedoManager {
                 .apply_wal_records(buf_tag, &base_img, records, wal_redo_timeout)
                 .context("apply_wal_records");
 
-            let end_time = Instant::now();
-            let duration = end_time.duration_since(lock_time);
+            let duration = started_at.elapsed();
 
             let len = records.len();
             let nbytes = records.iter().fold(0, |acumulator, record| {
@@ -596,21 +592,21 @@ trait CloseFileDescriptors: CommandExt {
 
 impl<C: CommandExt> CloseFileDescriptors for C {
     fn close_fds(&mut self) -> &mut Command {
+        // SAFETY: Code executed inside pre_exec should have async-signal-safety,
+        // which means it should be safe to execute inside a signal handler.
+        // The precise meaning depends on platform. See `man signal-safety`
+        // for the linux definition.
+        //
+        // The set_fds_cloexec_threadsafe function is documented to be
+        // async-signal-safe.
+        //
+        // Aside from this function, the rest of the code is re-entrant and
+        // doesn't make any syscalls. We're just passing constants.
+        //
+        // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
+        // which is not async-signal-safe. Be careful.
         unsafe {
             self.pre_exec(move || {
-                // SAFETY: Code executed inside pre_exec should have async-signal-safety,
-                // which means it should be safe to execute inside a signal handler.
-                // The precise meaning depends on platform. See `man signal-safety`
-                // for the linux definition.
-                //
-                // The set_fds_cloexec_threadsafe function is documented to be
-                // async-signal-safe.
-                //
-                // Aside from this function, the rest of the code is re-entrant and
-                // doesn't make any syscalls. We're just passing constants.
-                //
-                // NOTE: It's easy to indirectly cause a malloc or lock a mutex,
-                // which is not async-signal-safe. Be careful.
                 close_fds::set_fds_cloexec_threadsafe(3, &[]);
                 Ok(())
             })
@@ -667,10 +663,10 @@ impl WalRedoProcess {
             .close_fds()
             .spawn_no_leak_child(tenant_id)
             .context("spawn process")?;
-
+        WAL_REDO_PROCESS_COUNTERS.started.inc();
         let mut child = scopeguard::guard(child, |child| {
             error!("killing wal-redo-postgres process due to a problem during launch");
-            child.kill_and_wait();
+            child.kill_and_wait(WalRedoKillCause::Startup);
         });
 
         let stdin = child.stdin.take().unwrap();
@@ -1001,7 +997,7 @@ impl Drop for WalRedoProcess {
         self.child
             .take()
             .expect("we only do this once")
-            .kill_and_wait();
+            .kill_and_wait(WalRedoKillCause::WalRedoProcessDrop);
         self.stderr_logger_cancel.cancel();
         // no way to wait for stderr_logger_task from Drop because that is async only
     }
@@ -1037,16 +1033,19 @@ impl NoLeakChild {
         })
     }
 
-    fn kill_and_wait(mut self) {
+    fn kill_and_wait(mut self, cause: WalRedoKillCause) {
         let child = match self.child.take() {
             Some(child) => child,
             None => return,
         };
-        Self::kill_and_wait_impl(child);
+        Self::kill_and_wait_impl(child, cause);
     }
 
-    #[instrument(skip_all, fields(pid=child.id()))]
-    fn kill_and_wait_impl(mut child: Child) {
+    #[instrument(skip_all, fields(pid=child.id(), ?cause))]
+    fn kill_and_wait_impl(mut child: Child, cause: WalRedoKillCause) {
+        scopeguard::defer! {
+            WAL_REDO_PROCESS_COUNTERS.killed_by_cause[cause].inc();
+        }
         let res = child.kill();
         if let Err(e) = res {
             // This branch is very unlikely because:
@@ -1091,7 +1090,7 @@ impl Drop for NoLeakChild {
                 // This thread here is going to outlive of our dropper.
                 let span = tracing::info_span!("walredo", %tenant_id);
                 let _entered = span.enter();
-                Self::kill_and_wait_impl(child);
+                Self::kill_and_wait_impl(child, WalRedoKillCause::NoLeakChildDrop);
             })
             .await
         });

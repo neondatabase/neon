@@ -366,11 +366,17 @@ def test_deletion_queue_recovery(
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
 
     if validate_before == ValidateBefore.VALIDATE:
+        # At this point, one or more DeletionLists have been written.  We have set a failpoint
+        # to prevent them successfully executing, but we want to see them get validated.
+        #
+        # We await _some_ validations instead of _all_ validations, because our execution failpoint
+        # will prevent validation proceeding for any but the first DeletionList.  Usually the workload
+        # just generates one, but if it generates two due to timing, then we must not expect that the
+        # second one will be validated.
+        def assert_some_validations():
+            assert get_deletion_queue_validated(ps_http) > 0
 
-        def assert_validation_complete():
-            assert get_deletion_queue_submitted(ps_http) == get_deletion_queue_validated(ps_http)
-
-        wait_until(20, 1, assert_validation_complete)
+        wait_until(20, 1, assert_some_validations)
 
         # The validatated keys statistic advances before the header is written, so we
         # also wait to see the header hit the disk: this seems paranoid but the race
@@ -379,6 +385,11 @@ def test_deletion_queue_recovery(
             assert (env.pageserver.workdir / "deletion" / "header-01").exists()
 
         wait_until(20, 1, assert_header_written)
+
+        # If we will lose attachment, then our expectation on restart is that only the ones
+        # we already validated will execute.  Act like only those were present in the queue.
+        if keep_attachment == KeepAttachment.LOSE:
+            before_restart_depth = get_deletion_queue_validated(ps_http)
 
     log.info(f"Restarting pageserver with {before_restart_depth} deletions enqueued")
     env.pageserver.stop(immediate=True)
@@ -402,11 +413,13 @@ def test_deletion_queue_recovery(
     ps_http.deletion_queue_flush(execute=True)
     wait_until(10, 1, lambda: assert_deletion_queue(ps_http, lambda n: n == 0))
 
-    if keep_attachment == KeepAttachment.KEEP or validate_before == ValidateBefore.VALIDATE:
+    if keep_attachment == KeepAttachment.KEEP:
         # - If we kept the attachment, then our pre-restart deletions should execute
         #   because on re-attach they were from the immediately preceding generation
-        # - If we validated before restart, then the deletions should execute because the
-        #   deletion queue header records a validated deletion list sequence number.
+        assert get_deletion_queue_executed(ps_http) == before_restart_depth
+    elif validate_before == ValidateBefore.VALIDATE:
+        # - If we validated before restart, then we should execute however many keys were
+        #   validated before restart.
         assert get_deletion_queue_executed(ps_http) == before_restart_depth
     else:
         env.pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])

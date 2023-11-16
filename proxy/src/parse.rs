@@ -3,10 +3,9 @@
 use std::ffi::CStr;
 
 pub fn split_cstr(bytes: &[u8]) -> Option<(&CStr, &[u8])> {
-    let pos = bytes.iter().position(|&x| x == 0)?;
-    let (cstr, other) = bytes.split_at(pos + 1);
-    // SAFETY: we've already checked that there's a terminator
-    Some((unsafe { CStr::from_bytes_with_nul_unchecked(cstr) }, other))
+    let cstr = CStr::from_bytes_until_nul(bytes).ok()?;
+    let (_, other) = bytes.split_at(cstr.to_bytes_with_nul().len());
+    Some((cstr, other))
 }
 
 /// See <https://doc.rust-lang.org/std/primitive.slice.html#method.split_array_ref>.

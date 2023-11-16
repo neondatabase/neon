@@ -403,7 +403,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     return (evicted_bytes, evictions_failed);
                 };
 
-                let results = timeline.evict_layers(&batch, &cancel).await;
+                let results = timeline.evict_layers(&batch).await;
 
                 match results {
                     Ok(results) => {
@@ -545,7 +545,7 @@ async fn collect_eviction_candidates(
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
-        let tenant = match tenant::mgr::get_tenant(*tenant_id, true).await {
+        let tenant = match tenant::mgr::get_tenant(*tenant_id, true) {
             Ok(tenant) => tenant,
             Err(e) => {
                 // this can happen if tenant has lifecycle transition after we fetched it
@@ -553,6 +553,11 @@ async fn collect_eviction_candidates(
                 continue;
             }
         };
+
+        if tenant.cancel.is_cancelled() {
+            info!(%tenant_id, "Skipping tenant for eviction, it is shutting down");
+            continue;
+        }
 
         // collect layers from all timelines in this tenant
         //
