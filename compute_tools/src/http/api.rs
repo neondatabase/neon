@@ -214,10 +214,13 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 serde_json::from_str(&String::from_utf8(body_bytes).unwrap()).unwrap();
 
             let res = compute.ensure_row_level_sec(params).await;
-            if !res.is_ok() {
-                let mut err_resp = Response::new(Body::from("query failed"));
-                *err_resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                return err_resp;
+            match res {
+                Ok(true) => (),
+                _ => {
+                    let mut err_resp = Response::new(Body::from("query failed"));
+                    *err_resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    return err_resp;
+                }
             }
             Response::new(Body::from(""))
         }
