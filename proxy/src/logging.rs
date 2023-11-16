@@ -13,9 +13,6 @@ use tracing_subscriber::{
 /// destination, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
 /// See <https://opentelemetry.io/docs/reference/specification/sdk-environment-variables>
 pub async fn init() -> anyhow::Result<LoggingGuard> {
-    opentelemetry::global::set_text_map_propagator(
-        opentelemetry::sdk::propagation::TraceContextPropagator::default(),
-    );
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
