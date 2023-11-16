@@ -208,6 +208,10 @@ impl GlobalConnPool {
             } else {
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
+                tracing::Span::current().record(
+                    "pid",
+                    &tracing::field::display(client.inner.get_process_id()),
+                );
                 latency_timer.pool_hit();
                 latency_timer.success();
                 return Ok(Client::new(client, pool).await);
@@ -224,6 +228,12 @@ impl GlobalConnPool {
             )
             .await
         };
+        if let Ok(client) = &new_client {
+            tracing::Span::current().record(
+                "pid",
+                &tracing::field::display(client.inner.get_process_id()),
+            );
+        }
 
         match &new_client {
             // clear the hash. it's no longer valid
@@ -257,12 +267,11 @@ impl GlobalConnPool {
             }
             _ => {}
         }
-
-        // new_client.map(|inner| Client::new(inner, pool).await)
-        Ok(Client::new(new_client?, pool).await)
+        let new_client = new_client?;
+        Ok(Client::new(new_client, pool).await)
     }
 
-    fn put(&self, conn_info: &ConnInfo, client: ClientInner, pid: i32) -> anyhow::Result<()> {
+    fn put(&self, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
         let conn_id = client.conn_id;
 
         // We want to hold this open while we return. This ensures that the pool can't close
@@ -306,9 +315,9 @@ impl GlobalConnPool {
 
         // do logging outside of the mutex
         if returned {
-            info!(%conn_id, "pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}, pid={pid}");
+            info!(%conn_id, "pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
         } else {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}, pid={pid}");
+            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
 
         Ok(())
@@ -385,7 +394,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
 // Wake up the destination if needed. Code here is a bit involved because
 // we reuse the code from the usual proxy and we need to prepare few structures
 // that this code expects.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
@@ -452,6 +461,7 @@ async fn connect_to_compute_once(
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
+    tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
 
     let (tx, mut rx) = tokio::sync::watch::channel(session);
 
@@ -519,20 +529,6 @@ struct ClientInner {
     conn_id: uuid::Uuid,
 }
 
-impl ClientInner {
-    pub async fn get_pid(&mut self) -> anyhow::Result<i32> {
-        let rows = self.inner.query("select pg_backend_pid();", &[]).await?;
-        if rows.len() != 1 {
-            Err(anyhow::anyhow!(
-                "expected 1 row from pg_backend_pid(), got {}",
-                rows.len()
-            ))
-        } else {
-            Ok(rows[0].get(0))
-        }
-    }
-}
-
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
         USAGE_METRICS.register(self.inner.as_ref().unwrap().ids.clone())
@@ -544,7 +540,6 @@ pub struct Client {
     span: Span,
     inner: Option<ClientInner>,
     pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
-    pid: i32,
 }
 
 pub struct Discard<'a> {
@@ -554,12 +549,11 @@ pub struct Discard<'a> {
 
 impl Client {
     pub(self) async fn new(
-        mut inner: ClientInner,
+        inner: ClientInner,
         pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
     ) -> Self {
         Self {
             conn_id: inner.conn_id,
-            pid: inner.get_pid().await.unwrap_or(-1),
             inner: Some(inner),
             span: Span::current(),
             pool,
@@ -571,7 +565,6 @@ impl Client {
             pool,
             conn_id,
             span: _,
-            pid: _,
         } = self;
         (
             &mut inner
@@ -628,11 +621,10 @@ impl Drop for Client {
             .expect("client inner should not be removed");
         if let Some((conn_info, conn_pool)) = self.pool.take() {
             let current_span = self.span.clone();
-            let pid = self.pid;
             // return connection to the pool
             tokio::task::spawn_blocking(move || {
                 let _span = current_span.enter();
-                let _ = conn_pool.put(&conn_info, client, pid);
+                let _ = conn_pool.put(&conn_info, client);
             });
         }
     }
