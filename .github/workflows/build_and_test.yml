@@ -847,7 +847,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.18.5
+      VM_BUILDER_VERSION: v0.19.0
 
     steps:
       - name: Checkout
@@ -857,8 +857,7 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          # TEMPORARY: Pull custom version of vm-builder built from neondatabase/autoscaling#600.
-          curl -fL https://sharnoff.io/misc/8706cca48732d4f9/vm-builder-29ef2a1 -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
       # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
