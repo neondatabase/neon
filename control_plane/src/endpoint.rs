@@ -572,7 +572,9 @@ impl Endpoint {
                         }
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
-                        | ComputeStatus::Configuration => {
+                            | ComputeStatus::Configuration
+                            | ComputeStatus::MergePending
+                            | ComputeStatus::Merging => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }

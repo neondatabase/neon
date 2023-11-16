@@ -48,6 +48,10 @@ pub enum ComputeStatus {
     Running,
     // New spec is being applied.
     Configuration,
+    // Merge requested
+    MergePending,
+    // Merge in progress
+    Merging,
     // Either startup or configuration failed,
     // compute will exit soon or is waiting for
     // control-plane to terminate it.

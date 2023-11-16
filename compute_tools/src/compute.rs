@@ -83,6 +83,7 @@ pub struct ComputeState {
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub pspec: Option<ParsedSpec>,
+    pub merge_src_connstr: Option<String>,
     pub metrics: ComputeMetrics,
 }
 
@@ -94,6 +95,7 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
+            merge_src_connstr: None,
             metrics: ComputeMetrics::default(),
         }
     }
@@ -629,11 +631,9 @@ impl ComputeNode {
 
     /// Merge two branches
     #[instrument(skip_all)]
-    pub fn merge(&self, src_constr: &str) -> Result<()> {
-        let compute_state = self.state.lock().unwrap().clone();
-        let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+    pub fn merge(&self, src_connstr: &str) -> Result<()> {
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
-        handle_merge(spec, &mut client, self.connstr.as_str(), src_constr)?;
+        handle_merge(&mut client, self.connstr.as_str(), &src_connstr)?;
         Ok(())
     }
 

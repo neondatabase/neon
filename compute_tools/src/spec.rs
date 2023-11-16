@@ -408,7 +408,7 @@ fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent
 }
 
 #[instrument(skip_all)]
-pub fn handle_merge(spec: &ComputeSpec, client: &mut Client, dst_connstr: &str, src_connstr: &str) -> Result<()> {
+pub fn handle_merge(client: &mut Client, dst_connstr: &str, src_connstr: &str) -> Result<()> {
     info!("Merge branch into {}", dst_connstr);
     let existing_dbs = get_existing_dbs(client)?;
 

@@ -126,7 +126,13 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         // Handle branch merge request
         (&Method::POST, "/merge") => {
             info!("serving /merge POST request");
-            handle_merge_request(req, compute).await
+            match handle_merge_request(req, compute).await {
+                Ok(msg) => Response::new(Body::from(msg)),
+                Err((msg, code)) => {
+                    error!("error handling /merge request: {msg}");
+                    render_json_error(&msg, code)
+                }
+            }
         }
 
         // download extension files from S3 on demand
@@ -215,16 +221,54 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
     }
 }
 
-async fn handle_merge_request(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+async fn handle_merge_request(req: Request<Body>, compute: &Arc<ComputeNode>)
+                              -> Result<String, (String, StatusCode)>
+{
     let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
     let connstr = String::from_utf8(body_bytes.to_vec()).unwrap();
-    match compute.merge(&connstr) {
-        Ok(_) => Response::new(Body::from("OK")),
-        Err(e) => {
-            error!("Branch merge failed: {}", e);
-            Response::new(Body::from(e.to_string()))
+
+    let c = compute.clone();
+
+    {
+        let mut state = compute.state.lock().unwrap();
+        if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+            let msg = format!(
+                "invalid compute status for merge request: {:?}",
+                state.status.clone()
+            );
+            return Err((msg, StatusCode::PRECONDITION_FAILED));
         }
+        state.merge_src_connstr = Some(connstr);
+        state.status = ComputeStatus::MergePending;
+        compute.state_changed.notify_all();
+        drop(state);
+        info!("set new spec and notified waiters");
     }
+
+    task::spawn_blocking(move || {
+        let mut state = c.state.lock().unwrap();
+        while state.status != ComputeStatus::Running {
+            state = c.state_changed.wait(state).unwrap();
+            info!(
+                "waiting for compute to become Running, current status: {:?}",
+                state.status
+            );
+
+            if state.status == ComputeStatus::Failed {
+                let err = state.error.as_ref().map_or("unknown error", |x| x);
+                let msg = format!("compute configuration failed: {:?}", err);
+                return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
+            }
+        }
+        
+        Ok(())
+    })
+        .await
+        .unwrap()?;
+    
+    let state = compute.state.lock().unwrap().clone();
+    let status_response = status_response_from_state(&state);
+    Ok(serde_json::to_string(&status_response).unwrap())
 }
 
 async fn handle_configure_request(
