@@ -40,9 +40,6 @@ pub enum StorageTimeOperation {
     #[strum(serialize = "logical size")]
     LogicalSize,
 
-    #[strum(serialize = "imitate logical size")]
-    ImitateLogicalSize,
-
     #[strum(serialize = "load layer map")]
     LoadLayerMap,
 
@@ -1364,7 +1361,6 @@ pub struct TimelineMetrics {
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
-    pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
@@ -1393,11 +1389,6 @@ impl TimelineMetrics {
             StorageTimeMetrics::new(StorageTimeOperation::CreateImages, &tenant_id, &timeline_id);
         let logical_size_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LogicalSize, &tenant_id, &timeline_id);
-        let imitate_logical_size_histo = StorageTimeMetrics::new(
-            StorageTimeOperation::ImitateLogicalSize,
-            &tenant_id,
-            &timeline_id,
-        );
         let load_layer_map_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LoadLayerMap, &tenant_id, &timeline_id);
         let garbage_collect_histo =
@@ -1430,7 +1421,6 @@ impl TimelineMetrics {
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
-            imitate_logical_size_histo,
             garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,

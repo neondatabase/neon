@@ -81,8 +81,6 @@ use crate::task_mgr::TaskKind;
 use crate::ZERO_PAGE;
 
 use self::delete::DeleteTimelineFlow;
-pub(super) use self::eviction_task::EvictionTaskTenantState;
-use self::eviction_task::EvictionTaskTimelineState;
 use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
@@ -298,8 +296,6 @@ pub struct Timeline {
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
 
-    eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
-
     /// Barrier to wait before doing initial logical size calculation. Used only during startup.
     initial_logical_size_can_start: Option<completion::Barrier>,
 
@@ -433,7 +429,6 @@ impl std::fmt::Display for PageReconstructError {
 pub enum LogicalSizeCalculationCause {
     Initial,
     ConsumptionMetricsSyntheticSize,
-    EvictionTaskImitation,
     TenantSizeHandler,
 }
 
@@ -1442,9 +1437,6 @@ impl Timeline {
 
                 state,
 
-                eviction_task_timeline_state: tokio::sync::Mutex::new(
-                    EvictionTaskTimelineState::default(),
-                ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
                 initial_logical_size_can_start,
@@ -1967,9 +1959,6 @@ impl Timeline {
             LogicalSizeCalculationCause::Initial
             | LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize
             | LogicalSizeCalculationCause::TenantSizeHandler => &self.metrics.logical_size_histo,
-            LogicalSizeCalculationCause::EvictionTaskImitation => {
-                &self.metrics.imitate_logical_size_histo
-            }
         };
         let timer = storage_time_metrics.start_timer();
         let logical_size = self
