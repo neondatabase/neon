@@ -49,7 +49,7 @@ files:
   - filename: postgres_exporter_queries.yml
     content: |
       pg_wait_sampling:
-        query: "select pid, event_type, event, w.queryid as queryid, query, count from pg_wait_sampling_profile w join pg_stat_statements s on w.queryid = s.queryid;"
+        query: "select pid, event_type, event, w.queryid as queryid, query, count from pg_wait_sampling_profile w left join pg_stat_statements s on w.queryid = s.queryid;"
         cache_seconds: 30
         metrics:
           - pid:
