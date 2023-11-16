@@ -128,9 +128,13 @@ impl<'a> ClientCredentials<'a> {
         info!(user, project = project.as_deref(), "credentials");
         if sni.is_some() {
             info!("Connection with sni");
-            NUM_CONNECTION_ACCEPTED_BY_SNI.with_label_values(&["sni"]).inc();
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["sni"])
+                .inc();
         } else if project.is_some() {
-            NUM_CONNECTION_ACCEPTED_BY_SNI.with_label_values(&["no_sni"]).inc();
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["no_sni"])
+                .inc();
             info!("Connection without sni");
         } else {
             NUM_CONNECTION_ACCEPTED_BY_SNI
