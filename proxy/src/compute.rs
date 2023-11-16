@@ -248,6 +248,7 @@ impl ConnCfg {
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
