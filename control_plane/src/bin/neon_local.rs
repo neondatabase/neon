@@ -602,6 +602,16 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let dst_endpoint = cplane.endpoints.get(dst_endpoint_id).unwrap();
             dst_endpoint.merge_from(src_endpoint)?;
         }
+        Some(("set_mergeable", branch_match)) => {
+            let endpoint_id = branch_match
+                .get_one::<String>("endpoint")
+                .map(|s| s.as_str())
+                .ok_or(anyhow!("No endpoint provided"))?;
+
+            let cplane = ComputeControlPlane::load(env.clone())?;
+            let endpoint = cplane.endpoints.get(endpoint_id).unwrap();
+            endpoint.set_mergeable()?;
+        }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{sub_name}'"),
         None => bail!("no tenant subcommand provided"),
     }
@@ -1324,6 +1334,10 @@ fn cli() -> Command {
                         .about("Merge changes from one branch into another")
                         .arg(Arg::new("src-endpoint").long("src-endpoint").help("Source endpoint for merge").required(true))
                         .arg(Arg::new("dst-endpoint").long("dst-endpoint").help("Destination endpoint for merge").required(true))
+            )
+            .subcommand(Command::new("set_mergeable")
+                        .about("Mark branch as mergeable")
+                        .arg(Arg::new("endpoint").long("endpoint").help("Enpoint to be marked as mergeable").required(true))
             )
             .subcommand(Command::new("create")
                 .about("Create a new blank timeline")

@@ -413,15 +413,14 @@ pub fn handle_merge(client: &mut Client, dst_connstr: &str, src_connstr: &str) -
     let existing_dbs = get_existing_dbs(client)?;
 
     for (_, db) in existing_dbs {
+        if db.name.starts_with("template") {
+            continue;
+        }
         let mut dst_conf = Config::from_str(dst_connstr)?;
         dst_conf.dbname(&db.name);
 
         let mut src_conf = Config::from_str(src_connstr)?;
         src_conf.dbname(&db.name);
-
-        let mut pub_client = src_conf.connect(NoTls)?;
-        let create_pub = format!("create publication pub_merge for tables in schema public");
-        pub_client.simple_query(&create_pub)?;
 
         let mut sub_client = dst_conf.connect(NoTls)?;
         let create_sub = format!("create subscription sub_merge connection '{}' publication pub_merge with (create_slot=false, slot_name=merge_slot_{}, copy_data=false)", str::replace(src_connstr, "'",  "''"), &db.name);
@@ -432,11 +431,14 @@ pub fn handle_merge(client: &mut Client, dst_connstr: &str, src_connstr: &str) -
 }
 
 #[instrument(skip_all)]
-pub fn handle_replication(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> Result<()> {
-    info!("Creating logical replication slot");
+pub fn handle_set_mergeable(client: &mut Client, connstr: &str) -> Result<()> {
+    info!("Mark branch as mergeable");
     let existing_dbs = get_existing_dbs(client)?;
 
     for (_, db) in existing_dbs {
+        if db.name.starts_with("template") {
+            continue;
+        }
         let mut conf = Config::from_str(connstr)?;
         conf.dbname(&db.name);
 
@@ -447,6 +449,7 @@ pub fn handle_replication(spec: &ComputeSpec, client: &mut Client, connstr: &str
             &db.name
         );
         db_client.simple_query(&create_slot)?;
+        db_client.simple_query("create publication pub_merge for all tables")?;
     }
 
     Ok(())

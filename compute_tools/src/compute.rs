@@ -637,6 +637,14 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Mark brnach as mergeable
+    #[instrument(skip_all)]
+    pub fn set_mergeable(&self) -> Result<()> {
+        let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+        handle_set_mergeable(&mut client, self.connstr.as_str())?;
+        Ok(())
+    }
+
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
     #[instrument(skip_all)]
@@ -707,7 +715,6 @@ impl ComputeNode {
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, &mut client, self.connstr.as_str())?;
-        handle_replication(spec, &mut client, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
         create_availability_check_data(&mut client)?;
 

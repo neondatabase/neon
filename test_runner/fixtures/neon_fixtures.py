@@ -1174,6 +1174,22 @@ class NeonCli(AbstractNeonCli):
         res = self.raw_cli(args)
         res.check_returncode()
 
+    def set_mergeable(
+        self,
+        endpoint: Endpoint):
+        """
+        Merge two branches
+        """
+
+        args = [
+            "timeline",
+            "set_mergeable",
+            "--endpoint",
+            str(endpoint.endpoint_id),
+        ]
+        res = self.raw_cli(args)
+        res.check_returncode()
+
     def create_tenant(
         self,
         tenant_id: Optional[TenantId] = None,

@@ -40,14 +40,25 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
             drop(state);
 
             let mut new_status = ComputeStatus::Failed;
-            if let Err(e) = compute.merge(&connstr)
-            {
+            if let Err(e) = compute.merge(&connstr) {
                 info!("could not merge compute node: {}", e);
-            }
-            else
-            {
+            } else {
                 new_status = ComputeStatus::Running;
                 info!("merge complete");
+            }
+            compute.set_status(new_status);
+        } else if state.status == ComputeStatus::SetMergeablePending {
+            info!("got set mergeable request");
+            state.status = ComputeStatus::SetMergeable;
+            compute.state_changed.notify_all();
+            drop(state);
+
+            let mut new_status = ComputeStatus::Failed;
+            if let Err(e) = compute.set_mergeable() {
+                info!("could not mark branch as mergeable: {}", e);
+            } else {
+                new_status = ComputeStatus::Running;
+                info!("marked as mergeable");
             }
             compute.set_status(new_status);
         } else if state.status == ComputeStatus::Failed {

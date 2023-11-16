@@ -50,8 +50,12 @@ pub enum ComputeStatus {
     Configuration,
     // Merge requested
     MergePending,
+    // Set mergeable requested
+    SetMergeablePending,
     // Merge in progress
     Merging,
+    // Set mergeable in progress
+    SetMergeable,
     // Either startup or configuration failed,
     // compute will exit soon or is waiting for
     // control-plane to terminate it.
