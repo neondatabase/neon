@@ -39,7 +39,9 @@ use utils::lsn::Lsn;
 pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
     // Read control file to extract the LSN
     let controlfile_path = path.join("global").join("pg_control");
-    let controlfile = ControlFileData::decode(&std::fs::read(controlfile_path)?)?;
+    let controlfile_buf = std::fs::read(&controlfile_path)
+        .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
+    let controlfile = ControlFileData::decode(&controlfile_buf)?;
     let lsn = controlfile.checkPoint;
 
     Ok(Lsn(lsn))
