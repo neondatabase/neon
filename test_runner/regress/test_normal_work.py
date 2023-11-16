@@ -6,12 +6,14 @@ from fixtures.pageserver.http import PageserverHttpClient
 
 def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):
     tenant_id, timeline_id = env.neon_cli.create_tenant()
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id, config_lines=[
+                "log_statement=all",
+            ],)
     # we rely upon autocommit after each statement
     res_1 = endpoint.safe_psql_many(
         queries=[
-            "CREATE TABLE t(key int primary key, value text)",
-            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+            "CREATE TABLE \nt(key int primary key, value text)",
+            "INSERT INTO \n\nt SELECT generate_series(1,100000), 'payload'",
             "SELECT sum(key) FROM t",
         ]
     )
