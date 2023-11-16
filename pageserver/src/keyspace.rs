@@ -1,4 +1,7 @@
-use crate::repository::{key_range_size, singleton_range, Key};
+use crate::{
+    pgdatadir_mapping::{BASEBACKUP_CUT, METADATA_CUT},
+    repository::{key_range_size, singleton_range, Key},
+};
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
@@ -22,13 +25,22 @@ impl KeySpace {
         let target_nblocks = (target_size / BLCKSZ as u64) as usize;
 
         let mut parts = Vec::new();
-        let mut current_part = Vec::new();
+        let mut current_part: Vec<Range<Key>> = Vec::new();
         let mut current_part_size: usize = 0;
         for range in &self.ranges {
+            let last = current_part
+                .last()
+                .map(|r| r.end)
+                .unwrap_or(Key::from_i128(0));
+            let cut_here = (range.start >= METADATA_CUT && last < METADATA_CUT)
+                || (range.start >= BASEBACKUP_CUT && last < BASEBACKUP_CUT);
+
             // If appending the next contiguous range in the keyspace to the current
             // partition would cause it to be too large, start a new partition.
             let this_size = key_range_size(range) as usize;
-            if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
+            if cut_here
+                || current_part_size + this_size > target_nblocks && !current_part.is_empty()
+            {
                 parts.push(KeySpace {
                     ranges: current_part,
                 });
