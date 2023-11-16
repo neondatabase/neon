@@ -4,15 +4,15 @@ commands:
   - name: cgconfigparser
     user: root
     sysvInitAction: sysinit
-    shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
+    shell: "cgconfigparser -l /etc/cgconfig.conf -s 1664"
   - name: pgbouncer
     user: nobody
     sysvInitAction: respawn
-    shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini'
+    shell: "/usr/local/bin/pgbouncer /etc/pgbouncer.ini"
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
-    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres" /bin/postgres_exporter'
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres" /bin/postgres_exporter --extend.query-path /etc/postgres_exporter_queries.yml'
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
@@ -46,6 +46,21 @@ files:
           }
           memory {}
       }
+  - filename: postgres_exporter_queries.yml
+    content: |
+      postgres_exporter_pg_database_size:
+        query: "SELECT pg_database.datname, pg_database_size(pg_database.datname) as bytes, 42 as fourtytwo FROM pg_database"
+        cache_seconds: 30
+        metrics:
+          - datname:
+              usage: "LABEL"
+              description: "Name of the database"
+          - bytes:
+              usage: "GAUGE"
+              description: "Disk space used by the database"
+          - fourtytwo:
+              usage: "GAUGE"
+              description: "fourtytwo"
 build: |
   # Build cgroup-tools
   #
@@ -114,10 +129,12 @@ merge: |
 
   COPY cgconfig.conf /etc/cgconfig.conf
   COPY pgbouncer.ini /etc/pgbouncer.ini
+  COPY postgres_exporter_queries.yml /etc/postgres_exporter_queries.yml
   RUN set -e \
       && chown postgres:postgres /etc/pgbouncer.ini \
       && chmod 0644 /etc/pgbouncer.ini \
-      && chmod 0644 /etc/cgconfig.conf
+      && chmod 0644 /etc/cgconfig.conf \
+      && chmod 0644 /etc/postgres_exporter_queries.yml
 
   COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
   COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/
