@@ -157,18 +157,30 @@ impl Api {
         async {
             let request = self
                 .endpoint
-                .post("proxy_ensure_row_level")
+                .post("proxy_ensure_role_level_sec")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
-                .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(project)),
-                    ("dbname", Some(&dbname)),
-                    ("username", Some(&username)),
-                    ("options", extra.options),
-                ])
-                .json(&EnsureRowLevelReq { policies })
+                // .query(&[
+                //     ("application_name", extra.application_name),
+                //     ("project", Some(project)),
+                //     ("dbname", Some(&dbname)),
+                //     ("username", Some(&username)),
+                //     ("options", extra.options),
+                // ])
+                .json(&EnsureRowLevelReq {
+                    project: project.to_owned(),
+                    targets: policies
+                        .into_iter()
+                        .map(|p| Target {
+                            database_name: dbname.clone(),
+                            table_name: p.table,
+                            row_level_user_id: username.clone(),
+                            role_name: "enduser".to_owned(),
+                            column_name: p.column,
+                        })
+                        .collect(),
+                })
                 .build()?;
 
             info!(url = request.url().as_str(), "sending http request");
@@ -187,8 +199,19 @@ impl Api {
 
 #[derive(Serialize)]
 struct EnsureRowLevelReq {
-    policies: Vec<Policy>,
+    project: String,
+    targets: Vec<Target>,
 }
+
+#[derive(Serialize)]
+struct Target {
+    database_name: String,
+    table_name: String,
+    row_level_user_id: String,
+    role_name: String,
+    column_name: String,
+}
+
 #[derive(Deserialize)]
 struct UserRowLevel {
     password: String,

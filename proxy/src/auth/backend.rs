@@ -350,8 +350,8 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Policy {
-    table: String,
-    column: String,
+    pub table: String,
+    pub column: String,
 }
 
 // enum PolicyType {
