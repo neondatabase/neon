@@ -36,10 +36,12 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
             info!("got merge request");
             state.status = ComputeStatus::Merging;
             compute.state_changed.notify_all();
+            let connstr = state.merge_src_connstr.clone().unwrap();
+            drop(state);
+
             let mut new_status = ComputeStatus::Failed;
-            if let Err(e) = compute.merge(&state.merge_src_connstr.clone().unwrap())
+            if let Err(e) = compute.merge(&connstr)
             {
-                drop(state);
                 info!("could not merge compute node: {}", e);
             }
             else
