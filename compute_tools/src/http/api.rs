@@ -123,6 +123,12 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // Handle branch merge request
+        (&Method::POST, "/merge") => {
+            info!("serving /merge POST request");
+            handle_merge_request(req, compute).await
+        }
+
         // download extension files from S3 on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
@@ -205,6 +211,18 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let mut not_found = Response::new(Body::from("404 Not Found"));
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
+        }
+    }
+}
+
+async fn handle_merge_request(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+    let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
+    let connstr = String::from_utf8(body_bytes.to_vec()).unwrap();
+    match compute.merge(&connstr) {
+        Ok(_) => Response::new(Body::from("OK")),
+        Err(e) => {
+            error!("Branch merge failed: {}", e);
+            Response::new(Body::from(e.to_string()))
         }
     }
 }

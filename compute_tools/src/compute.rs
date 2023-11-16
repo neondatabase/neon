@@ -627,6 +627,16 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Merge two branches
+    #[instrument(skip_all)]
+    pub fn merge(&self, src_constr: &str) -> Result<()> {
+        let compute_state = self.state.lock().unwrap().clone();
+        let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+        let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+        handle_merge(spec, &mut client, self.connstr.as_str(), src_constr)?;
+        Ok(())
+    }
+
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
     #[instrument(skip_all)]
@@ -697,6 +707,7 @@ impl ComputeNode {
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, &mut client, self.connstr.as_str())?;
+        handle_replication(spec, &mut client, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
         create_availability_check_data(&mut client)?;
 

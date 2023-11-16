@@ -587,6 +587,21 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 timeline_info.timeline_id
             );
         }
+        Some(("merge", branch_match)) => {
+            let src_endpoint_id = branch_match
+                .get_one::<String>("src-endpoint")
+                .map(|s| s.as_str())
+                .ok_or(anyhow!("No source endpoint provided"))?;
+            let dst_endpoint_id = branch_match
+                .get_one::<String>("dst-endpoint")
+                .map(|s| s.as_str())
+                .ok_or(anyhow!("No destination endpoint provided"))?;
+
+            let cplane = ComputeControlPlane::load(env.clone())?;
+            let src_endpoint = cplane.endpoints.get(src_endpoint_id).unwrap();
+            let dst_endpoint = cplane.endpoints.get(dst_endpoint_id).unwrap();
+            dst_endpoint.merge_from(src_endpoint)?;
+        }
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{sub_name}'"),
         None => bail!("no tenant subcommand provided"),
     }
@@ -1305,6 +1320,11 @@ fn cli() -> Command {
                     .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
                 .arg(Arg::new("ancestor-start-lsn").long("ancestor-start-lsn")
                     .help("When using another timeline as base, use a specific Lsn in it instead of the latest one").required(false)))
+            .subcommand(Command::new("merge")
+                        .about("Merge changes from one branch into another")
+                        .arg(Arg::new("src-endpoint").long("src-endpoint").help("Source endpoint for merge").required(true))
+                        .arg(Arg::new("dst-endpoint").long("dst-endpoint").help("Destination endpoint for merge").required(true))
+            )
             .subcommand(Command::new("create")
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())

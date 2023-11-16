@@ -1154,6 +1154,26 @@ class NeonCli(AbstractNeonCli):
         kwargs["local_binpath"] = True
         return super().raw_cli(*args, **kwargs)
 
+
+    def merge(
+        self,
+        src_endpoint: Endpoint,
+        dst_endpoint: Endpoint):
+        """
+        Merge two branches
+        """
+
+        args = [
+            "timeline",
+            "merge",
+            "--src-endpoint",
+            str(src_endpoint.endpoint_id),
+            "--dst-endpoint",
+            str(dst_endpoint.endpoint_id)
+        ]
+        res = self.raw_cli(args)
+        res.check_returncode()
+
     def create_tenant(
         self,
         tenant_id: Optional[TenantId] = None,

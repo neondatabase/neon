@@ -85,6 +85,37 @@ paths:
                 description: Error text or 'true' if check passed.
                 example: "true"
 
+  /merge:
+    post:
+      tags:
+      - Merge
+      summary: Mere branches.
+      description: |
+        This is a blocking API endpoint, i.e. it blocks waiting until
+        compute is finished configuration and is in `Running` state.
+        Optional non-blocking mode could be added later.
+      operationId: mergeBranches
+      requestBody:
+        description: connection string of target branch
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        200:
+          description: Merge finished.
+          content:
+            application/json:OK
+              schema:
+                $ref: "#/components/schemas/ComputeState"
+        500:
+          description: Merge request failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
   /configure:
     post:
       tags:

@@ -407,6 +407,51 @@ fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent
     Ok(())
 }
 
+#[instrument(skip_all)]
+pub fn handle_merge(spec: &ComputeSpec, client: &mut Client, dst_connstr: &str, src_connstr: &str) -> Result<()> {
+    info!("Merge branch into {}", dst_connstr);
+    let existing_dbs = get_existing_dbs(client)?;
+
+    for (_, db) in existing_dbs {
+        let mut dst_conf = Config::from_str(dst_connstr)?;
+        dst_conf.dbname(&db.name);
+
+        let mut src_conf = Config::from_str(src_connstr)?;
+        src_conf.dbname(&db.name);
+
+        let mut pub_client = src_conf.connect(NoTls)?;
+        let create_pub = format!("create publication pub_merge for tables in schema public");
+        pub_client.simple_query(&create_pub)?;
+
+        let mut sub_client = dst_conf.connect(NoTls)?;
+        let create_sub = format!("create subscription sub_merge connection '{}' publication pub_merge with (create_slot=false, slot_name=merge_slot_{}, copy_data=false)", str::replace(src_connstr, "'",  "''"), &db.name);
+        sub_client.simple_query(&create_sub)?;
+    }
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+pub fn handle_replication(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> Result<()> {
+    info!("Creating logical replication slot");
+    let existing_dbs = get_existing_dbs(client)?;
+
+    for (_, db) in existing_dbs {
+        let mut conf = Config::from_str(connstr)?;
+        conf.dbname(&db.name);
+
+        let mut db_client = conf.connect(NoTls)?;
+
+        let create_slot = format!(
+            "select pg_create_logical_replication_slot('merge_slot_{}', 'pgoutput')",
+            &db.name
+        );
+        db_client.simple_query(&create_slot)?;
+    }
+
+    Ok(())
+}
+
 /// It follows mostly the same logic as `handle_roles()` excepting that we
 /// does not use an explicit transactions block, since major database operations
 /// like `CREATE DATABASE` and `DROP DATABASE` do not support it. Statement-level
