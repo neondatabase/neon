@@ -88,6 +88,14 @@ impl Endpoint {
         self.client.get(url.into_inner())
     }
 
+    /// Return a [builder](RequestBuilder) for a `POST` request,
+    /// appending a single `path` segment to the base endpoint URL.
+    pub fn post(&self, path: &str) -> RequestBuilder {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut().push(path);
+        self.client.post(url.into_inner())
+    }
+
     /// Execute a [request](reqwest::Request).
     pub async fn execute(&self, request: Request) -> Result<Response, Error> {
         self.client.execute(request).await

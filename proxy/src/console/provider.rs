@@ -3,7 +3,7 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::ClientCredentials,
+    auth::{ClientCredentials, backend::Policy},
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
@@ -248,6 +248,16 @@ pub trait Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+
+    /// Get the password for the RLS user
+    async fn ensure_row_level(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials,
+        dbname: String,
+        username: String,
+        policies: Vec<Policy>
+    ) -> anyhow::Result<String>;
 }
 
 /// Various caches for [`console`](super).

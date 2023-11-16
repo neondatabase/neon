@@ -4,7 +4,13 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUrl};
+use crate::{
+    auth::{backend::Policy, ClientCredentials},
+    compute,
+    error::io_error,
+    scram,
+    url::ApiUrl,
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
@@ -120,6 +126,18 @@ impl super::Api for Api {
         self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)
             .await
+    }
+
+    /// Get the password for the RLS user
+    async fn ensure_row_level(
+        &self,
+        _extra: &ConsoleReqExtra<'_>,
+        _creds: &ClientCredentials,
+        _dbname: String,
+        _username: String,
+        _policies: Vec<Policy>,
+    ) -> anyhow::Result<String> {
+        Err(anyhow::anyhow!("unimplemented"))
     }
 }
 

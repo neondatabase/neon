@@ -1,15 +1,20 @@
 use std::sync::Arc;
 
 use anyhow::bail;
+use anyhow::Context;
+use biscuit::JWT;
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
 use hyper::header;
+use hyper::header::AUTHORIZATION;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
 use hyper::Response;
 use hyper::StatusCode;
 use hyper::{Body, HeaderMap, Request};
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -26,11 +31,13 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::auth::backend::Policy;
 use crate::config::HttpConfig;
 use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
+use super::jwt_auth::JWKSetCaches;
 
 #[derive(serde::Deserialize)]
 struct QueryData {
@@ -118,9 +125,10 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
     }
 }
 
-fn get_conn_info(
+async fn get_conn_info(
+    jwk_cache_pool: &JWKSetCaches,
     headers: &HeaderMap,
-    sni_hostname: Option<String>,
+    sni_hostname: &str,
 ) -> Result<ConnInfo, anyhow::Error> {
     let connection_string = headers
         .get("Neon-Connection-String")
@@ -144,18 +152,40 @@ fn get_conn_info(
         .next()
         .ok_or(anyhow::anyhow!("invalid database name"))?;
 
-    let username = connection_url.username();
-    if username.is_empty() {
-        return Err(anyhow::anyhow!("missing username"));
-    }
+    let mut password = "";
+    let mut policies = None;
+    let authorization = headers.get(AUTHORIZATION);
+    let username = if let Some(auth) = authorization {
+        // TODO: introduce control plane API to fetch this
+        let jwks_url = match sni_hostname {
+            "foo" => "https://adapted-gorilla-88.clerk.accounts.dev/.well-known/jwks.json",
+            _ => anyhow::bail!("invalid sni name"),
+        };
+        let jwk_cache = jwk_cache_pool.get_cache(jwks_url).await?;
 
-    let password = connection_url
-        .password()
-        .ok_or(anyhow::anyhow!("no password"))?;
+        let auth = auth.to_str()?;
+        let token = auth.strip_prefix("Bearer ").context("bad token")?;
+        let jwt: JWT<NeonFields, ()> = JWT::new_encoded(token);
+        let token = jwk_cache.decode(&jwt).await?;
+        let payload = token.payload().unwrap();
+        policies = Some(payload.private.policies.clone());
+        payload
+            .registered
+            .subject
+            .as_deref()
+            .context("missing user id")?
+            .to_owned()
+    } else {
+        password = connection_url
+            .password()
+            .ok_or(anyhow::anyhow!("no password"))?;
 
-    // TLS certificate selector now based on SNI hostname, so if we are running here
-    // we are sure that SNI hostname is set to one of the configured domain names.
-    let sni_hostname = sni_hostname.ok_or(anyhow::anyhow!("no SNI hostname set"))?;
+        let u = connection_url.username();
+        if u.is_empty() {
+            return Err(anyhow::anyhow!("missing username"));
+        }
+        u.to_owned()
+    };
 
     let hostname = connection_url
         .host_str()
@@ -186,7 +216,8 @@ fn get_conn_info(
     }
 
     Ok(ConnInfo {
-        username: username.to_owned(),
+        username,
+        policies,
         dbname: dbname.to_owned(),
         hostname: hostname.to_owned(),
         password: password.to_owned(),
@@ -199,12 +230,13 @@ pub async fn handle(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
+    jwk_cache_pool: Arc<JWKSetCaches>,
     session_id: uuid::Uuid,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.sql_over_http_timeout,
-        handle_inner(request, sni_hostname, conn_pool, session_id),
+        handle_inner(request, sni_hostname, conn_pool, jwk_cache_pool, session_id),
     )
     .await;
     let mut response = match result {
@@ -255,6 +287,7 @@ async fn handle_inner(
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
+    jwk_cache_pool: Arc<JWKSetCaches>,
     session_id: uuid::Uuid,
 ) -> anyhow::Result<Response<Body>> {
     NUM_CONNECTIONS_ACCEPTED_COUNTER
@@ -264,11 +297,15 @@ async fn handle_inner(
         NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
     }
 
+    // TLS certificate selector now based on SNI hostname, so if we are running here
+    // we are sure that SNI hostname is set to one of the configured domain names.
+    let sni_hostname = sni_hostname.ok_or(anyhow::anyhow!("no SNI hostname set"))?;
+
     //
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(headers, sni_hostname)?;
+    let conn_info = get_conn_info(&jwk_cache_pool, headers, &sni_hostname).await?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -695,6 +732,11 @@ fn _pg_array_parse(
     }
 
     Ok((Value::Array(entries), 0))
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NeonFields {
+    policies: Vec<Policy>,
 }
 
 #[cfg(test)]

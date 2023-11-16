@@ -21,7 +21,8 @@ use tokio::time;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
-    auth, console,
+    auth::{self, backend::Policy},
+    console,
     proxy::{
         neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
         NUM_DB_CONNECTIONS_OPENED_COUNTER,
@@ -45,6 +46,8 @@ pub struct ConnInfo {
     pub hostname: String,
     pub password: String,
     pub options: Option<String>,
+    /// row level security mode enabled
+    pub policies: Option<Vec<Policy>>,
 }
 
 impl ConnInfo {
@@ -365,6 +368,7 @@ struct TokioMechanism<'a> {
     conn_info: &'a ConnInfo,
     session_id: uuid::Uuid,
     conn_id: uuid::Uuid,
+    password: Option<String>,
 }
 
 #[async_trait]
@@ -384,6 +388,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
             timeout,
             self.conn_id,
             self.session_id,
+            self.password.as_deref(),
         )
         .await
     }
@@ -431,11 +436,26 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
+    let mut password = None;
+    if let Some(policies) = &conn_info.policies {
+        password = Some(
+            creds
+                .ensure_row_level(
+                    &extra,
+                    conn_info.dbname.to_owned(),
+                    conn_info.username.to_owned(),
+                    policies.clone(),
+                )
+                .await?,
+        );
+    }
+
     crate::proxy::connect_to_compute(
         &TokioMechanism {
             conn_id,
             conn_info,
             session_id,
+            password,
         },
         node_info,
         &extra,
@@ -451,12 +471,13 @@ async fn connect_to_compute_once(
     timeout: time::Duration,
     conn_id: uuid::Uuid,
     mut session: uuid::Uuid,
+    password: Option<&str>,
 ) -> Result<ClientInner, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
     let (client, mut connection) = config
         .user(&conn_info.username)
-        .password(&conn_info.password)
+        .password(password.unwrap_or(&conn_info.password))
         .dbname(&conn_info.dbname)
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
