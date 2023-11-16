@@ -197,6 +197,11 @@ impl Timeline {
             let layers = guard.layer_map();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
+                // Don't evict the small layers needed to serve a basebackup request.
+                if hist_layer.is_basebackup_pages() {
+                    continue;
+                }
+
                 let hist_layer = guard.get_from_desc(&hist_layer);
 
                 // guard against eviction while we inspect it; it might be that eviction_task and

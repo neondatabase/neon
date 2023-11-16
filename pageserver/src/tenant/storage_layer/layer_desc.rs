@@ -5,7 +5,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::repository::Key;
+use crate::{pgdatadir_mapping::METADATA_CUT, repository::Key};
 
 use super::{DeltaFileName, ImageFileName, LayerFileName};
 
@@ -47,6 +47,20 @@ impl PersistentLayerDesc {
             lsn_range: self.lsn_range.clone(),
             is_delta: self.is_delta,
         }
+    }
+
+    /// Does this layer consist exclusively of metadata
+    /// content such as dbdir & relation sizes?  This is a
+    /// hint that the layer is likely to be small and should
+    /// not be a candidate for eviction under normal circumstances.
+    pub fn is_metadata_pages(&self) -> bool {
+        self.key_range.start >= METADATA_CUT
+    }
+
+    /// Does this layer consist exclusively of content
+    /// required to serve a basebackup request?
+    pub fn is_basebackup_pages(&self) -> bool {
+        self.key_range.start >= METADATA_CUT
     }
 
     pub fn short_id(&self) -> impl Display {

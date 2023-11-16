@@ -4274,6 +4274,11 @@ impl Timeline {
             let file_size = l.file_size();
             max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
+            // Don't evict small layers required to serve a basebackup
+            if l.is_basebackup_pages() {
+                continue;
+            }
+
             let l = guard.get_from_desc(&l);
 
             let l = match l.keep_resident().await {
