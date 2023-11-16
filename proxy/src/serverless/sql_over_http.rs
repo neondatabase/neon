@@ -158,8 +158,10 @@ async fn get_conn_info(
     let username = if let Some(auth) = authorization {
         // TODO: introduce control plane API to fetch this
         let jwks_url = match sni_hostname {
-            "foo" => "https://adapted-gorilla-88.clerk.accounts.dev/.well-known/jwks.json",
-            _ => anyhow::bail!("invalid sni name"),
+            "ep-winter-pond-71436068.cloud.krypton.aws.neon.build" => {
+                "https://adapted-gorilla-88.clerk.accounts.dev/.well-known/jwks.json"
+            }
+            _ => anyhow::bail!("jwt auth not supported"),
         };
         let jwk_cache = jwk_cache_pool.get_cache(jwks_url).await?;
 
