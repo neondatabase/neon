@@ -1053,21 +1053,19 @@ LIMIT 100",
             }
         });
         let result = client
-            .query(
+            .batch_execute(&format!(
                 "BEGIN;
-ALTER TABLE $1 ENABLE ROW LEVEL SECURITY;
-CREATE USER $2 WITH PASSWORD $3 IN GROUP $4;
-CREATE POLICY neon_row_level ON $1 TO $4
-    USING ($5 = current_user);
-COMMIT;",
-                &[
-                    &params.table_name,
-                    &params.user_name,
-                    &params.password,
-                    &params.role,
-                    &params.column_name,
-                ],
-            )
+        ALTER TABLE {0} ENABLE ROW LEVEL SECURITY;
+        CREATE USER {1} WITH PASSWORD '{2}' IN GROUP {3};
+        CREATE POLICY neon_row_level ON {0} TO {3}
+            USING ({4} = current_user);
+        COMMIT;",
+                &params.table_name,
+                &params.user_name,
+                &params.password,
+                &params.role,
+                &params.column_name,
+            ))
             .await;
         Ok(result.is_ok())
     }
