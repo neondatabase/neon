@@ -1,5 +1,6 @@
+import os
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import pytest
 from _pytest.mark import ParameterSet
@@ -78,6 +79,15 @@ QUERIES: Tuple[LabelledQuery, ...] = (
 )
 
 
+def get_scale() -> List[str]:
+    # We parametrize each tpc-h and clickbench test with scale
+    # to distinguish them from each other, but don't really use it inside.
+    # Databases are pre-created and passed through BENCHMARK_CONNSTR env variable.
+
+    scale = os.getenv("TEST_OLAP_SCALE", "noscale")
+    return [scale]
+
+
 def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> None:
     # prepare connstr:
     # - cut out password from connstr to pass it via env
@@ -100,9 +110,10 @@ def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> N
             env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
 
 
+@pytest.mark.parametrize("scale", get_scale())
 @pytest.mark.parametrize("query", QUERIES)
 @pytest.mark.remote_cluster
-def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare):
+def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare, scale: str):
     """
     An OLAP-style ClickHouse benchmark
 
@@ -128,9 +139,10 @@ def tpch_queuies() -> Tuple[ParameterSet, ...]:
     )
 
 
+@pytest.mark.parametrize("scale", get_scale())
 @pytest.mark.parametrize("query", tpch_queuies())
 @pytest.mark.remote_cluster
-def test_tpch(query: LabelledQuery, remote_compare: RemoteCompare):
+def test_tpch(query: LabelledQuery, remote_compare: RemoteCompare, scale: str):
     """
     TCP-H Benchmark
 

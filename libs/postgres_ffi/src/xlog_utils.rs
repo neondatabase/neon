@@ -136,20 +136,41 @@ pub fn get_current_timestamp() -> TimestampTz {
     to_pg_timestamp(SystemTime::now())
 }
 
-pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
-    const UNIX_EPOCH_JDATE: u64 = 2440588; /* == date2j(1970, 1, 1) */
-    const POSTGRES_EPOCH_JDATE: u64 = 2451545; /* == date2j(2000, 1, 1) */
+// Module to reduce the scope of the constants
+mod timestamp_conversions {
+    use std::time::Duration;
+
+    use super::*;
+
+    const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
+    const POSTGRES_EPOCH_JDATE: u64 = 2451545; // == date2j(2000, 1, 1)
     const SECS_PER_DAY: u64 = 86400;
     const USECS_PER_SEC: u64 = 1000000;
-    match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(n) => {
-            ((n.as_secs() - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY))
-                * USECS_PER_SEC
-                + n.subsec_micros() as u64) as i64
+    const SECS_DIFF_UNIX_TO_POSTGRES_EPOCH: u64 =
+        (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+
+    pub fn to_pg_timestamp(time: SystemTime) -> TimestampTz {
+        match time.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(n) => {
+                ((n.as_secs() - SECS_DIFF_UNIX_TO_POSTGRES_EPOCH) * USECS_PER_SEC
+                    + n.subsec_micros() as u64) as i64
+            }
+            Err(_) => panic!("SystemTime before UNIX EPOCH!"),
         }
-        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+
+    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+        let time: u64 = time
+            .try_into()
+            .expect("timestamp before millenium (postgres epoch)");
+        let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_micros(since_unix_epoch))
+            .expect("SystemTime overflow")
     }
 }
+
+pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -483,218 +504,22 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::PG_MAJORVERSION;
     use super::*;
-    use regex::Regex;
-    use std::cmp::min;
-    use std::fs;
-    use std::{env, str::FromStr};
-    use utils::const_assert;
-
-    fn init_logging() {
-        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-            format!("wal_craft=info,postgres_ffi::{PG_MAJORVERSION}::xlog_utils=trace"),
-        ))
-        .is_test(true)
-        .try_init();
-    }
-
-    fn test_end_of_wal<C: wal_craft::Crafter>(test_name: &str) {
-        use wal_craft::*;
-
-        let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
-
-        // Craft some WAL
-        let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
-        let cfg = Conf {
-            pg_version,
-            pg_distrib_dir: top_path.join("pg_install"),
-            datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
-        };
-        if cfg.datadir.exists() {
-            fs::remove_dir_all(&cfg.datadir).unwrap();
-        }
-        cfg.initdb().unwrap();
-        let srv = cfg.start_server().unwrap();
-        let (intermediate_lsns, expected_end_of_wal_partial) =
-            C::craft(&mut srv.connect_with_timeout().unwrap()).unwrap();
-        let intermediate_lsns: Vec<Lsn> = intermediate_lsns
-            .iter()
-            .map(|&lsn| u64::from(lsn).into())
-            .collect();
-        let expected_end_of_wal: Lsn = u64::from(expected_end_of_wal_partial).into();
-        srv.kill();
-
-        // Check find_end_of_wal on the initial WAL
-        let last_segment = cfg
-            .wal_dir()
-            .read_dir()
-            .unwrap()
-            .map(|f| f.unwrap().file_name().into_string().unwrap())
-            .filter(|fname| IsXLogFileName(fname))
-            .max()
-            .unwrap();
-        check_pg_waldump_end_of_wal(&cfg, &last_segment, expected_end_of_wal);
-        for start_lsn in intermediate_lsns
-            .iter()
-            .chain(std::iter::once(&expected_end_of_wal))
-        {
-            // Erase all WAL before `start_lsn` to ensure it's not used by `find_end_of_wal`.
-            // We assume that `start_lsn` is non-decreasing.
-            info!(
-                "Checking with start_lsn={}, erasing WAL before it",
-                start_lsn
-            );
-            for file in fs::read_dir(cfg.wal_dir()).unwrap().flatten() {
-                let fname = file.file_name().into_string().unwrap();
-                if !IsXLogFileName(&fname) {
-                    continue;
-                }
-                let (segno, _) = XLogFromFileName(&fname, WAL_SEGMENT_SIZE);
-                let seg_start_lsn = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
-                if seg_start_lsn > u64::from(*start_lsn) {
-                    continue;
-                }
-                let mut f = File::options().write(true).open(file.path()).unwrap();
-                const ZEROS: [u8; WAL_SEGMENT_SIZE] = [0u8; WAL_SEGMENT_SIZE];
-                f.write_all(
-                    &ZEROS[0..min(
-                        WAL_SEGMENT_SIZE,
-                        (u64::from(*start_lsn) - seg_start_lsn) as usize,
-                    )],
-                )
-                .unwrap();
-            }
-            check_end_of_wal(&cfg, &last_segment, *start_lsn, expected_end_of_wal);
-        }
-    }
-
-    fn check_pg_waldump_end_of_wal(
-        cfg: &wal_craft::Conf,
-        last_segment: &str,
-        expected_end_of_wal: Lsn,
-    ) {
-        // Get the actual end of WAL by pg_waldump
-        let waldump_output = cfg
-            .pg_waldump("000000010000000000000001", last_segment)
-            .unwrap()
-            .stderr;
-        let waldump_output = std::str::from_utf8(&waldump_output).unwrap();
-        let caps = match Regex::new(r"invalid record length at (.+):")
-            .unwrap()
-            .captures(waldump_output)
-        {
-            Some(caps) => caps,
-            None => {
-                error!("Unable to parse pg_waldump's stderr:\n{}", waldump_output);
-                panic!();
-            }
-        };
-        let waldump_wal_end = Lsn::from_str(caps.get(1).unwrap().as_str()).unwrap();
-        info!(
-            "waldump erred on {}, expected wal end at {}",
-            waldump_wal_end, expected_end_of_wal
-        );
-        assert_eq!(waldump_wal_end, expected_end_of_wal);
-    }
-
-    fn check_end_of_wal(
-        cfg: &wal_craft::Conf,
-        last_segment: &str,
-        start_lsn: Lsn,
-        expected_end_of_wal: Lsn,
-    ) {
-        // Check end_of_wal on non-partial WAL segment (we treat it as fully populated)
-        // let wal_end = find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, start_lsn).unwrap();
-        // info!(
-        //     "find_end_of_wal returned wal_end={} with non-partial WAL segment",
-        //     wal_end
-        // );
-        // assert_eq!(wal_end, expected_end_of_wal_non_partial);
-
-        // Rename file to partial to actually find last valid lsn, then rename it back.
-        fs::rename(
-            cfg.wal_dir().join(last_segment),
-            cfg.wal_dir().join(format!("{}.partial", last_segment)),
-        )
-        .unwrap();
-        let wal_end = find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, start_lsn).unwrap();
-        info!(
-            "find_end_of_wal returned wal_end={} with partial WAL segment",
-            wal_end
-        );
-        assert_eq!(wal_end, expected_end_of_wal);
-        fs::rename(
-            cfg.wal_dir().join(format!("{}.partial", last_segment)),
-            cfg.wal_dir().join(last_segment),
-        )
-        .unwrap();
-    }
-
-    const_assert!(WAL_SEGMENT_SIZE == 16 * 1024 * 1024);
 
     #[test]
-    pub fn test_find_end_of_wal_simple() {
-        init_logging();
-        test_end_of_wal::<wal_craft::Simple>("test_find_end_of_wal_simple");
+    fn test_ts_conversion() {
+        let now = SystemTime::now();
+        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+
+        let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
+
+        let now_pg = get_current_timestamp();
+        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+
+        assert_eq!(now_pg, round_trip_pg);
     }
 
-    #[test]
-    pub fn test_find_end_of_wal_crossing_segment_followed_by_small_one() {
-        init_logging();
-        test_end_of_wal::<wal_craft::WalRecordCrossingSegmentFollowedBySmallOne>(
-            "test_find_end_of_wal_crossing_segment_followed_by_small_one",
-        );
-    }
-
-    #[test]
-    pub fn test_find_end_of_wal_last_crossing_segment() {
-        init_logging();
-        test_end_of_wal::<wal_craft::LastWalRecordCrossingSegment>(
-            "test_find_end_of_wal_last_crossing_segment",
-        );
-    }
-
-    /// Check the math in update_next_xid
-    ///
-    /// NOTE: These checks are sensitive to the value of XID_CHECKPOINT_INTERVAL,
-    /// currently 1024.
-    #[test]
-    pub fn test_update_next_xid() {
-        let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
-        let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
-
-        checkpoint.nextXid = FullTransactionId { value: 10 };
-        assert_eq!(checkpoint.nextXid.value, 10);
-
-        // The input XID gets rounded up to the next XID_CHECKPOINT_INTERVAL
-        // boundary
-        checkpoint.update_next_xid(100);
-        assert_eq!(checkpoint.nextXid.value, 1024);
-
-        // No change
-        checkpoint.update_next_xid(500);
-        assert_eq!(checkpoint.nextXid.value, 1024);
-        checkpoint.update_next_xid(1023);
-        assert_eq!(checkpoint.nextXid.value, 1024);
-
-        // The function returns the *next* XID, given the highest XID seen so
-        // far. So when we pass 1024, the nextXid gets bumped up to the next
-        // XID_CHECKPOINT_INTERVAL boundary.
-        checkpoint.update_next_xid(1024);
-        assert_eq!(checkpoint.nextXid.value, 2048);
-    }
-
-    #[test]
-    pub fn test_encode_logical_message() {
-        let expected = [
-            64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 170, 34, 166, 227, 255,
-            38, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 112, 114,
-            101, 102, 105, 120, 0, 109, 101, 115, 115, 97, 103, 101,
-        ];
-        let actual = encode_logical_message("prefix", "message");
-        assert_eq!(expected, actual[..]);
-    }
+    // If you need to craft WAL and write tests for this module, put it at wal_craft crate.
 }

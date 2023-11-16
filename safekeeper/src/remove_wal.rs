@@ -1,26 +1,32 @@
 //! Thread removing old WAL.
 
-use std::{thread, time::Duration};
+use std::time::Duration;
 
+use tokio::time::sleep;
 use tracing::*;
 
 use crate::{GlobalTimelines, SafeKeeperConf};
 
-pub fn thread_main(conf: SafeKeeperConf) {
+pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
     let wal_removal_interval = Duration::from_millis(5000);
     loop {
         let tlis = GlobalTimelines::get_all();
         for tli in &tlis {
-            if !tli.is_active() {
+            if !tli.is_active().await {
                 continue;
             }
             let ttid = tli.ttid;
-            let _enter =
-                info_span!("", tenant = %ttid.tenant_id, timeline = %ttid.timeline_id).entered();
-            if let Err(e) = tli.remove_old_wal(conf.wal_backup_enabled) {
-                warn!("failed to remove WAL: {}", e);
+            async {
+                if let Err(e) = tli.maybe_persist_control_file().await {
+                    warn!("failed to persist control file: {e}");
+                }
+                if let Err(e) = tli.remove_old_wal(conf.wal_backup_enabled).await {
+                    error!("failed to remove WAL: {}", e);
+                }
             }
+            .instrument(info_span!("WAL removal", ttid = %ttid))
+            .await;
         }
-        thread::sleep(wal_removal_interval)
+        sleep(wal_removal_interval).await;
     }
 }

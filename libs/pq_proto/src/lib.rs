@@ -1,6 +1,7 @@
 //! Postgres protocol messages serialization-deserialization. See
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod framed;
 
@@ -179,7 +180,7 @@ pub struct FeExecuteMessage {
 #[derive(Debug)]
 pub struct FeCloseMessage;
 
-/// An error occured while parsing or serializing raw stream into Postgres
+/// An error occurred while parsing or serializing raw stream into Postgres
 /// messages.
 #[derive(thiserror::Error, Debug)]
 pub enum ProtocolError {
@@ -670,6 +671,7 @@ pub fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
 }
 
 pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
+pub const SQLSTATE_ADMIN_SHUTDOWN: &[u8; 5] = b"57P01";
 pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
 impl<'a> BeMessage<'a> {
@@ -934,6 +936,15 @@ impl<'a> BeMessage<'a> {
     }
 }
 
+fn terminate_code(code: &[u8; 5]) -> [u8; 6] {
+    let mut terminated = [0; 6];
+    for (i, &elem) in code.iter().enumerate() {
+        terminated[i] = elem;
+    }
+
+    terminated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,7 +961,7 @@ mod tests {
         let make_params = |options| StartupMessageParams::new([("options", options)]);
 
         let params = StartupMessageParams::new([]);
-        assert!(matches!(params.options_escaped(), None));
+        assert!(params.options_escaped().is_none());
 
         let params = make_params("");
         assert!(split_options(&params).is_empty());
@@ -964,13 +975,4 @@ mod tests {
         let params = make_params("foo\\ bar \\ \\\\ baz\\  lol");
         assert_eq!(split_options(&params), ["foo bar", " \\", "baz ", "lol"]);
     }
-}
-
-fn terminate_code(code: &[u8; 5]) -> [u8; 6] {
-    let mut terminated = [0; 6];
-    for (i, &elem) in code.iter().enumerate() {
-        terminated[i] = elem;
-    }
-
-    terminated
 }

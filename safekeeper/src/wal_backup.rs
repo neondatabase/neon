@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 
+use camino::{Utf8Path, Utf8PathBuf};
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
 use tokio::task::JoinHandle;
 use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +17,6 @@ use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
-use tokio::runtime::Builder;
 
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -34,30 +35,16 @@ use once_cell::sync::OnceCell;
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 
-pub fn wal_backup_launcher_thread_main(
-    conf: SafeKeeperConf,
-    wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) {
-    let mut builder = Builder::new_multi_thread();
-    if let Some(num_threads) = conf.backup_runtime_threads {
-        builder.worker_threads(num_threads);
-    }
-    let rt = builder
-        .enable_all()
-        .build()
-        .expect("failed to create wal backup runtime");
-
-    rt.block_on(async {
-        wal_backup_launcher_main_loop(conf, wal_backup_launcher_rx).await;
-    });
-}
-
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
-fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get(ttid)
-        .ok()
-        .filter(|tli| tli.wal_backup_attend())
+async fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
+    match GlobalTimelines::get(ttid).ok() {
+        Some(tli) => {
+            tli.wal_backup_attend().await;
+            Some(tli)
+        }
+        None => None,
+    }
 }
 
 struct WalBackupTaskHandle {
@@ -141,22 +128,28 @@ async fn update_task(
     ttid: TenantTimelineId,
     entry: &mut WalBackupTimelineEntry,
 ) {
-    let alive_peers = entry.timeline.get_peers(conf);
-    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn();
+    let alive_peers = entry.timeline.get_peers(conf).await;
+    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn().await;
     let (offloader, election_dbg_str) =
         determine_offloader(&alive_peers, wal_backup_lsn, ttid, conf);
     let elected_me = Some(conf.my_id) == offloader;
 
     if elected_me != (entry.handle.is_some()) {
         if elected_me {
-            info!("elected for backup {}: {}", ttid, election_dbg_str);
+            info!("elected for backup: {}", election_dbg_str);
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
             let timeline_dir = conf.timeline_dir(&ttid);
 
             let handle = tokio::spawn(
-                backup_task_main(ttid, timeline_dir, conf.workdir.clone(), shutdown_rx)
-                    .instrument(info_span!("WAL backup task", ttid = %ttid)),
+                backup_task_main(
+                    ttid,
+                    timeline_dir,
+                    conf.workdir.clone(),
+                    conf.backup_parallel_jobs,
+                    shutdown_rx,
+                )
+                .in_current_span(),
             );
 
             entry.handle = Some(WalBackupTaskHandle {
@@ -164,7 +157,7 @@ async fn update_task(
                 handle,
             });
         } else {
-            info!("stepping down from backup {}: {}", ttid, election_dbg_str);
+            info!("stepping down from backup: {}", election_dbg_str);
             shut_down_task(ttid, entry).await;
         }
     }
@@ -175,10 +168,10 @@ const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
 /// tasks. Having this in separate task simplifies locking, allows to reap
 /// panics and separate elections from offloading itself.
-async fn wal_backup_launcher_main_loop(
+pub async fn wal_backup_launcher_task_main(
     conf: SafeKeeperConf,
     mut wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) {
+) -> anyhow::Result<()> {
     info!(
         "WAL backup launcher started, remote config {:?}",
         conf.remote_storage
@@ -206,29 +199,33 @@ async fn wal_backup_launcher_main_loop(
                 if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
                     continue; /* just drain the channel and do nothing */
                 }
-                let timeline = is_wal_backup_required(ttid);
-                // do we need to do anything at all?
-                if timeline.is_some() != tasks.contains_key(&ttid) {
-                    if let Some(timeline) = timeline {
-                        // need to start the task
-                        let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
-                            timeline,
-                            handle: None,
-                        });
-                        update_task(&conf, ttid, entry).await;
-                    } else {
-                        // need to stop the task
-                        info!("stopping WAL backup task for {}", ttid);
-                        let mut entry = tasks.remove(&ttid).unwrap();
-                        shut_down_task(ttid, &mut entry).await;
+                async {
+                    let timeline = is_wal_backup_required(ttid).await;
+                    // do we need to do anything at all?
+                    if timeline.is_some() != tasks.contains_key(&ttid) {
+                        if let Some(timeline) = timeline {
+                            // need to start the task
+                            let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
+                                timeline,
+                                handle: None,
+                            });
+                            update_task(&conf, ttid, entry).await;
+                        } else {
+                            // need to stop the task
+                            info!("stopping WAL backup task");
+                            let mut entry = tasks.remove(&ttid).unwrap();
+                            shut_down_task(ttid, &mut entry).await;
+                        }
                     }
-                }
+                }.instrument(info_span!("WAL backup", ttid = %ttid)).await;
             }
             // For each timeline needing offloading, check if this safekeeper
             // should do the job and start/stop the task accordingly.
             _ = ticker.tick() => {
                 for (ttid, entry) in tasks.iter_mut() {
-                    update_task(&conf, *ttid, entry).await;
+                    update_task(&conf, *ttid, entry)
+                        .instrument(info_span!("WAL backup", ttid = %ttid))
+                        .await;
                 }
             }
         }
@@ -237,33 +234,36 @@ async fn wal_backup_launcher_main_loop(
 
 struct WalBackupTask {
     timeline: Arc<Timeline>,
-    timeline_dir: PathBuf,
-    workspace_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
+    workspace_dir: Utf8PathBuf,
     wal_seg_size: usize,
+    parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
 }
 
 /// Offload single timeline.
 async fn backup_task_main(
     ttid: TenantTimelineId,
-    timeline_dir: PathBuf,
-    workspace_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
+    workspace_dir: Utf8PathBuf,
+    parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
     info!("started");
     let res = GlobalTimelines::get(ttid);
     if let Err(e) = res {
-        error!("backup error for timeline {}: {}", ttid, e);
+        error!("backup error: {}", e);
         return;
     }
     let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
-        wal_seg_size: tli.get_wal_seg_size(),
+        wal_seg_size: tli.get_wal_seg_size().await,
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
         workspace_dir,
+        parallel_jobs,
     };
 
     // task is spinned up only when wal_seg_size already initialized
@@ -315,7 +315,7 @@ impl WalBackupTask {
                 continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
             }
             // Perhaps peers advanced the position, check shmem value.
-            backup_lsn = self.timeline.get_wal_backup_lsn();
+            backup_lsn = self.timeline.get_wal_backup_lsn().await;
             if backup_lsn.segment_number(self.wal_seg_size)
                 >= commit_lsn.segment_number(self.wal_seg_size)
             {
@@ -330,6 +330,7 @@ impl WalBackupTask {
                 self.wal_seg_size,
                 &self.timeline_dir,
                 &self.workspace_dir,
+                self.parallel_jobs,
             )
             .await
             {
@@ -349,27 +350,57 @@ impl WalBackupTask {
     }
 }
 
-pub async fn backup_lsn_range(
+async fn backup_lsn_range(
     timeline: &Arc<Timeline>,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
-    timeline_dir: &Path,
-    workspace_dir: &Path,
+    timeline_dir: &Utf8Path,
+    workspace_dir: &Utf8Path,
+    parallel_jobs: usize,
 ) -> Result<()> {
+    if parallel_jobs < 1 {
+        anyhow::bail!("parallel_jobs must be >= 1");
+    }
+
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
-    for s in &segments {
-        backup_single_segment(s, timeline_dir, workspace_dir)
-            .await
-            .with_context(|| format!("offloading segno {}", s.seg_no))?;
 
-        let new_backup_lsn = s.end_lsn;
-        timeline
-            .set_wal_backup_lsn(new_backup_lsn)
-            .context("setting wal_backup_lsn")?;
-        *backup_lsn = new_backup_lsn;
+    // Pool of concurrent upload tasks. We use `FuturesOrdered` to
+    // preserve order of uploads, and update `backup_lsn` only after
+    // all previous uploads are finished.
+    let mut uploads = FuturesOrdered::new();
+    let mut iter = segments.iter();
+
+    loop {
+        let added_task = match iter.next() {
+            Some(s) => {
+                uploads.push_back(backup_single_segment(s, timeline_dir, workspace_dir));
+                true
+            }
+            None => false,
+        };
+
+        // Wait for the next segment to upload if we don't have any more segments,
+        // or if we have too many concurrent uploads.
+        if !added_task || uploads.len() >= parallel_jobs {
+            let next = uploads.next().await;
+            if let Some(res) = next {
+                // next segment uploaded
+                let segment = res?;
+                let new_backup_lsn = segment.end_lsn;
+                timeline
+                    .set_wal_backup_lsn(new_backup_lsn)
+                    .await
+                    .context("setting wal_backup_lsn")?;
+                *backup_lsn = new_backup_lsn;
+            } else {
+                // no more segments to upload
+                break;
+            }
+        }
     }
+
     info!(
         "offloaded segnos {:?} up to {}, previous backup_lsn {}",
         segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
@@ -381,9 +412,9 @@ pub async fn backup_lsn_range(
 
 async fn backup_single_segment(
     seg: &Segment,
-    timeline_dir: &Path,
-    workspace_dir: &Path,
-) -> Result<()> {
+    timeline_dir: &Utf8Path,
+    workspace_dir: &Utf8Path,
+) -> Result<Segment> {
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
         .strip_prefix(workspace_dir)
@@ -402,9 +433,9 @@ async fn backup_single_segment(
         BACKUP_ERRORS.inc();
     }
     res?;
-    debug!("Backup of {} done", segment_file_path.display());
+    debug!("Backup of {} done", segment_file_path);
 
-    Ok(())
+    Ok(*seg)
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -427,7 +458,7 @@ impl Segment {
         XLogFileName(PG_TLI, self.seg_no, self.size())
     }
 
-    pub fn file_path(self, timeline_dir: &Path) -> Result<PathBuf> {
+    pub fn file_path(self, timeline_dir: &Utf8Path) -> Result<Utf8PathBuf> {
         Ok(timeline_dir.join(self.object_name()))
     }
 
@@ -452,19 +483,22 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
-async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize) -> Result<()> {
+async fn backup_object(
+    source_file: &Utf8Path,
+    target_file: &RemotePath,
+    size: usize,
+) -> Result<()> {
     let storage = REMOTE_STORAGE
         .get()
         .expect("failed to get remote storage")
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
-        format!(
-            "Failed to open file {} for wal backup",
-            source_file.display()
-        )
-    })?);
+    let file = tokio::io::BufReader::new(
+        File::open(&source_file)
+            .await
+            .with_context(|| format!("Failed to open file {} for wal backup", source_file))?,
+    );
 
     storage
         .upload_storage_object(Box::new(file), size, target_file)

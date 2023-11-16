@@ -19,6 +19,10 @@
 #include "access/xlog.h"
 #include "access/xlogutils.h"
 #include "storage/buf_internals.h"
+#include "storage/lwlock.h"
+#include "storage/ipc.h"
+#include "c.h"
+#include "postmaster/interrupt.h"
 
 #include "libpq-fe.h"
 #include "libpq/pqformat.h"
@@ -30,11 +34,10 @@
 
 #include "neon.h"
 #include "walproposer.h"
-#include "walproposer_utils.h"
+#include "neon_utils.h"
 
 #define PageStoreTrace DEBUG5
 
-#define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_INTERVAL_USEC 1000000
 
 bool		connected = false;
@@ -55,13 +58,70 @@ int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
 
-int			n_unflushed_requests = 0;
-int			flush_every_n_requests = 8;
 int			readahead_buffer_size = 128;
+int			flush_every_n_requests = 8;
+
+int			n_reconnect_attempts = 0;
+int			max_reconnect_attempts = 60;
+
+#define MAX_PAGESERVER_CONNSTRING_SIZE 256
+
+typedef struct
+{
+    LWLockId lock;
+    pg_atomic_uint64 update_counter;
+    char pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
+} PagestoreShmemState;
+
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static void walproposer_shmem_request(void);
+#endif
+static shmem_startup_hook_type prev_shmem_startup_hook;
+static PagestoreShmemState *pagestore_shared;
+static uint64 pagestore_local_counter = 0;
+static char local_pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
-static void pageserver_flush(void);
+static bool pageserver_flush(void);
+static void pageserver_disconnect(void);
+
+static bool
+CheckPageserverConnstring(char **newval, void **extra, GucSource source)
+{
+    return strlen(*newval) < MAX_PAGESERVER_CONNSTRING_SIZE;
+}
+
+static void
+AssignPageserverConnstring(const char *newval, void *extra)
+{
+    if(!pagestore_shared)
+        return;
+    LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
+    strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
+    pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
+    LWLockRelease(pagestore_shared->lock);
+}
+
+static bool
+CheckConnstringUpdated()
+{
+    if(!pagestore_shared)
+        return false;
+    return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
+}
+
+static void
+ReloadConnstring()
+{
+    if(!pagestore_shared)
+        return;
+    LWLockAcquire(pagestore_shared->lock, LW_SHARED);
+    strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
+    pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
+    LWLockRelease(pagestore_shared->lock);
+}
 
 static bool
 pageserver_connect(int elevel)
@@ -73,6 +133,11 @@ pageserver_connect(int elevel)
 	int			n;
 
 	Assert(!connected);
+
+        if(CheckConnstringUpdated())
+        {
+            ReloadConnstring();
+        }
 
 	/*
 	 * Connect using the connection string we got from the
@@ -93,7 +158,7 @@ pageserver_connect(int elevel)
 		n++;
 	}
 	keywords[n] = "dbname";
-	values[n] = page_server_connstring;
+	values[n] = local_pageserver_connstring;
 	n++;
 	keywords[n] = NULL;
 	values[n] = NULL;
@@ -192,8 +257,9 @@ retry:
 		{
 			if (!PQconsumeInput(pageserver_conn))
 			{
-				neon_log(LOG, "could not get response from pageserver: %s",
-						 PQerrorMessage(pageserver_conn));
+				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+				neon_log(LOG, "could not get response from pageserver: %s", msg);
+				pfree(msg);
 				return -1;
 			}
 		}
@@ -231,16 +297,23 @@ pageserver_disconnect(void)
 	}
 }
 
-static void
+static bool
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
-	int n_reconnect_attempts = 0;
+
+        if(CheckConnstringUpdated())
+        {
+            pageserver_disconnect();
+            ReloadConnstring();
+        }
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
+	{
+		neon_log(LOG, "pageserver_send disconnect bad connection");
 		pageserver_disconnect();
-
+	}
 
 	req_buff = nm_pack_request(request);
 
@@ -251,52 +324,36 @@ pageserver_send(NeonRequest * request)
 	 * See https://github.com/neondatabase/neon/issues/1138
 	 * So try to reestablish connection in case of failure.
 	 */
-	while (true)
+	if (!connected)
 	{
-		if (!connected)
+		while (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
-			if (!pageserver_connect(n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS ? LOG : ERROR))
-			{
-				n_reconnect_attempts += 1;
-				pg_usleep(RECONNECT_INTERVAL_USEC);
-				continue;
-			}
+			HandleMainLoopInterrupts();
+			n_reconnect_attempts += 1;
+			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
+		n_reconnect_attempts = 0;
+	}
 
-		/*
-		 * Send request.
-		 *
-		 * In principle, this could block if the output buffer is full, and we
-		 * should use async mode and check for interrupts while waiting. In
-		 * practice, our requests are small enough to always fit in the output and
-		 * TCP buffer.
-		 */
-		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
-		{
-			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-			if (n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
-			{
-				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
-				if (n_reconnect_attempts != 0) /* do not sleep before first reconnect attempt, assuming that pageserver is already restarted */
-					pg_usleep(RECONNECT_INTERVAL_USEC);
-				n_reconnect_attempts += 1;
-				continue;
-			}
-			else
-			{
-				pageserver_disconnect();
-				neon_log(ERROR, "failed to send page request: %s", msg);
-			}
-		}
-		break;
+	/*
+	 * Send request.
+	 *
+	 * In principle, this could block if the output buffer is full, and we
+	 * should use async mode and check for interrupts while waiting. In
+	 * practice, our requests are small enough to always fit in the output and
+	 * TCP buffer.
+	 */
+	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	{
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		pageserver_disconnect();
+		neon_log(LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
+		pfree(msg);
+		pfree(req_buff.data);
+		return false;
 	}
 
 	pfree(req_buff.data);
-
-	n_unflushed_requests++;
-
-	if (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests)
-		pageserver_flush();
 
 	if (message_level_is_interesting(PageStoreTrace))
 	{
@@ -305,6 +362,7 @@ pageserver_send(NeonRequest * request)
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
+	return true;
 }
 
 static NeonResponse *
@@ -339,16 +397,25 @@ pageserver_receive(void)
 		}
 		else if (rc == -1)
 		{
+			neon_log(LOG, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
 			pageserver_disconnect();
 			resp = NULL;
 		}
 		else if (rc == -2)
-			neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+		{
+			char* msg = pchomp(PQerrorMessage(pageserver_conn));
+			pageserver_disconnect();
+			neon_log(ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
+		}
 		else
-			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
+		{
+			pageserver_disconnect();
+			neon_log(ERROR, "pageserver_receive disconnect because unexpected PQgetCopyData return value: %d", rc);
+		}
 	}
 	PG_CATCH();
 	{
+		neon_log(LOG, "pageserver_receive disconnect due to caught exception");
 		pageserver_disconnect();
 		PG_RE_THROW();
 	}
@@ -358,24 +425,29 @@ pageserver_receive(void)
 }
 
 
-static void
+static bool
 pageserver_flush(void)
 {
 	if (!connected)
 	{
 		neon_log(WARNING, "Tried to flush while disconnected");
 	}
-	else if (PQflush(pageserver_conn))
+	else
 	{
-		char	   *msg = PQerrorMessage(pageserver_conn);
-
-		pageserver_disconnect();
-		neon_log(ERROR, "failed to flush page requests: %s", msg);
+		if (PQflush(pageserver_conn))
+		{
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+			pageserver_disconnect();
+			neon_log(LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
+			pfree(msg);
+			return false;
+		}
 	}
-	n_unflushed_requests = 0;
+	return true;
 }
 
-page_server_api api = {
+page_server_api api =
+{
 	.send = pageserver_send,
 	.flush = pageserver_flush,
 	.receive = pageserver_receive
@@ -389,20 +461,80 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
+static Size
+PagestoreShmemSize(void)
+{
+    return sizeof(PagestoreShmemState);
+}
+
+static bool
+PagestoreShmemInit(void)
+{
+    bool found;
+    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+    pagestore_shared = ShmemInitStruct("libpagestore shared state",
+                                       PagestoreShmemSize(),
+                                       &found);
+    if(!found)
+    {
+        pagestore_shared->lock = &(GetNamedLWLockTranche("neon_libpagestore")->lock);
+        pg_atomic_init_u64(&pagestore_shared->update_counter, 0);
+        AssignPageserverConnstring(page_server_connstring, NULL);
+    }
+    LWLockRelease(AddinShmemInitLock);
+    return found;
+}
+
+static void
+pagestore_shmem_startup_hook(void)
+{
+    if(prev_shmem_startup_hook)
+        prev_shmem_startup_hook();
+
+    PagestoreShmemInit();
+}
+
+static void
+pagestore_shmem_request(void)
+{
+#if PG_VERSION_NUM >= 150000
+    if(prev_shmem_request_hook)
+        prev_shmem_request_hook();
+#endif
+
+    RequestAddinShmemSpace(PagestoreShmemSize());
+    RequestNamedLWLockTranche("neon_libpagestore", 1);
+}
+
+static void
+pagestore_prepare_shmem(void)
+{
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pagestore_shmem_request;
+#else
+        pagestore_shmem_request();
+#endif
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = pagestore_shmem_startup_hook;
+}
+
 /*
  * Module initialization function
  */
 void
 pg_init_libpagestore(void)
 {
+        pagestore_prepare_shmem();
+
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
 							   &page_server_connstring,
 							   "",
-							   PGC_POSTMASTER,
+							   PGC_SIGHUP,
 							   0,	/* no flags required */
-							   NULL, NULL, NULL);
+							   CheckPageserverConnstring, AssignPageserverConnstring, NULL);
 
 	DefineCustomStringVariable("neon.timeline_id",
 							   "Neon timeline_id the server is running on",
@@ -437,6 +569,14 @@ pg_init_libpagestore(void)
 							8, -1, INT_MAX,
 							PGC_USERSET,
 							0,	/* no flags required */
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.max_reconnect_attempts",
+							"Maximal attempts to reconnect to pages server (with 1 second timeout)",
+							NULL,
+							&max_reconnect_attempts,
+							60, 0, INT_MAX,
+							PGC_USERSET,
+							0,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
 							"number of prefetches to buffer",
@@ -474,5 +614,6 @@ pg_init_libpagestore(void)
 		old_redo_read_buffer_filter = redo_read_buffer_filter;
 		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
+
 	lfc_init();
 }

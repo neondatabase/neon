@@ -6,19 +6,32 @@
 use bstr::ByteSlice;
 
 pub struct PasswordHackPayload {
-    pub project: String,
+    pub endpoint: String,
     pub password: Vec<u8>,
 }
 
 impl PasswordHackPayload {
     pub fn parse(bytes: &[u8]) -> Option<Self> {
-        // The format is `project=<utf-8>;<password-bytes>`.
-        let mut iter = bytes.strip_prefix(b"project=")?.splitn_str(2, ";");
-        let project = iter.next()?.to_str().ok()?.to_owned();
-        let password = iter.next()?.to_owned();
+        // The format is `project=<utf-8>;<password-bytes>` or `project=<utf-8>$<password-bytes>`.
+        let separators = [";", "$"];
+        for sep in separators {
+            if let Some((endpoint, password)) = bytes.split_once_str(sep) {
+                let endpoint = endpoint.to_str().ok()?;
+                return Some(Self {
+                    endpoint: parse_endpoint_param(endpoint)?.to_owned(),
+                    password: password.to_owned(),
+                });
+            }
+        }
 
-        Some(Self { project, password })
+        None
     }
+}
+
+pub fn parse_endpoint_param(bytes: &str) -> Option<&str> {
+    bytes
+        .strip_prefix("project=")
+        .or_else(|| bytes.strip_prefix("endpoint="))
 }
 
 #[cfg(test)]
@@ -26,7 +39,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_password_hack_payload() {
+    fn parse_endpoint_param_fn() {
+        let input = "";
+        assert!(parse_endpoint_param(input).is_none());
+
+        let input = "project=";
+        assert_eq!(parse_endpoint_param(input), Some(""));
+
+        let input = "project=foobar";
+        assert_eq!(parse_endpoint_param(input), Some("foobar"));
+
+        let input = "endpoint=";
+        assert_eq!(parse_endpoint_param(input), Some(""));
+
+        let input = "endpoint=foobar";
+        assert_eq!(parse_endpoint_param(input), Some("foobar"));
+
+        let input = "other_option=foobar";
+        assert!(parse_endpoint_param(input).is_none());
+    }
+
+    #[test]
+    fn parse_password_hack_payload_project() {
         let bytes = b"";
         assert!(PasswordHackPayload::parse(bytes).is_none());
 
@@ -34,13 +68,52 @@ mod tests {
         assert!(PasswordHackPayload::parse(bytes).is_none());
 
         let bytes = b"project=;";
-        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
-        assert_eq!(payload.project, "");
+        let payload: PasswordHackPayload =
+            PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "");
         assert_eq!(payload.password, b"");
 
         let bytes = b"project=foobar;pass;word";
         let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
-        assert_eq!(payload.project, "foobar");
+        assert_eq!(payload.endpoint, "foobar");
         assert_eq!(payload.password, b"pass;word");
+    }
+
+    #[test]
+    fn parse_password_hack_payload_endpoint() {
+        let bytes = b"";
+        assert!(PasswordHackPayload::parse(bytes).is_none());
+
+        let bytes = b"endpoint=";
+        assert!(PasswordHackPayload::parse(bytes).is_none());
+
+        let bytes = b"endpoint=;";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "");
+        assert_eq!(payload.password, b"");
+
+        let bytes = b"endpoint=foobar;pass;word";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "foobar");
+        assert_eq!(payload.password, b"pass;word");
+    }
+
+    #[test]
+    fn parse_password_hack_payload_dollar() {
+        let bytes = b"";
+        assert!(PasswordHackPayload::parse(bytes).is_none());
+
+        let bytes = b"endpoint=";
+        assert!(PasswordHackPayload::parse(bytes).is_none());
+
+        let bytes = b"endpoint=$";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "");
+        assert_eq!(payload.password, b"");
+
+        let bytes = b"endpoint=foobar$pass$word";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "foobar");
+        assert_eq!(payload.password, b"pass$word");
     }
 }

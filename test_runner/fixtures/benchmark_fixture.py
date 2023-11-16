@@ -5,7 +5,6 @@ import json
 import os
 import re
 import timeit
-import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +17,7 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.terminal import TerminalReporter
 
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
 
@@ -385,7 +385,7 @@ class NeonBenchmarker:
         path = f"{repo_dir}/tenants/{tenant_id}/timelines/{timeline_id}"
 
         totalbytes = 0
-        for root, dirs, files in os.walk(path):
+        for root, _dirs, files in os.walk(path):
             for name in files:
                 totalbytes += os.path.getsize(os.path.join(root, name))
 
@@ -451,13 +451,17 @@ def pytest_terminal_summary(
     revision = os.getenv("GITHUB_SHA", "local")
     platform = os.getenv("PLATFORM", "local")
 
-    terminalreporter.section("Benchmark results", "-")
+    is_header_printed = False
 
     result = []
     for test_report in terminalreporter.stats.get("passed", []):
         result_entry = []
 
         for _, recorded_property in test_report.user_properties:
+            if not is_header_printed:
+                terminalreporter.section("Benchmark results", "-")
+                is_header_printed = True
+
             terminalreporter.write(
                 "{}.{}: ".format(test_report.head_line, recorded_property["name"])
             )
@@ -485,11 +489,10 @@ def pytest_terminal_summary(
 
     out_dir = config.getoption("out_dir")
     if out_dir is None:
-        warnings.warn("no out dir provided to store performance test results")
         return
 
     if not result:
-        warnings.warn("no results to store (no passed test suites)")
+        log.warning("no results to store (no passed test suites)")
         return
 
     get_out_path(Path(out_dir), revision=revision).write_text(

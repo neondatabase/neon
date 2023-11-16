@@ -4,11 +4,10 @@ from contextlib import closing
 import psycopg2.extras
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LocalFsStorage,
     NeonEnvBuilder,
-    RemoteStorageKind,
 )
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import Lsn
 from fixtures.utils import wait_until
 
@@ -62,6 +61,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             log.info(f"show {env.initial_tenant}")
             pscur.execute(f"show {env.initial_tenant}")
             res = pscur.fetchone()
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -101,6 +101,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -151,6 +152,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "eviction_policy": json.dumps(
             {"kind": "LayerAccessThreshold", "period": "80s", "threshold": "42h"}
         ),
+        "max_lsn_wal_lag": "13000000",
     }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
@@ -162,6 +164,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after config res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -206,6 +209,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
     assert updated_effective_config["gc_horizon"] == 67108864
     assert updated_effective_config["image_creation_threshold"] == 2
     assert updated_effective_config["pitr_interval"] == "7days"
+    assert updated_effective_config["max_lsn_wal_lag"] == 13000000
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -216,6 +220,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -265,6 +270,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "period": "20s",
         "threshold": "23h",
     }
+    assert final_effective_config["max_lsn_wal_lag"] == 10 * 1024 * 1024
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -275,6 +281,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -285,17 +292,14 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_creating_tenant_conf_after_attach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     # tenant is created with defaults, as in without config file
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
-    config_path = env.repo_dir / "tenants" / str(tenant_id) / "config"
+    config_path = env.pageserver.tenant_dir(tenant_id) / "config"
     assert config_path.exists(), "config file is always initially created"
 
     http_client = env.pageserver.http_client()
@@ -330,13 +334,10 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_live_reconfig_get_evictions_low_residence_duration_metric_threshold",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
     ps_http = env.pageserver.http_client()

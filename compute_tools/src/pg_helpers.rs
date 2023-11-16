@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::fs::File;
@@ -16,15 +17,26 @@ use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
-/// Escape a string for including it in a SQL literal
-fn escape_literal(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
+/// Escape a string for including it in a SQL literal. Wrapping the result
+/// with `E'{}'` or `'{}'` is not required, as it returns a ready-to-use
+/// SQL string literal, e.g. `'db'''` or `E'db\\'`.
+/// See <https://github.com/postgres/postgres/blob/da98d005cdbcd45af563d0c4ac86d0e9772cd15f/src/backend/utils/adt/quote.c#L47>
+/// for the original implementation.
+pub fn escape_literal(s: &str) -> String {
+    let res = s.replace('\'', "''").replace('\\', "\\\\");
+
+    if res.contains('\\') {
+        format!("E'{}'", res)
+    } else {
+        format!("'{}'", res)
+    }
 }
 
-/// Escape a string so that it can be used in postgresql.conf.
-/// Same as escape_literal, currently.
-fn escape_conf_value(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
+/// Escape a string so that it can be used in postgresql.conf. Wrapping the result
+/// with `'{}'` is not required, as it returns a ready-to-use config string.
+pub fn escape_conf_value(s: &str) -> String {
+    let res = s.replace('\'', "''").replace('\\', "\\\\");
+    format!("'{}'", res)
 }
 
 trait GenericOptionExt {
@@ -37,7 +49,7 @@ impl GenericOptionExt for GenericOption {
     fn to_pg_option(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} '{}'", self.name, escape_literal(val)),
+                "string" => format!("{} {}", self.name, escape_literal(val)),
                 _ => format!("{} {}", self.name, val),
             }
         } else {
@@ -49,7 +61,7 @@ impl GenericOptionExt for GenericOption {
     fn to_pg_setting(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", self.name, escape_conf_value(val)),
+                "string" => format!("{} = {}", self.name, escape_conf_value(val)),
                 _ => format!("{} = {}", self.name, val),
             }
         } else {
@@ -121,9 +133,8 @@ impl RoleExt for Role {
     /// string of arguments.
     fn to_pg_options(&self) -> String {
         // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in control-plane.
-        // For now, we do not use generic `options` for roles. Once used, add
-        // `self.options.as_pg_options()` somewhere here.
-        let mut params: String = "LOGIN".to_string();
+        let mut params: String = self.options.as_pg_options();
+        params.push_str(" LOGIN");
 
         if let Some(pass) = &self.encrypted_password {
             // Some time ago we supported only md5 and treated all encrypted_password as md5.
@@ -182,11 +193,16 @@ impl Escaping for PgIdent {
 /// Build a list of existing Postgres roles
 pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
     let postgres_roles = xact
-        .query("SELECT rolname, rolpassword FROM pg_catalog.pg_authid", &[])?
+        .query(
+            "SELECT rolname, rolpassword, rolreplication, rolbypassrls FROM pg_catalog.pg_authid",
+            &[],
+        )?
         .iter()
         .map(|row| Role {
             name: row.get("rolname"),
             encrypted_password: row.get("rolpassword"),
+            replication: Some(row.get("rolreplication")),
+            bypassrls: Some(row.get("rolbypassrls")),
             options: None,
         })
         .collect();
@@ -195,28 +211,43 @@ pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
 }
 
 /// Build a list of existing Postgres databases
-pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
-    let postgres_dbs = client
+pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>> {
+    // `pg_database.datconnlimit = -2` means that the database is in the
+    // invalid state. See:
+    //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
+    let postgres_dbs: Vec<Database> = client
         .query(
-            "SELECT datname, datdba::regrole::text as owner
-               FROM pg_catalog.pg_database;",
+            "SELECT
+                datname AS name,
+                datdba::regrole::text AS owner,
+                NOT datallowconn AS restrict_conn,
+                datconnlimit = - 2 AS invalid
+            FROM
+                pg_catalog.pg_database;",
             &[],
         )?
         .iter()
         .map(|row| Database {
-            name: row.get("datname"),
+            name: row.get("name"),
             owner: row.get("owner"),
+            restrict_conn: row.get("restrict_conn"),
+            invalid: row.get("invalid"),
             options: None,
         })
         .collect();
 
-    Ok(postgres_dbs)
+    let dbs_map = postgres_dbs
+        .iter()
+        .map(|db| (db.name.clone(), db.clone()))
+        .collect::<HashMap<_, _>>();
+
+    Ok(dbs_map)
 }
 
 /// Wait for Postgres to become ready to accept connections. It's ready to
 /// accept connections when the state-field in `pgdata/postmaster.pid` says
 /// 'ready'.
-#[instrument(skip(pg))]
+#[instrument(skip_all, fields(pgdata = %pgdata.display()))]
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
 

@@ -18,7 +18,7 @@
 # 6. We wait for the new pageserver's remote_consistent_lsn to catch up
 #
 # For more context on how to use this, see:
-# https://github.com/neondatabase/cloud/wiki/Storage-format-migration
+# https://www.notion.so/neondatabase/Storage-format-migration-9a8eba33ccf8417ea8cf50e6a0c542cf
 
 import argparse
 import os
@@ -162,7 +162,7 @@ class PgProtocol:
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
-        conn = psycopg2.connect(**self.conn_options(**kwargs))
+        conn: PgConnection = psycopg2.connect(**self.conn_options(**kwargs))
 
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
@@ -214,8 +214,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         self.running = True
 
-        if log_path is None:
-            log_path = os.path.join(self.pgdatadir, "pg.log")
+        log_path = log_path or os.path.join(self.pgdatadir, "pg.log")
 
         self.pg_bin.run_capture(
             ["pg_ctl", "-w", "-D", str(self.pgdatadir), "-l", log_path, "start"]
@@ -396,7 +395,7 @@ def reconstruct_paths(log_dir, pg_bin, base_tar, port: int):
 
                 query = "select relname, pg_relation_filepath(oid) from pg_class"
                 result = vanilla_pg.safe_psql(query, user="cloud_admin", dbname=database)
-                for relname, filepath in result:
+                for _relname, filepath in result:
                     if filepath is not None:
                         if database == "template0copy":
                             # Add all template0copy paths to template0
@@ -535,8 +534,8 @@ def export_timeline(
 
 
 def main(args: argparse.Namespace):
-    # any psql version will do here. use current DEFAULT_PG_VERSION = 14
-    psql_path = str(Path(args.pg_distrib_dir) / "v14" / "bin" / "psql")
+    # any psql version will do here. use current DEFAULT_PG_VERSION = 15
+    psql_path = str(Path(args.pg_distrib_dir) / "v15" / "bin" / "psql")
 
     old_pageserver_host = args.old_pageserver_host
     new_pageserver_host = args.new_pageserver_host

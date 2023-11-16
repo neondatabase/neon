@@ -16,18 +16,19 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
-    RemoteStorageKind,
     VanillaPostgres,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
+    timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size, wait_until
 
@@ -188,7 +189,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
                 # If we get here, the timeline size limit failed
                 log.error("Query unexpectedly succeeded")
-                assert False
+                raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
                 log.info(f"Query expectedly failed with: {err}")
@@ -272,7 +273,7 @@ def test_timeline_initial_logical_size_calculation_cancellation(
             if deletion_method == "tenant_detach":
                 client.tenant_detach(tenant_id)
             elif deletion_method == "timeline_delete":
-                client.timeline_delete(tenant_id, timeline_id)
+                timeline_delete_wait_completed(client, tenant_id, timeline_id)
             delete_timeline_success.put(True)
         except PageserverApiException:
             delete_timeline_success.put(False)
@@ -283,9 +284,9 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     # give it some time to settle in the state where it waits for size computation task
     time.sleep(5)
     if not delete_timeline_success.empty():
-        assert (
-            False
-        ), f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
+        raise AssertionError(
+            f"test is broken, the {deletion_method} should be stuck waiting for size computation task, got result {delete_timeline_success.get()}"
+        )
 
     log.info(
         "resume the size calculation. The failpoint checks that the timeline directory still exists."
@@ -300,14 +301,8 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     # message emitted by the code behind failpoint "timeline-calculate-logical-size-check-dir-exists"
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_init(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -338,19 +333,12 @@ def test_timeline_physical_size_init(
     )
 
     assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id),
     )
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_post_checkpoint(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+def test_timeline_physical_size_post_checkpoint(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -370,20 +358,16 @@ def test_timeline_physical_size_post_checkpoint(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
-    assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
-    )
-
-
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_post_compaction(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
+    def check():
+        assert_physical_size_invariants(
+            get_physical_size_values(env, env.initial_tenant, new_timeline_id),
         )
+
+    wait_until(10, 1, check)
+
+
+def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Disable background compaction as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -415,29 +399,22 @@ def test_timeline_physical_size_post_compaction(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
 
     # shutdown safekeepers to prevent new data from coming in
+    endpoint.stop()  # We can't gracefully stop after safekeepers die
     for sk in env.safekeepers:
         sk.stop()
 
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_compact(env.initial_tenant, new_timeline_id)
 
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id),
     )
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_post_gc(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Disable background compaction and GC as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -474,12 +451,10 @@ def test_timeline_physical_size_post_gc(
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id),
     )
 
 
@@ -521,7 +496,7 @@ def test_timeline_size_metrics(
     ).value
 
     # assert that the physical size metric matches the actual physical size on disk
-    timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
 
     # Check that the logical size metric is sane, and matches
@@ -563,16 +538,10 @@ def test_timeline_size_metrics(
     assert math.isclose(dbsize_sum, tl_logical_size_metric, abs_tol=2 * 1024 * 1024)
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_tenant_physical_size(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
+def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
     random.seed(100)
 
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -580,12 +549,10 @@ def test_tenant_physical_size(
     client = env.pageserver.http_client()
 
     tenant, timeline = env.neon_cli.create_tenant()
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
     def get_timeline_resident_physical_size(timeline: TimelineId):
-        sizes = get_physical_size_values(env, tenant, timeline, remote_storage_kind)
-        assert_physical_size_invariants(sizes, remote_storage_kind)
+        sizes = get_physical_size_values(env, tenant, timeline)
+        assert_physical_size_invariants(sizes)
         return sizes.prometheus_resident_physical
 
     timeline_total_resident_physical_size = get_timeline_resident_physical_size(timeline)
@@ -605,8 +572,7 @@ def test_tenant_physical_size(
         wait_for_last_flush_lsn(env, endpoint, tenant, timeline)
         pageserver_http.timeline_checkpoint(tenant, timeline)
 
-        if remote_storage_kind is not None:
-            wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
+        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
         timeline_total_resident_physical_size += get_timeline_resident_physical_size(timeline)
 
@@ -635,7 +601,6 @@ def get_physical_size_values(
     env: NeonEnv,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    remote_storage_kind: Optional[RemoteStorageKind],
 ) -> TimelinePhysicalSizeValues:
     res = TimelinePhysicalSizeValues()
 
@@ -651,38 +616,30 @@ def get_physical_size_values(
     res.prometheus_resident_physical = metrics.query_one(
         "pageserver_resident_physical_size", metrics_filter
     ).value
-    if remote_storage_kind is not None:
-        res.prometheus_remote_physical = metrics.query_one(
-            "pageserver_remote_physical_size", metrics_filter
-        ).value
-    else:
-        res.prometheus_remote_physical = None
+    res.prometheus_remote_physical = metrics.query_one(
+        "pageserver_remote_physical_size", metrics_filter
+    ).value
 
     detail = client.timeline_detail(
         tenant_id, timeline_id, include_timeline_dir_layer_file_size_sum=True
     )
     res.api_current_physical = detail["current_physical_size"]
 
-    timeline_path = env.timeline_dir(tenant_id, timeline_id)
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
     res.python_timelinedir_layerfiles_physical = get_timeline_dir_size(timeline_path)
 
     return res
 
 
-def assert_physical_size_invariants(
-    sizes: TimelinePhysicalSizeValues, remote_storage_kind: Optional[RemoteStorageKind]
-):
+def assert_physical_size_invariants(sizes: TimelinePhysicalSizeValues):
     # resident phyiscal size is defined as
     assert sizes.python_timelinedir_layerfiles_physical == sizes.prometheus_resident_physical
     assert sizes.python_timelinedir_layerfiles_physical == sizes.layer_map_file_size_sum
 
     # we don't do layer eviction, so, all layers are resident
     assert sizes.api_current_physical == sizes.prometheus_resident_physical
-    if remote_storage_kind is not None:
-        assert sizes.prometheus_resident_physical == sizes.prometheus_remote_physical
-        # XXX would be nice to assert layer file physical storage utilization here as well, but we can only do that for LocalFS
-    else:
-        assert sizes.prometheus_remote_physical is None
+    assert sizes.prometheus_resident_physical == sizes.prometheus_remote_physical
+    # XXX would be nice to assert layer file physical storage utilization here as well, but we can only do that for LocalFS
 
 
 # Timeline logical size initialization is an asynchronous background task that runs once,

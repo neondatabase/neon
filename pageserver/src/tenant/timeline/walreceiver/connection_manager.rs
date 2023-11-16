@@ -6,7 +6,7 @@
 //! Current connection state is tracked too, to ensure it's not getting stale.
 //!
 //! After every connection or storage broker update fetched, the state gets updated correspondingly and rechecked for the new conneciton leader,
-//! then a [re]connection happens, if necessary.
+//! then a (re)connection happens, if necessary.
 //! Only WAL streaming task expects to be finished, other loops (storage broker, connection management) never exit unless cancelled explicitly via the dedicated channel.
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
@@ -17,8 +17,8 @@ use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
-use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
+use crate::task_mgr::{shutdown_token, TaskKind};
+use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -26,20 +26,24 @@ use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::BrokerClientChannel;
-use storage_broker::Streaming;
-use tokio::sync::RwLock;
-use tokio::{select, sync::watch};
+use storage_broker::{BrokerClientChannel, Code, Streaming};
+use tokio::select;
 use tracing::*;
 
-use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::PgConnectionConfig;
+use utils::backoff::{
+    exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
+};
+use utils::postgres_client::wal_stream_connection_config;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
 };
 
-use super::{walreceiver_connection::WalConnectionStatus, TaskEvent, TaskHandle};
+use super::{
+    walreceiver_connection::WalConnectionStatus, walreceiver_connection::WalReceiverError,
+    TaskEvent, TaskHandle,
+};
 
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
@@ -48,16 +52,19 @@ pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
-    manager_status: &RwLock<Option<ConnectionManagerStatus>>,
+    manager_status: &std::sync::RwLock<Option<ConnectionManagerStatus>>,
 ) -> ControlFlow<(), ()> {
-    let mut timeline_state_updates = connection_manager_state
+    match connection_manager_state
         .timeline
-        .subscribe_for_state_updates();
-
-    match wait_for_active_timeline(&mut timeline_state_updates).await {
-        ControlFlow::Continue(()) => {}
-        ControlFlow::Break(()) => {
-            info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
+        .wait_to_become_active(ctx)
+        .await
+    {
+        Ok(()) => {}
+        Err(new_state) => {
+            debug!(
+                ?new_state,
+                "state changed, stopping wal connection manager loop"
+            );
             return ControlFlow::Break(());
         }
     }
@@ -72,11 +79,15 @@ pub(super) async fn connection_manager_loop_step(
         timeline_id: connection_manager_state.timeline.timeline_id,
     };
 
+    let mut timeline_state_updates = connection_manager_state
+        .timeline
+        .subscribe_for_state_updates();
+
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
-    info!("Subscribed for broker timeline updates");
+    debug!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
@@ -125,8 +136,17 @@ pub(super) async fn connection_manager_loop_step(
             broker_update = broker_subscription.message() => {
                 match broker_update {
                     Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
-                    Err(e) => {
-                        error!("broker subscription failed: {e}");
+                    Err(status) => {
+                        match status.code() {
+                            Code::Unknown if status.message().contains("stream closed because of a broken pipe") => {
+                                // tonic's error handling doesn't provide a clear code for disconnections: we get
+                                // "h2 protocol error: error reading a body from connection: stream closed because of a broken pipe"
+                                info!("broker disconnected: {status}");
+                            },
+                            _ => {
+                                warn!("broker subscription failed: {status}");
+                            }
+                        }
                         return ControlFlow::Continue(());
                     }
                     Ok(None) => {
@@ -147,13 +167,13 @@ pub(super) async fn connection_manager_loop_step(
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping => {
-                                    info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
+                                TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                    debug!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
                                     return ControlFlow::Break(());
                                 }
                                 TimelineState::Loading => {
                                     warn!("timeline transitioned back to Loading state, that should not happen");
-                                    return ControlFlow::Continue(new_state);
+                                    return ControlFlow::Continue(());
                                 }
                             }
                         }
@@ -161,12 +181,11 @@ pub(super) async fn connection_manager_loop_step(
                     }
                 }
             } => match new_event {
-                ControlFlow::Continue(new_state) => {
-                    info!("observed timeline state change, new state is {new_state:?}");
+                ControlFlow::Continue(()) => {
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
-                    info!("Timeline dropped state updates sender, stopping wal connection manager loop");
+                    debug!("Timeline is no longer active, stopping wal connection manager loop");
                     return ControlFlow::Break(());
                 }
             },
@@ -191,35 +210,7 @@ pub(super) async fn connection_manager_loop_step(
                 .change_connection(new_candidate, ctx)
                 .await
         }
-        *manager_status.write().await = Some(connection_manager_state.manager_status());
-    }
-}
-
-async fn wait_for_active_timeline(
-    timeline_state_updates: &mut watch::Receiver<TimelineState>,
-) -> ControlFlow<(), ()> {
-    let current_state = *timeline_state_updates.borrow();
-    if current_state == TimelineState::Active {
-        return ControlFlow::Continue(());
-    }
-
-    loop {
-        match timeline_state_updates.changed().await {
-            Ok(()) => {
-                let new_state = *timeline_state_updates.borrow();
-                match new_state {
-                    TimelineState::Active => {
-                        debug!("Timeline state changed to active, continuing the walreceiver connection manager");
-                        return ControlFlow::Continue(());
-                    }
-                    state => {
-                        debug!("Not running the walreceiver connection manager, timeline is not active: {state:?}");
-                        continue;
-                    }
-                }
-            }
-            Err(_sender_dropped_error) => return ControlFlow::Break(()),
-        }
+        *manager_status.write().unwrap() = Some(connection_manager_state.manager_status());
     }
 }
 
@@ -229,11 +220,14 @@ async fn subscribe_for_timeline_updates(
     id: TenantTimelineId,
 ) -> Streaming<SafekeeperTimelineInfo> {
     let mut attempt = 0;
+    let cancel = shutdown_token();
+
     loop {
         exponential_backoff(
             attempt,
             DEFAULT_BASE_BACKOFF_SECONDS,
             DEFAULT_MAX_BACKOFF_SECONDS,
+            &cancel,
         )
         .await;
         attempt += 1;
@@ -289,7 +283,7 @@ pub struct ConnectionManagerStatus {
 impl ConnectionManagerStatus {
     /// Generates a string, describing current connection status in a form, suitable for logging.
     pub fn to_human_readable_string(&self) -> String {
-        let mut resulting_string = "WalReceiver status".to_string();
+        let mut resulting_string = String::new();
         match &self.existing_connection {
             Some(connection) => {
                 if connection.has_processed_wal {
@@ -415,7 +409,6 @@ impl ConnectionManagerState {
 
         self.drop_old_connection(true).await;
 
-        let id = self.id;
         let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
@@ -423,23 +416,51 @@ impl ConnectionManagerState {
             TaskKind::WalReceiverConnectionHandler,
             DownloadBehavior::Download,
         );
+
+        let span = info_span!("connection", %node_id);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
-                super::walreceiver_connection::handle_walreceiver_connection(
+                debug_assert_current_span_has_tenant_and_timeline_id();
+
+                let res = super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
                     new_sk.wal_source_connconf,
                     events_sender,
-                    cancellation,
+                    cancellation.clone(),
                     connect_timeout,
                     ctx,
                     node_id,
                 )
-                .await
-                .context("walreceiver connection handling failure")
+                .await;
+
+                match res {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        match e {
+                            WalReceiverError::SuccessfulCompletion(msg) => {
+                                info!("walreceiver connection handling ended with success: {msg}");
+                                Ok(())
+                            }
+                            WalReceiverError::ExpectedSafekeeperError(e) => {
+                                info!("walreceiver connection handling ended: {e}");
+                                Ok(())
+                            }
+                            WalReceiverError::Other(e) => {
+                                // give out an error to have task_mgr give it a really verbose logging
+                                if cancellation.is_cancelled() {
+                                    // Ideally we would learn about this via some path other than Other, but
+                                    // that requires refactoring all the intermediate layers of ingest code
+                                    // that only emit anyhow::Error
+                                    Ok(())
+                                } else {
+                                    Err(e).context("walreceiver connection handling failure")
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            .instrument(
-                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, %node_id),
-            )
+            .instrument(span)
         });
 
         let now = Utc::now().naive_utc();
@@ -874,33 +895,6 @@ impl ReconnectReason {
     }
 }
 
-fn wal_stream_connection_config(
-    TenantTimelineId {
-        tenant_id,
-        timeline_id,
-    }: TenantTimelineId,
-    listen_pg_addr_str: &str,
-    auth_token: Option<&str>,
-    availability_zone: Option<&str>,
-) -> anyhow::Result<PgConnectionConfig> {
-    let (host, port) =
-        parse_host_port(listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
-    let port = port.unwrap_or(5432);
-    let mut connstr = PgConnectionConfig::new_host_port(host, port)
-        .extend_options([
-            "-c".to_owned(),
-            format!("timeline_id={}", timeline_id),
-            format!("tenant_id={}", tenant_id),
-        ])
-        .set_password(auth_token.map(|s| s.to_owned()));
-
-    if let Some(availability_zone) = availability_zone {
-        connstr = connstr.extend_options([format!("availability_zone={}", availability_zone)]);
-    }
-
-    Ok(connstr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,6 +910,7 @@ mod tests {
             timeline: SafekeeperTimelineInfo {
                 safekeeper_id: 0,
                 tenant_timeline_id: None,
+                term: 0,
                 last_log_term: 0,
                 flush_lsn: 0,
                 commit_lsn,
@@ -924,6 +919,7 @@ mod tests {
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
+                http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
             },
             latest_update,
@@ -1132,7 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lsn_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
+    async fn lsn_wal_over_threshold_current_candidate() -> anyhow::Result<()> {
         let harness = TenantHarness::create("lsn_wal_over_threshcurrent_candidate")?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
@@ -1198,8 +1194,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_connection_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("timeout_connection_threshhold_current_candidate")?;
+    async fn timeout_connection_threshold_current_candidate() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("timeout_connection_threshold_current_candidate")?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1261,8 +1257,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_wal_over_threshhold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("timeout_wal_over_threshhold_current_candidate")?;
+    async fn timeout_wal_over_threshold_current_candidate() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("timeout_wal_over_threshold_current_candidate")?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let new_lsn = Lsn(100_100).align();
@@ -1330,12 +1326,12 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
-    async fn dummy_state(harness: &TenantHarness<'_>) -> ConnectionManagerState {
+    async fn dummy_state(harness: &TenantHarness) -> ConnectionManagerState {
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x8), crate::DEFAULT_PG_VERSION, &ctx)
+            .await
             .expect("Failed to create an empty timeline for dummy wal connection manager");
-        let timeline = timeline.initialize(&ctx).unwrap();
 
         ConnectionManagerState {
             id: TenantTimelineId {

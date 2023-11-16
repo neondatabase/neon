@@ -1,12 +1,10 @@
 import enum
 import os
-from typing import Iterator, Optional
+from typing import Optional
 
 import pytest
+from _pytest.config import Config
 from _pytest.config.argparsing import Parser
-from pytest import FixtureRequest
-
-from fixtures.log_helper import log
 
 """
 This fixture is used to determine which version of Postgres to use for tests.
@@ -19,6 +17,7 @@ This fixture is used to determine which version of Postgres to use for tests.
 class PgVersion(str, enum.Enum):
     V14 = "14"
     V15 = "15"
+    V16 = "16"
     # Instead of making version an optional parameter in methods, we can use this fake entry
     # to explicitly rely on the default server version (could be different from pg_version fixture value)
     NOT_SET = "<-POSTRGRES VERSION IS NOT SET->"
@@ -26,6 +25,16 @@ class PgVersion(str, enum.Enum):
     # Make it less confusing in logs
     def __repr__(self) -> str:
         return f"'{self.value}'"
+
+    # Make this explicit for Python 3.11 compatibility, which changes the behavior of enums
+    def __str__(self) -> str:
+        return self.value
+
+    # In GitHub workflows we use Postgres version with v-prefix (e.g. v14 instead of just 14),
+    # sometime we need to do so in tests.
+    @property
+    def v_prefixed(self) -> str:
+        return f"v{self.value}"
 
     @classmethod
     def _missing_(cls, value) -> Optional["PgVersion"]:
@@ -46,23 +55,29 @@ class PgVersion(str, enum.Enum):
 DEFAULT_VERSION: PgVersion = PgVersion.V14
 
 
+def skip_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is version,
+        reason=reason,
+    )
+
+
+def xfail_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.xfail(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is version,
+        reason=reason,
+    )
+
+
 def pytest_addoption(parser: Parser):
     parser.addoption(
         "--pg-version",
         action="store",
         type=PgVersion,
-        help="Postgres version to use for tests",
+        help="DEPRECATED: Postgres version to use for tests",
     )
 
 
-@pytest.fixture(scope="session")
-def pg_version(request: FixtureRequest) -> Iterator[PgVersion]:
-    if v := request.config.getoption("--pg-version"):
-        version, source = v, "from --pg-version commad-line argument"
-    elif v := os.environ.get("DEFAULT_PG_VERSION"):
-        version, source = PgVersion(v), "from DEFAULT_PG_VERSION environment variable"
-    else:
-        version, source = DEFAULT_VERSION, "default verson"
-
-    log.info(f"pg_version is {version} ({source})")
-    yield version
+def pytest_configure(config: Config):
+    if config.getoption("--pg-version"):
+        raise Exception("--pg-version is deprecated, use DEFAULT_PG_VERSION env var instead")

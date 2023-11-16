@@ -1,3 +1,9 @@
+//! Code to manage pageservers
+//!
+//! In the local test environment, the pageserver stores its data directly in
+//!
+//!   .neon/
+//!
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
@@ -8,9 +14,11 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
+use camino::Utf8PathBuf;
 use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
+    self, LocationConfig, TenantInfo, TenantLocationConfigRequest, TimelineInfo,
 };
+use pageserver_api::shard::TenantShardId;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -23,7 +31,11 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
+
+/// Directory within .neon which will be used by default for LocalFs remote storage.
+pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/pageserver";
 
 #[derive(Error, Debug)]
 pub enum PageserverHttpError {
@@ -72,43 +84,42 @@ impl ResponseErrorMessageExt for Response {
 #[derive(Debug)]
 pub struct PageServerNode {
     pub pg_connection_config: PgConnectionConfig,
+    pub conf: PageServerConf,
     pub env: LocalEnv,
     pub http_client: Client,
     pub http_base_url: String,
 }
 
 impl PageServerNode {
-    pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
-            .expect("Unable to parse listen_pg_addr");
+    pub fn from_env(env: &LocalEnv, conf: &PageServerConf) -> PageServerNode {
+        let (host, port) =
+            parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
+            conf: conf.clone(),
             env: env.clone(),
             http_client: Client::new(),
-            http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
+            http_base_url: format!("http://{}/v1", conf.listen_http_addr),
         }
     }
 
-    // pageserver conf overrides defined by neon_local configuration.
-    fn neon_local_overrides(&self) -> Vec<String> {
-        let id = format!("id={}", self.env.pageserver.id);
+    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
+    ///
+    /// These all end up on the command line of the `pageserver` binary.
+    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
+        let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let http_auth_type_param =
-            format!("http_auth_type='{}'", self.env.pageserver.http_auth_type);
-        let listen_http_addr_param = format!(
-            "listen_http_addr='{}'",
-            self.env.pageserver.listen_http_addr
-        );
+        let http_auth_type_param = format!("http_auth_type='{}'", self.conf.http_auth_type);
+        let listen_http_addr_param = format!("listen_http_addr='{}'", self.conf.listen_http_addr);
 
-        let pg_auth_type_param = format!("pg_auth_type='{}'", self.env.pageserver.pg_auth_type);
-        let listen_pg_addr_param =
-            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let pg_auth_type_param = format!("pg_auth_type='{}'", self.conf.pg_auth_type);
+        let listen_pg_addr_param = format!("listen_pg_addr='{}'", self.conf.listen_pg_addr);
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -122,34 +133,52 @@ impl PageServerNode {
             broker_endpoint_param,
         ];
 
-        if self.env.pageserver.http_auth_type != AuthType::Trust
-            || self.env.pageserver.pg_auth_type != AuthType::Trust
-        {
-            overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
+        if let Some(control_plane_api) = &self.env.control_plane_api {
+            overrides.push(format!(
+                "control_plane_api='{}'",
+                control_plane_api.as_str()
+            ));
         }
+
+        if !cli_overrides
+            .iter()
+            .any(|c| c.starts_with("remote_storage"))
+        {
+            overrides.push(format!(
+                "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
+            ));
+        }
+
+        if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
+        {
+            // Keys are generated in the toplevel repo dir, pageservers' workdirs
+            // are one level below that, so refer to keys with ../
+            overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
+        }
+
+        // Apply the user-provided overrides
+        overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
+
         overrides
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
     pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(config_overrides).with_context(|| {
-            format!(
-                "Failed to run init for pageserver node {}",
-                self.env.pageserver.id,
-            )
-        })
+        self.pageserver_init(config_overrides)
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
     pub fn repo_path(&self) -> PathBuf {
-        self.env.pageserver_data_dir()
+        self.env.pageserver_data_dir(self.conf.id)
     }
 
     /// The pid file is created by the pageserver process, with its pid stored inside.
     /// Other pageservers cannot lock the same file and overwrite it for as long as the current
     /// pageserver runs. (Unless someone removes the file manually; never do that!)
-    fn pid_file(&self) -> PathBuf {
-        self.repo_path().join("pageserver.pid")
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
+            .expect("non-Unicode path")
     }
 
     pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
@@ -158,7 +187,7 @@ impl PageServerNode {
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         let datadir = self.repo_path();
-        let node_id = self.env.pageserver.id;
+        let node_id = self.conf.id;
         println!(
             "Initializing pageserver node {} at '{}' in {:?}",
             node_id,
@@ -166,6 +195,10 @@ impl PageServerNode {
             datadir
         );
         io::stdout().flush()?;
+
+        if !datadir.exists() {
+            std::fs::create_dir(&datadir)?;
+        }
 
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
@@ -191,13 +224,10 @@ impl PageServerNode {
     }
 
     fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
-
         let datadir = self.repo_path();
         print!(
             "Starting pageserver node {} at '{}' in {:?}",
-            self.env.pageserver.id,
+            self.conf.id,
             self.pg_connection_config.raw_address(),
             datadir
         );
@@ -206,7 +236,7 @@ impl PageServerNode {
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!(
                 "Cannot start pageserver node {} in path that has no string representation: {:?}",
-                self.env.pageserver.id, datadir,
+                self.conf.id, datadir,
             )
         })?;
         let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
@@ -236,8 +266,7 @@ impl PageServerNode {
     ) -> Vec<Cow<'a, str>> {
         let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
 
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+        let overrides = self.neon_local_overrides(config_overrides);
         for config_override in overrides {
             args.push(Cow::Borrowed("-c"));
             args.push(Cow::Owned(config_override));
@@ -250,7 +279,7 @@ impl PageServerNode {
         // FIXME: why is this tied to pageserver's auth type? Whether or not the safekeeper
         // needs a token, and how to generate that token, seems independent to whether
         // the pageserver requires a token in incoming requests.
-        Ok(if self.env.pageserver.http_auth_type != AuthType::Trust {
+        Ok(if self.conf.http_auth_type != AuthType::Trust {
             // Generate a token to connect from the pageserver to a safekeeper
             let token = self
                 .env
@@ -275,7 +304,7 @@ impl PageServerNode {
 
     pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
         let mut config = self.pg_connection_config.clone();
-        if self.env.pageserver.pg_auth_type == AuthType::NeonJWT {
+        if self.conf.pg_auth_type == AuthType::NeonJWT {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
@@ -286,7 +315,7 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> anyhow::Result<RequestBuilder> {
         let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.http_auth_type == AuthType::NeonJWT {
+        if self.conf.http_auth_type == AuthType::NeonJWT {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
@@ -312,12 +341,13 @@ impl PageServerNode {
 
     pub fn tenant_create(
         &self,
-        new_tenant_id: Option<TenantId>,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
-        let request = TenantCreateRequest {
-            new_tenant_id,
+
+        let config = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -371,6 +401,17 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
+            gc_feedback: settings
+                .remove("gc_feedback")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_feedback' as bool")?,
+        };
+
+        let request = models::TenantCreateRequest {
+            new_tenant_id: TenantShardId::unsharded(new_tenant_id),
+            generation,
+            config,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -391,69 +432,109 @@ impl PageServerNode {
             })
     }
 
-    pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
-            .json(&TenantConfigRequest {
-                tenant_id,
+    pub fn tenant_config(
+        &self,
+        tenant_id: TenantId,
+        mut settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<()> {
+        let config = {
+            // Braces to make the diff easier to read
+            models::TenantConfig {
                 checkpoint_distance: settings
-                    .get("checkpoint_distance")
+                    .remove("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'checkpoint_distance' as an integer")?,
-                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
+                checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
                 compaction_target_size: settings
-                    .get("compaction_target_size")
+                    .remove("compaction_target_size")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'compaction_target_size' as an integer")?,
-                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
                 compaction_threshold: settings
-                    .get("compaction_threshold")
+                    .remove("compaction_threshold")
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'compaction_threshold' as an integer")?,
                 gc_horizon: settings
-                    .get("gc_horizon")
+                    .remove("gc_horizon")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'gc_horizon' as an integer")?,
-                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                gc_period: settings.remove("gc_period").map(|x| x.to_string()),
                 image_creation_threshold: settings
-                    .get("image_creation_threshold")
+                    .remove("image_creation_threshold")
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
-                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
                 walreceiver_connect_timeout: settings
-                    .get("walreceiver_connect_timeout")
+                    .remove("walreceiver_connect_timeout")
                     .map(|x| x.to_string()),
-                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                lagging_wal_timeout: settings
+                    .remove("lagging_wal_timeout")
+                    .map(|x| x.to_string()),
                 max_lsn_wal_lag: settings
-                    .get("max_lsn_wal_lag")
+                    .remove("max_lsn_wal_lag")
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
                 trace_read_requests: settings
-                    .get("trace_read_requests")
+                    .remove("trace_read_requests")
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'trace_read_requests' as bool")?,
                 eviction_policy: settings
-                    .get("eviction_policy")
-                    .map(|x| serde_json::from_str(x))
+                    .remove("eviction_policy")
+                    .map(serde_json::from_str)
                     .transpose()
                     .context("Failed to parse 'eviction_policy' json")?,
                 min_resident_size_override: settings
-                    .get("min_resident_size_override")
+                    .remove("min_resident_size_override")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'min_resident_size_override' as an integer")?,
                 evictions_low_residence_duration_metric_threshold: settings
-                    .get("evictions_low_residence_duration_metric_threshold")
+                    .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-            })
+                gc_feedback: settings
+                    .remove("gc_feedback")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'gc_feedback' as bool")?,
+            }
+        };
+
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        }
+
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
+            .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
+
+        Ok(())
+    }
+
+    pub fn location_config(
+        &self,
+        tenant_id: TenantId,
+        config: LocationConfig,
+    ) -> anyhow::Result<()> {
+        let req_body = TenantLocationConfigRequest { tenant_id, config };
+
+        self.http_request(
+            Method::PUT,
+            format!(
+                "{}/tenant/{}/location_config",
+                self.http_base_url, tenant_id
+            ),
+        )?
+        .json(&req_body)
+        .send()?
+        .error_from_body()?;
 
         Ok(())
     }
@@ -479,11 +560,14 @@ impl PageServerNode {
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     ) -> anyhow::Result<TimelineInfo> {
+        // If timeline ID was not specified, generate one
+        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
+
         self.http_request(
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
         )?
-        .json(&TimelineCreateRequest {
+        .json(&models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,

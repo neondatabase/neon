@@ -4,7 +4,8 @@ import time
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.types import Lsn
+from fixtures.pageserver.http import TimelineCreate406
+from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar
 
 
@@ -173,5 +174,12 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         env.neon_cli.create_branch("b1", "b0", tenant_id=tenant, ancestor_start_lsn=lsn)
+    # retry the same with the HTTP API, so that we can inspect the status code
+    with pytest.raises(TimelineCreate406):
+        new_timeline_id = TimelineId.generate()
+        log.info(
+            f"Expecting failure for branch behind gc'ing LSN, new_timeline_id={new_timeline_id}"
+        )
+        pageserver_http_client.timeline_create(env.pg_version, tenant, new_timeline_id, b0, lsn)
 
     thread.join()

@@ -10,6 +10,7 @@
 //
 
 use anyhow::Context;
+use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
@@ -31,12 +32,15 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
+use tokio_util::sync::CancellationToken;
+use tracing::field;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
-    auth::{Claims, JwtAuth, Scope},
+    auth::{Claims, Scope, SwappableJwtAuth},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     simple_rcu::RcuReadGuard,
@@ -47,78 +51,23 @@ use crate::basebackup;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
-use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
+use crate::metrics;
+use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
-use crate::tenant::{Tenant, Timeline};
+use crate::tenant::mgr::get_active_tenant_with_timeout;
+use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-fn copyin_stream<IO>(pgb: &mut PostgresBackend<IO>) -> impl Stream<Item = io::Result<Bytes>> + '_
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    async_stream::try_stream! {
-        loop {
-            let msg = tokio::select! {
-                biased;
-
-                _ = task_mgr::shutdown_watcher() => {
-                    // We were requested to shut down.
-                    let msg = "pageserver is shutting down";
-                    let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
-                    Err(QueryError::Other(anyhow::anyhow!(msg)))
-                }
-
-                msg = pgb.read_message() => { msg.map_err(QueryError::from)}
-            };
-
-            match msg {
-                Ok(Some(message)) => {
-                    let copy_data_bytes = match message {
-                        FeMessage::CopyData(bytes) => bytes,
-                        FeMessage::CopyDone => { break },
-                        FeMessage::Sync => continue,
-                        FeMessage::Terminate => {
-                            let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                            // error can't happen here, ErrorResponse serialization should be always ok
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                            Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                            break;
-                        }
-                        m => {
-                            let msg = format!("unexpected message {m:?}");
-                            // error can't happen here, ErrorResponse serialization should be always ok
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
-                            Err(io::Error::new(io::ErrorKind::Other, msg))?;
-                            break;
-                        }
-                    };
-
-                    yield copy_data_bytes;
-                }
-                Ok(None) => {
-                    let msg = "client closed connection during COPY";
-                    let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                    // error can't happen here, ErrorResponse serialization should be always ok
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                    pgb.flush().await?;
-                    Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                }
-                Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
-                    Err(io_error)?;
-                }
-                Err(other) => {
-                    Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
-                }
-            };
-        }
-    }
-}
+// How long we may block waiting for a [`TenantSlot::InProgress`]` and/or a [`Tenant`] which
+// is not yet in state [`TenantState::Active`].
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Read the end of a tar archive.
 ///
@@ -172,10 +121,12 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 ///
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
+    broker_client: storage_broker::BrokerClientChannel,
+    auth: Option<Arc<SwappableJwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
     listener_ctx: RequestContext,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -184,7 +135,7 @@ pub async fn libpq_listener_main(
     while let Some(res) = tokio::select! {
         biased;
 
-        _ = task_mgr::shutdown_watcher() => {
+        _ = cancel.cancelled() => {
             // We were requested to shut down.
             None
         }
@@ -213,7 +164,14 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type, connection_ctx),
+                    page_service_conn_main(
+                        conf,
+                        broker_client.clone(),
+                        local_auth,
+                        socket,
+                        auth_type,
+                        connection_ctx,
+                    ),
                 );
             }
             Err(err) => {
@@ -228,9 +186,11 @@ pub async fn libpq_listener_main(
     Ok(())
 }
 
+#[instrument(skip_all, fields(peer_addr))]
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
+    broker_client: storage_broker::BrokerClientChannel,
+    auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
     connection_ctx: RequestContext,
@@ -249,6 +209,7 @@ async fn page_service_conn_main(
         .context("could not set TCP_NODELAY")?;
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
+    tracing::Span::current().record("peer_addr", field::display(peer_addr));
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
     // - long enough for most valid compute connections
@@ -256,14 +217,35 @@ async fn page_service_conn_main(
     //
     // no write timeout is used, because the kernel is assumed to error writes after some time.
     let mut socket = tokio_io_timeout::TimeoutReader::new(socket);
-    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 10)));
+
+    let default_timeout_ms = 10 * 60 * 1000; // 10 minutes by default
+    let socket_timeout_ms = (|| {
+        fail::fail_point!("simulated-bad-compute-connection", |avg_timeout_ms| {
+            // Exponential distribution for simulating
+            // poor network conditions, expect about avg_timeout_ms to be around 15
+            // in tests
+            if let Some(avg_timeout_ms) = avg_timeout_ms {
+                let avg = avg_timeout_ms.parse::<i64>().unwrap() as f32;
+                let u = rand::random::<f32>();
+                ((1.0 - u).ln() / (-avg)) as u64
+            } else {
+                default_timeout_ms
+            }
+        });
+        default_timeout_ms
+    })();
+
+    // A timeout here does not mean the client died, it can happen if it's just idle for
+    // a while: we will tear down this PageServerHandler and instantiate a new one if/when
+    // they reconnect.
+    socket.set_timeout(Some(std::time::Duration::from_millis(socket_timeout_ms)));
     let socket = std::pin::pin!(socket);
 
     // XXX: pgbackend.run() should take the connection_ctx,
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, auth, connection_ctx);
+    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -286,42 +268,10 @@ async fn page_service_conn_main(
     }
 }
 
-struct PageRequestMetrics {
-    get_rel_exists: metrics::Histogram,
-    get_rel_size: metrics::Histogram,
-    get_page_at_lsn: metrics::Histogram,
-    get_db_size: metrics::Histogram,
-}
-
-impl PageRequestMetrics {
-    fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
-        let timeline_id = timeline_id.to_string();
-
-        let get_rel_exists =
-            SMGR_QUERY_TIME.with_label_values(&["get_rel_exists", &tenant_id, &timeline_id]);
-
-        let get_rel_size =
-            SMGR_QUERY_TIME.with_label_values(&["get_rel_size", &tenant_id, &timeline_id]);
-
-        let get_page_at_lsn =
-            SMGR_QUERY_TIME.with_label_values(&["get_page_at_lsn", &tenant_id, &timeline_id]);
-
-        let get_db_size =
-            SMGR_QUERY_TIME.with_label_values(&["get_db_size", &tenant_id, &timeline_id]);
-
-        Self {
-            get_rel_exists,
-            get_rel_size,
-            get_page_at_lsn,
-            get_db_size,
-        }
-    }
-}
-
 struct PageServerHandler {
     _conf: &'static PageServerConf,
-    auth: Option<Arc<JwtAuth>>,
+    broker_client: storage_broker::BrokerClientChannel,
+    auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
     /// The context created for the lifetime of the connection
@@ -334,18 +284,109 @@ struct PageServerHandler {
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
-        auth: Option<Arc<JwtAuth>>,
+        broker_client: storage_broker::BrokerClientChannel,
+        auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
             _conf: conf,
+            broker_client,
             auth,
             claims: None,
             connection_ctx,
         }
     }
 
-    #[instrument(skip(self, pgb, ctx))]
+    /// Wrap PostgresBackend::flush to respect our CancellationToken: it is important to use
+    /// this rather than naked flush() in order to shut down promptly.  Without this, we would
+    /// block shutdown of a tenant if a postgres client was failing to consume bytes we send
+    /// in the flush.
+    async fn flush_cancellable<IO>(
+        &self,
+        pgb: &mut PostgresBackend<IO>,
+        cancel: &CancellationToken,
+    ) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        tokio::select!(
+            flush_r = pgb.flush() => {
+                Ok(flush_r?)
+            },
+            _ = cancel.cancelled() => {
+                Err(QueryError::Shutdown)
+            }
+        )
+    }
+
+    fn copyin_stream<'a, IO>(
+        &'a self,
+        pgb: &'a mut PostgresBackend<IO>,
+        cancel: &'a CancellationToken,
+    ) -> impl Stream<Item = io::Result<Bytes>> + 'a
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        async_stream::try_stream! {
+            loop {
+                let msg = tokio::select! {
+                    biased;
+
+                    _ = cancel.cancelled() => {
+                        // We were requested to shut down.
+                        let msg = "pageserver is shutting down";
+                        let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
+                        Err(QueryError::Shutdown)
+                    }
+
+                    msg = pgb.read_message() => { msg.map_err(QueryError::from)}
+                };
+
+                match msg {
+                    Ok(Some(message)) => {
+                        let copy_data_bytes = match message {
+                            FeMessage::CopyData(bytes) => bytes,
+                            FeMessage::CopyDone => { break },
+                            FeMessage::Sync => continue,
+                            FeMessage::Terminate => {
+                                let msg = "client terminated connection with Terminate message during COPY";
+                                let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                                // error can't happen here, ErrorResponse serialization should be always ok
+                                pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
+                                Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                                break;
+                            }
+                            m => {
+                                let msg = format!("unexpected message {m:?}");
+                                // error can't happen here, ErrorResponse serialization should be always ok
+                                pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
+                                Err(io::Error::new(io::ErrorKind::Other, msg))?;
+                                break;
+                            }
+                        };
+
+                        yield copy_data_bytes;
+                    }
+                    Ok(None) => {
+                        let msg = "client closed connection during COPY";
+                        let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                        // error can't happen here, ErrorResponse serialization should be always ok
+                        pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
+                        self.flush_cancellable(pgb, cancel).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                        Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
+                    }
+                    Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
+                        Err(io_error)?;
+                    }
+                    Err(other) => {
+                        Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
+                    }
+                };
+            }
+        }
+    }
+
+    #[instrument(skip_all)]
     async fn handle_pagerequests<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -356,12 +397,15 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        // NOTE: pagerequests handler exits when connection is closed,
-        //       so there is no need to reset the association
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Make request tracer if needed
-        let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
+        let tenant = mgr::get_active_tenant_with_timeout(
+            tenant_id,
+            ACTIVE_TENANT_TIMEOUT,
+            &task_mgr::shutdown_token(),
+        )
+        .await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path = tenant
@@ -373,22 +417,29 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        // Avoid starting new requests if the timeline has already started shutting down,
+        // and block timeline shutdown until this request is complete, or drops out due
+        // to cancellation.
+        let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown)?;
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
-        let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
+        let metrics = metrics::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
 
         loop {
             let msg = tokio::select! {
                 biased;
 
-                _ = task_mgr::shutdown_watcher() => {
+                _ = timeline.cancel.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
-                    break;
+                    return Err(QueryError::Shutdown)
                 }
 
                 msg = pgb.read_message() => { msg }
@@ -417,44 +468,81 @@ impl PageServerHandler {
             // TODO: We could create a new per-request context here, with unique ID.
             // Currently we use the same per-timeline context for all requests
 
-            let response = match neon_fe_msg {
+            let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
-                    let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timeline, &req, &ctx)
-                        .await
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelExists);
+                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_rel_exists_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
-                    let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timeline, &req, &ctx).await
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelSize);
+                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_nblocks_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::GetPage(req) => {
-                    let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
-                        .await
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetPageAtLsn);
+                    let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
+                    (
+                        self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
                 PagestreamFeMessage::DbSize(req) => {
-                    let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timeline, &req, &ctx).await
+                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetDbSize);
+                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.lsn);
+                    (
+                        self.handle_db_size_request(&timeline, &req, &ctx)
+                            .instrument(span.clone())
+                            .await,
+                        span,
+                    )
                 }
             };
 
+            if let Err(e) = &response {
+                // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
+                // because wait_lsn etc will drop out
+                // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
+                // is_canceled(): [`Timeline::shutdown`]` has entered
+                if timeline.cancel.is_cancelled() || timeline.is_stopping() {
+                    // If we fail to fulfil a request during shutdown, which may be _because_ of
+                    // shutdown, then do not send the error to the client.  Instead just drop the
+                    // connection.
+                    span.in_scope(|| info!("dropped response during shutdown: {e:#}"));
+                    return Err(QueryError::Shutdown);
+                }
+            }
+
             let response = response.unwrap_or_else(|e| {
                 // print the all details to the log with {:#}, but for the client the
-                // error message is enough
-                error!("error reading relation or page version: {:?}", e);
+                // error message is enough.  Do not log if shutting down, as the anyhow::Error
+                // here includes cancellation which is not an error.
+                span.in_scope(|| error!("error reading relation or page version: {:#}", e));
                 PagestreamBeMessage::Error(PagestreamErrorResponse {
                     message: e.to_string(),
                 })
             });
 
             pgb.write_message_noflush(&BeMessage::CopyData(&response.serialize()))?;
-            pgb.flush().await?;
+            self.flush_cancellable(pgb, &timeline.cancel).await?;
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all, fields(%base_lsn, end_lsn=%_end_lsn, %pg_version))]
     async fn handle_import_basebackup<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -468,11 +556,19 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)?;
+        let tenant = get_active_tenant_with_timeout(
+            tenant_id,
+            ACTIVE_TENANT_TIMEOUT,
+            &task_mgr::shutdown_token(),
+        )
+        .await?;
+        let timeline = tenant
+            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
+            .await?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -487,11 +583,16 @@ impl PageServerHandler {
         // Import basebackup provided via CopyData
         info!("importing basebackup");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb, &tenant.cancel).await?;
 
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &tenant.cancel)));
         timeline
-            .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
+            .import_basebackup_from_tar(
+                &mut copyin_reader,
+                base_lsn,
+                self.broker_client.clone(),
+                &ctx,
+            )
             .await?;
 
         // Read the end of the tar archive.
@@ -507,7 +608,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all, fields(%start_lsn, %end_lsn))]
     async fn handle_import_wal<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
@@ -520,9 +621,11 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
+        let timeline = self
+            .get_active_tenant_timeline(tenant_id, timeline_id)
+            .await?;
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
             return Err(QueryError::Other(
@@ -536,8 +639,8 @@ impl PageServerHandler {
         // Import wal provided via CopyData
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
+        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &timeline.cancel)));
         import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 
@@ -622,7 +725,6 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
@@ -643,7 +745,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
@@ -662,7 +763,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
@@ -684,7 +784,6 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
@@ -714,7 +813,7 @@ impl PageServerHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self, pgb, ctx))]
+    #[instrument(skip_all, fields(?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -723,15 +822,20 @@ impl PageServerHandler {
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
+        gzip: bool,
         ctx: RequestContext,
     ) -> anyhow::Result<()>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let started = std::time::Instant::now();
 
         // check that the timeline exists
-        let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
+        let timeline = self
+            .get_active_tenant_timeline(tenant_id, timeline_id)
+            .await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -746,10 +850,11 @@ impl PageServerHandler {
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
-        // Send a tarball of the latest layer on the timeline
-        {
+        // Send a tarball of the latest layer on the timeline. Compress if not
+        // fullbackup. TODO Compress in that case too (tests need to be updated)
+        if full_backup {
             let mut writer = pgb.copyout_writer();
             basebackup::send_basebackup_tarball(
                 &mut writer,
@@ -760,10 +865,44 @@ impl PageServerHandler {
                 &ctx,
             )
             .await?;
+        } else {
+            let mut writer = pgb.copyout_writer();
+            if gzip {
+                let mut encoder = GzipEncoder::with_quality(
+                    writer,
+                    // NOTE using fast compression because it's on the critical path
+                    //      for compute startup. For an empty database, we get
+                    //      <100KB with this method. The Level::Best compression method
+                    //      gives us <20KB, but maybe we should add basebackup caching
+                    //      on compute shutdown first.
+                    async_compression::Level::Fastest,
+                );
+                basebackup::send_basebackup_tarball(
+                    &mut encoder,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+                // shutdown the encoder to ensure the gzip footer is written
+                encoder.shutdown().await?;
+            } else {
+                basebackup::send_basebackup_tarball(
+                    &mut writer,
+                    &timeline,
+                    lsn,
+                    prev_lsn,
+                    full_backup,
+                    &ctx,
+                )
+                .await?;
+            }
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
-        pgb.flush().await?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         let basebackup_after = started
             .elapsed()
@@ -781,7 +920,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<(), QueryError> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -793,7 +932,26 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
+    }
+
+    /// Shorthand for getting a reference to a Timeline of an Active tenant.
+    async fn get_active_tenant_timeline(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
+        let tenant = get_active_tenant_with_timeout(
+            tenant_id,
+            ACTIVE_TENANT_TIMEOUT,
+            &task_mgr::shutdown_token(),
+        )
+        .await
+        .map_err(GetActiveTimelineError::Tenant)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
+        Ok(timeline)
     }
 }
 
@@ -813,16 +971,17 @@ where
             .auth
             .as_ref()
             .unwrap()
-            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
+            .map_err(|e| QueryError::Unauthorized(e.0))?;
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "jwt token scope is Tenant, but tenant id is missing"
-            )));
+            return Err(QueryError::Unauthorized(
+                "jwt token scope is Tenant, but tenant id is missing".into(),
+            ));
         }
 
-        info!(
-            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
+        debug!(
+            "jwt scope check succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
 
@@ -838,14 +997,19 @@ where
         Ok(())
     }
 
+    #[instrument(skip_all, fields(tenant_id, timeline_id))]
     async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
+        fail::fail_point!("simulated-bad-compute-connection", |_| {
+            info!("Hit failpoint for bad connection");
+            Err(QueryError::SimulatedConnectionError)
+        });
+
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
-
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
@@ -858,6 +1022,10 @@ where
                 .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -878,9 +1046,13 @@ where
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             self.check_permission(Some(tenant_id))?;
 
-            let lsn = if params.len() == 3 {
+            let lsn = if params.len() >= 3 {
                 Some(
                     Lsn::from_str(params[2])
                         .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
@@ -889,10 +1061,38 @@ where
                 None
             };
 
-            // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false, ctx)
-                .await?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            let gzip = if params.len() >= 4 {
+                if params[3] == "--gzip" {
+                    true
+                } else {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "Parameter in position 3 unknown {}",
+                        params[3],
+                    )));
+                }
+            } else {
+                false
+            };
+
+            ::metrics::metric_vec_duration::observe_async_block_duration_by_result(
+                &*metrics::BASEBACKUP_QUERY_TIME,
+                async move {
+                    self.handle_basebackup_request(
+                        pgb,
+                        tenant_id,
+                        timeline_id,
+                        lsn,
+                        None,
+                        false,
+                        gzip,
+                        ctx,
+                    )
+                    .await?;
+                    pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                    anyhow::Ok(())
+                },
+            )
+            .await?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -910,8 +1110,14 @@ where
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
+            let timeline = self
+                .get_active_tenant_timeline(tenant_id, timeline_id)
+                .await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -941,6 +1147,10 @@ where
             let timeline_id = TimelineId::from_str(params[1])
                 .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
                 Some(
@@ -962,8 +1172,17 @@ where
             self.check_permission(Some(tenant_id))?;
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true, ctx)
-                .await?;
+            self.handle_basebackup_request(
+                pgb,
+                tenant_id,
+                timeline_id,
+                lsn,
+                prev_lsn,
+                true,
+                false,
+                ctx,
+            )
+            .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
@@ -994,6 +1213,10 @@ where
                 .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
             let pg_version = u32::from_str(params[4])
                 .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
 
@@ -1039,6 +1262,10 @@ where
             let end_lsn = Lsn::from_str(params[3])
                 .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
 
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
             self.check_permission(Some(tenant_id))?;
 
             match self
@@ -1070,9 +1297,16 @@ where
             let tenant_id = TenantId::from_str(params[0])
                 .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
 
+            tracing::Span::current().record("tenant_id", field::display(tenant_id));
+
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
+            let tenant = get_active_tenant_with_timeout(
+                tenant_id,
+                ACTIVE_TENANT_TIMEOUT,
+                &task_mgr::shutdown_token(),
+            )
+            .await?;
             pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -1118,69 +1352,33 @@ where
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-enum GetActiveTenantError {
-    #[error(
-        "Timed out waiting {wait_time:?} for tenant active state. Latest state: {latest_state:?}"
-    )]
-    WaitForActiveTimeout {
-        latest_state: TenantState,
-        wait_time: Duration,
-    },
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
 impl From<GetActiveTenantError> for QueryError {
     fn from(e: GetActiveTenantError) -> Self {
         match e {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
-            GetActiveTenantError::Other(e) => QueryError::Other(e),
-        }
-    }
-}
-
-/// Get active tenant.
-///
-/// If the tenant is Loading, waits for it to become Active, for up to 30 s. That
-/// ensures that queries don't fail immediately after pageserver startup, because
-/// all tenants are still loading.
-async fn get_active_tenant_with_timeout(
-    tenant_id: TenantId,
-    _ctx: &RequestContext, /* require get a context to support cancellation in the future */
-) -> Result<Arc<Tenant>, GetActiveTenantError> {
-    let tenant = match mgr::get_tenant(tenant_id, false).await {
-        Ok(tenant) => tenant,
-        Err(e) => return Err(GetActiveTenantError::Other(e.into())),
-    };
-    let wait_time = Duration::from_secs(30);
-    match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
-        Ok(Ok(())) => Ok(tenant),
-        // no .context(), the error message is good enough and some tests depend on it
-        Ok(Err(wait_error)) => Err(GetActiveTenantError::Other(wait_error)),
-        Err(_) => {
-            let latest_state = tenant.current_state();
-            if latest_state == TenantState::Active {
-                Ok(tenant)
-            } else {
-                Err(GetActiveTenantError::WaitForActiveTimeout {
-                    latest_state,
-                    wait_time,
-                })
+            GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                QueryError::Shutdown
             }
+            e => QueryError::Other(anyhow::anyhow!(e)),
         }
     }
 }
 
-/// Shorthand for getting a reference to a Timeline of an Active tenant.
-async fn get_active_tenant_timeline(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    ctx: &RequestContext,
-) -> Result<Arc<Timeline>, GetActiveTenantError> {
-    let tenant = get_active_tenant_with_timeout(tenant_id, ctx).await?;
-    let timeline = tenant.get_timeline(timeline_id, true)?;
-    Ok(timeline)
+#[derive(Debug, thiserror::Error)]
+enum GetActiveTimelineError {
+    #[error(transparent)]
+    Tenant(GetActiveTenantError),
+    #[error(transparent)]
+    Timeline(anyhow::Error),
+}
+
+impl From<GetActiveTimelineError> for QueryError {
+    fn from(e: GetActiveTimelineError) -> Self {
+        match e {
+            GetActiveTimelineError::Tenant(e) => e.into(),
+            GetActiveTimelineError::Timeline(e) => QueryError::Other(e),
+        }
+    }
 }

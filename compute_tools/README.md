@@ -19,9 +19,10 @@ Also `compute_ctl` spawns two separate service threads:
 - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
   last activity requests.
 
-If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
-compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
-downscaling and (eventually) will request immediate upscaling under resource pressure.
+If `AUTOSCALING` environment variable is set, `compute_ctl` will start the
+`vm-monitor` located in [`neon/libs/vm_monitor`]. For VM compute nodes,
+`vm-monitor` communicates with the VM autoscaling system. It coordinates
+downscaling and requests immediate upscaling under resource pressure.
 
 Usage example:
 ```sh

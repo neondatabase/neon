@@ -23,9 +23,9 @@ pub enum SeqWaitError {
 
 /// Monotonically increasing value
 ///
-/// It is handy to store some other fields under the same mutex in SeqWait<S>
+/// It is handy to store some other fields under the same mutex in `SeqWait<S>`
 /// (e.g. store prev_record_lsn). So we allow SeqWait to be parametrized with
-/// any type that can expose counter. <V> is the type of exposed counter.
+/// any type that can expose counter. `V` is the type of exposed counter.
 pub trait MonotonicCounter<V> {
     /// Bump counter value and check that it goes forward
     /// N.B.: new_val is an actual new value, not a difference.
@@ -58,7 +58,7 @@ where
 // to get that.
 impl<T: Ord> PartialOrd for Waiter<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.wake_num.partial_cmp(&self.wake_num)
+        Some(self.cmp(other))
     }
 }
 
@@ -90,7 +90,7 @@ impl<T: Ord> Eq for Waiter<T> {}
 /// [`wait_for`]: SeqWait::wait_for
 /// [`advance`]: SeqWait::advance
 ///
-/// <S> means Storage, <V> is type of counter that this storage exposes.
+/// `S` means Storage, `V` is type of counter that this storage exposes.
 ///
 pub struct SeqWait<S, V>
 where
@@ -125,6 +125,9 @@ where
             // Wake everyone with an error.
             let mut internal = self.internal.lock().unwrap();
 
+            // Block any future waiters from starting
+            internal.shutdown = true;
+
             // This will steal the entire waiters map.
             // When we drop it all waiters will be woken.
             mem::take(&mut internal.waiters)
@@ -144,6 +147,8 @@ where
     ///
     /// This call won't complete until someone has called `advance`
     /// with a number greater than or equal to the one we're waiting for.
+    ///
+    /// This function is async cancellation-safe.
     pub async fn wait_for(&self, num: V) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
@@ -159,6 +164,8 @@ where
     ///
     /// If that hasn't happened after the specified timeout duration,
     /// [`SeqWaitError::Timeout`] will be returned.
+    ///
+    /// This function is async cancellation-safe.
     pub async fn wait_for_timeout(
         &self,
         num: V,

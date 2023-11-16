@@ -1,4 +1,10 @@
-use crate::{cancellation::CancelClosure, error::UserFacingError};
+use crate::{
+    auth::parse_endpoint_param,
+    cancellation::CancelClosure,
+    console::errors::WakeComputeError,
+    error::{io_error, UserFacingError},
+    proxy::is_neon_param,
+};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -13,7 +19,7 @@ const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 #[derive(Debug, Error)]
 pub enum ConnectionError {
     /// This error doesn't seem to reveal any secrets; for instance,
-    /// [`tokio_postgres::error::Kind`] doesn't contain ip addresses and such.
+    /// `tokio_postgres::error::Kind` doesn't contain ip addresses and such.
     #[error("{COULD_NOT_CONNECT}: {0}")]
     Postgres(#[from] tokio_postgres::Error),
 
@@ -22,6 +28,12 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] native_tls::Error),
+}
+
+impl From<WakeComputeError> for ConnectionError {
+    fn from(value: WakeComputeError) -> Self {
+        io_error(value).into()
+    }
 }
 
 impl UserFacingError for ConnectionError {
@@ -136,18 +148,17 @@ impl Default for ConnCfg {
 
 impl ConnCfg {
     /// Establish a raw TCP connection to the compute node.
-    async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream, &str)> {
+    async fn connect_raw(&self, timeout: Duration) -> io::Result<(SocketAddr, TcpStream, &str)> {
         use tokio_postgres::config::Host;
 
         // wrap TcpStream::connect with timeout
         let connect_with_timeout = |host, port| {
-            let connection_timeout = Duration::from_millis(10000);
-            tokio::time::timeout(connection_timeout, TcpStream::connect((host, port))).map(
+            tokio::time::timeout(timeout, TcpStream::connect((host, port))).map(
                 move |res| match res {
                     Ok(tcpstream_connect_res) => tcpstream_connect_res,
                     Err(_) => Err(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        format!("exceeded connection timeout {connection_timeout:?}"),
+                        format!("exceeded connection timeout {timeout:?}"),
                     )),
                 },
             )
@@ -220,11 +231,13 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    async fn do_connect(
+    /// Connect to a corresponding compute node.
+    pub async fn connect(
         &self,
         allow_self_signed_compute: bool,
+        timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
-        let (socket_addr, stream, host) = self.connect_raw().await?;
+        let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
 
         let tls_connector = native_tls::TlsConnector::builder()
             .danger_accept_invalid_certs(allow_self_signed_compute)
@@ -235,6 +248,7 @@ impl ConnCfg {
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
@@ -259,19 +273,6 @@ impl ConnCfg {
 
         Ok(connection)
     }
-
-    /// Connect to a corresponding compute node.
-    pub async fn connect(
-        &self,
-        allow_self_signed_compute: bool,
-    ) -> Result<PostgresConnection, ConnectionError> {
-        self.do_connect(allow_self_signed_compute)
-            .inspect_err(|err| {
-                // Immediately log the error we have at our disposal.
-                error!("couldn't connect to compute node: {err}");
-            })
-            .await
-    }
 }
 
 /// Retrieve `options` from a startup message, dropping all proxy-secific flags.
@@ -279,7 +280,7 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     #[allow(unstable_name_collisions)]
     let options: String = params
         .options_raw()?
-        .filter(|opt| !opt.starts_with("project="))
+        .filter(|opt| parse_endpoint_param(opt).is_none() && !is_neon_param(opt))
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 
@@ -313,6 +314,12 @@ mod tests {
         assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
 
         let params = StartupMessageParams::new([("options", "project = foo")]);
+        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+
+        let params = StartupMessageParams::new([(
+            "options",
+            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
+        )]);
         assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
     }
 }

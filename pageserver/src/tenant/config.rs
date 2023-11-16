@@ -9,10 +9,11 @@
 //! may lead to a data loss.
 //!
 use anyhow::Context;
-use pageserver_api::models::{TenantConfigRequest, TenantCreateRequest};
+use pageserver_api::models;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
+use utils::generation::Generation;
 
 pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
@@ -38,13 +39,217 @@ pub mod defaults {
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
-    pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
-    pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
+    pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
+    pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 }
 
-/// Per-tenant configuration options
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum AttachmentMode {
+    /// Our generation is current as far as we know, and as far as we know we are the only attached
+    /// pageserver.  This is the "normal" attachment mode.
+    Single,
+    /// Our generation number is current as far as we know, but we are advised that another
+    /// pageserver is still attached, and therefore to avoid executing deletions.   This is
+    /// the attachment mode of a pagesever that is the destination of a migration.
+    Multi,
+    /// Our generation number is superseded, or about to be superseded.  We are advised
+    /// to avoid remote storage writes if possible, and to avoid sending billing data.  This
+    /// is the attachment mode of a pageserver that is the origin of a migration.
+    Stale,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AttachedLocationConfig {
+    pub(crate) generation: Generation,
+    pub(crate) attach_mode: AttachmentMode,
+    // TODO: add a flag to override AttachmentMode's policies under
+    // disk pressure (i.e. unblock uploads under disk pressure in Stale
+    // state, unblock deletions after timeout in Multi state)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SecondaryLocationConfig {
+    /// If true, keep the local cache warm by polling remote storage
+    pub(crate) warm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum LocationMode {
+    Attached(AttachedLocationConfig),
+    Secondary(SecondaryLocationConfig),
+}
+
+/// Per-tenant, per-pageserver configuration.  All pageservers use the same TenantConf,
+/// but have distinct LocationConf.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LocationConf {
+    /// The location-specific part of the configuration, describes the operating
+    /// mode of this pageserver for this tenant.
+    pub(crate) mode: LocationMode,
+    /// The pan-cluster tenant configuration, the same on all locations
+    pub(crate) tenant_conf: TenantConfOpt,
+}
+
+impl std::fmt::Debug for LocationConf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.mode {
+            LocationMode::Attached(conf) => {
+                write!(
+                    f,
+                    "Attached {:?}, gen={:?}",
+                    conf.attach_mode, conf.generation
+                )
+            }
+            LocationMode::Secondary(conf) => {
+                write!(f, "Secondary, warm={}", conf.warm)
+            }
+        }
+    }
+}
+
+impl AttachedLocationConfig {
+    /// Consult attachment mode to determine whether we are currently permitted
+    /// to delete layers.  This is only advisory, not required for data safety.
+    /// See [`AttachmentMode`] for more context.
+    pub(crate) fn may_delete_layers_hint(&self) -> bool {
+        // TODO: add an override for disk pressure in AttachedLocationConfig,
+        // and respect it here.
+        match &self.attach_mode {
+            AttachmentMode::Single => true,
+            AttachmentMode::Multi | AttachmentMode::Stale => {
+                // In Multi mode we avoid doing deletions because some other
+                // attached pageserver might get 404 while trying to read
+                // a layer we delete which is still referenced in their metadata.
+                //
+                // In Stale mode, we avoid doing deletions because we expect
+                // that they would ultimately fail validation in the deletion
+                // queue due to our stale generation.
+                false
+            }
+        }
+    }
+
+    /// Whether we are currently hinted that it is worthwhile to upload layers.
+    /// This is only advisory, not required for data safety.
+    /// See [`AttachmentMode`] for more context.
+    pub(crate) fn may_upload_layers_hint(&self) -> bool {
+        // TODO: add an override for disk pressure in AttachedLocationConfig,
+        // and respect it here.
+        match &self.attach_mode {
+            AttachmentMode::Single | AttachmentMode::Multi => true,
+            AttachmentMode::Stale => {
+                // In Stale mode, we avoid doing uploads because we expect that
+                // our replacement pageserver will already have started its own
+                // IndexPart that will never reference layers we upload: it is
+                // wasteful.
+                false
+            }
+        }
+    }
+}
+
+impl LocationConf {
+    /// For use when loading from a legacy configuration: presence of a tenant
+    /// implies it is in AttachmentMode::Single, which used to be the only
+    /// possible state.  This function should eventually be removed.
+    pub(crate) fn attached_single(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation,
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf,
+        }
+    }
+
+    /// For use when attaching/re-attaching: update the generation stored in this
+    /// structure.  If we were in a secondary state, promote to attached (posession
+    /// of a fresh generation implies this).
+    pub(crate) fn attach_in_generation(&mut self, generation: Generation) {
+        match &mut self.mode {
+            LocationMode::Attached(attach_conf) => {
+                attach_conf.generation = generation;
+            }
+            LocationMode::Secondary(_) => {
+                // We are promoted to attached by the control plane's re-attach response
+                self.mode = LocationMode::Attached(AttachedLocationConfig {
+                    generation,
+                    attach_mode: AttachmentMode::Single,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn try_from(conf: &'_ models::LocationConfig) -> anyhow::Result<Self> {
+        let tenant_conf = TenantConfOpt::try_from(&conf.tenant_conf)?;
+
+        fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
+            conf.generation
+                .ok_or_else(|| anyhow::anyhow!("Generation must be set when attaching"))
+        }
+
+        let mode = match &conf.mode {
+            models::LocationConfigMode::AttachedMulti => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Multi,
+                })
+            }
+            models::LocationConfigMode::AttachedSingle => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Single,
+                })
+            }
+            models::LocationConfigMode::AttachedStale => {
+                LocationMode::Attached(AttachedLocationConfig {
+                    generation: get_generation(conf)?,
+                    attach_mode: AttachmentMode::Stale,
+                })
+            }
+            models::LocationConfigMode::Secondary => {
+                anyhow::ensure!(conf.generation.is_none());
+
+                let warm = conf
+                    .secondary_conf
+                    .as_ref()
+                    .map(|c| c.warm)
+                    .unwrap_or(false);
+                LocationMode::Secondary(SecondaryLocationConfig { warm })
+            }
+            models::LocationConfigMode::Detached => {
+                // Should not have been called: API code should translate this mode
+                // into a detach rather than trying to decode it as a LocationConf
+                return Err(anyhow::anyhow!("Cannot decode a Detached configuration"));
+            }
+        };
+
+        Ok(Self { mode, tenant_conf })
+    }
+}
+
+impl Default for LocationConf {
+    // TODO: this should be removed once tenant loading can guarantee that we are never
+    // loading from a directory without a configuration.
+    // => tech debt since https://github.com/neondatabase/neon/issues/1555
+    fn default() -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation: Generation::none(),
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf: TenantConfOpt::default(),
+        }
+    }
+}
+
+/// A tenant's calcuated configuration, which is the result of merging a
+/// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
+///
+/// For storing and transmitting individual tenant's configuration, see
+/// TenantConfOpt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
@@ -99,6 +304,7 @@ pub struct TenantConf {
     // See the corresponding metric's help string.
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
+    pub gc_feedback: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -175,6 +381,10 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub gc_feedback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +452,7 @@ impl TenantConfOpt {
             evictions_low_residence_duration_metric_threshold: self
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
+            gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
         }
     }
 }
@@ -278,6 +489,7 @@ impl Default for TenantConf {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
+            gc_feedback: false,
         }
     }
 }
@@ -292,10 +504,10 @@ fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() 
     move || format!("Cannot parse `{field_name}` duration {value:?}")
 }
 
-impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
+impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
     type Error = anyhow::Error;
 
-    fn try_from(request_data: &TenantCreateRequest) -> Result<Self, Self::Error> {
+    fn try_from(request_data: &'_ models::TenantConfig) -> Result<Self, Self::Error> {
         let mut tenant_conf = TenantConfOpt::default();
 
         if let Some(gc_period) = &request_data.gc_period {
@@ -372,84 +584,7 @@ impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
                     ))?,
             );
         }
-
-        Ok(tenant_conf)
-    }
-}
-
-impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
-    type Error = anyhow::Error;
-
-    fn try_from(request_data: &TenantConfigRequest) -> Result<Self, Self::Error> {
-        let mut tenant_conf = TenantConfOpt::default();
-        if let Some(gc_period) = &request_data.gc_period {
-            tenant_conf.gc_period = Some(
-                humantime::parse_duration(gc_period)
-                    .with_context(bad_duration("gc_period", gc_period))?,
-            );
-        }
-        tenant_conf.gc_horizon = request_data.gc_horizon;
-        tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
-
-        if let Some(pitr_interval) = &request_data.pitr_interval {
-            tenant_conf.pitr_interval = Some(
-                humantime::parse_duration(pitr_interval)
-                    .with_context(bad_duration("pitr_interval", pitr_interval))?,
-            );
-        }
-        if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
-            tenant_conf.walreceiver_connect_timeout = Some(
-                humantime::parse_duration(walreceiver_connect_timeout).with_context(
-                    bad_duration("walreceiver_connect_timeout", walreceiver_connect_timeout),
-                )?,
-            );
-        }
-        if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
-            tenant_conf.lagging_wal_timeout = Some(
-                humantime::parse_duration(lagging_wal_timeout)
-                    .with_context(bad_duration("lagging_wal_timeout", lagging_wal_timeout))?,
-            );
-        }
-        tenant_conf.max_lsn_wal_lag = request_data.max_lsn_wal_lag;
-        tenant_conf.trace_read_requests = request_data.trace_read_requests;
-
-        tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
-        if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
-            tenant_conf.checkpoint_timeout = Some(
-                humantime::parse_duration(checkpoint_timeout)
-                    .with_context(bad_duration("checkpoint_timeout", checkpoint_timeout))?,
-            );
-        }
-        tenant_conf.compaction_target_size = request_data.compaction_target_size;
-        tenant_conf.compaction_threshold = request_data.compaction_threshold;
-
-        if let Some(compaction_period) = &request_data.compaction_period {
-            tenant_conf.compaction_period = Some(
-                humantime::parse_duration(compaction_period)
-                    .with_context(bad_duration("compaction_period", compaction_period))?,
-            );
-        }
-
-        if let Some(eviction_policy) = &request_data.eviction_policy {
-            tenant_conf.eviction_policy = Some(
-                serde::Deserialize::deserialize(eviction_policy)
-                    .context("parse field `eviction_policy`")?,
-            );
-        }
-
-        tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
-
-        if let Some(evictions_low_residence_duration_metric_threshold) =
-            &request_data.evictions_low_residence_duration_metric_threshold
-        {
-            tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
-                humantime::parse_duration(evictions_low_residence_duration_metric_threshold)
-                    .with_context(bad_duration(
-                        "evictions_low_residence_duration_metric_threshold",
-                        evictions_low_residence_duration_metric_threshold,
-                    ))?,
-            );
-        }
+        tenant_conf.gc_feedback = request_data.gc_feedback;
 
         Ok(tenant_conf)
     }

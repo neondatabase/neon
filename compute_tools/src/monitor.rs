@@ -1,14 +1,13 @@
 use std::sync::Arc;
-use std::{thread, time};
+use std::{thread, time::Duration};
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
 use tracing::{debug, info};
 
 use crate::compute::ComputeNode;
 
-const MONITOR_CHECK_INTERVAL: u64 = 500; // milliseconds
+const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
@@ -18,13 +17,12 @@ fn watch_compute_activity(compute: &ComputeNode) {
     let connstr = compute.connstr.as_str();
     // Define `client` outside of the loop to reuse existing connection if it's active.
     let mut client = Client::connect(connstr, NoTls);
-    let timeout = time::Duration::from_millis(MONITOR_CHECK_INTERVAL);
 
     info!("watching Postgres activity at {}", connstr);
 
     loop {
         // Should be outside of the write lock to allow others to read while we sleep.
-        thread::sleep(timeout);
+        thread::sleep(MONITOR_CHECK_INTERVAL);
 
         match &mut client {
             Ok(cli) => {
@@ -105,10 +103,11 @@ fn watch_compute_activity(compute: &ComputeNode) {
 }
 
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
-pub fn launch_monitor(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_monitor(state: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
     let state = Arc::clone(state);
 
-    Ok(thread::Builder::new()
+    thread::Builder::new()
         .name("compute-monitor".into())
-        .spawn(move || watch_compute_activity(&state))?)
+        .spawn(move || watch_compute_activity(&state))
+        .expect("cannot launch compute monitor thread")
 }

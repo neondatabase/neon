@@ -9,27 +9,16 @@ from typing import DefaultDict, Dict
 import psycopg2
 import psycopg2.extras
 
-# We call the test "flaky" if it failed at least once on the main branch in the last N=10 days.
 FLAKY_TESTS_QUERY = """
     SELECT
-        DISTINCT parent_suite, suite, test
-    FROM
-        (
-            SELECT
-                revision,
-                jsonb_array_elements(data -> 'children') -> 'name' as parent_suite,
-                jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'name' as suite,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'name' as test,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'status' as status,
-                to_timestamp((jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'time' -> 'start')::bigint / 1000)::date as timestamp
-            FROM
-                regress_test_results
-            WHERE
-                reference = 'refs/heads/main'
-        ) data
+        DISTINCT parent_suite, suite, name
+    FROM results
     WHERE
-        timestamp > CURRENT_DATE - INTERVAL '%s' day
-        AND status::text IN ('"failed"', '"broken"')
+        started_at > CURRENT_DATE - INTERVAL '%s' day
+        AND (
+            (status IN ('failed', 'broken') AND reference = 'refs/heads/main')
+            OR flaky
+        )
     ;
 """
 
@@ -38,6 +27,9 @@ def main(args: argparse.Namespace):
     connstr = args.connstr
     interval_days = args.days
     output = args.output
+
+    build_type = args.build_type
+    pg_version = args.pg_version
 
     res: DefaultDict[str, DefaultDict[str, Dict[str, bool]]]
     res = defaultdict(lambda: defaultdict(dict))
@@ -54,8 +46,23 @@ def main(args: argparse.Namespace):
         rows = []
 
     for row in rows:
-        logging.info(f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['test']}")
-        res[row["parent_suite"]][row["suite"]][row["test"]] = True
+        # We don't want to automatically rerun tests in a performance suite
+        if row["parent_suite"] != "test_runner.regress":
+            continue
+
+        if row["name"].endswith("]"):
+            parametrized_test = row["name"].replace(
+                "[",
+                f"[{build_type}-pg{pg_version}-",
+            )
+        else:
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}]"
+
+        res[row["parent_suite"]][row["suite"]][parametrized_test] = True
+
+        logging.info(
+            f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{parametrized_test}"
+        )
 
     logging.info(f"saving results to {output.name}")
     json.dump(res, output, indent=2)
@@ -75,6 +82,18 @@ if __name__ == "__main__":
         default=10,
         type=int,
         help="how many days to look back for flaky tests (default: 10)",
+    )
+    parser.add_argument(
+        "--build-type",
+        required=True,
+        type=str,
+        help="for which build type to create list of flaky tests (debug or release)",
+    )
+    parser.add_argument(
+        "--pg-version",
+        required=True,
+        type=int,
+        help="for which Postgres version to create list of flaky tests (14, 15, etc.)",
     )
     parser.add_argument(
         "connstr",

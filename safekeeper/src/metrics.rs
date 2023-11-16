@@ -7,6 +7,7 @@ use std::{
 
 use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
 use anyhow::Result;
+use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
@@ -124,6 +125,25 @@ pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
         "Number of errors during backup"
     )
     .expect("Failed to register safekeeper_backup_errors_total counter")
+});
+pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_broker_push_update_seconds",
+        "Seconds to push all timeline updates to the broker",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_broker_push_update_seconds histogram vec")
+});
+pub const TIMELINES_COUNT_BUCKETS: &[f64] = &[
+    1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0,
+];
+pub static BROKER_ITERATION_TIMELINES: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_broker_iteration_timelines",
+        "Count of timelines pushed to the broker in a single iteration",
+        TIMELINES_COUNT_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_broker_iteration_timelines histogram vec")
 });
 
 pub const LABEL_UNKNOWN: &str = "unknown";
@@ -273,14 +293,17 @@ impl WalStorageMetrics {
     }
 }
 
-/// Accepts a closure that returns a result, and returns the duration of the closure.
-pub fn time_io_closure(closure: impl FnOnce() -> Result<()>) -> Result<f64> {
+/// Accepts async function that returns empty anyhow result, and returns the duration of its execution.
+pub async fn time_io_closure<E: Into<anyhow::Error>>(
+    closure: impl Future<Output = Result<(), E>>,
+) -> Result<f64> {
     let start = std::time::Instant::now();
-    closure()?;
+    closure.await.map_err(|e| e.into())?;
     Ok(start.elapsed().as_secs_f64())
 }
 
 /// Metrics for a single timeline.
+#[derive(Clone)]
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
     pub ps_feedback: PageserverFeedback,
@@ -556,13 +579,19 @@ impl Collector for TimelineCollector {
         let timelines = GlobalTimelines::get_all();
         let timelines_count = timelines.len();
 
-        for arc_tli in timelines {
-            let tli = arc_tli.info_for_metrics();
-            if tli.is_none() {
-                continue;
-            }
-            let tli = tli.unwrap();
+        // Prometheus Collector is sync, and data is stored under async lock. To
+        // bridge the gap with a crutch, collect data in spawned thread with
+        // local tokio runtime.
+        let infos = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("failed to create rt");
+            rt.block_on(collect_timeline_metrics())
+        })
+        .join()
+        .expect("collect_timeline_metrics thread panicked");
 
+        for tli in &infos {
             let tenant_id = tli.ttid.tenant_id.to_string();
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
@@ -662,4 +691,16 @@ impl Collector for TimelineCollector {
 
         mfs
     }
+}
+
+async fn collect_timeline_metrics() -> Vec<FullTimelineInfo> {
+    let mut res = vec![];
+    let timelines = GlobalTimelines::get_all();
+
+    for tli in timelines {
+        if let Some(info) = tli.info_for_metrics().await {
+            res.push(info);
+        }
+    }
+    res
 }

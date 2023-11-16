@@ -2,25 +2,31 @@
 
 use std::env::{var, VarError};
 use std::sync::Arc;
-use std::{env, ops::ControlFlow, path::Path, str::FromStr};
+use std::time::Duration;
+use std::{env, ops::ControlFlow, str::FromStr};
 
 use anyhow::{anyhow, Context};
+use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
-use fail::FailScenario;
+
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
+use pageserver::task_mgr::WALRECEIVER_RUNTIME;
+use pageserver::tenant::TenantSharedResources;
 use remote_storage::GenericRemoteStorage;
+use tokio::time::Instant;
 use tracing::*;
 
 use metrics::set_build_info_metric;
 use pageserver::{
     config::{defaults::*, PageServerConf},
     context::{DownloadBehavior, RequestContext},
+    deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
-    task_mgr::{
-        BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
-    },
+    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
     virtual_file,
 };
@@ -28,19 +34,21 @@ use postgres_backend::AuthType;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
-    auth::JwtAuth, logging, project_git_version, sentry_init::init_sentry, signals::Signal,
+    auth::{JwtAuth, SwappableJwtAuth},
+    logging, project_build_tag, project_git_version,
+    sentry_init::init_sentry,
+    signals::Signal,
     tcp_listener,
 };
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const PID_FILE_NAME: &str = "pageserver.pid";
 
 const FEATURES: &[&str] = &[
     #[cfg(feature = "testing")]
     "testing",
-    #[cfg(feature = "fail/failpoints")]
-    "fail/failpoints",
 ];
 
 fn version() -> String {
@@ -63,21 +71,17 @@ fn main() -> anyhow::Result<()> {
 
     let workdir = arg_matches
         .get_one::<String>("workdir")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new(".neon"));
+        .map(Utf8Path::new)
+        .unwrap_or_else(|| Utf8Path::new(".neon"));
     let workdir = workdir
-        .canonicalize()
-        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
+        .canonicalize_utf8()
+        .with_context(|| format!("Error opening workdir '{workdir}'"))?;
 
     let cfg_file_path = workdir.join("pageserver.toml");
 
     // Set CWD to workdir for non-daemon modes
-    env::set_current_dir(&workdir).with_context(|| {
-        format!(
-            "Failed to set application's current dir to '{}'",
-            workdir.display()
-        )
-    })?;
+    env::set_current_dir(&workdir)
+        .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
     let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
         ControlFlow::Continue(conf) => conf,
@@ -113,16 +117,12 @@ fn main() -> anyhow::Result<()> {
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
-        utils::crashsafe::create_dir_all(conf.tenants_path()).with_context(|| {
-            format!(
-                "Failed to create tenants root dir at '{}'",
-                tenants_path.display()
-            )
-        })?;
+        utils::crashsafe::create_dir_all(conf.tenants_path())
+            .with_context(|| format!("Failed to create tenants root dir at '{tenants_path}'"))?;
     }
 
     // Initialize up failpoints support
-    let scenario = FailScenario::setup();
+    let scenario = pageserver::failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);
@@ -135,9 +135,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initialize_config(
-    cfg_file_path: &Path,
+    cfg_file_path: &Utf8Path,
     arg_matches: clap::ArgMatches,
-    workdir: &Path,
+    workdir: &Utf8Path,
 ) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
     let init = arg_matches.get_flag("init");
     let update_config = init || arg_matches.get_flag("update-config");
@@ -145,33 +145,22 @@ fn initialize_config(
     let (mut toml, config_file_exists) = if cfg_file_path.is_file() {
         if init {
             anyhow::bail!(
-                "Config file '{}' already exists, cannot init it, use --update-config to update it",
-                cfg_file_path.display()
+                "Config file '{cfg_file_path}' already exists, cannot init it, use --update-config to update it",
             );
         }
         // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
-            format!(
-                "Failed to read pageserver config at '{}'",
-                cfg_file_path.display()
-            )
-        })?;
+        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
+            .with_context(|| format!("Failed to read pageserver config at '{cfg_file_path}'"))?;
         (
             cfg_file_contents
                 .parse::<toml_edit::Document>()
                 .with_context(|| {
-                    format!(
-                        "Failed to parse '{}' as pageserver config",
-                        cfg_file_path.display()
-                    )
+                    format!("Failed to parse '{cfg_file_path}' as pageserver config")
                 })?,
             true,
         )
     } else if cfg_file_path.exists() {
-        anyhow::bail!(
-            "Config file '{}' exists but is not a regular file",
-            cfg_file_path.display()
-        );
+        anyhow::bail!("Config file '{cfg_file_path}' exists but is not a regular file");
     } else {
         // We're initializing the tenant, so there's no config file yet
         (
@@ -190,7 +179,7 @@ fn initialize_config(
 
             for (key, item) in doc.iter() {
                 if config_file_exists && update_config && key == "id" && toml.contains_key(key) {
-                    anyhow::bail!("Pageserver config file exists at '{}' and has node id already, it cannot be overridden", cfg_file_path.display());
+                    anyhow::bail!("Pageserver config file exists at '{cfg_file_path}' and has node id already, it cannot be overridden");
                 }
                 toml.insert(key, item.clone());
             }
@@ -202,18 +191,11 @@ fn initialize_config(
         .context("Failed to parse pageserver configuration")?;
 
     if update_config {
-        info!("Writing pageserver config to '{}'", cfg_file_path.display());
+        info!("Writing pageserver config to '{cfg_file_path}'");
 
-        std::fs::write(cfg_file_path, toml.to_string()).with_context(|| {
-            format!(
-                "Failed to write pageserver config to '{}'",
-                cfg_file_path.display()
-            )
-        })?;
-        info!(
-            "Config successfully written to '{}'",
-            cfg_file_path.display()
-        )
+        std::fs::write(cfg_file_path, toml.to_string())
+            .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
+        info!("Config successfully written to '{cfg_file_path}'")
     }
 
     Ok(if init {
@@ -223,20 +205,69 @@ fn initialize_config(
     })
 }
 
+struct WaitForPhaseResult<F: std::future::Future + Unpin> {
+    timeout_remaining: Duration,
+    skipped: Option<F>,
+}
+
+/// During startup, we apply a timeout to our waits for readiness, to avoid
+/// stalling the whole service if one Tenant experiences some problem.  Each
+/// phase may consume some of the timeout: this function returns the updated
+/// timeout for use in the next call.
+async fn wait_for_phase<F>(phase: &str, mut fut: F, timeout: Duration) -> WaitForPhaseResult<F>
+where
+    F: std::future::Future + Unpin,
+{
+    let initial_t = Instant::now();
+    let skipped = match tokio::time::timeout(timeout, &mut fut).await {
+        Ok(_) => None,
+        Err(_) => {
+            tracing::info!(
+                timeout_millis = timeout.as_millis(),
+                %phase,
+                "Startup phase timed out, proceeding anyway"
+            );
+            Some(fut)
+        }
+    };
+
+    WaitForPhaseResult {
+        timeout_remaining: timeout
+            .checked_sub(Instant::now().duration_since(initial_t))
+            .unwrap_or(Duration::ZERO),
+        skipped,
+    }
+}
+
+fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
+    let elapsed = started_at.elapsed();
+    let secs = elapsed.as_secs_f64();
+    STARTUP_DURATION.with_label_values(&[phase]).set(secs);
+
+    info!(
+        elapsed_ms = elapsed.as_millis(),
+        "{human_phase} ({secs:.3}s since start)"
+    )
+}
+
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
 ) -> anyhow::Result<()> {
+    // Monotonic time for later calculating startup duration
+    let started_startup_at = Instant::now();
+
     // Print version and launch timestamp to the log,
     // and expose them as prometheus metrics.
     // A changed version string indicates changed software.
     // A changed launch timestamp indicates a pageserver restart.
     info!(
-        "version: {} launch_timestamp: {}",
+        "version: {} launch_timestamp: {} build_tag: {}",
         version(),
-        launch_ts.to_string()
+        launch_ts.to_string(),
+        BUILD_TAG,
     );
-    set_build_info_metric(GIT_VERSION);
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
     pageserver::preinitialize_metrics();
 
@@ -276,19 +307,29 @@ fn start_pageserver(
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
     // Launch broker client
-    WALRECEIVER_RUNTIME.block_on(pageserver::broker_client::init_broker_client(conf))?;
+    // The storage_broker::connect call needs to happen inside a tokio runtime thread.
+    let broker_client = WALRECEIVER_RUNTIME
+        .block_on(async {
+            // Note: we do not attempt connecting here (but validate endpoints sanity).
+            storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
+        })
+        .with_context(|| {
+            format!(
+                "create broker client for uri={:?} keepalive_interval={:?}",
+                &conf.broker_endpoint, conf.broker_keepalive_interval,
+            )
+        })?;
 
     // Initialize authentication for incoming connections
     let http_auth;
     let pg_auth;
     if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
-        // unwrap is ok because check is performed when creating config, so path is set and file exists
+        // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
-        info!(
-            "Loading public key for verifying JWT tokens from {:#?}",
-            key_path
-        );
-        let auth: Arc<JwtAuth> = Arc::new(JwtAuth::from_key_path(key_path)?);
+        info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
+
+        let jwt_auth = JwtAuth::from_key_path(key_path)?;
+        let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
         http_auth = match &conf.http_auth_type {
             AuthType::Trust => None,
@@ -322,11 +363,170 @@ fn start_pageserver(
         }
     };
 
+    // Top-level cancellation token for the process
+    let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
+
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
+    // Set up deletion queue
+    let (deletion_queue, deletion_workers) = DeletionQueue::new(
+        remote_storage.clone(),
+        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        conf,
+    );
+    if let Some(deletion_workers) = deletion_workers {
+        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
+    }
+
+    // Up to this point no significant I/O has been done: this should have been fast.  Record
+    // duration prior to starting I/O intensive phase of startup.
+    startup_checkpoint(started_startup_at, "initial", "Starting loading tenants");
+    STARTUP_IS_LOADING.set(1);
+
+    // Startup staging or optimizing:
+    //
+    // We want to minimize downtime for `page_service` connections, and trying not to overload
+    // BACKGROUND_RUNTIME by doing initial compactions and initial logical sizes at the same time.
+    //
+    // init_done_rx will notify when all initial load operations have completed.
+    //
+    // background_jobs_can_start (same name used to hold off background jobs from starting at
+    // consumer side) will be dropped once we can start the background jobs. Currently it is behind
+    // completing all initial logical size calculations (init_logical_size_done_rx) and a timeout
+    // (background_task_maximum_delay).
+    let (init_remote_done_tx, init_remote_done_rx) = utils::completion::channel();
+    let (init_done_tx, init_done_rx) = utils::completion::channel();
+
+    let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
+
+    let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
+
+    let order = pageserver::InitializationOrder {
+        initial_tenant_load_remote: Some(init_done_tx),
+        initial_tenant_load: Some(init_remote_done_tx),
+        initial_logical_size_can_start: init_done_rx.clone(),
+        initial_logical_size_attempt: Some(init_logical_size_done_tx),
+        background_jobs_can_start: background_jobs_barrier.clone(),
+    };
+
     // Scan the local 'tenants/' directory and start loading the tenants
-    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
+    let deletion_queue_client = deletion_queue.new_client();
+    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+        conf,
+        TenantSharedResources {
+            broker_client: broker_client.clone(),
+            remote_storage: remote_storage.clone(),
+            deletion_queue_client,
+        },
+        order,
+        shutdown_pageserver.clone(),
+    ))?;
+    let tenant_manager = Arc::new(tenant_manager);
+
+    BACKGROUND_RUNTIME.spawn({
+        let init_done_rx = init_done_rx;
+        let shutdown_pageserver = shutdown_pageserver.clone();
+        let drive_init = async move {
+            // NOTE: unlike many futures in pageserver, this one is cancellation-safe
+            let guard = scopeguard::guard_on_success((), |_| {
+                tracing::info!("Cancelled before initial load completed")
+            });
+
+            let timeout = conf.background_task_maximum_delay;
+
+            let init_remote_done = std::pin::pin!(async {
+                init_remote_done_rx.wait().await;
+                startup_checkpoint(
+                    started_startup_at,
+                    "initial_tenant_load_remote",
+                    "Remote part of initial load completed",
+                );
+            });
+
+            let WaitForPhaseResult {
+                timeout_remaining: timeout,
+                skipped: init_remote_skipped,
+            } = wait_for_phase("initial_tenant_load_remote", init_remote_done, timeout).await;
+
+            let init_load_done = std::pin::pin!(async {
+                init_done_rx.wait().await;
+                startup_checkpoint(
+                    started_startup_at,
+                    "initial_tenant_load",
+                    "Initial load completed",
+                );
+                STARTUP_IS_LOADING.set(0);
+            });
+
+            let WaitForPhaseResult {
+                timeout_remaining: timeout,
+                skipped: init_load_skipped,
+            } = wait_for_phase("initial_tenant_load", init_load_done, timeout).await;
+
+            // initial logical sizes can now start, as they were waiting on init_done_rx.
+
+            scopeguard::ScopeGuard::into_inner(guard);
+
+            let guard = scopeguard::guard_on_success((), |_| {
+                tracing::info!("Cancelled before initial logical sizes completed")
+            });
+
+            let logical_sizes_done = std::pin::pin!(async {
+                init_logical_size_done_rx.wait().await;
+                startup_checkpoint(
+                    started_startup_at,
+                    "initial_logical_sizes",
+                    "Initial logical sizes completed",
+                );
+            });
+
+            let WaitForPhaseResult {
+                timeout_remaining: _,
+                skipped: logical_sizes_skipped,
+            } = wait_for_phase("initial_logical_sizes", logical_sizes_done, timeout).await;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+
+            // allow background jobs to start: we either completed prior stages, or they reached timeout
+            // and were skipped.  It is important that we do not let them block background jobs indefinitely,
+            // because things like consumption metrics for billing are blocked by this barrier.
+            drop(background_jobs_can_start);
+            startup_checkpoint(
+                started_startup_at,
+                "background_jobs_can_start",
+                "Starting background jobs",
+            );
+
+            // We are done. If we skipped any phases due to timeout, run them to completion here so that
+            // they will eventually update their startup_checkpoint, and so that we do not declare the
+            // 'complete' stage until all the other stages are really done.
+            let guard = scopeguard::guard_on_success((), |_| {
+                tracing::info!("Cancelled before waiting for skipped phases done")
+            });
+            if let Some(f) = init_remote_skipped {
+                f.await;
+            }
+            if let Some(f) = init_load_skipped {
+                f.await;
+            }
+            if let Some(f) = logical_sizes_skipped {
+                f.await;
+            }
+            scopeguard::ScopeGuard::into_inner(guard);
+
+            startup_checkpoint(started_startup_at, "complete", "Startup complete");
+        };
+
+        async move {
+            let mut drive_init = std::pin::pin!(drive_init);
+            // just race these tasks
+            tokio::select! {
+                _ = shutdown_pageserver.cancelled() => {},
+                _ = &mut drive_init => {},
+            }
+        }
+    });
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -339,6 +539,7 @@ fn start_pageserver(
             conf,
             remote_storage.clone(),
             disk_usage_eviction_state.clone(),
+            background_jobs_barrier.clone(),
         )?;
     }
 
@@ -347,15 +548,21 @@ fn start_pageserver(
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(
-            conf,
-            launch_ts,
-            http_auth,
-            remote_storage,
-            disk_usage_eviction_state,
-        )?
-        .build()
-        .map_err(|err| anyhow!(err))?;
+        let router_state = Arc::new(
+            http::routes::State::new(
+                conf,
+                tenant_manager,
+                http_auth.clone(),
+                remote_storage.clone(),
+                broker_client.clone(),
+                disk_usage_eviction_state,
+                deletion_queue.new_client(),
+            )
+            .context("Failed to initialize router state")?,
+        );
+        let router = http::make_router(router_state, launch_ts, http_auth.clone())?
+            .build()
+            .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
@@ -373,37 +580,54 @@ fn start_pageserver(
                 Ok(())
             },
         );
+    }
 
-        if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-            let metrics_ctx = RequestContext::todo_child(
-                TaskKind::MetricsCollection,
-                // This task itself shouldn't download anything.
-                // The actual size calculation does need downloads, and
-                // creates a child context with the right DownloadBehavior.
-                DownloadBehavior::Error,
-            );
-            task_mgr::spawn(
-                MGMT_REQUEST_RUNTIME.handle(),
-                TaskKind::MetricsCollection,
-                None,
-                None,
-                "consumption metrics collection",
-                true,
-                async move {
-                    pageserver::consumption_metrics::collect_metrics(
-                        metric_collection_endpoint,
-                        conf.metric_collection_interval,
-                        conf.cached_metric_collection_interval,
-                        conf.synthetic_size_calculation_interval,
-                        conf.id,
-                        metrics_ctx,
-                    )
-                    .instrument(info_span!("metrics_collection"))
-                    .await?;
-                    Ok(())
-                },
-            );
-        }
+    if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+        let background_jobs_barrier = background_jobs_barrier;
+        let metrics_ctx = RequestContext::todo_child(
+            TaskKind::MetricsCollection,
+            // This task itself shouldn't download anything.
+            // The actual size calculation does need downloads, and
+            // creates a child context with the right DownloadBehavior.
+            DownloadBehavior::Error,
+        );
+
+        let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
+
+        task_mgr::spawn(
+            crate::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MetricsCollection,
+            None,
+            None,
+            "consumption metrics collection",
+            true,
+            async move {
+                // first wait until background jobs are cleared to launch.
+                //
+                // this is because we only process active tenants and timelines, and the
+                // Timeline::get_current_logical_size will spawn the logical size calculation,
+                // which will not be rate-limited.
+                let cancel = task_mgr::shutdown_token();
+
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); },
+                    _ = background_jobs_barrier.wait() => {}
+                };
+
+                pageserver::consumption_metrics::collect_metrics(
+                    metric_collection_endpoint,
+                    conf.metric_collection_interval,
+                    conf.cached_metric_collection_interval,
+                    conf.synthetic_size_calculation_interval,
+                    conf.id,
+                    local_disk_storage,
+                    metrics_ctx,
+                )
+                .instrument(info_span!("metrics_collection"))
+                .await?;
+                Ok(())
+            },
+        );
     }
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
@@ -427,15 +651,19 @@ fn start_pageserver(
             async move {
                 page_service::libpq_listener_main(
                     conf,
+                    broker_client,
                     pg_auth,
                     pageserver_listener,
                     conf.pg_auth_type,
                     libpq_ctx,
+                    task_mgr::shutdown_token(),
                 )
                 .await
             },
         );
     }
+
+    let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
     ShutdownSignals::handle(|signal| match signal {
@@ -452,7 +680,17 @@ fn start_pageserver(
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+
+            // This cancels the `shutdown_pageserver` cancellation tree.
+            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
+            // The plan is to change that over time.
+            shutdown_pageserver.take();
+            let bg_remote_storage = remote_storage.clone();
+            let bg_deletion_queue = deletion_queue.clone();
+            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
+                bg_remote_storage.map(|_| bg_deletion_queue),
+                0,
+            ));
             unreachable!()
         }
     })
@@ -464,7 +702,7 @@ fn create_remote_storage_client(
     let config = if let Some(config) = &conf.remote_storage_config {
         config
     } else {
-        // No remote storage configured.
+        tracing::warn!("no remote storage configured, this is a deprecated configuration");
         return Ok(None);
     };
 

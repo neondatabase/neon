@@ -1,4 +1,6 @@
 use std::convert::Infallible;
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
@@ -13,7 +15,7 @@ use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use num_cpus;
 use serde_json;
 use tokio::task;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
@@ -121,6 +123,83 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // download extension files from S3 on demand
+        (&Method::POST, route) if route.starts_with("/extension_server/") => {
+            info!("serving {:?} POST request", route);
+            info!("req.uri {:?}", req.uri());
+
+            // don't even try to download extensions
+            // if no remote storage is configured
+            if compute.ext_remote_storage.is_none() {
+                info!("no extensions remote storage configured");
+                let mut resp = Response::new(Body::from("no remote storage configured"));
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return resp;
+            }
+
+            let mut is_library = false;
+            if let Some(params) = req.uri().query() {
+                info!("serving {:?} POST request with params: {}", route, params);
+                if params == "is_library=true" {
+                    is_library = true;
+                } else {
+                    let mut resp = Response::new(Body::from("Wrong request parameters"));
+                    *resp.status_mut() = StatusCode::BAD_REQUEST;
+                    return resp;
+                }
+            }
+            let filename = route.split('/').last().unwrap().to_string();
+            info!("serving /extension_server POST request, filename: {filename:?} is_library: {is_library}");
+
+            // get ext_name and path from spec
+            // don't lock compute_state for too long
+            let ext = {
+                let compute_state = compute.state.lock().unwrap();
+                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+                let spec = &pspec.spec;
+
+                // debug only
+                info!("spec: {:?}", spec);
+
+                let remote_extensions = match spec.remote_extensions.as_ref() {
+                    Some(r) => r,
+                    None => {
+                        info!("no remote extensions spec was provided");
+                        let mut resp = Response::new(Body::from("no remote storage configured"));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        return resp;
+                    }
+                };
+
+                remote_extensions.get_ext(
+                    &filename,
+                    is_library,
+                    &compute.build_tag,
+                    &compute.pgversion,
+                )
+            };
+
+            match ext {
+                Ok((ext_name, ext_path)) => {
+                    match compute.download_extension(ext_name, ext_path).await {
+                        Ok(_) => Response::new(Body::from("OK")),
+                        Err(e) => {
+                            error!("extension download failed: {}", e);
+                            let mut resp = Response::new(Body::from(e.to_string()));
+                            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                            resp
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("extension download failed to find extension: {}", e);
+                    let mut resp = Response::new(Body::from("failed to find file"));
+                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    resp
+                }
+            }
+        }
+
         // Return the `404 Not Found` for any other routes.
         _ => {
             let mut not_found = Response::new(Body::from("404 Not Found"));
@@ -220,8 +299,10 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
 #[tokio::main]
-async fn serve(state: Arc<ComputeNode>) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3080));
+async fn serve(port: u16, state: Arc<ComputeNode>) {
+    // this usually binds to both IPv4 and IPv6 on linux
+    // see e.g. https://github.com/rust-lang/rust/pull/34440
+    let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), port);
 
     let make_service = make_service_fn(move |_conn| {
         let state = state.clone();
@@ -256,10 +337,10 @@ async fn serve(state: Arc<ComputeNode>) {
 }
 
 /// Launch a separate Hyper HTTP API server thread and return its `JoinHandle`.
-pub fn launch_http_server(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
 
     Ok(thread::Builder::new()
         .name("http-endpoint".into())
-        .spawn(move || serve(state))?)
+        .spawn(move || serve(port, state))?)
 }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use camino::Utf8Path;
 use futures::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
@@ -29,7 +30,7 @@ use postgres_ffi::{BLCKSZ, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
 // Returns checkpoint LSN from controlfile
-pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
+pub fn get_lsn_from_controlfile(path: &Utf8Path) -> Result<Lsn> {
     // Read control file to extract the LSN
     let controlfile_path = path.join("global").join("pg_control");
     let controlfile = ControlFileData::decode(&std::fs::read(controlfile_path)?)?;
@@ -46,7 +47,7 @@ pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
 /// cluster was not shut down cleanly.
 pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
-    pgdata_path: &Path,
+    pgdata_path: &Utf8Path,
     pgdata_lsn: Lsn,
     ctx: &RequestContext,
 ) -> Result<()> {
@@ -75,12 +76,12 @@ pub async fn import_timeline_from_postgres_datadir(
             {
                 pg_control = Some(control_file);
             }
-            modification.flush()?;
+            modification.flush(ctx).await?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit()?;
+    modification.commit(ctx).await?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -148,17 +149,17 @@ async fn import_rel(
     // because there is no guarantee about the order in which we are processing segments.
     // ignore "relation already exists" error
     //
-    // FIXME: use proper error type for this, instead of parsing the error message.
-    // Or better yet, keep track of which relations we've already created
+    // FIXME: Keep track of which relations we've already created?
     // https://github.com/neondatabase/neon/issues/3309
     if let Err(e) = modification
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
-        if e.to_string().contains("already exists") {
-            debug!("relation {} already exists. we must be extending it", rel);
-        } else {
-            return Err(e);
+        match e {
+            RelationError::AlreadyExists => {
+                debug!("Relation {} already exist. We must be extending it.", rel)
+            }
+            _ => return Err(e.into()),
         }
     }
 
@@ -256,7 +257,7 @@ async fn import_slru(
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
 async fn import_wal(
-    walpath: &Path,
+    walpath: &Utf8Path,
     tline: &Timeline,
     startpoint: Lsn,
     endpoint: Lsn,
@@ -359,7 +360,7 @@ pub async fn import_basebackup_from_tar(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush()?;
+                modification.flush(ctx).await?;
             }
             tokio_tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -377,7 +378,7 @@ pub async fn import_basebackup_from_tar(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit()?;
+    modification.commit(ctx).await?;
     Ok(())
 }
 
@@ -594,7 +595,7 @@ async fn import_file(
         // zenith.signal is not necessarily the last file, that we handle
         // but it is ok to call `finish_write()`, because final `modification.commit()`
         // will update lsn once more to the final one.
-        let writer = modification.tline.writer();
+        let writer = modification.tline.writer().await;
         writer.finish_write(prev_lsn);
 
         debug!("imported zenith signal {}", prev_lsn);

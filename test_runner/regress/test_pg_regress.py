@@ -3,15 +3,11 @@
 #
 from pathlib import Path
 
-import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-# This runs for a long time, especially in debug mode, so use a larger-than-default
-# timeout.
-@pytest.mark.timeout(1800)
 def test_pg_regress(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
@@ -32,8 +28,8 @@ def test_pg_regress(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"
-    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/regress"
+    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/regress"
+    src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/regress"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "parallel_schedule"
     pg_regress = build_path / "pg_regress"
@@ -60,18 +56,11 @@ def test_pg_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        # checkpoint one more time to ensure that the lsn we get is the latest one
-        endpoint.safe_psql("CHECKPOINT")
-
-        # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
 
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
-# This runs for a long time, especially in debug mode, so use a larger-than-default
-# timeout.
-@pytest.mark.timeout(1800)
 def test_isolation(
     neon_simple_env: NeonEnv,
     test_output_dir: Path,
@@ -95,8 +84,8 @@ def test_isolation(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/isolation"
-    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/isolation"
+    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/isolation"
+    src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/isolation"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "isolation_schedule"
     pg_isolation_regress = build_path / "pg_isolation_regress"
@@ -173,9 +162,4 @@ def test_sql_regress(
     with capsys.disabled():
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
-        # checkpoint one more time to ensure that the lsn we get is the latest one
-        endpoint.safe_psql("CHECKPOINT")
-        endpoint.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
-
-        # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)

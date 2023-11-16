@@ -1,5 +1,5 @@
-///! Various stuff for dealing with the Neon Console.
-///! Later we might move some API wrappers here.
+//! Various stuff for dealing with the Neon Console.
+//! Later we might move some API wrappers here.
 
 /// Payloads used in the console's APIs.
 pub mod messages;
@@ -11,6 +11,11 @@ pub use provider::{errors, Api, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeI
 /// Various cache-related types.
 pub mod caches {
     pub use super::provider::{ApiCaches, NodeInfoCache};
+}
+
+/// Various cache-related types.
+pub mod locks {
+    pub use super::provider::ApiLocks;
 }
 
 /// Console's management API.

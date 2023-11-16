@@ -84,7 +84,7 @@ pub fn init(
     let r = r.with({
         let log_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
-            .with_ansi(atty::is(atty::Stream::Stdout))
+            .with_ansi(false)
             .with_writer(std::io::stdout);
         let log_layer = match log_format {
             LogFormat::Json => log_layer.json().boxed(),
@@ -112,7 +112,7 @@ pub fn init(
 ///
 /// When the return value is dropped, the hook is reverted to std default hook (prints to stderr).
 /// If the assumptions about the initialization order are not held, use
-/// [`TracingPanicHookGuard::disarm`] but keep in mind, if tracing is stopped, then panics will be
+/// [`TracingPanicHookGuard::forget`] but keep in mind, if tracing is stopped, then panics will be
 /// lost.
 #[must_use]
 pub fn replace_panic_hook_with_tracing_panic_hook() -> TracingPanicHookGuard {
@@ -213,6 +213,30 @@ impl std::fmt::Display for PrettyLocation<'_, '_> {
 impl std::fmt::Debug for PrettyLocation<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Self as std::fmt::Display>::fmt(self, f)
+    }
+}
+
+/// When you will store a secret but want to make sure it won't
+/// be accidentally logged, wrap it in a SecretString, whose Debug
+/// implementation does not expose the contents.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn get_contents(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[SECRET]")
     }
 }
 

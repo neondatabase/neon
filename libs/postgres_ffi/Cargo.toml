@@ -24,7 +24,6 @@ workspace_hack.workspace = true
 [dev-dependencies]
 env_logger.workspace = true
 postgres.workspace = true
-wal_craft = { path = "wal_craft" }
 
 [build-dependencies]
 anyhow.workspace = true

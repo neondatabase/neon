@@ -5,6 +5,7 @@
 /// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 
+use futures::future::Either;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -17,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
 
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 project_git_version!(GIT_VERSION);
 
@@ -109,20 +110,25 @@ async fn main() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let main = proxy::flatten_err(tokio::spawn(task_main(
+    let main = tokio::spawn(task_main(
         Arc::new(destination),
         tls_config,
         proxy_listener,
         cancellation_token.clone(),
-    )));
-    let signals_task = proxy::flatten_err(tokio::spawn(proxy::handle_signals(cancellation_token)));
+    ));
+    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
 
-    tokio::select! {
-        res = main => { res?; },
-        res = signals_task => { res?; },
-    }
+    // the signal task cant ever succeed.
+    // the main task can error, or can succeed on cancellation.
+    // we want to immediately exit on either of these cases
+    let signal = match futures::future::select(signals_task, main).await {
+        Either::Left((res, _)) => proxy::flatten_err(res)?,
+        Either::Right((res, _)) => return proxy::flatten_err(res),
+    };
 
-    Ok(())
+    // maintenance tasks return `Infallible` success values, this is an impossible value
+    // so this match statically ensures that there are no possibilities for that value
+    match signal {}
 }
 
 async fn task_main(
@@ -141,7 +147,6 @@ async fn task_main(
         tokio::select! {
             accept_result = listener.accept() => {
                 let (socket, peer_addr) = accept_result?;
-                info!("accepted postgres client connection from {peer_addr}");
 
                 let session_id = uuid::Uuid::new_v4();
                 let tls_config = Arc::clone(&tls_config);
@@ -149,19 +154,24 @@ async fn task_main(
 
                 connections.spawn(
                     async move {
-                        info!("spawned a task for {peer_addr}");
-
                         socket
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(dest_suffix, tls_config, session_id, socket).await
+                        info!(%peer_addr, "serving");
+                        handle_client(dest_suffix, tls_config, socket).await
                     }
                     .unwrap_or_else(|e| {
                         // Acknowledge that the task has finished with an error.
                         error!("per-client task finished with an error: {e:#}");
-                    }),
+                    })
+                    .instrument(tracing::info_span!("handle_client", ?session_id))
                 );
+            }
+            Some(Err(e)) = connections.join_next(), if !connections.is_empty() => {
+                if !e.is_panic() && !e.is_cancelled() {
+                    warn!("unexpected error from joined connection task: {e:?}");
+                }
             }
             _ = cancellation_token.cancelled() => {
                 drop(listener);
@@ -192,7 +202,6 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut stream = PqStream::new(Stream::from_raw(raw_stream));
 
     let msg = stream.read_startup_packet().await?;
-    info!("received {msg:?}");
     use pq_proto::FeStartupPacket::*;
 
     match msg {
@@ -215,15 +224,19 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             }
             Ok(raw.upgrade(tls_config).await?)
         }
-        _ => stream.throw_error_str(ERR_INSECURE_CONNECTION).await?,
+        unexpected => {
+            info!(
+                ?unexpected,
+                "unexpected startup packet, rejecting connection"
+            );
+            stream.throw_error_str(ERR_INSECURE_CONNECTION).await?
+        }
     }
 }
 
-#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 async fn handle_client(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
-    session_id: uuid::Uuid,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
     let tls_stream = ssl_handshake(stream, tls_config).await?;

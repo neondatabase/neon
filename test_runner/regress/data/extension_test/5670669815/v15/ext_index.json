@@ -1,0 +1,17 @@
+{
+    "public_extensions": [
+        "anon"
+    ],
+    "library_index": {
+        "anon": "anon"
+    },
+    "extension_data": {
+        "anon": {
+            "control_data": {
+                "anon.control": "# PostgreSQL Anonymizer (anon) extension \ncomment = 'Data anonymization tools' \ndefault_version = '1.1.0' \ndirectory='extension/anon' \nrelocatable = false \nrequires = 'pgcrypto' \nsuperuser = false \nmodule_pathname = '$libdir/anon' \ntrusted = true \n"
+            },
+            "archive_path": "5670669815/v15/extensions/anon.tar.zst"
+        }
+    }
+}
+

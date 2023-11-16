@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::spec::ComputeSpec;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
     pub error: String,
 }
 
 /// Response of the /status API
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeStatusResponse {
     pub start_time: DateTime<Utc>,
@@ -23,7 +23,7 @@ pub struct ComputeStatusResponse {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeState {
     pub status: ComputeStatus,
@@ -33,7 +33,7 @@ pub struct ComputeState {
     pub error: Option<String>,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
     // Spec wasn't provided at start, waiting for it to be
@@ -68,11 +68,45 @@ where
 /// Response of the /metrics.json API
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ComputeMetrics {
+    /// Time spent waiting in pool
     pub wait_for_spec_ms: u64,
+
+    /// Time spent checking if safekeepers are synced
+    pub sync_sk_check_ms: u64,
+
+    /// Time spent syncing safekeepers (walproposer.c).
+    /// In most cases this should be zero.
     pub sync_safekeepers_ms: u64,
+
+    /// Time it took to establish a pg connection to the pageserver.
+    /// This is two roundtrips, so it's a good proxy for compute-pageserver
+    /// latency. The latency is usually 0.2ms, but it's not safe to assume
+    /// that.
+    pub pageserver_connect_micros: u64,
+
+    /// Time to get basebackup from pageserver and write it to disk.
     pub basebackup_ms: u64,
+
+    /// Compressed size of basebackup received.
+    pub basebackup_bytes: u64,
+
+    /// Time spent starting potgres. This includes initialization of shared
+    /// buffers, preloading extensions, and other pg operations.
+    pub start_postgres_ms: u64,
+
+    /// Time spent applying pg catalog updates that were made in the console
+    /// UI. This should be 0 when startup time matters, since cplane tries
+    /// to do these updates eagerly, and passes the skip_pg_catalog_updates
+    /// when it's safe to skip this step.
     pub config_ms: u64,
+
+    /// Total time, from when we receive the spec to when we're ready to take
+    /// pg connections.
     pub total_startup_ms: u64,
+    pub load_ext_ms: u64,
+    pub num_ext_downloaded: u64,
+    pub largest_ext_size: u64, // these are measured in bytes
+    pub total_ext_download_size: u64,
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.

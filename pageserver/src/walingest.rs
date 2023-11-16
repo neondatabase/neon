@@ -25,7 +25,7 @@ use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
@@ -106,6 +106,10 @@ impl<'a> WalIngest<'a> {
             self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
                 .await?;
         }
+        if decoded.xl_rmid == pg_constants::RM_NEON_ID {
+            self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                .await?;
+        }
         // Handle other special record types
         if decoded.xl_rmid == pg_constants::RM_SMGR_ID
             && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
@@ -163,6 +167,32 @@ impl<'a> WalIngest<'a> {
                         .await?;
                 } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
                     == postgres_ffi::v15::bindings::XLOG_DBASE_DROP
+                {
+                    let dropdb = XlDropDatabase::decode(&mut buf);
+                    for tablespace_id in dropdb.tablespace_ids {
+                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                        modification
+                            .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                            .await?;
+                    }
+                }
+            } else if self.timeline.pg_version == 16 {
+                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG
+                {
+                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY
+                {
+                    // The XLOG record was renamed between v14 and v15,
+                    // but the record format is the same.
+                    // So we can reuse XlCreateDatabase here.
+                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                    let createdb = XlCreateDatabase::decode(&mut buf);
+                    self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                        .await?;
+                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
+                    == postgres_ffi::v16::bindings::XLOG_DBASE_DROP
                 {
                     let dropdb = XlDropDatabase::decode(&mut buf);
                     for tablespace_id in dropdb.tablespace_ids {
@@ -305,6 +335,24 @@ impl<'a> WalIngest<'a> {
                     self.checkpoint_modified = true;
                 }
             }
+        } else if decoded.xl_rmid == pg_constants::RM_LOGICALMSG_ID {
+            let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+            if info == pg_constants::XLOG_LOGICAL_MESSAGE {
+                let xlrec = XlLogicalMessage::decode(&mut buf);
+                let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
+                let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
+                if prefix == "neon-test" {
+                    // This is a convenient way to make the WAL ingestion pause at
+                    // particular point in the WAL. For more fine-grained control,
+                    // we could peek into the message and only pause if it contains
+                    // a particular string, for example, but this is enough for now.
+                    crate::failpoint_support::sleep_millis_async!(
+                        "wal-ingest-logical-message-sleep"
+                    );
+                } else if let Some(path) = prefix.strip_prefix("neon-file:") {
+                    modification.put_file(path, message, ctx).await?;
+                }
+            }
         }
 
         // Iterate through all the blocks that the record modifies, and
@@ -324,7 +372,7 @@ impl<'a> WalIngest<'a> {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit()?;
+        modification.commit(ctx).await?;
 
         Ok(())
     }
@@ -395,7 +443,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
+        decoded: &DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -405,57 +453,212 @@ impl<'a> WalIngest<'a> {
         // need to clear the corresponding bits in the visibility map.
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
-        if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
-            let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
-            if info == pg_constants::XLOG_HEAP_INSERT {
-                let xlrec = XlHeapInsert::decode(buf);
-                assert_eq!(0, buf.remaining());
-                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
-                    new_heap_blkno = Some(decoded.blocks[0].blkno);
-                }
-            } else if info == pg_constants::XLOG_HEAP_DELETE {
-                let xlrec = XlHeapDelete::decode(buf);
-                assert_eq!(0, buf.remaining());
-                if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
-                    new_heap_blkno = Some(decoded.blocks[0].blkno);
-                }
-            } else if info == pg_constants::XLOG_HEAP_UPDATE
-                || info == pg_constants::XLOG_HEAP_HOT_UPDATE
-            {
-                let xlrec = XlHeapUpdate::decode(buf);
-                // the size of tuple data is inferred from the size of the record.
-                // we can't validate the remaining number of bytes without parsing
-                // the tuple data.
-                if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
-                    old_heap_blkno = Some(decoded.blocks[0].blkno);
-                }
-                if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
-                    // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
-                    // non-HOT update where the new tuple goes to different page than
-                    // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
-                    // set.
-                    new_heap_blkno = Some(decoded.blocks[1].blkno);
-                }
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
-            let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
-            if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
-                let xlrec = XlHeapMultiInsert::decode(buf);
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
-                let offset_array_len = if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
-                    // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
-                    0
+        match self.timeline.pg_version {
+            14 => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v14::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v14::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v14::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v14::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v14::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v14::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
                 } else {
-                    std::mem::size_of::<u16>() * xlrec.ntuples as usize
-                };
-                assert_eq!(offset_array_len, buf.remaining());
-
-                if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
-                    new_heap_blkno = Some(decoded.blocks[0].blkno);
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
+            15 => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v15::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v15::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v15::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v15::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v15::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v15::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else {
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                }
+            }
+            16 => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v16::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v16::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v16::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v16::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v16::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v16::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else {
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                }
+            }
+            _ => {}
         }
-        // FIXME: What about XLOG_HEAP_LOCK and XLOG_HEAP2_LOCK_UPDATED?
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -499,7 +702,7 @@ impl<'a> WalIngest<'a> {
                         NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
                             old_heap_blkno,
-                            flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                            flags,
                         },
                         ctx,
                     )
@@ -515,7 +718,7 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno,
                                 old_heap_blkno: None,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
                             },
                             ctx,
                         )
@@ -529,7 +732,177 @@ impl<'a> WalIngest<'a> {
                             NeonWalRecord::ClearVisibilityMapFlags {
                                 new_heap_blkno: None,
                                 old_heap_blkno,
-                                flags: pg_constants::VISIBILITYMAP_VALID_BITS,
+                                flags,
+                            },
+                            ctx,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn ingest_neonrmgr_record(
+        &mut self,
+        buf: &mut Bytes,
+        modification: &mut DatadirModification<'_>,
+        decoded: &DecodedWALRecord,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        // Handle VM bit updates that are implicitly part of heap records.
+
+        // First, look at the record to determine which VM bits need
+        // to be cleared. If either of these variables is set, we
+        // need to clear the corresponding bits in the visibility map.
+        let mut new_heap_blkno: Option<u32> = None;
+        let mut old_heap_blkno: Option<u32> = None;
+        let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
+
+        assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
+
+        match self.timeline.pg_version {
+            16 => {
+                let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                match info {
+                    pg_constants::XLOG_NEON_HEAP_INSERT => {
+                        let xlrec = v16::rm_neon::XlNeonHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    }
+                    pg_constants::XLOG_NEON_HEAP_DELETE => {
+                        let xlrec = v16::rm_neon::XlNeonHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    }
+                    pg_constants::XLOG_NEON_HEAP_UPDATE
+                    | pg_constants::XLOG_NEON_HEAP_HOT_UPDATE => {
+                        let xlrec = v16::rm_neon::XlNeonHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    }
+                    pg_constants::XLOG_NEON_HEAP_MULTI_INSERT => {
+                        let xlrec = v16::rm_neon::XlNeonHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    }
+                    pg_constants::XLOG_NEON_HEAP_LOCK => {
+                        let xlrec = v16::rm_neon::XlNeonHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                    info => bail!("Unknown WAL record type for Neon RMGR: {}", info),
+                }
+            }
+            _ => bail!(
+                "Neon RMGR has no known compatibility with PostgreSQL version {}",
+                self.timeline.pg_version
+            ),
+        }
+
+        // Clear the VM bits if required.
+        if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
+            let vm_rel = RelTag {
+                forknum: VISIBILITYMAP_FORKNUM,
+                spcnode: decoded.blocks[0].rnode_spcnode,
+                dbnode: decoded.blocks[0].rnode_dbnode,
+                relnode: decoded.blocks[0].rnode_relnode,
+            };
+
+            let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+
+            // Sometimes, Postgres seems to create heap WAL records with the
+            // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
+            // not set. In fact, it's possible that the VM page does not exist at all.
+            // In that case, we don't want to store a record to clear the VM bit;
+            // replaying it would fail to find the previous image of the page, because
+            // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
+            // record if it doesn't.
+            let vm_size = self.get_relsize(vm_rel, modification.lsn, ctx).await?;
+            if let Some(blknum) = new_vm_blk {
+                if blknum >= vm_size {
+                    new_vm_blk = None;
+                }
+            }
+            if let Some(blknum) = old_vm_blk {
+                if blknum >= vm_size {
+                    old_vm_blk = None;
+                }
+            }
+
+            if new_vm_blk.is_some() || old_vm_blk.is_some() {
+                if new_vm_blk == old_vm_blk {
+                    // An UPDATE record that needs to clear the bits for both old and the
+                    // new page, both of which reside on the same VM page.
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        new_vm_blk.unwrap(),
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno,
+                            old_heap_blkno,
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
+                } else {
+                    // Clear VM bits for one heap page, or for two pages that reside on
+                    // different VM pages.
+                    if let Some(new_vm_blk) = new_vm_blk {
+                        self.put_rel_wal_record(
+                            modification,
+                            vm_rel,
+                            new_vm_blk,
+                            NeonWalRecord::ClearVisibilityMapFlags {
+                                new_heap_blkno,
+                                old_heap_blkno: None,
+                                flags,
+                            },
+                            ctx,
+                        )
+                        .await?;
+                    }
+                    if let Some(old_vm_blk) = old_vm_blk {
+                        self.put_rel_wal_record(
+                            modification,
+                            vm_rel,
+                            old_vm_blk,
+                            NeonWalRecord::ClearVisibilityMapFlags {
+                                new_heap_blkno: None,
+                                old_heap_blkno,
+                                flags,
                             },
                             ctx,
                         )
@@ -1073,7 +1446,10 @@ impl<'a> WalIngest<'a> {
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
-            modification.put_rel_creation(rel, 0, ctx).await?;
+            modification
+                .put_rel_creation(rel, 0, ctx)
+                .await
+                .context("Relation Error")?;
             0
         } else {
             self.timeline.get_rel_size(rel, last_lsn, true, ctx).await?
@@ -1162,7 +1538,6 @@ impl<'a> WalIngest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pgdatadir_mapping::create_test_timeline;
     use crate::tenant::harness::*;
     use crate::tenant::Timeline;
     use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
@@ -1191,7 +1566,7 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
-        m.commit()?;
+        m.commit(ctx).await?;
         let walingest = WalIngest::new(tline, Lsn(0x10), ctx).await?;
 
         Ok(walingest)
@@ -1200,7 +1575,9 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_relsize")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1208,22 +1585,22 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
@@ -1309,7 +1686,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 2, &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
@@ -1351,7 +1728,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 0, &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x68), false, &ctx)
@@ -1364,7 +1741,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x70), false, &ctx)
@@ -1389,7 +1766,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x80), false, &ctx)
@@ -1419,14 +1796,16 @@ mod tests {
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_drop_extend")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
@@ -1445,7 +1824,7 @@ mod tests {
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest.put_rel_drop(&mut m, TESTREL_A, &ctx).await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         // Check that rel is not visible anymore
         assert_eq!(
@@ -1463,7 +1842,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
@@ -1488,7 +1867,9 @@ mod tests {
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_truncate_extend")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1500,7 +1881,7 @@ mod tests {
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
                 .await?;
         }
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
@@ -1545,7 +1926,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 1, &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         // Check reported size and contents after truncation
         assert_eq!(
@@ -1594,7 +1975,7 @@ mod tests {
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
                 .await?;
         }
-        m.commit()?;
+        m.commit(&ctx).await?;
 
         assert_eq!(
             tline
@@ -1628,7 +2009,9 @@ mod tests {
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_large_rel")?.load().await;
-        let tline = create_test_timeline(&tenant, TIMELINE_ID, DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         let mut lsn = 0x10;
@@ -1639,7 +2022,7 @@ mod tests {
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &ctx)
                 .await?;
-            m.commit()?;
+            m.commit(&ctx).await?;
         }
 
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -1655,7 +2038,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE, &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
             RELSEG_SIZE
@@ -1668,7 +2051,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1, &ctx)
             .await?;
-        m.commit()?;
+        m.commit(&ctx).await?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
             RELSEG_SIZE - 1
@@ -1684,7 +2067,7 @@ mod tests {
             walingest
                 .put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber, &ctx)
                 .await?;
-            m.commit()?;
+            m.commit(&ctx).await?;
             assert_eq!(
                 tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
                 size as BlockNumber

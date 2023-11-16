@@ -14,12 +14,16 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
 
-@pytest.mark.timeout(600)
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     # Put data in vanilla pg
     vanilla_pg.start()
@@ -77,8 +81,9 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     timeline = TimelineId.generate()
 
     # Set up pageserver for import
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
+
     client = env.pageserver.http_client()
     client.tenant_create(tenant)
 
@@ -130,11 +135,11 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Importing empty file fails
     empty_file = os.path.join(test_output_dir, "empty_file")
     with open(empty_file, "w") as _:
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             import_tar(empty_file, empty_file)
 
     # Importing corrupt backup fails
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         import_tar(corrupt_base_tar, wal_tar)
 
     # A tar with trailing garbage is currently accepted. It prints a warnings
@@ -143,7 +148,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     assert env.pageserver.log_contains(
         ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
     )
-    client.timeline_delete(tenant, timeline)
+
+    timeline_delete_wait_completed(client, tenant, timeline)
 
     # Importing correct backup works
     import_tar(base_tar, wal_tar)
@@ -157,9 +163,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
 
-@pytest.mark.timeout(600)
 def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     # FIXME: Is this expected?
@@ -181,7 +186,7 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
 # @pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
 @pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2255")
 def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_local_fs_remote_storage()
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_multisegment")
@@ -266,7 +271,7 @@ def _import(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 

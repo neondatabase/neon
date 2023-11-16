@@ -1,4 +1,4 @@
-//! This module contains global (tenant_id, timeline_id) -> Arc<Timeline> mapping.
+//! This module contains global `(tenant_id, timeline_id)` -> `Arc<Timeline>` mapping.
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
@@ -6,12 +6,12 @@ use crate::safekeeper::ServerInfo;
 use crate::timeline::{Timeline, TimelineError};
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
+use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
 use tracing::*;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
@@ -71,21 +71,25 @@ pub struct GlobalTimelines;
 
 impl GlobalTimelines {
     /// Inject dependencies needed for the timeline constructors and load all timelines to memory.
-    pub fn init(
+    pub async fn init(
         conf: SafeKeeperConf,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
     ) -> Result<()> {
-        let mut state = TIMELINES_STATE.lock().unwrap();
-        assert!(state.wal_backup_launcher_tx.is_none());
-        state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
-        state.conf = Some(conf);
+        // clippy isn't smart enough to understand that drop(state) releases the
+        // lock, so use explicit block
+        let tenants_dir = {
+            let mut state = TIMELINES_STATE.lock().unwrap();
+            assert!(state.wal_backup_launcher_tx.is_none());
+            state.wal_backup_launcher_tx = Some(wal_backup_launcher_tx);
+            state.conf = Some(conf);
 
-        // Iterate through all directories and load tenants for all directories
-        // named as a valid tenant_id.
+            // Iterate through all directories and load tenants for all directories
+            // named as a valid tenant_id.
+            state.get_conf().workdir.clone()
+        };
         let mut tenant_count = 0;
-        let tenants_dir = state.get_conf().workdir.clone();
         for tenants_dir_entry in std::fs::read_dir(&tenants_dir)
-            .with_context(|| format!("failed to list tenants dir {}", tenants_dir.display()))?
+            .with_context(|| format!("failed to list tenants dir {}", tenants_dir))?
         {
             match &tenants_dir_entry {
                 Ok(tenants_dir_entry) => {
@@ -93,14 +97,12 @@ impl GlobalTimelines {
                         TenantId::from_str(tenants_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         tenant_count += 1;
-                        GlobalTimelines::load_tenant_timelines(&mut state, tenant_id)?;
+                        GlobalTimelines::load_tenant_timelines(tenant_id).await?;
                     }
                 }
                 Err(e) => error!(
                     "failed to list tenants dir entry {:?} in directory {}, reason: {:?}",
-                    tenants_dir_entry,
-                    tenants_dir.display(),
-                    e
+                    tenants_dir_entry, tenants_dir, e
                 ),
             }
         }
@@ -108,19 +110,31 @@ impl GlobalTimelines {
         info!(
             "found {} tenants directories, successfully loaded {} timelines",
             tenant_count,
-            state.timelines.len()
+            TIMELINES_STATE.lock().unwrap().timelines.len()
         );
         Ok(())
     }
 
-    /// Loads all timelines for the given tenant to memory. Returns fs::read_dir errors if any.
-    fn load_tenant_timelines(
-        state: &mut MutexGuard<GlobalTimelinesState>,
-        tenant_id: TenantId,
-    ) -> Result<()> {
-        let timelines_dir = state.get_conf().tenant_dir(&tenant_id);
+    /// Loads all timelines for the given tenant to memory. Returns fs::read_dir
+    /// errors if any.
+    ///
+    /// It is async for update_status_notify sake. Since TIMELINES_STATE lock is
+    /// sync and there is no important reason to make it async (it is always
+    /// held for a short while) we just lock and unlock it for each timeline --
+    /// this function is called during init when nothing else is running, so
+    /// this is fine.
+    async fn load_tenant_timelines(tenant_id: TenantId) -> Result<()> {
+        let (conf, wal_backup_launcher_tx) = {
+            let state = TIMELINES_STATE.lock().unwrap();
+            (
+                state.get_conf().clone(),
+                state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
+            )
+        };
+
+        let timelines_dir = conf.tenant_dir(&tenant_id);
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
-            .with_context(|| format!("failed to list timelines dir {}", timelines_dir.display()))?
+            .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
         {
             match &timelines_dir_entry {
                 Ok(timeline_dir_entry) => {
@@ -128,13 +142,16 @@ impl GlobalTimelines {
                         TimelineId::from_str(timeline_dir_entry.file_name().to_str().unwrap_or(""))
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
-                        match Timeline::load_timeline(
-                            state.get_conf().clone(),
-                            ttid,
-                            state.wal_backup_launcher_tx.as_ref().unwrap().clone(),
-                        ) {
+                        match Timeline::load_timeline(&conf, ttid, wal_backup_launcher_tx.clone()) {
                             Ok(timeline) => {
-                                state.timelines.insert(ttid, Arc::new(timeline));
+                                let tli = Arc::new(timeline);
+                                TIMELINES_STATE
+                                    .lock()
+                                    .unwrap()
+                                    .timelines
+                                    .insert(ttid, tli.clone());
+                                tli.bootstrap(&conf);
+                                tli.update_status_notify().await.unwrap();
                             }
                             // If we can't load a timeline, it's most likely because of a corrupted
                             // directory. We will log an error and won't allow to delete/recreate
@@ -149,9 +166,7 @@ impl GlobalTimelines {
                 }
                 Err(e) => error!(
                     "failed to list timelines dir entry {:?} in directory {}, reason: {:?}",
-                    timelines_dir_entry,
-                    timelines_dir.display(),
-                    e
+                    timelines_dir_entry, timelines_dir, e
                 ),
             }
         }
@@ -160,18 +175,22 @@ impl GlobalTimelines {
     }
 
     /// Load timeline from disk to the memory.
-    pub fn load_timeline(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+    pub async fn load_timeline(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
         let (conf, wal_backup_launcher_tx) = TIMELINES_STATE.lock().unwrap().get_dependencies();
 
-        match Timeline::load_timeline(conf, ttid, wal_backup_launcher_tx) {
+        match Timeline::load_timeline(&conf, ttid, wal_backup_launcher_tx) {
             Ok(timeline) => {
                 let tli = Arc::new(timeline);
+
                 // TODO: prevent concurrent timeline creation/loading
                 TIMELINES_STATE
                     .lock()
                     .unwrap()
                     .timelines
                     .insert(ttid, tli.clone());
+
+                tli.bootstrap(&conf);
+
                 Ok(tli)
             }
             // If we can't load a timeline, it's bad. Caller will figure it out.
@@ -209,7 +228,7 @@ impl GlobalTimelines {
         info!("creating new timeline {}", ttid);
 
         let timeline = Arc::new(Timeline::create_empty(
-            conf,
+            &conf,
             ttid,
             wal_backup_launcher_tx,
             server_info,
@@ -220,7 +239,7 @@ impl GlobalTimelines {
         // Take a lock and finish the initialization holding this mutex. No other threads
         // can interfere with creation after we will insert timeline into the map.
         {
-            let mut shared_state = timeline.write_shared_state();
+            let mut shared_state = timeline.write_shared_state().await;
 
             // We can get a race condition here in case of concurrent create calls, but only
             // in theory. create() will return valid timeline on the next try.
@@ -232,23 +251,24 @@ impl GlobalTimelines {
             // Write the new timeline to the disk and start background workers.
             // Bootstrap is transactional, so if it fails, the timeline will be deleted,
             // and the state on disk should remain unchanged.
-            if let Err(e) = timeline.bootstrap(&mut shared_state) {
-                // Note: the most likely reason for bootstrap failure is that the timeline
+            if let Err(e) = timeline.init_new(&mut shared_state, &conf).await {
+                // Note: the most likely reason for init failure is that the timeline
                 // directory already exists on disk. This happens when timeline is corrupted
                 // and wasn't loaded from disk on startup because of that. We want to preserve
                 // the timeline directory in this case, for further inspection.
 
                 // TODO: this is an unusual error, perhaps we should send it to sentry
                 // TODO: compute will try to create timeline every second, we should add backoff
-                error!("failed to bootstrap timeline {}: {}", ttid, e);
+                error!("failed to init new timeline {}: {}", ttid, e);
 
-                // Timeline failed to bootstrap, it cannot be used. Remove it from the map.
+                // Timeline failed to init, it cannot be used. Remove it from the map.
                 TIMELINES_STATE.lock().unwrap().timelines.remove(&ttid);
                 return Err(e);
             }
             // We are done with bootstrap, release the lock, return the timeline.
             // {} block forces release before .await
         }
+        timeline.update_status_notify().await?;
         timeline.wal_backup_launcher_tx.send(timeline.ttid).await?;
         Ok(timeline)
     }
@@ -276,8 +296,8 @@ impl GlobalTimelines {
         global_lock
             .timelines
             .values()
-            .cloned()
             .filter(|t| !t.is_cancelled())
+            .cloned()
             .collect()
     }
 
@@ -294,15 +314,16 @@ impl GlobalTimelines {
     }
 
     /// Cancels timeline, then deletes the corresponding data directory.
-    pub fn delete_force(ttid: &TenantTimelineId) -> Result<TimelineDeleteForceResult> {
+    pub async fn delete_force(ttid: &TenantTimelineId) -> Result<TimelineDeleteForceResult> {
         let tli_res = TIMELINES_STATE.lock().unwrap().get(ttid);
         match tli_res {
             Ok(timeline) => {
                 // Take a lock and finish the deletion holding this mutex.
-                let mut shared_state = timeline.write_shared_state();
+                let mut shared_state = timeline.write_shared_state().await;
 
                 info!("deleting timeline {}", ttid);
-                let (dir_existed, was_active) = timeline.delete_from_disk(&mut shared_state)?;
+                let (dir_existed, was_active) =
+                    timeline.delete_from_disk(&mut shared_state).await?;
 
                 // Remove timeline from the map.
                 // FIXME: re-enable it once we fix the issue with recreation of deleted timelines
@@ -335,7 +356,7 @@ impl GlobalTimelines {
     /// the tenant had, `true` if a timeline was active. There may be a race if new timelines are
     /// created simultaneously. In that case the function will return error and the caller should
     /// retry tenant deletion again later.
-    pub fn delete_force_all_for_tenant(
+    pub async fn delete_force_all_for_tenant(
         tenant_id: &TenantId,
     ) -> Result<HashMap<TenantTimelineId, TimelineDeleteForceResult>> {
         info!("deleting all timelines for tenant {}", tenant_id);
@@ -345,7 +366,7 @@ impl GlobalTimelines {
 
         let mut deleted = HashMap::new();
         for tli in &to_delete {
-            match Self::delete_force(&tli.ttid) {
+            match Self::delete_force(&tli.ttid).await {
                 Ok(result) => {
                     deleted.insert(tli.ttid, result);
                 }
@@ -396,7 +417,7 @@ pub struct TimelineDeleteForceResult {
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
-fn delete_dir(path: PathBuf) -> Result<bool> {
+fn delete_dir(path: Utf8PathBuf) -> Result<bool> {
     match std::fs::remove_dir_all(path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),

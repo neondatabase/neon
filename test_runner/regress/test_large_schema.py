@@ -74,9 +74,9 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     cur.execute("select * from pg_depend order by refclassid, refobjid, refobjsubid")
 
     # Check layer file sizes
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
-    timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant_id, timeline_id)
+    timeline_path = "{}/tenants/{}/timelines/{}/".format(
+        env.pageserver.workdir, env.initial_tenant, env.initial_timeline
+    )
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
             log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")

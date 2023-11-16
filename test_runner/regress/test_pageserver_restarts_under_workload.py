@@ -17,12 +17,6 @@ def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgB
     n_restarts = 10
     scale = 10
 
-    # the background task may complete the init task delay after finding an
-    # active tenant, but shutdown starts right before Tenant::gc_iteration
-    env.pageserver.allowed_errors.append(
-        r".*Gc failed, retrying in \S+: Cannot run GC iteration on inactive tenant"
-    )
-
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
@@ -31,7 +25,7 @@ def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgB
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
     thread.start()
 
-    for i in range(n_restarts):
+    for _ in range(n_restarts):
         # Stop the pageserver gracefully and restart it.
         time.sleep(1)
         env.pageserver.stop()

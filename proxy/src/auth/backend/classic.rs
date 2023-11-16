@@ -1,20 +1,24 @@
-use super::AuthSuccess;
+use super::{AuthSuccess, ComputeCredentials};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
-    console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
+    config::AuthenticationConfig,
+    console::{self, AuthInfo, ConsoleReqExtra},
+    proxy::LatencyTimer,
     sasl, scram,
     stream::PqStream,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{info, warn};
 
 pub(super) async fn authenticate(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     info!("fetching user's authentication info");
     let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
@@ -33,7 +37,29 @@ pub(super) async fn authenticate(
         AuthInfo::Scram(secret) => {
             info!("auth endpoint chooses SCRAM");
             let scram = auth::Scram(&secret);
-            let client_key = match flow.begin(scram).await?.authenticate().await? {
+
+            let auth_outcome = tokio::time::timeout(
+                config.scram_protocol_timeout,
+                async {
+                    // pause the timer while we communicate with the client
+                    let _paused = latency_timer.pause();
+
+                    flow.begin(scram).await.map_err(|error| {
+                        warn!(?error, "error sending scram acknowledgement");
+                        error
+                    })?.authenticate().await.map_err(|error| {
+                        warn!(?error, "error processing scram messages");
+                        error
+                    })
+                }
+            )
+            .await
+            .map_err(|error| {
+                warn!("error processing scram messages error = authentication timed out, execution time exeeded {} seconds", config.scram_protocol_timeout.as_secs());
+                auth::io::Error::new(auth::io::ErrorKind::TimedOut, error)
+            })??;
+
+            let client_key = match auth_outcome {
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
@@ -41,21 +67,17 @@ pub(super) async fn authenticate(
                 }
             };
 
-            Some(compute::ScramKeys {
+            compute::ScramKeys {
                 client_key: client_key.as_bytes(),
                 server_key: secret.server_key.as_bytes(),
-            })
+            }
         }
     };
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    if let Some(keys) = scram_keys {
-        use tokio_postgres::config::AuthKeys;
-        node.config.auth_keys(AuthKeys::ScramSha256(keys));
-    }
-
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: node,
+        value: ComputeCredentials::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
+            scram_keys,
+        )),
     })
 }

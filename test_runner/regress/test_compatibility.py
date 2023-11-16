@@ -2,8 +2,9 @@ import copy
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import pytest
 import toml  # TODO: replace with tomllib for Python >= 3.11
@@ -12,11 +13,16 @@ from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
     PgBin,
-    PortDistributor,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, RemoteStorageUser
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -34,6 +40,54 @@ from pytest import FixtureRequest
 # - prepare_snapshot copies the snapshot, cleans it up and makes it ready for the current version of Neon (replaces paths and ports in config files).
 # - check_neon_works performs the test itself, feel free to add more checks there.
 #
+#
+# How to run `test_backward_compatibility` locally:
+#
+#    export DEFAULT_PG_VERSION=15
+#    export BUILD_TYPE=release
+#    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#
+#    # Build previous version of binaries and create a data snapshot:
+#    rm -rf pg_install target
+#    git checkout <previous version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    ./scripts/pytest -k test_create_snapshot
+#
+#    # Build current version of binaries
+#    rm -rf pg_install target
+#    git checkout <current version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#
+#    # Run backward compatibility test
+#    COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION} \
+#       ./scripts/pytest -k test_backward_compatibility
+#
+#
+# How to run `test_forward_compatibility` locally:
+#
+#    export DEFAULT_PG_VERSION=15
+#    export BUILD_TYPE=release
+#    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#
+#    # Build previous version of binaries and store them somewhere:
+#    rm -rf pg_install target
+#    git checkout <previous version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    mkdir -p neon_previous/target
+#    cp -a target/${BUILD_TYPE} ./neon_previous/target/${BUILD_TYPE}
+#    cp -a pg_install ./neon_previous/pg_install
+#
+#    # Build current version of binaries and create a data snapshot:
+#    rm -rf pg_install target
+#    git checkout <current version>
+#    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
+#    ./scripts/pytest -k test_create_snapshot
+#
+#    # Run forward compatibility test
+#    COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE} \
+#    COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install \
+#       ./scripts/pytest -k test_forward_compatibility
+#
 
 check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     os.environ.get("CHECK_ONDISK_DATA_COMPATIBILITY") is None,
@@ -41,20 +95,22 @@ check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
 )
 
 
-# Note: if renaming this test, don't forget to update a reference to it in a workflow file:
-# "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
-@check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
-def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):
+def test_create_snapshot(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    top_output_dir: Path,
+    test_output_dir: Path,
+    pg_version: PgVersion,
+):
     # The test doesn't really test anything
     # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`.
     #
     # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
-    neon_env_builder.pg_version = PgVersion.V14
+    neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_local_fs_remote_storage()
-    neon_env_builder.preserve_database_files = True
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
@@ -64,9 +120,9 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    pg_bin.run(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
-    pg_bin.run(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
-    pg_bin.run(
+    pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
     )
 
@@ -86,8 +142,13 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
         sk.stop()
     env.pageserver.stop()
 
-    shutil.copytree(test_output_dir, test_output_dir / "compatibility_snapshot_pg14")
-    # Directory `test_output_dir / "compatibility_snapshot_pg14"` is uploaded to S3 in a workflow, keep the name in sync with it
+    # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
+    compatibility_snapshot_dir = (
+        top_output_dir / f"compatibility_snapshot_pg{pg_version.v_prefixed}"
+    )
+    if compatibility_snapshot_dir.exists():
+        shutil.rmtree(compatibility_snapshot_dir)
+    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -108,7 +169,7 @@ def test_backward_compatibility(
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert (
         compatibility_snapshot_dir_env is not None
-    ), "COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot_pg14` path generateted by test_create_snapshot (ideally generated by the previous version of Neon)"
+    ), f"COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot_pg{pg_version.v_prefixed}` path generateted by test_create_snapshot (ideally generated by the previous version of Neon)"
     compatibility_snapshot_dir = Path(compatibility_snapshot_dir_env).resolve()
 
     breaking_changes_allowed = (
@@ -120,7 +181,6 @@ def test_backward_compatibility(
         prepare_snapshot(
             from_dir=compatibility_snapshot_dir,
             to_dir=test_output_dir / "compatibility_snapshot",
-            neon_binpath=neon_binpath,
             port_distributor=port_distributor,
         )
 
@@ -153,6 +213,7 @@ def test_backward_compatibility(
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
     test_output_dir: Path,
+    top_output_dir: Path,
     port_distributor: PortDistributor,
     pg_version: PgVersion,
     request: FixtureRequest,
@@ -175,7 +236,7 @@ def test_forward_compatibility(
     compatibility_postgres_distrib_dir = Path(compatibility_postgres_distrib_dir_env).resolve()
 
     compatibility_snapshot_dir = (
-        test_output_dir.parent / "test_create_snapshot" / "compatibility_snapshot_pg14"
+        top_output_dir / f"compatibility_snapshot_pg{pg_version.v_prefixed}"
     )
 
     breaking_changes_allowed = (
@@ -188,7 +249,6 @@ def test_forward_compatibility(
             from_dir=compatibility_snapshot_dir,
             to_dir=test_output_dir / "compatibility_snapshot",
             port_distributor=port_distributor,
-            neon_binpath=compatibility_neon_bin,
             pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
 
@@ -220,7 +280,6 @@ def prepare_snapshot(
     from_dir: Path,
     to_dir: Path,
     port_distributor: PortDistributor,
-    neon_binpath: Path,
     pg_distrib_dir: Optional[Path] = None,
 ):
     assert from_dir.exists(), f"Snapshot '{from_dir}' doesn't exist"
@@ -231,6 +290,9 @@ def prepare_snapshot(
     shutil.copytree(from_dir, to_dir)
 
     repo_dir = to_dir / "repo"
+
+    snapshot_config_toml = repo_dir / "config"
+    snapshot_config = toml.load(snapshot_config_toml)
 
     # Remove old logs to avoid confusion in test artifacts
     for logfile in repo_dir.glob("**/*.log"):
@@ -244,72 +306,60 @@ def prepare_snapshot(
         shutil.rmtree(repo_dir / "pgdatadirs")
     os.mkdir(repo_dir / "endpoints")
 
-    # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
-    # them anymore, but old versions did.
-    for tenant in (repo_dir / "tenants").glob("*"):
-        wal_redo_dir = tenant / "wal-redo-datadir.___temp"
-        if wal_redo_dir.exists() and wal_redo_dir.is_dir():
-            shutil.rmtree(wal_redo_dir)
-
     # Update paths and ports in config files
-    pageserver_toml = repo_dir / "pageserver.toml"
-    pageserver_config = toml.load(pageserver_toml)
-    pageserver_config["remote_storage"]["local_path"] = str(repo_dir / "local_fs_remote_storage")
-    pageserver_config["listen_http_addr"] = port_distributor.replace_with_new_port(
-        pageserver_config["listen_http_addr"]
-    )
-    pageserver_config["listen_pg_addr"] = port_distributor.replace_with_new_port(
-        pageserver_config["listen_pg_addr"]
-    )
-    # since storage_broker these are overriden by neon_local during pageserver
-    # start; remove both to prevent unknown options during etcd ->
-    # storage_broker migration. TODO: remove once broker is released
-    pageserver_config.pop("broker_endpoint", None)
-    pageserver_config.pop("broker_endpoints", None)
-    etcd_broker_endpoints = [f"http://localhost:{port_distributor.get_port()}/"]
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
+    legacy_pageserver_toml = repo_dir / "pageserver.toml"
+    legacy_bundle = os.path.exists(legacy_pageserver_toml)
 
-    # Older pageserver versions had just one `auth_type` setting. Now there
-    # are separate settings for pg and http ports. We don't use authentication
-    # in compatibility tests so just remove authentication related settings.
-    pageserver_config.pop("auth_type", None)
-    pageserver_config.pop("pg_auth_type", None)
-    pageserver_config.pop("http_auth_type", None)
-
-    if pg_distrib_dir:
-        pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
-
-    with pageserver_toml.open("w") as f:
-        toml.dump(pageserver_config, f)
-
-    snapshot_config_toml = repo_dir / "config"
-    snapshot_config = toml.load(snapshot_config_toml)
-
-    # Provide up/downgrade etcd <-> storage_broker to make forward/backward
-    # compatibility test happy. TODO: leave only the new part once broker is released.
-    if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
-        # old etcd version
-        snapshot_config["etcd_broker"] = {
-            "etcd_binary_path": shutil.which("etcd"),
-            "broker_endpoints": etcd_broker_endpoints,
-        }
-        snapshot_config.pop("broker", None)
+    path_to_config: dict[Path, dict[Any, Any]] = {}
+    if legacy_bundle:
+        os.mkdir(repo_dir / "pageserver_1")
+        path_to_config[repo_dir / "pageserver_1" / "pageserver.toml"] = toml.load(
+            legacy_pageserver_toml
+        )
+        os.remove(legacy_pageserver_toml)
+        os.rename(repo_dir / "tenants", repo_dir / "pageserver_1" / "tenants")
     else:
-        # new storage_broker version
-        broker_listen_addr = f"127.0.0.1:{port_distributor.get_port()}"
-        snapshot_config["broker"] = {"listen_addr": broker_listen_addr}
-        snapshot_config.pop("etcd_broker", None)
+        for ps_conf in snapshot_config["pageservers"]:
+            config_path = repo_dir / f"pageserver_{ps_conf['id']}" / "pageserver.toml"
+            path_to_config[config_path] = toml.load(config_path)
 
-    snapshot_config["pageserver"]["listen_http_addr"] = port_distributor.replace_with_new_port(
-        snapshot_config["pageserver"]["listen_http_addr"]
-    )
-    snapshot_config["pageserver"]["listen_pg_addr"] = port_distributor.replace_with_new_port(
-        snapshot_config["pageserver"]["listen_pg_addr"]
+    # For each pageserver config, edit it and rewrite
+    for config_path, pageserver_config in path_to_config.items():
+        pageserver_config["remote_storage"]["local_path"] = str(
+            LocalFsStorage.component_path(repo_dir, RemoteStorageUser.PAGESERVER)
+        )
+
+        for param in ("listen_http_addr", "listen_pg_addr", "broker_endpoint"):
+            pageserver_config[param] = port_distributor.replace_with_new_port(
+                pageserver_config[param]
+            )
+
+        # We don't use authentication in compatibility tests
+        # so just remove authentication related settings.
+        pageserver_config.pop("pg_auth_type", None)
+        pageserver_config.pop("http_auth_type", None)
+
+        if pg_distrib_dir:
+            pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
+
+        with config_path.open("w") as f:
+            toml.dump(pageserver_config, f)
+
+    # neon_local config doesn't have to be backward compatible.  If we're using a dump from before
+    # it supported multiple pageservers, fix it up.
+    if "pageservers" not in snapshot_config:
+        snapshot_config["pageservers"] = [snapshot_config["pageserver"]]
+        del snapshot_config["pageserver"]
+
+    for param in ("listen_http_addr", "listen_pg_addr"):
+        for pageserver in snapshot_config["pageservers"]:
+            pageserver[param] = port_distributor.replace_with_new_port(pageserver[param])
+    snapshot_config["broker"]["listen_addr"] = port_distributor.replace_with_new_port(
+        snapshot_config["broker"]["listen_addr"]
     )
     for sk in snapshot_config["safekeepers"]:
-        sk["http_port"] = port_distributor.replace_with_new_port(sk["http_port"])
-        sk["pg_port"] = port_distributor.replace_with_new_port(sk["pg_port"])
+        for param in ("http_port", "pg_port", "pg_tenant_only_port"):
+            sk[param] = port_distributor.replace_with_new_port(sk[param])
 
     if pg_distrib_dir:
         snapshot_config["pg_distrib_dir"] = str(pg_distrib_dir)
@@ -333,12 +383,6 @@ def prepare_snapshot(
     assert (
         rv.returncode != 0
     ), f"there're files referencing `test_create_snapshot/repo`, this path should be replaced with {repo_dir}:\n{rv.stdout}"
-
-
-# get git SHA of neon binary
-def get_neon_version(neon_binpath: Path):
-    out = subprocess.check_output([neon_binpath / "neon_local", "--version"]).decode("utf-8")
-    return out.split("git:", 1)[1].rstrip()
 
 
 def check_neon_works(
@@ -366,14 +410,22 @@ def check_neon_works(
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
-    config.preserve_database_files = True
+    config.remote_storage = None
+    config.ext_remote_storage = None
+    config.sk_remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config
     config_target.neon_binpath = neon_target_binpath
+    # We are using maybe-old binaries for neon services, but want to use current
+    # binaries for test utilities like neon_local
+    config_target.neon_local_binpath = neon_current_binpath
     cli_target = NeonCli(config_target)
 
     # And the current binaries to launch computes
+    snapshot_config["neon_distrib_dir"] = str(neon_current_binpath)
+    with (snapshot_config_toml).open("w") as f:
+        toml.dump(snapshot_config, f)
     config_current = copy.copy(config)
     config_current.neon_binpath = neon_current_binpath
     cli_current = NeonCli(config_current)
@@ -382,11 +434,14 @@ def check_neon_works(
     request.addfinalizer(lambda: cli_target.raw_cli(["stop"]))
 
     pg_port = port_distributor.get_port()
-    cli_current.endpoint_start("main", port=pg_port)
+    http_port = port_distributor.get_port()
+    cli_current.endpoint_start("main", pg_port=pg_port, http_port=http_port)
     request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
-    pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])
+    pg_bin.run_capture(
+        ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
     initial_dump_differs = dump_differs(
         repo_dir.parent / "dump.sql",
         test_output_dir / "dump.sql",
@@ -394,19 +449,19 @@ def check_neon_works(
     )
 
     # Check that project can be recovered from WAL
-    # loosely based on https://github.com/neondatabase/cloud/wiki/Recovery-from-WAL
+    # loosely based on https://www.notion.so/neondatabase/Storage-Recovery-from-WAL-d92c0aac0ebf40df892b938045d7d720
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
-    pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
+    pageserver_port = snapshot_config["pageservers"][0]["listen_http_addr"].split(":")[-1]
     pageserver_http = PageserverHttpClient(
         port=pageserver_port,
         is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
     )
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
-    pageserver_http.timeline_delete(tenant_id, timeline_id)
+    timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
     pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
-    pg_bin.run(
+    pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
     # The assert itself deferred to the end of the test
@@ -417,21 +472,28 @@ def check_neon_works(
         test_output_dir / "dump-from-wal.filediff",
     )
 
+    pg_bin.run_capture(["pg_amcheck", connstr, "--install-missing", "--verbose"])
+
     # Check that we can interract with the data
-    pg_bin.run(["pgbench", "--time=10", "--progress=2", connstr])
+    pg_bin.run_capture(["pgbench", "--time=10", "--progress=2", connstr])
 
     assert not dump_from_wal_differs, "dump from WAL differs"
     assert not initial_dump_differs, "initial dump differs"
 
 
-def dump_differs(first: Path, second: Path, output: Path) -> bool:
+def dump_differs(
+    first: Path, second: Path, output: Path, allowed_diffs: Optional[List[str]] = None
+) -> bool:
     """
     Runs diff(1) command on two SQL dumps and write the output to the given output file.
-    Returns True if the dumps differ, False otherwise.
+    The function supports allowed diffs, if the diff is in the allowed_diffs list, it's not considered as a difference.
+    See the example of it in https://github.com/neondatabase/neon/pull/4425/files#diff-15c5bfdd1d5cc1411b9221091511a60dd13a9edf672bdfbb57dd2ef8bb7815d6
+
+    Returns True if the dumps differ and produced diff is not allowed, False otherwise (in most cases we want it to return False).
     """
 
     with output.open("w") as stdout:
-        rv = subprocess.run(
+        res = subprocess.run(
             [
                 "diff",
                 "--unified",  # Make diff output more readable
@@ -443,4 +505,32 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
             stdout=stdout,
         )
 
-    return rv.returncode != 0
+    differs = res.returncode != 0
+
+    allowed_diffs = allowed_diffs or []
+    if differs and len(allowed_diffs) > 0:
+        for allowed_diff in allowed_diffs:
+            with tempfile.NamedTemporaryFile(mode="w") as tmp:
+                tmp.write(allowed_diff)
+                tmp.flush()
+
+                allowed = subprocess.run(
+                    [
+                        "diff",
+                        "--unified",  # Make diff output more readable
+                        r"--ignore-matching-lines=^---",  # Ignore diff headers
+                        r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
+                        "--ignore-matching-lines=^@@",  # Ignore diff blocks location
+                        "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
+                        "--ignore-matching-lines=^ --.*",  # Ignore SQL comments in diff
+                        "--ignore-blank-lines",
+                        str(output),
+                        str(tmp.name),
+                    ],
+                )
+
+                differs = allowed.returncode != 0
+                if not differs:
+                    break
+
+    return differs

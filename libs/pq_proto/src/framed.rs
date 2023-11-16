@@ -5,11 +5,11 @@
 //! It is similar to what tokio_util::codec::Framed with appropriate codec
 //! provides, but `FramedReader` and `FramedWriter` read/write parts can be used
 //! separately without using split from futures::stream::StreamExt (which
-//! allocates box[1] in polling internally). tokio::io::split is used for splitting
+//! allocates a [Box] in polling internally). tokio::io::split is used for splitting
 //! instead. Plus we customize error messages more than a single type for all io
 //! calls.
 //!
-//! [1] https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
+//! [Box]: https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
 use bytes::{Buf, BytesMut};
 use std::{
     future::Future,
@@ -117,7 +117,7 @@ impl<S: AsyncWrite + Unpin> Framed<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> Framed<S> {
     /// Split into owned read and write parts. Beware of potential issues with
     /// using halves in different tasks on TLS stream:
-    /// https://github.com/tokio-rs/tls/issues/40
+    /// <https://github.com/tokio-rs/tls/issues/40>
     pub fn split(self) -> (FramedReader<S>, FramedWriter<S>) {
         let (read_half, write_half) = tokio::io::split(self.stream);
         let reader = FramedReader {
@@ -214,27 +214,24 @@ where
     }
 }
 
+/// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn flush<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,
 ) -> Result<(), io::Error> {
     while write_buf.has_remaining() {
-        let bytes_written = stream.write(write_buf.chunk()).await?;
+        let bytes_written = stream.write_buf(write_buf).await?;
         if bytes_written == 0 {
             return Err(io::Error::new(
                 ErrorKind::WriteZero,
                 "failed to write message",
             ));
         }
-        // The advanced part will be garbage collected, likely during shifting
-        // data left on next attempt to write to buffer when free space is not
-        // enough.
-        write_buf.advance(bytes_written);
     }
-    write_buf.clear();
     stream.flush().await
 }
 
+/// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn shutdown<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,

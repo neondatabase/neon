@@ -7,14 +7,18 @@
 //! must be page images or WAL records with the 'will_init' flag set, so that
 //! they can be replayed without referring to an older page version.
 //!
-//! The delta files are stored in timelines/<timeline_id> directory.  Currently,
+//! The delta files are stored in `timelines/<timeline_id>` directory.  Currently,
 //! there are no subdirectories, and each delta file is named like this:
 //!
-//!    <key start>-<key end>__<start LSN>-<end LSN
+//! ```text
+//!    <key start>-<key end>__<start LSN>-<end LSN>
+//! ```
 //!
 //! For example:
 //!
+//! ```text
 //!    000000067F000032BE0000400000000020B6-000000067F000032BE0000400000000030B6__000000578C6B29-0000000057A50051
+//! ```
 //!
 //! Every delta file consists of three parts: "summary", "index", and
 //! "values". The summary is a fixed size header at the beginning of the file,
@@ -24,29 +28,28 @@
 //! "values" part.
 //!
 use crate::config::PageServerConf;
-use crate::context::RequestContext;
-use crate::page_cache::{PageReadGuard, PAGE_SZ};
+use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
+use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value, KEY_SIZE};
-use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
-use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
+use crate::tenant::blob_io::BlobWriter;
+use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{
-    PersistentLayer, ValueReconstructResult, ValueReconstructState,
-};
+use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::Timeline;
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
+use camino::{Utf8Path, Utf8PathBuf};
+use pageserver_api::models::LayerAccessKind;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
-use std::io::{Seek, SeekFrom};
+use std::fs::File;
+use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tracing::*;
 
 use utils::{
@@ -55,10 +58,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{
-    DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerFileName, LayerIter,
-    LayerKeyIter, PathOrConf,
-};
+use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer};
 
 ///
 /// Header stored in the beginning of the file
@@ -85,14 +85,30 @@ pub struct Summary {
 
 impl From<&DeltaLayer> for Summary {
     fn from(layer: &DeltaLayer) -> Self {
+        Self::expected(
+            layer.desc.tenant_id,
+            layer.desc.timeline_id,
+            layer.desc.key_range.clone(),
+            layer.desc.lsn_range.clone(),
+        )
+    }
+}
+
+impl Summary {
+    pub(super) fn expected(
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        keys: Range<Key>,
+        lsns: Range<Lsn>,
+    ) -> Self {
         Self {
             magic: DELTA_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
 
-            tenant_id: layer.tenant_id,
-            timeline_id: layer.timeline_id,
-            key_range: layer.key_range.clone(),
-            lsn_range: layer.lsn_range.clone(),
+            tenant_id,
+            timeline_id,
+            key_range: keys,
+            lsn_range: lsns,
 
             index_start_blk: 0,
             index_root_blk: 0,
@@ -103,14 +119,12 @@ impl From<&DeltaLayer> for Summary {
 // Flag indicating that this version initialize the page
 const WILL_INIT: u64 = 1;
 
-///
 /// Struct representing reference to BLOB in layers. Reference contains BLOB
 /// offset, and for WAL records it also contains `will_init` flag. The flag
 /// helps to determine the range of records that needs to be applied, without
 /// reading/deserializing records themselves.
-///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-struct BlobRef(u64);
+pub struct BlobRef(pub u64);
 
 impl BlobRef {
     pub fn will_init(&self) -> bool {
@@ -133,10 +147,8 @@ impl BlobRef {
 pub const DELTA_KEY_SIZE: usize = KEY_SIZE + 8;
 struct DeltaKey([u8; DELTA_KEY_SIZE]);
 
-///
 /// This is the key of the B-tree index stored in the delta layer. It consists
 /// of the serialized representation of a Key and LSN.
-///
 impl DeltaKey {
     fn from_slice(buf: &[u8]) -> Self {
         let mut bytes: [u8; DELTA_KEY_SIZE] = [0u8; DELTA_KEY_SIZE];
@@ -159,10 +171,6 @@ impl DeltaKey {
         Lsn(u64::from_be_bytes(self.0[KEY_SIZE..].try_into().unwrap()))
     }
 
-    fn extract_key_from_buf(buf: &[u8]) -> Key {
-        Key::from_slice(&buf[..KEY_SIZE])
-    }
-
     fn extract_lsn_from_buf(buf: &[u8]) -> Lsn {
         let mut lsn_buf = [0u8; 8];
         lsn_buf.copy_from_slice(&buf[KEY_SIZE..]);
@@ -170,26 +178,13 @@ impl DeltaKey {
     }
 }
 
-/// DeltaLayer is the in-memory data structure associated with an on-disk delta
-/// file.
-///
-/// We keep a DeltaLayer in memory for each file, in the LayerMap. If a layer
-/// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
-/// Otherwise the struct is just a placeholder for a file that exists on disk,
-/// and it needs to be loaded before using it in queries.
+/// This is used only from `pagectl`. Within pageserver, all layers are
+/// [`crate::tenant::storage_layer::Layer`], which can hold a [`DeltaLayerInner`].
 pub struct DeltaLayer {
-    path_or_conf: PathOrConf,
-
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub key_range: Range<Key>,
-    pub lsn_range: Range<Lsn>,
-
-    pub file_size: u64,
-
+    path: Utf8PathBuf,
+    pub desc: PersistentLayerDesc,
     access_stats: LayerAccessStats,
-
-    inner: RwLock<DeltaLayerInner>,
+    inner: OnceCell<Arc<DeltaLayerInner>>,
 }
 
 impl std::fmt::Debug for DeltaLayer {
@@ -197,307 +192,74 @@ impl std::fmt::Debug for DeltaLayer {
         use super::RangeDisplayDebug;
 
         f.debug_struct("DeltaLayer")
-            .field("key_range", &RangeDisplayDebug(&self.key_range))
-            .field("lsn_range", &self.lsn_range)
-            .field("file_size", &self.file_size)
+            .field("key_range", &RangeDisplayDebug(&self.desc.key_range))
+            .field("lsn_range", &self.desc.lsn_range)
+            .field("file_size", &self.desc.file_size)
             .field("inner", &self.inner)
             .finish()
     }
 }
 
+/// `DeltaLayerInner` is the in-memory data structure associated with an on-disk delta
+/// file.
 pub struct DeltaLayerInner {
-    /// If false, the fields below have not been loaded into memory yet.
-    loaded: bool,
-
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
 
-    /// Reader object for reading blocks from the file. (None if not loaded yet)
-    file: Option<FileBlockReader<VirtualFile>>,
+    /// Reader object for reading blocks from the file.
+    file: FileBlockReader,
 }
 
 impl std::fmt::Debug for DeltaLayerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeltaLayerInner")
-            .field("loaded", &self.loaded)
             .field("index_start_blk", &self.index_start_blk)
             .field("index_root_blk", &self.index_root_blk)
             .finish()
     }
 }
 
-impl Layer for DeltaLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key_range.clone()
+/// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+impl std::fmt::Display for DeltaLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.layer_desc().short_id())
     }
+}
 
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.lsn_range.clone()
+impl AsLayerDesc for DeltaLayer {
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
     }
-    fn is_incremental(&self) -> bool {
-        true
-    }
+}
 
-    fn short_id(&self) -> String {
-        self.filename().file_name()
-    }
-    /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.tenant_id,
-            self.timeline_id,
-            self.key_range.start,
-            self.key_range.end,
-            self.lsn_range.start,
-            self.lsn_range.end
-        );
+impl DeltaLayer {
+    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+        self.desc.dump();
 
         if !verbose {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
 
-        println!(
-            "index_start_blk: {}, root {}",
-            inner.index_start_blk, inner.index_root_blk
-        );
-
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-
-        tree_reader.dump()?;
-
-        let mut cursor = file.block_cursor();
-
-        // A subroutine to dump a single blob
-        let mut dump_blob = |blob_ref: BlobRef| -> anyhow::Result<String> {
-            let buf = cursor.read_blob(blob_ref.pos())?;
-            let val = Value::des(&buf)?;
-            let desc = match val {
-                Value::Image(img) => {
-                    format!(" img {} bytes", img.len())
-                }
-                Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec)?;
-                    format!(
-                        " rec {} bytes will_init: {} {}",
-                        buf.len(),
-                        rec.will_init(),
-                        wal_desc
-                    )
-                }
-            };
-            Ok(desc)
-        };
-
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |delta_key, val| {
-                let blob_ref = BlobRef(val);
-                let key = DeltaKey::extract_key_from_buf(delta_key);
-                let lsn = DeltaKey::extract_lsn_from_buf(delta_key);
-
-                let desc = match dump_blob(blob_ref) {
-                    Ok(desc) => desc,
-                    Err(err) => format!("ERROR: {}", err),
-                };
-                println!("  key {} at {}: {}", key, lsn, desc);
-                true
-            },
-        )?;
-
-        Ok(())
-    }
-
-    fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start >= self.lsn_range.start);
-        let mut need_image = true;
-
-        ensure!(self.key_range.contains(&key));
-
-        {
-            // Open the file and lock the metadata in memory
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
-
-            // Scan the page versions backwards, starting from `lsn`.
-            let file = inner.file.as_ref().unwrap();
-            let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-                inner.index_start_blk,
-                inner.index_root_blk,
-                file,
-            );
-            let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
-
-            let mut offsets: Vec<(Lsn, u64)> = Vec::new();
-
-            tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
-                let blob_ref = BlobRef(value);
-                if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                    return false;
-                }
-                let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                if entry_lsn < lsn_range.start {
-                    return false;
-                }
-                offsets.push((entry_lsn, blob_ref.pos()));
-
-                !blob_ref.will_init()
-            })?;
-
-            // Ok, 'offsets' now contains the offsets of all the entries we need to read
-            let mut cursor = file.block_cursor();
-            let mut buf = Vec::new();
-            for (entry_lsn, pos) in offsets {
-                cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
-                    format!(
-                        "Failed to read blob from virtual file {}",
-                        file.file.path.display()
-                    )
-                })?;
-                let val = Value::des(&buf).with_context(|| {
-                    format!(
-                        "Failed to deserialize file blob from virtual file {}",
-                        file.file.path.display()
-                    )
-                })?;
-                match val {
-                    Value::Image(img) => {
-                        reconstruct_state.img = Some((entry_lsn, img));
-                        need_image = false;
-                        break;
-                    }
-                    Value::WalRecord(rec) => {
-                        let will_init = rec.will_init();
-                        reconstruct_state.records.push((entry_lsn, rec));
-                        if will_init {
-                            // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            // release metadata lock and close the file
-        }
-
-        // If an older page image is needed to reconstruct the page, let the
-        // caller know.
-        if need_image {
-            Ok(ValueReconstructResult::Continue)
-        } else {
-            Ok(ValueReconstructResult::Complete)
-        }
-    }
-}
-
-impl PersistentLayer for DeltaLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
-
-    fn filename(&self) -> LayerFileName {
-        self.layer_name().into()
-    }
-
-    fn local_path(&self) -> Option<PathBuf> {
-        Some(self.path())
-    }
-
-    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        let inner = self
-            .load(LayerAccessKind::KeyIter, ctx)
-            .context("load delta layer")?;
-        Ok(match DeltaValueIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(err) => Box::new(std::iter::once(Err(err))),
-        })
-    }
-
-    fn key_iter(&self, ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        let inner = self.load(LayerAccessKind::KeyIter, ctx)?;
-        Ok(Box::new(
-            DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
-        ))
-    }
-
-    fn delete_resident_layer_file(&self) -> Result<()> {
-        // delete underlying file
-        fs::remove_file(self.path())?;
-        Ok(())
-    }
-
-    fn file_size(&self) -> u64 {
-        self.file_size
-    }
-
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
-        let layer_file_name = self.filename().file_name();
-        let lsn_range = self.get_lsn_range();
-
-        let access_stats = self.access_stats.as_api_model(reset);
-
-        HistoricLayerInfo::Delta {
-            layer_file_name,
-            layer_file_size: self.file_size,
-            lsn_start: lsn_range.start,
-            lsn_end: lsn_range.end,
-            remote: false,
-            access_stats,
-        }
-    }
-
-    fn access_stats(&self) -> &LayerAccessStats {
-        &self.access_stats
-    }
-}
-
-impl DeltaLayer {
-    fn path_for(
-        path_or_conf: &PathOrConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
-        fname: &DeltaFileName,
-    ) -> PathBuf {
-        match path_or_conf {
-            PathOrConf::Path(path) => path.clone(),
-            PathOrConf::Conf(conf) => conf
-                .timeline_path(&timeline_id, &tenant_id)
-                .join(fname.to_string()),
-        }
+        inner.dump(ctx).await
     }
 
     fn temp_path_for(
         conf: &PageServerConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(8)
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&timeline_id, &tenant_id).join(format!(
+        conf.timeline_path(tenant_id, timeline_id).join(format!(
             "{}-XXX__{:016X}-{:016X}.{}.{}",
             key_start,
             u64::from(lsn_range.start),
@@ -511,118 +273,42 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(
+    async fn load(
         &self,
         access_kind: LayerAccessKind,
         ctx: &RequestContext,
-    ) -> Result<RwLockReadGuard<DeltaLayerInner>> {
-        self.access_stats
-            .record_access(access_kind, ctx.task_kind());
-        loop {
-            // Quick exit if already loaded
-            let inner = self.inner.read().unwrap();
-            if inner.loaded {
-                return Ok(inner);
-            }
-
-            // Need to open the file and load the metadata. Upgrade our lock to
-            // a write lock. (Or rather, release and re-lock in write mode.)
-            drop(inner);
-            let inner = self.inner.write().unwrap();
-            if !inner.loaded {
-                self.load_inner(inner).with_context(|| {
-                    format!("Failed to load delta layer {}", self.path().display())
-                })?;
-            } else {
-                // Another thread loaded it while we were not holding the lock.
-            }
-
-            // We now have the file open and loaded. There's no function to do
-            // that in the std library RwLock, so we have to release and re-lock
-            // in read mode. (To be precise, the lock guard was moved in the
-            // above call to `load_inner`, so it's already been released). And
-            // while we do that, another thread could unload again, so we have
-            // to re-check and retry if that happens.
-        }
+    ) -> Result<&Arc<DeltaLayerInner>> {
+        self.access_stats.record_access(access_kind, ctx);
+        // Quick exit if already loaded
+        self.inner
+            .get_or_try_init(|| self.load_inner(ctx))
+            .await
+            .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
-    fn load_inner(&self, mut inner: RwLockWriteGuard<DeltaLayerInner>) -> Result<()> {
+    async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        // Open the file if it's not open already.
-        if inner.file.is_none() {
-            let file = VirtualFile::open(&path)
-                .with_context(|| format!("Failed to open file '{}'", path.display()))?;
-            inner.file = Some(FileBlockReader::new(file));
-        }
-        let file = inner.file.as_mut().unwrap();
-        let summary_blk = file.read_blk(0)?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let loaded = DeltaLayerInner::load(&path, None, ctx).await?;
 
-        match &self.path_or_conf {
-            PathOrConf::Conf(_) => {
-                let mut expected_summary = Summary::from(self);
-                expected_summary.index_start_blk = actual_summary.index_start_blk;
-                expected_summary.index_root_blk = actual_summary.index_root_blk;
-                if actual_summary != expected_summary {
-                    bail!("in-file summary does not match expected summary. actual = {:?} expected = {:?}", actual_summary, expected_summary);
-                }
-            }
-            PathOrConf::Path(path) => {
-                let actual_filename = path.file_name().unwrap().to_str().unwrap().to_owned();
-                let expected_filename = self.filename().file_name();
+        // not production code
+        let actual_filename = path.file_name().unwrap().to_owned();
+        let expected_filename = self.layer_desc().filename().file_name();
 
-                if actual_filename != expected_filename {
-                    println!(
-                        "warning: filename does not match what is expected from in-file summary"
-                    );
-                    println!("actual: {:?}", actual_filename);
-                    println!("expected: {:?}", expected_filename);
-                }
-            }
+        if actual_filename != expected_filename {
+            println!("warning: filename does not match what is expected from in-file summary");
+            println!("actual: {:?}", actual_filename);
+            println!("expected: {:?}", expected_filename);
         }
 
-        inner.index_start_blk = actual_summary.index_start_blk;
-        inner.index_root_blk = actual_summary.index_root_blk;
-
-        debug!("loaded from {}", &path.display());
-
-        inner.loaded = true;
-        Ok(())
-    }
-
-    /// Create a DeltaLayer struct representing an existing file on disk.
-    pub fn new(
-        conf: &'static PageServerConf,
-        timeline_id: TimelineId,
-        tenant_id: TenantId,
-        filename: &DeltaFileName,
-        file_size: u64,
-        access_stats: LayerAccessStats,
-    ) -> DeltaLayer {
-        DeltaLayer {
-            path_or_conf: PathOrConf::Conf(conf),
-            timeline_id,
-            tenant_id,
-            key_range: filename.key_range.clone(),
-            lsn_range: filename.lsn_range.clone(),
-            file_size,
-            access_stats,
-            inner: RwLock::new(DeltaLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk: 0,
-                index_root_blk: 0,
-            }),
-        }
+        Ok(Arc::new(loaded))
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
-    /// This variant is only used for debugging purposes, by the 'pageserver_binutils' binary.
-    pub fn new_for_path(path: &Path, file: File) -> Result<Self> {
-        let mut summary_buf = Vec::new();
-        summary_buf.resize(PAGE_SZ, 0);
+    /// This variant is only used for debugging purposes, by the 'pagectl' binary.
+    pub fn new_for_path(path: &Utf8Path, file: File) -> Result<Self> {
+        let mut summary_buf = vec![0; PAGE_SZ];
         file.read_exact_at(&mut summary_buf, 0)?;
         let summary = Summary::des_prefix(&summary_buf)?;
 
@@ -631,37 +317,22 @@ impl DeltaLayer {
             .context("get file metadata to determine size")?;
 
         Ok(DeltaLayer {
-            path_or_conf: PathOrConf::Path(path.to_path_buf()),
-            timeline_id: summary.timeline_id,
-            tenant_id: summary.tenant_id,
-            key_range: summary.key_range,
-            lsn_range: summary.lsn_range,
-            file_size: metadata.len(),
+            path: path.to_path_buf(),
+            desc: PersistentLayerDesc::new_delta(
+                summary.tenant_id,
+                summary.timeline_id,
+                summary.key_range,
+                summary.lsn_range,
+                metadata.len(),
+            ),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: RwLock::new(DeltaLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk: 0,
-                index_root_blk: 0,
-            }),
+            inner: OnceCell::new(),
         })
     }
 
-    fn layer_name(&self) -> DeltaFileName {
-        DeltaFileName {
-            key_range: self.key_range.clone(),
-            lsn_range: self.lsn_range.clone(),
-        }
-    }
-
     /// Path to the layer file in pageserver workdir.
-    pub fn path(&self) -> PathBuf {
-        Self::path_for(
-            &self.path_or_conf,
-            self.timeline_id,
-            self.tenant_id,
-            &self.layer_name(),
-        )
+    fn path(&self) -> Utf8PathBuf {
+        self.path.clone()
     }
 }
 
@@ -678,7 +349,7 @@ impl DeltaLayer {
 ///
 struct DeltaLayerWriterInner {
     conf: &'static PageServerConf,
-    pub path: PathBuf,
+    pub path: Utf8PathBuf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
 
@@ -687,14 +358,14 @@ struct DeltaLayerWriterInner {
 
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
-    blob_writer: WriteBlobWriter<BufWriter<VirtualFile>>,
+    blob_writer: BlobWriter<true>,
 }
 
 impl DeltaLayerWriterInner {
     ///
     /// Start building a new delta layer.
     ///
-    fn new(
+    async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -707,13 +378,12 @@ impl DeltaLayerWriterInner {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = DeltaLayer::temp_path_for(conf, timeline_id, tenant_id, key_start, &lsn_range);
+        let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path)?;
+        let mut file = VirtualFile::create(&path).await?;
         // make room for the header block
-        file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
-        let buf_writer = BufWriter::new(file);
-        let blob_writer = WriteBlobWriter::new(buf_writer, PAGE_SZ as u64);
+        file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
+        let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
 
         // Initialize the b-tree index builder
         let block_buf = BlockBuf::new();
@@ -736,11 +406,12 @@ impl DeltaLayerWriterInner {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+    async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
         self.put_value_bytes(key, lsn, &Value::ser(&val)?, val.will_init())
+            .await
     }
 
-    fn put_value_bytes(
+    async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
@@ -749,7 +420,7 @@ impl DeltaLayerWriterInner {
     ) -> anyhow::Result<()> {
         assert!(self.lsn_range.start <= lsn);
 
-        let off = self.blob_writer.write_blob(val)?;
+        let off = self.blob_writer.write_blob(val).await?;
 
         let blob_ref = BlobRef::new(off, will_init);
 
@@ -766,18 +437,18 @@ impl DeltaLayerWriterInner {
     ///
     /// Finish writing the delta layer.
     ///
-    fn finish(self, key_end: Key) -> anyhow::Result<DeltaLayer> {
+    async fn finish(self, key_end: Key, timeline: &Arc<Timeline>) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
-        let buf_writer = self.blob_writer.into_inner();
-        let mut file = buf_writer.into_inner()?;
+        let mut file = self.blob_writer.into_inner().await?;
 
         // Write out the index
         let (index_root_blk, block_buf) = self.tree.finish()?;
-        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))?;
+        file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
+            .await?;
         for buf in block_buf.blocks {
-            file.write_all(buf.as_ref())?;
+            file.write_all(buf.as_ref()).await?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
         // Fill in the summary on blk 0
@@ -791,50 +462,53 @@ impl DeltaLayerWriterInner {
             index_start_blk,
             index_root_blk,
         };
-        file.seek(SeekFrom::Start(0))?;
-        Summary::ser_into(&summary, &mut file)?;
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&summary, &mut buf)?;
+        if buf.spilled() {
+            // This is bad as we only have one free block for the summary
+            warn!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            );
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf).await?;
 
         let metadata = file
             .metadata()
+            .await
             .context("get file metadata to determine size")?;
+
+        // 5GB limit for objects without multipart upload (which we don't want to use)
+        // Make it a little bit below to account for differing GB units
+        // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
+        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+        ensure!(
+            metadata.len() <= S3_UPLOAD_LIMIT,
+            "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
+            file.path,
+            metadata.len()
+        );
 
         // Note: Because we opened the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
-        let layer = DeltaLayer {
-            path_or_conf: PathOrConf::Conf(self.conf),
-            tenant_id: self.tenant_id,
-            timeline_id: self.timeline_id,
-            key_range: self.key_start..key_end,
-            lsn_range: self.lsn_range.clone(),
-            file_size: metadata.len(),
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
-            inner: RwLock::new(DeltaLayerInner {
-                loaded: false,
-                file: None,
-                index_start_blk,
-                index_root_blk,
-            }),
-        };
+
+        let desc = PersistentLayerDesc::new_delta(
+            self.tenant_id,
+            self.timeline_id,
+            self.key_start..key_end,
+            self.lsn_range.clone(),
+            metadata.len(),
+        );
 
         // fsync the file
-        file.sync_all()?;
-        // Rename the file to its final name
-        //
-        // Note: This overwrites any existing file. There shouldn't be any.
-        // FIXME: throw an error instead?
-        let final_path = DeltaLayer::path_for(
-            &PathOrConf::Conf(self.conf),
-            self.timeline_id,
-            self.tenant_id,
-            &DeltaFileName {
-                key_range: self.key_start..key_end,
-                lsn_range: self.lsn_range,
-            },
-        );
-        std::fs::rename(self.path, &final_path)?;
+        file.sync_all().await?;
 
-        trace!("created delta layer {}", final_path.display());
+        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
+
+        trace!("created delta layer {}", layer.local_path());
 
         Ok(layer)
     }
@@ -853,7 +527,7 @@ impl DeltaLayerWriterInner {
 ///
 /// # Note
 ///
-/// As described in https://github.com/neondatabase/neon/issues/2650, it's
+/// As described in <https://github.com/neondatabase/neon/issues/2650>, it's
 /// possible for the writer to drop before `finish` is actually called. So this
 /// could lead to odd temporary files in the directory, exhausting file system.
 /// This structure wraps `DeltaLayerWriterInner` and also contains `Drop`
@@ -870,7 +544,7 @@ impl DeltaLayerWriter {
     ///
     /// Start building a new delta layer.
     ///
-    pub fn new(
+    pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -878,13 +552,10 @@ impl DeltaLayerWriter {
         lsn_range: Range<Lsn>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            inner: Some(DeltaLayerWriterInner::new(
-                conf,
-                timeline_id,
-                tenant_id,
-                key_start,
-                lsn_range,
-            )?),
+            inner: Some(
+                DeltaLayerWriterInner::new(conf, timeline_id, tenant_id, key_start, lsn_range)
+                    .await?,
+            ),
         })
     }
 
@@ -893,11 +564,11 @@ impl DeltaLayerWriter {
     ///
     /// The values must be appended in key, lsn order.
     ///
-    pub fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
-        self.inner.as_mut().unwrap().put_value(key, lsn, val)
+    pub async fn put_value(&mut self, key: Key, lsn: Lsn, val: Value) -> anyhow::Result<()> {
+        self.inner.as_mut().unwrap().put_value(key, lsn, val).await
     }
 
-    pub fn put_value_bytes(
+    pub async fn put_value_bytes(
         &mut self,
         key: Key,
         lsn: Lsn,
@@ -908,6 +579,7 @@ impl DeltaLayerWriter {
             .as_mut()
             .unwrap()
             .put_value_bytes(key, lsn, val, will_init)
+            .await
     }
 
     pub fn size(&self) -> u64 {
@@ -917,169 +589,296 @@ impl DeltaLayerWriter {
     ///
     /// Finish writing the delta layer.
     ///
-    pub fn finish(mut self, key_end: Key) -> anyhow::Result<DeltaLayer> {
-        self.inner.take().unwrap().finish(key_end)
+    pub(crate) async fn finish(
+        mut self,
+        key_end: Key,
+        timeline: &Arc<Timeline>,
+    ) -> anyhow::Result<ResidentLayer> {
+        self.inner.take().unwrap().finish(key_end, timeline).await
     }
 }
 
 impl Drop for DeltaLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            match inner.blob_writer.into_inner().into_inner() {
-                Ok(vfile) => vfile.remove(),
-                Err(err) => warn!(
-                    "error while flushing buffer of image layer temporary file: {}",
-                    err
-                ),
+            // We want to remove the virtual file here, so it's fine to not
+            // having completely flushed unwritten data.
+            let vfile = inner.blob_writer.into_inner_no_flush();
+            vfile.remove();
+        }
+    }
+}
+
+impl DeltaLayerInner {
+    pub(super) async fn load(
+        path: &Utf8Path,
+        summary: Option<Summary>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path)
+            .await
+            .with_context(|| format!("Failed to open file '{path}'"))?;
+        let file = FileBlockReader::new(file);
+
+        let summary_blk = file.read_blk(0, ctx).await?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+
+        if let Some(mut expected_summary) = summary {
+            // production code path
+            expected_summary.index_start_blk = actual_summary.index_start_blk;
+            expected_summary.index_root_blk = actual_summary.index_root_blk;
+            if actual_summary != expected_summary {
+                bail!(
+                    "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
+                    actual_summary,
+                    expected_summary
+                );
             }
         }
+
+        Ok(DeltaLayerInner {
+            file,
+            index_start_blk: actual_summary.index_start_blk,
+            index_root_blk: actual_summary.index_root_blk,
+        })
     }
-}
 
-///
-/// Iterator over all key-value pairse stored in a delta layer
-///
-/// FIXME: This creates a Vector to hold the offsets of all key value pairs.
-/// That takes up quite a lot of memory. Should do this in a more streaming
-/// fashion.
-///
-struct DeltaValueIter<'a> {
-    all_offsets: Vec<(DeltaKey, BlobRef)>,
-    next_idx: usize,
-    reader: BlockCursor<Adapter<'a>>,
-}
-
-struct Adapter<'a>(RwLockReadGuard<'a, DeltaLayerInner>);
-
-impl<'a> BlockReader for Adapter<'a> {
-    type BlockLease = PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
-        self.0.file.as_ref().unwrap().read_blk(blknum)
-    }
-}
-
-impl<'a> Iterator for DeltaValueIter<'a> {
-    type Item = Result<(Key, Lsn, Value)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_res().transpose()
-    }
-}
-
-impl<'a> DeltaValueIter<'a> {
-    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
-        let file = inner.file.as_ref().unwrap();
+    pub(super) async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
+        let mut need_image = true;
+        // Scan the page versions backwards, starting from `lsn`.
+        let file = &self.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
+            self.index_start_blk,
+            self.index_root_blk,
             file,
         );
+        let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
-        let mut all_offsets: Vec<(DeltaKey, BlobRef)> = Vec::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                all_offsets.push((DeltaKey::from_slice(key), BlobRef(value)));
-                true
-            },
-        )?;
+        let mut offsets: Vec<(Lsn, u64)> = Vec::new();
 
-        let iter = DeltaValueIter {
-            all_offsets,
-            next_idx: 0,
-            reader: BlockCursor::new(Adapter(inner)),
-        };
+        tree_reader
+            .visit(
+                &search_key.0,
+                VisitDirection::Backwards,
+                |key, value| {
+                    let blob_ref = BlobRef(value);
+                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                        return false;
+                    }
+                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                    if entry_lsn < lsn_range.start {
+                        return false;
+                    }
+                    offsets.push((entry_lsn, blob_ref.pos()));
 
-        Ok(iter)
-    }
+                    !blob_ref.will_init()
+                },
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+                    .build(),
+            )
+            .await?;
 
-    fn next_res(&mut self) -> Result<Option<(Key, Lsn, Value)>> {
-        if self.next_idx < self.all_offsets.len() {
-            let (delta_key, blob_ref) = &self.all_offsets[self.next_idx];
+        let ctx = &RequestContextBuilder::extend(ctx)
+            .page_content_kind(PageContentKind::DeltaLayerValue)
+            .build();
 
-            let key = delta_key.key();
-            let lsn = delta_key.lsn();
-
-            let buf = self.reader.read_blob(blob_ref.pos())?;
-            let val = Value::des(&buf)?;
-            self.next_idx += 1;
-            Ok(Some((key, lsn, val)))
-        } else {
-            Ok(None)
-        }
-    }
-}
-///
-/// Iterator over all keys stored in a delta layer
-///
-/// FIXME: This creates a Vector to hold all keys.
-/// That takes up quite a lot of memory. Should do this in a more streaming
-/// fashion.
-///
-struct DeltaKeyIter {
-    all_keys: Vec<(DeltaKey, u64)>,
-    next_idx: usize,
-}
-
-impl Iterator for DeltaKeyIter {
-    type Item = (Key, Lsn, u64);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next_idx < self.all_keys.len() {
-            let (delta_key, size) = &self.all_keys[self.next_idx];
-
-            let key = delta_key.key();
-            let lsn = delta_key.lsn();
-
-            self.next_idx += 1;
-            Some((key, lsn, *size))
-        } else {
-            None
-        }
-    }
-}
-
-impl<'a> DeltaKeyIter {
-    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
-        let file = inner.file.as_ref().unwrap();
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            inner.index_start_blk,
-            inner.index_root_blk,
-            file,
-        );
-
-        let mut all_keys: Vec<(DeltaKey, u64)> = Vec::new();
-        tree_reader.visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value| {
-                let delta_key = DeltaKey::from_slice(key);
-                let pos = BlobRef(value).pos();
-                if let Some(last) = all_keys.last_mut() {
-                    if last.0.key() == delta_key.key() {
-                        return true;
-                    } else {
-                        // subtract offset of new key BLOB and first blob of this key
-                        // to get total size if values associated with this key
-                        let first_pos = last.1;
-                        last.1 = pos - first_pos;
+        // Ok, 'offsets' now contains the offsets of all the entries we need to read
+        let cursor = file.block_cursor();
+        let mut buf = Vec::new();
+        for (entry_lsn, pos) in offsets {
+            cursor
+                .read_blob_into_buf(pos, &mut buf, ctx)
+                .await
+                .with_context(|| {
+                    format!("Failed to read blob from virtual file {}", file.file.path)
+                })?;
+            let val = Value::des(&buf).with_context(|| {
+                format!(
+                    "Failed to deserialize file blob from virtual file {}",
+                    file.file.path
+                )
+            })?;
+            match val {
+                Value::Image(img) => {
+                    reconstruct_state.img = Some((entry_lsn, img));
+                    need_image = false;
+                    break;
+                }
+                Value::WalRecord(rec) => {
+                    let will_init = rec.will_init();
+                    reconstruct_state.records.push((entry_lsn, rec));
+                    if will_init {
+                        // This WAL record initializes the page, so no need to go further back
+                        need_image = false;
+                        break;
                     }
                 }
-                all_keys.push((delta_key, pos));
-                true
-            },
-        )?;
-        if let Some(last) = all_keys.last_mut() {
-            // Last key occupies all space till end of layer
-            last.1 = std::fs::metadata(&file.file.path)?.len() - last.1;
+            }
         }
-        let iter = DeltaKeyIter {
-            all_keys,
-            next_idx: 0,
-        };
 
-        Ok(iter)
+        // If an older page image is needed to reconstruct the page, let the
+        // caller know.
+        if need_image {
+            Ok(ValueReconstructResult::Continue)
+        } else {
+            Ok(ValueReconstructResult::Complete)
+        }
+    }
+
+    pub(super) async fn load_keys<'a>(
+        &'a self,
+        ctx: &RequestContext,
+    ) -> Result<Vec<DeltaEntry<'a>>> {
+        let file = &self.file;
+
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+
+        let mut all_keys: Vec<DeltaEntry<'_>> = Vec::new();
+
+        tree_reader
+            .visit(
+                &[0u8; DELTA_KEY_SIZE],
+                VisitDirection::Forwards,
+                |key, value| {
+                    let delta_key = DeltaKey::from_slice(key);
+                    let val_ref = ValueRef {
+                        blob_ref: BlobRef(value),
+                        reader: BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(
+                            Adapter(self),
+                        )),
+                    };
+                    let pos = BlobRef(value).pos();
+                    if let Some(last) = all_keys.last_mut() {
+                        // subtract offset of the current and last entries to get the size
+                        // of the value associated with this (key, lsn) tuple
+                        let first_pos = last.size;
+                        last.size = pos - first_pos;
+                    }
+                    let entry = DeltaEntry {
+                        key: delta_key.key(),
+                        lsn: delta_key.lsn(),
+                        size: pos,
+                        val: val_ref,
+                    };
+                    all_keys.push(entry);
+                    true
+                },
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+                    .build(),
+            )
+            .await?;
+        if let Some(last) = all_keys.last_mut() {
+            // Last key occupies all space till end of value storage,
+            // which corresponds to beginning of the index
+            last.size = self.index_start_blk as u64 * PAGE_SZ as u64 - last.size;
+        }
+        Ok(all_keys)
+    }
+
+    pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        println!(
+            "index_start_blk: {}, root {}",
+            self.index_start_blk, self.index_root_blk
+        );
+
+        let file = &self.file;
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            file,
+        );
+
+        tree_reader.dump().await?;
+
+        let keys = self.load_keys(ctx).await?;
+
+        async fn dump_blob(val: ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
+            let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
+            let val = Value::des(&buf)?;
+            let desc = match val {
+                Value::Image(img) => {
+                    format!(" img {} bytes", img.len())
+                }
+                Value::WalRecord(rec) => {
+                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    format!(
+                        " rec {} bytes will_init: {} {}",
+                        buf.len(),
+                        rec.will_init(),
+                        wal_desc
+                    )
+                }
+            };
+            Ok(desc)
+        }
+
+        for entry in keys {
+            let DeltaEntry { key, lsn, val, .. } = entry;
+            let desc = match dump_blob(val, ctx).await {
+                Ok(desc) => desc,
+                Err(err) => {
+                    format!("ERROR: {err}")
+                }
+            };
+            println!("  key {key} at {lsn}: {desc}");
+        }
+
+        Ok(())
+    }
+}
+
+/// A set of data associated with a delta layer key and its value
+pub struct DeltaEntry<'a> {
+    pub key: Key,
+    pub lsn: Lsn,
+    /// Size of the stored value
+    pub size: u64,
+    /// Reference to the on-disk value
+    pub val: ValueRef<'a>,
+}
+
+/// Reference to an on-disk value
+pub struct ValueRef<'a> {
+    blob_ref: BlobRef,
+    reader: BlockCursor<'a>,
+}
+
+impl<'a> ValueRef<'a> {
+    /// Loads the value from disk
+    pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
+        // theoretically we *could* record an access time for each, but it does not really matter
+        let buf = self.reader.read_blob(self.blob_ref.pos(), ctx).await?;
+        let val = Value::des(&buf)?;
+        Ok(val)
+    }
+}
+
+pub(crate) struct Adapter<T>(T);
+
+impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<BlockLease, std::io::Error> {
+        self.0.as_ref().file.read_blk(blknum, ctx).await
+    }
+}
+
+impl AsRef<DeltaLayerInner> for DeltaLayerInner {
+    fn as_ref(&self) -> &DeltaLayerInner {
+        self
     }
 }

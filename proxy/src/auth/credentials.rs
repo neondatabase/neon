@@ -1,6 +1,11 @@
 //! User credentials used in authentication.
 
-use crate::error::UserFacingError;
+use crate::{
+    auth::password_hack::parse_endpoint_param,
+    error::UserFacingError,
+    proxy::{neon_options, NUM_CONNECTION_ACCEPTED_BY_SNI},
+};
+use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use std::collections::HashSet;
 use thiserror::Error;
@@ -37,6 +42,8 @@ pub struct ClientCredentials<'a> {
     pub user: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<String>,
+
+    pub cache_key: String,
 }
 
 impl ClientCredentials<'_> {
@@ -47,6 +54,15 @@ impl ClientCredentials<'_> {
 }
 
 impl<'a> ClientCredentials<'a> {
+    #[cfg(test)]
+    pub fn new_noop() -> Self {
+        ClientCredentials {
+            user: "",
+            project: None,
+            cache_key: "".to_string(),
+        }
+    }
+
     pub fn parse(
         params: &'a StartupMessageParams,
         sni: Option<&str>,
@@ -61,7 +77,15 @@ impl<'a> ClientCredentials<'a> {
         // Project name might be passed via PG's command-line options.
         let project_option = params
             .options_raw()
-            .and_then(|mut options| options.find_map(|opt| opt.strip_prefix("project=")))
+            .and_then(|options| {
+                // We support both `project` (deprecated) and `endpoint` options for backward compatibility.
+                // However, if both are present, we don't exactly know which one to use.
+                // Therefore we require that only one of them is present.
+                options
+                    .filter_map(parse_endpoint_param)
+                    .at_most_one()
+                    .ok()?
+            })
             .map(|name| name.to_string());
 
         let project_from_domain = if let Some(sni_str) = sni {
@@ -102,8 +126,34 @@ impl<'a> ClientCredentials<'a> {
         .transpose()?;
 
         info!(user, project = project.as_deref(), "credentials");
+        if sni.is_some() {
+            info!("Connection with sni");
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["sni"])
+                .inc();
+        } else if project.is_some() {
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["no_sni"])
+                .inc();
+            info!("Connection without sni");
+        } else {
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["password_hack"])
+                .inc();
+            info!("Connection with password hack");
+        }
 
-        Ok(Self { user, project })
+        let cache_key = format!(
+            "{}{}",
+            project.as_deref().unwrap_or(""),
+            neon_options(params).unwrap_or("".to_string())
+        );
+
+        Ok(Self {
+            user,
+            project,
+            cache_key,
+        })
     }
 }
 
@@ -159,6 +209,7 @@ mod tests {
         let creds = ClientCredentials::parse(&options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
+        assert_eq!(creds.cache_key, "foo");
 
         Ok(())
     }
@@ -173,6 +224,51 @@ mod tests {
         let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_endpoint_from_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "-ckey=1 endpoint=bar -c geqo=off"),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.project.as_deref(), Some("bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_three_endpoints_from_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            (
+                "options",
+                "-ckey=1 endpoint=one endpoint=two endpoint=three -c geqo=off",
+            ),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert!(creds.project.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_when_endpoint_and_project_are_in_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert!(creds.project.is_none());
 
         Ok(())
     }
@@ -240,5 +336,24 @@ mod tests {
             }
             _ => panic!("bad error: {err:?}"),
         }
+    }
+
+    #[test]
+    fn parse_neon_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "neon_lsn:0/2 neon_endpoint_type:read_write"),
+        ]);
+
+        let sni = Some("project.localhost");
+        let common_names = Some(["localhost".into()].into());
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("project"));
+        assert_eq!(
+            creds.cache_key,
+            "projectneon_endpoint_type:read_write neon_lsn:0/2"
+        );
+
+        Ok(())
     }
 }

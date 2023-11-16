@@ -10,18 +10,19 @@
 //! (non-Neon binaries don't necessarily follow our pidfile conventions).
 //! The pid stored in the file is later used to stop the service.
 //!
-//! See [`lock_file`] module for more info.
+//! See the [`lock_file`](utils::lock_file) module for more info.
 
 use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command};
 use std::time::Duration;
 use std::{fs, io, thread};
 
 use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag};
 use nix::sys::signal::{kill, Signal};
@@ -45,9 +46,9 @@ const NOTICE_AFTER_RETRIES: u64 = 50;
 /// it itself.
 pub enum InitialPidFile<'t> {
     /// Create a pidfile, to allow future CLI invocations to manipulate the process.
-    Create(&'t Path),
+    Create(&'t Utf8Path),
     /// The process will create the pidfile itself, need to wait for that event.
-    Expect(&'t Path),
+    Expect(&'t Utf8Path),
 }
 
 /// Start a background child process using the parameters given.
@@ -85,7 +86,7 @@ where
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
         .args(args);
-    let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
+    let filled_cmd = fill_remote_storage_secrets_vars(fill_rust_env_vars(background_command));
     filled_cmd.envs(envs);
 
     let pid_file_to_check = match initial_pid_file {
@@ -137,7 +138,11 @@ where
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
-pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
+pub fn stop_process(
+    immediate: bool,
+    process_name: &str,
+    pid_file: &Utf8Path,
+) -> anyhow::Result<()> {
     let pid = match pid_file::read(pid_file)
         .with_context(|| format!("read pid_file {pid_file:?}"))?
     {
@@ -180,6 +185,11 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
     }
 
     // Wait until process is gone
+    wait_until_stopped(process_name, pid)?;
+    Ok(())
+}
+
+pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
     for retries in 0..RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {
@@ -228,11 +238,13 @@ fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     filled_cmd
 }
 
-fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     for env_key in [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        "AZURE_STORAGE_ACCOUNT",
+        "AZURE_STORAGE_ACCESS_KEY",
     ] {
         if let Ok(value) = std::env::var(env_key) {
             cmd = cmd.env(env_key, value);
@@ -247,10 +259,10 @@ fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
 ///    will remain held until the cmd exits.
 fn pre_exec_create_pidfile<P>(cmd: &mut Command, path: P) -> &mut Command
 where
-    P: Into<PathBuf>,
+    P: Into<Utf8PathBuf>,
 {
-    let path: PathBuf = path.into();
-    // SAFETY
+    let path: Utf8PathBuf = path.into();
+    // SAFETY:
     // pre_exec is marked unsafe because it runs between fork and exec.
     // Why is that dangerous in various ways?
     // Long answer:  https://github.com/rust-lang/rust/issues/39575
@@ -306,7 +318,7 @@ where
 
 fn process_started<F>(
     pid: Pid,
-    pid_file_to_check: Option<&Path>,
+    pid_file_to_check: Option<&Utf8Path>,
     status_check: &F,
 ) -> anyhow::Result<bool>
 where

@@ -6,7 +6,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
 from fixtures.log_helper import log
-from pytest_lazyfixture import lazy_fixture  # type: ignore
+from pytest_lazyfixture import lazy_fixture
 
 
 @pytest.mark.parametrize(
@@ -61,5 +61,5 @@ def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: in
             cur.execute(f"set max_parallel_workers_per_gather = {workers}")
 
             with env.record_duration("run"):
-                for i in range(iters):
+                for _ in range(iters):
                     cur.execute("select count(*) from t;")

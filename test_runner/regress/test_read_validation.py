@@ -133,7 +133,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
             log.info("Validation page inspect won't allow reading pages of dropped relations")
             try:
                 c.execute("select * from page_header(get_raw_page('foo', 'main', 0));")
-                assert False, "query should have failed"
+                raise AssertionError("query should have failed")
             except UndefinedTable as e:
                 log.info("Caught an expected failure: {}".format(e))
 
@@ -157,7 +157,7 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
                 c.execute(
                     "select lsn, lower, upper from page_header(get_raw_page_at_lsn('Unknown', 'main', 0, '0/0'))"
                 )
-                assert False, "query should have failed"
+                raise AssertionError("query should have failed")
             except UndefinedTable as e:
                 log.info("Caught an expected failure: {}".format(e))
 
@@ -169,7 +169,7 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
                 c.execute(
                     "select lsn, lower, upper from page_header(get_raw_page_at_lsn('foo', 'main', 0, '0/0'))"
                 )
-                assert False, "query should have failed"
+                raise AssertionError("query should have failed")
             except IoError as e:
                 log.info("Caught an expected failure: {}".format(e))
 

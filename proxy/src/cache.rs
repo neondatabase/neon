@@ -262,24 +262,21 @@ pub mod timed_lru {
         token: Option<(C, C::LookupInfo<C::Key>)>,
 
         /// The value itself.
-        pub value: C::Value,
+        value: C::Value,
     }
 
     impl<C: Cache> Cached<C> {
         /// Place any entry into this wrapper; invalidation will be a no-op.
-        /// Unfortunately, rust doesn't let us implement [`From`] or [`Into`].
-        pub fn new_uncached(value: impl Into<C::Value>) -> Self {
-            Self {
-                token: None,
-                value: value.into(),
-            }
+        pub fn new_uncached(value: C::Value) -> Self {
+            Self { token: None, value }
         }
 
         /// Drop this entry from a cache if it's still there.
-        pub fn invalidate(&self) {
+        pub fn invalidate(self) -> C::Value {
             if let Some((cache, info)) = &self.token {
                 cache.invalidate(info);
             }
+            self.value
         }
 
         /// Tell if this entry is actually cached.

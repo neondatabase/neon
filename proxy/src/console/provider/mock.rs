@@ -59,7 +59,7 @@ impl Api {
             let rows = client.query(query, &[&creds.user]).await?;
 
             // We can get at most one row, because `rolname` is unique.
-            let row = match rows.get(0) {
+            let row = match rows.first() {
                 Some(row) => row,
                 // This means that the user doesn't exist, so there can be no secret.
                 // However, this is still a *valid* outcome which is very similar
@@ -106,7 +106,7 @@ impl super::Api for Api {
     async fn get_auth_info(
         &self,
         _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ClientCredentials,
     ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
         self.do_get_auth_info(creds).await
     }
@@ -115,7 +115,7 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         _extra: &ConsoleReqExtra<'_>,
-        _creds: &ClientCredentials<'_>,
+        _creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)

@@ -1,22 +1,23 @@
-use crate::auth::{Claims, JwtAuth};
-use crate::http::error;
-use anyhow::{anyhow, Context};
+use crate::auth::{AuthError, Claims, SwappableJwtAuth};
+use crate::http::error::{api_error_handler, route_error_handler, ApiError};
+use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
 use hyper::http::HeaderValue;
 use hyper::Method;
-use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
+use hyper::{header::CONTENT_TYPE, Body, Request, Response};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
-use routerify::{Middleware, RequestInfo, Router, RouterBuilder, RouterService};
-use tokio::task::JoinError;
+use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
 use tracing::{self, debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
-use std::net::TcpListener;
 use std::str::FromStr;
 
-use super::error::ApiError;
+use bytes::{Bytes, BytesMut};
+use std::io::Write as _;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -35,8 +36,18 @@ struct RequestId(String);
 /// Adds a tracing info_span! instrumentation around the handler events,
 /// logs the request start and end events for non-GET requests and non-200 responses.
 ///
+/// Usage: Replace `my_handler` with `|r| request_span(r, my_handler)`
+///
 /// Use this to distinguish between logs of different HTTP requests: every request handler wrapped
-/// in this type will get request info logged in the wrapping span, including the unique request ID.
+/// with this will get request info logged in the wrapping span, including the unique request ID.
+///
+/// This also handles errors, logging them and converting them to an HTTP error response.
+///
+/// NB: If the client disconnects, Hyper will drop the Future, without polling it to
+/// completion. In other words, the handler must be async cancellation safe! request_span
+/// prints a warning to the log when that happens, so that you have some trace of it in
+/// the log.
+///
 ///
 /// There could be other ways to implement similar functionality:
 ///
@@ -54,60 +65,56 @@ struct RequestId(String);
 /// tries to achive with its `.instrument` used in the current approach.
 ///
 /// If needed, a declarative macro to substitute the |r| ... closure boilerplate could be introduced.
-pub struct RequestSpan<E, R, H>(pub H)
+pub async fn request_span<R, H>(request: Request<Body>, handler: H) -> R::Output
 where
-    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
-    R: Future<Output = Result<Response<Body>, E>> + Send + 'static,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static;
-
-impl<E, R, H> RequestSpan<E, R, H>
-where
-    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
-    R: Future<Output = Result<Response<Body>, E>> + Send + 'static,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    R: Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
+    H: FnOnce(Request<Body>) -> R + Send + Sync + 'static,
 {
-    /// Creates a tracing span around inner request handler and executes the request handler in the contex of that span.
-    /// Use as `|r| RequestSpan(my_handler).handle(r)` instead of `my_handler` as the request handler to get the span enabled.
-    pub async fn handle(self, request: Request<Body>) -> Result<Response<Body>, E> {
-        let request_id = request.context::<RequestId>().unwrap_or_default().0;
-        let method = request.method();
-        let path = request.uri().path();
-        let request_span = info_span!("request", %method, %path, %request_id);
+    let request_id = request.context::<RequestId>().unwrap_or_default().0;
+    let method = request.method();
+    let path = request.uri().path();
+    let request_span = info_span!("request", %method, %path, %request_id);
 
-        let log_quietly = method == Method::GET;
-        async move {
-            let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
-            if log_quietly {
-                debug!("Handling request");
-            } else {
-                info!("Handling request");
-            }
-
-            // Note that we reuse `error::handler` here and not returning and error at all,
-            // yet cannot use `!` directly in the method signature due to `routerify::RouterBuilder` limitation.
-            // Usage of the error handler also means that we expect only the `ApiError` errors to be raised in this call.
-            //
-            // Panics are not handled separately, there's a `tracing_panic_hook` from another module to do that globally.
-            let res = (self.0)(request).await;
-
-            cancellation_guard.disarm();
-
-            match res {
-                Ok(response) => {
-                    let response_status = response.status();
-                    if log_quietly && response_status.is_success() {
-                        debug!("Request handled, status: {response_status}");
-                    } else {
-                        info!("Request handled, status: {response_status}");
-                    }
-                    Ok(response)
-                }
-                Err(e) => Ok(error::handler(e.into()).await),
-            }
+    let log_quietly = method == Method::GET;
+    async move {
+        let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
+        if log_quietly {
+            debug!("Handling request");
+        } else {
+            info!("Handling request");
         }
-        .instrument(request_span)
-        .await
+
+        // No special handling for panics here. There's a `tracing_panic_hook` from another
+        // module to do that globally.
+        let res = handler(request).await;
+
+        cancellation_guard.disarm();
+
+        // Log the result if needed.
+        //
+        // We also convert any errors into an Ok response with HTTP error code here.
+        // `make_router` sets a last-resort error handler that would do the same, but
+        // we prefer to do it here, before we exit the request span, so that the error
+        // is still logged with the span.
+        //
+        // (Because we convert errors to Ok response, we never actually return an error,
+        // and we could declare the function to return the never type (`!`). However,
+        // using `routerify::RouterBuilder` requires a proper error type.)
+        match res {
+            Ok(response) => {
+                let response_status = response.status();
+                if log_quietly && response_status.is_success() {
+                    debug!("Request handled, status: {response_status}");
+                } else {
+                    info!("Request handled, status: {response_status}");
+                }
+                Ok(response)
+            }
+            Err(err) => Ok(api_error_handler(err)),
+        }
     }
+    .instrument(request_span)
+    .await
 }
 
 /// Drop guard to WARN in case the request was dropped before completion.
@@ -144,26 +151,135 @@ impl Drop for RequestCancelled {
     }
 }
 
+/// An [`std::io::Write`] implementation on top of a channel sending [`bytes::Bytes`] chunks.
+pub struct ChannelWriter {
+    buffer: BytesMut,
+    pub tx: mpsc::Sender<std::io::Result<Bytes>>,
+    written: usize,
+}
+
+impl ChannelWriter {
+    pub fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
+        assert_ne!(buf_len, 0);
+        ChannelWriter {
+            // split about half off the buffer from the start, because we flush depending on
+            // capacity. first flush will come sooner than without this, but now resizes will
+            // have better chance of picking up the "other" half. not guaranteed of course.
+            buffer: BytesMut::with_capacity(buf_len).split_off(buf_len / 2),
+            tx,
+            written: 0,
+        }
+    }
+
+    pub fn flush0(&mut self) -> std::io::Result<usize> {
+        let n = self.buffer.len();
+        if n == 0 {
+            return Ok(0);
+        }
+
+        tracing::trace!(n, "flushing");
+        let ready = self.buffer.split().freeze();
+
+        // not ideal to call from blocking code to block_on, but we are sure that this
+        // operation does not spawn_blocking other tasks
+        let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
+            self.tx.send(Ok(ready)).await.map_err(|_| ())?;
+
+            // throttle sending to allow reuse of our buffer in `write`.
+            self.tx.reserve().await.map_err(|_| ())?;
+
+            // now the response task has picked up the buffer and hopefully started
+            // sending it to the client.
+            Ok(())
+        });
+        if res.is_err() {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        self.written += n;
+        Ok(n)
+    }
+
+    pub fn flushed_bytes(&self) -> usize {
+        self.written
+    }
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.buffer.capacity() - self.buffer.len();
+
+        let out_of_space = remaining < buf.len();
+
+        let original_len = buf.len();
+
+        if out_of_space {
+            let can_still_fit = buf.len() - remaining;
+            self.buffer.extend_from_slice(&buf[..can_still_fit]);
+            buf = &buf[can_still_fit..];
+            self.flush0()?;
+        }
+
+        // assume that this will often under normal operation just move the pointer back to the
+        // beginning of allocation, because previous split off parts are already sent and
+        // dropped.
+        self.buffer.extend_from_slice(buf);
+        Ok(original_len)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush0().map(|_| ())
+    }
+}
+
 async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
 
-    let mut buffer = vec![];
-    let encoder = TextEncoder::new();
+    let started_at = std::time::Instant::now();
 
-    let metrics = tokio::task::spawn_blocking(move || {
-        // Currently we take a lot of mutexes while collecting metrics, so it's
-        // better to spawn a blocking task to avoid blocking the event loop.
-        metrics::gather()
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))?;
-    encoder.encode(&metrics, &mut buffer).unwrap();
+    let (tx, rx) = mpsc::channel(1);
+
+    let body = Body::wrap_stream(ReceiverStream::new(rx));
+
+    let mut writer = ChannelWriter::new(128 * 1024, tx);
+
+    let encoder = TextEncoder::new();
 
     let response = Response::builder()
         .status(200)
         .header(CONTENT_TYPE, encoder.format_type())
-        .body(Body::from(buffer))
+        .body(body)
         .unwrap();
+
+    let span = info_span!("blocking");
+    tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+        let metrics = metrics::gather();
+        let res = encoder
+            .encode(&metrics, &mut writer)
+            .and_then(|_| writer.flush().map_err(|e| e.into()));
+
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "responded /metrics"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("failed to write out /metrics response: {e:#}");
+                // semantics of this error are quite... unclear. we want to error the stream out to
+                // abort the response to somehow notify the client that we failed.
+                //
+                // though, most likely the reason for failure is that the receiver is already gone.
+                drop(
+                    writer
+                        .tx
+                        .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
+                );
+            }
+        }
+    });
 
     Ok(response)
 }
@@ -207,10 +323,8 @@ pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
         .middleware(Middleware::post_with_info(
             add_request_id_header_to_response,
         ))
-        .get("/metrics", |r| {
-            RequestSpan(prometheus_metrics_handler).handle(r)
-        })
-        .err_handler(error::handler)
+        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .err_handler(route_error_handler)
 }
 
 pub fn attach_openapi_ui(
@@ -220,12 +334,14 @@ pub fn attach_openapi_ui(
     ui_mount_path: &'static str,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     router_builder
-        .get(spec_mount_path, move |r| {
-            RequestSpan(move |_| async move { Ok(Response::builder().body(Body::from(spec)).unwrap()) })
-                .handle(r)
-        })
-        .get(ui_mount_path, move |r| RequestSpan( move |_| async move {
-            Ok(Response::builder().body(Body::from(format!(r#"
+        .get(spec_mount_path,
+            move |r| request_span(r, move |_| async move {
+                Ok(Response::builder().body(Body::from(spec)).unwrap())
+            })
+        )
+        .get(ui_mount_path,
+             move |r| request_span(r, move |_| async move {
+                 Ok(Response::builder().body(Body::from(format!(r#"
                 <!DOCTYPE html>
                 <html lang="en">
                 <head>
@@ -255,7 +371,8 @@ pub fn attach_openapi_ui(
                 </body>
                 </html>
             "#, spec_mount_path))).unwrap())
-        }).handle(r))
+             })
+        )
 }
 
 fn parse_token(header_value: &str) -> Result<&str, ApiError> {
@@ -272,7 +389,7 @@ fn parse_token(header_value: &str) -> Result<&str, ApiError> {
 }
 
 pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-    provide_auth: fn(&Request<Body>) -> Option<&JwtAuth>,
+    provide_auth: fn(&Request<Body>) -> Option<&SwappableJwtAuth>,
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         if let Some(auth) = provide_auth(&req) {
@@ -283,9 +400,11 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                     })?;
                     let token = parse_token(header_value)?;
 
-                    let data = auth
-                        .decode(token)
-                        .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
+                    let data = auth.decode(token).map_err(|err| {
+                        warn!("Authentication error: {err}");
+                        // Rely on From<AuthError> for ApiError impl
+                        err
+                    })?;
                     req.set_context(data.claims);
                 }
                 None => {
@@ -333,50 +452,15 @@ where
 
 pub fn check_permission_with(
     req: &Request<Body>,
-    check_permission: impl Fn(&Claims) -> Result<(), anyhow::Error>,
+    check_permission: impl Fn(&Claims) -> Result<(), AuthError>,
 ) -> Result<(), ApiError> {
     match req.context::<Claims>() {
-        Some(claims) => {
-            Ok(check_permission(&claims).map_err(|err| ApiError::Forbidden(err.to_string()))?)
-        }
+        Some(claims) => Ok(check_permission(&claims)
+            .map_err(|_err| ApiError::Forbidden("JWT authentication error".to_string()))?),
         None => Ok(()), // claims is None because auth is disabled
     }
 }
 
-///
-/// Start listening for HTTP requests on given socket.
-///
-/// 'shutdown_future' can be used to stop. If the Future becomes
-/// ready, we stop listening for new requests, and the function returns.
-///
-pub fn serve_thread_main<S>(
-    router_builder: RouterBuilder<hyper::Body, ApiError>,
-    listener: TcpListener,
-    shutdown_future: S,
-) -> anyhow::Result<()>
-where
-    S: Future<Output = ()> + Send + Sync,
-{
-    info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
-
-    // Create a Service from the router above to handle incoming requests.
-    let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
-
-    // Enter a single-threaded tokio runtime bound to the current thread
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
-    let _guard = runtime.enter();
-
-    let server = Server::from_tcp(listener)?
-        .serve(service)
-        .with_graceful_shutdown(shutdown_future);
-
-    runtime.block_on(server)?;
-
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;

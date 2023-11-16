@@ -13,6 +13,9 @@ pub struct ProxyConfig {
     pub auth_backend: auth::BackendType<'static, ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
+    pub http_config: HttpConfig,
+    pub authentication_config: AuthenticationConfig,
+    pub require_client_ip: bool,
 }
 
 #[derive(Debug)]
@@ -24,6 +27,14 @@ pub struct MetricCollectionConfig {
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_names: Option<HashSet<String>>,
+}
+
+pub struct HttpConfig {
+    pub sql_over_http_timeout: tokio::time::Duration,
+}
+
+pub struct AuthenticationConfig {
+    pub scram_protocol_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -100,9 +111,10 @@ impl CertResolver {
         is_default: bool,
     ) -> anyhow::Result<()> {
         let priv_key = {
-            let key_bytes = std::fs::read(key_path).context("TLS key file")?;
-            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
+            let key_bytes = std::fs::read(key_path)
                 .context(format!("Failed to read TLS keys at '{key_path}'"))?;
+            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
+                .context(format!("Failed to parse TLS keys at '{key_path}'"))?;
 
             ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
             keys.pop().map(rustls::PrivateKey).unwrap()
@@ -210,8 +222,8 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::auth::caches::NodeInfoCache`].
-    pub const DEFAULT_OPTIONS_NODE_INFO: &str = "size=4000,ttl=5m";
+    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    pub const DEFAULT_OPTIONS_NODE_INFO: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::DEFAULT_OPTIONS_NODE_INFO`].
@@ -252,6 +264,79 @@ impl FromStr for CacheOptions {
     }
 }
 
+/// Helper for cmdline cache options parsing.
+pub struct WakeComputeLockOptions {
+    /// The number of shards the lock map should have
+    pub shards: usize,
+    /// The number of allowed concurrent requests for each endpoitn
+    pub permits: usize,
+    /// Garbage collection epoch
+    pub epoch: Duration,
+    /// Lock timeout
+    pub timeout: Duration,
+}
+
+impl WakeComputeLockOptions {
+    /// Default options for [`crate::console::provider::ApiLocks`].
+    pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
+
+    // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
+
+    /// Parse lock options passed via cmdline.
+    /// Example: [`Self::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK`].
+    fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut shards = None;
+        let mut permits = None;
+        let mut epoch = None;
+        let mut timeout = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "shards" => shards = Some(value.parse()?),
+                "permits" => permits = Some(value.parse()?),
+                "epoch" => epoch = Some(humantime::parse_duration(value)?),
+                "timeout" => timeout = Some(humantime::parse_duration(value)?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+
+        // these dont matter if lock is disabled
+        if let Some(0) = permits {
+            timeout = Some(Duration::default());
+            epoch = Some(Duration::default());
+            shards = Some(2);
+        }
+
+        let out = Self {
+            shards: shards.context("missing `shards`")?,
+            permits: permits.context("missing `permits`")?,
+            epoch: epoch.context("missing `epoch`")?,
+            timeout: timeout.context("missing `timeout`")?,
+        };
+
+        ensure!(out.shards > 1, "shard count must be > 1");
+        ensure!(
+            out.shards.is_power_of_two(),
+            "shard count must be a power of two"
+        );
+
+        Ok(out)
+    }
+}
+
+impl FromStr for WakeComputeLockOptions {
+    type Err = anyhow::Error;
+
+    fn from_str(options: &str) -> Result<Self, Self::Err> {
+        let error = || format!("failed to parse cache lock options '{options}'");
+        Self::parse(options).with_context(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +358,44 @@ mod tests {
         let CacheOptions { size, ttl } = "size=0".parse()?;
         assert_eq!(size, 0);
         assert_eq!(ttl, Duration::default());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_lock_options() -> anyhow::Result<()> {
+        let WakeComputeLockOptions {
+            epoch,
+            permits,
+            shards,
+            timeout,
+        } = "shards=32,permits=4,epoch=10m,timeout=1s".parse()?;
+        assert_eq!(epoch, Duration::from_secs(10 * 60));
+        assert_eq!(timeout, Duration::from_secs(1));
+        assert_eq!(shards, 32);
+        assert_eq!(permits, 4);
+
+        let WakeComputeLockOptions {
+            epoch,
+            permits,
+            shards,
+            timeout,
+        } = "epoch=60s,shards=16,timeout=100ms,permits=8".parse()?;
+        assert_eq!(epoch, Duration::from_secs(60));
+        assert_eq!(timeout, Duration::from_millis(100));
+        assert_eq!(shards, 16);
+        assert_eq!(permits, 8);
+
+        let WakeComputeLockOptions {
+            epoch,
+            permits,
+            shards,
+            timeout,
+        } = "permits=0".parse()?;
+        assert_eq!(epoch, Duration::ZERO);
+        assert_eq!(timeout, Duration::ZERO);
+        assert_eq!(shards, 2);
+        assert_eq!(permits, 0);
 
         Ok(())
     }

@@ -2,9 +2,12 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 import asyncpg
+import pytest
+import toml
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -243,7 +246,7 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
     # we try to simulate large (flush_lsn - truncate_lsn) lag, to test that WAL segments
     # are not removed before broadcasted to all safekeepers, with the help of replication slot
     asyncio.run(
-        run_restarts_under_load(env, endpoint, env.safekeepers, period_time=15, iterations=5)
+        run_restarts_under_load(env, endpoint, env.safekeepers, period_time=15, iterations=4)
     )
 
 
@@ -251,7 +254,8 @@ def endpoint_create_start(env: NeonEnv, branch: str, pgdir_name: Optional[str]):
     endpoint = Endpoint(
         env,
         tenant_id=env.initial_tenant,
-        port=env.port_distributor.get_port(),
+        pg_port=env.port_distributor.get_port(),
+        http_port=env.port_distributor.get_port(),
         # In these tests compute has high probability of terminating on its own
         # before our stop() due to lost consensus leadership.
         check_stop_result=False,
@@ -389,7 +393,7 @@ async def run_concurrent_computes(
             break
         await asyncio.sleep(0.1)
     else:
-        assert False, "Timed out while waiting for another query by computes[0]"
+        raise AssertionError("Timed out while waiting for another query by computes[0]")
     computes[0].stopped = True
 
     await asyncio.gather(background_tasks[0])
@@ -536,15 +540,20 @@ def test_race_conditions(neon_env_builder: NeonEnvBuilder):
 
 # Check that pageserver can select safekeeper with largest commit_lsn
 # and switch if LSN is not updated for some time (NoWalTimeout).
-async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint):
-    def safekeepers_guc(env: NeonEnv, active_sk: List[bool]) -> str:
-        # use ports 10, 11 and 12 to simulate unavailable safekeepers
-        return ",".join(
-            [
-                f"localhost:{sk.port.pg if active else 10 + i}"
-                for i, (sk, active) in enumerate(zip(env.safekeepers, active_sk))
-            ]
-        )
+async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Path):
+    def adjust_safekeepers(env: NeonEnv, active_sk: List[bool]):
+        # Change the pg ports of the inactive safekeepers in the config file to be
+        # invalid, to make them unavailable to the endpoint.  We use
+        # ports 10, 11 and 12 to simulate unavailable safekeepers.
+        config = toml.load(test_output_dir / "repo" / "config")
+        for i, (_sk, active) in enumerate(zip(env.safekeepers, active_sk)):
+            if active:
+                config["safekeepers"][i]["pg_port"] = env.safekeepers[i].port.pg
+            else:
+                config["safekeepers"][i]["pg_port"] = 10 + i
+
+        with open(test_output_dir / "repo" / "config", "w") as f:
+            toml.dump(config, f)
 
     conn = await endpoint.connect_async()
     await conn.execute("CREATE TABLE t(key int primary key, value text)")
@@ -565,7 +574,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint):
             it -= 1
             continue
 
-        endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_sk))
+        adjust_safekeepers(env, active_sk)
         log.info(f"Iteration {it}: {active_sk}")
 
         endpoint.start()
@@ -579,7 +588,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint):
         await conn.close()
         endpoint.stop()
 
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, [True] * len(env.safekeepers)))
+    adjust_safekeepers(env, [True] * len(env.safekeepers))
     endpoint.start()
     conn = await endpoint.connect_async()
 
@@ -589,12 +598,15 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint):
     assert res == expected_sum
 
 
-# do inserts while restarting postgres and messing with safekeeper addresses
-def test_wal_lagging(neon_env_builder: NeonEnvBuilder):
+# Do inserts while restarting postgres and messing with safekeeper addresses.
+# The test takes more than default 5 minutes on Postgres 16,
+# see https://github.com/neondatabase/neon/issues/5305
+@pytest.mark.timeout(600)
+def test_wal_lagging(neon_env_builder: NeonEnvBuilder, test_output_dir: Path):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_wal_lagging")
     endpoint = env.endpoints.create_start("test_wal_lagging")
 
-    asyncio.run(run_wal_lagging(env, endpoint))
+    asyncio.run(run_wal_lagging(env, endpoint, test_output_dir))

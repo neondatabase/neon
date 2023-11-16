@@ -20,7 +20,7 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    pageserver_http.configure_failpoints(("flush-frozen-before-sync", "sleep(10000)"))
+    pageserver_http.configure_failpoints(("flush-frozen-pausable", "sleep(10000)"))
 
     endpoint_branch0 = env.endpoints.create_start("main", tenant_id=tenant)
     branch0_cur = endpoint_branch0.connect().cursor()

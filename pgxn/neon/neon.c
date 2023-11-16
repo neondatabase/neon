@@ -25,6 +25,7 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "pagestore_client.h"
+#include "control_plane_connector.h"
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -32,9 +33,24 @@ void		_PG_init(void);
 void
 _PG_init(void)
 {
+	/*
+	 * Also load 'neon_rmgr'. This makes it unnecessary to list both 'neon'
+	 * and 'neon_rmgr' in shared_preload_libraries.
+	 */
+#if PG_VERSION_NUM >= 160000
+	load_file("$libdir/neon_rmgr", false);
+#endif
+
 	pg_init_libpagestore();
 	pg_init_walproposer();
 
+	InitControlPlaneConnector();
+
+	pg_init_extension_server();
+
+	// Important: This must happen after other parts of the extension
+	// are loaded, otherwise any settings to GUCs that were set before
+	// the extension was loaded will be removed.
 	EmitWarningsOnPlaceholders("neon");
 }
 

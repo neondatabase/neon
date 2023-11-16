@@ -19,9 +19,10 @@ use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::ops::Range;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
+use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 /// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
@@ -29,9 +30,33 @@ pub type BlockNumber = u32;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
+    /// Found commits both before and after the given timestamp
     Present(Lsn),
+
+    /// Found no commits after the given timestamp, this means
+    /// that the newest data in the branch is older than the given
+    /// timestamp.
+    ///
+    /// All commits <= LSN happened before the given timestamp
     Future(Lsn),
+
+    /// The queried timestamp is past our horizon we look back at (PITR)
+    ///
+    /// All commits > LSN happened after the given timestamp,
+    /// but any commits < LSN might have happened before or after
+    /// the given timestamp. We don't know because no data before
+    /// the given lsn is available.
     Past(Lsn),
+
+    /// We have found no commit with a timestamp,
+    /// so we can't return anything meaningful.
+    ///
+    /// The associated LSN is the lower bound value we can safely
+    /// create branches on, but no statement is made if it is
+    /// older or newer than the timestamp.
+    ///
+    /// This variant can e.g. be returned right after a
+    /// cluster import.
     NoData(Lsn),
 }
 
@@ -39,6 +64,46 @@ pub enum LsnForTimestamp {
 pub enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CollectKeySpaceError {
+    #[error(transparent)]
+    Decode(#[from] DeserializeError),
+    #[error(transparent)]
+    PageRead(PageReconstructError),
+    #[error("cancelled")]
+    Cancelled,
+}
+
+impl From<PageReconstructError> for CollectKeySpaceError {
+    fn from(err: PageReconstructError) -> Self {
+        match err {
+            PageReconstructError::Cancelled => Self::Cancelled,
+            err => Self::PageRead(err),
+        }
+    }
+}
+
+impl From<PageReconstructError> for CalculateLogicalSizeError {
+    fn from(pre: PageReconstructError) -> Self {
+        match pre {
+            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
+                Self::Cancelled
+            }
+            _ => Self::Other(pre.into()),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RelationError {
+    #[error("Relation Already Exists")]
+    AlreadyExists,
+    #[error("invalid relnode")]
+    InvalidRelnode,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -101,9 +166,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
@@ -148,9 +213,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
@@ -193,9 +258,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         // first try to lookup relation in cache
@@ -303,7 +368,11 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
-        let min_lsn = *gc_cutoff_lsn_guard;
+        // We use this method to figure out the branching LSN for the new branch, but the
+        // GC cutoff could be before the branching point and we cannot create a new branch
+        // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two to be
+        // on the safe side.
+        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
@@ -333,34 +402,36 @@ impl Timeline {
                 low = mid + 1;
             }
         }
+        // If `found_smaller == true`, `low = t + 1` where `t` is the target LSN,
+        // so the LSN of the last commit record before or at `search_timestamp`.
+        // Remove one from `low` to get `t`.
+        //
+        // FIXME: it would be better to get the LSN of the previous commit.
+        // Otherwise, if you restore to the returned LSN, the database will
+        // include physical changes from later commits that will be marked
+        // as aborted, and will need to be vacuumed away.
+        let commit_lsn = Lsn((low - 1) * 8);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
                 // just after importing a cluster.
-                Ok(LsnForTimestamp::NoData(max_lsn))
-            }
-            (true, false) => {
-                // Didn't find any commit timestamps larger than the request
-                Ok(LsnForTimestamp::Future(max_lsn))
+                Ok(LsnForTimestamp::NoData(min_lsn))
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
-                Ok(LsnForTimestamp::Past(max_lsn))
+                Ok(LsnForTimestamp::Past(min_lsn))
             }
-            (true, true) => {
-                // low is the LSN of the first commit record *after* the search_timestamp,
-                // Back off by one to get to the point just before the commit.
-                //
-                // FIXME: it would be better to get the LSN of the previous commit.
-                // Otherwise, if you restore to the returned LSN, the database will
-                // include physical changes from later commits that will be marked
-                // as aborted, and will need to be vacuumed away.
-                Ok(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
+            (true, false) => {
+                // Only found commits with timestamps smaller than the request.
+                // It's still a valid case for branch creation, return it.
+                // And `update_gc_info()` ignores LSN for a `LsnForTimestamp::Future`
+                // case, anyway.
+                Ok(LsnForTimestamp::Future(commit_lsn))
             }
+            (true, true) => Ok(LsnForTimestamp::Present(commit_lsn)),
         }
     }
 
-    ///
     /// Subroutine of find_lsn_for_timestamp(). Returns true, if there are any
     /// commits that committed after 'search_timestamp', at LSN 'probe_lsn'.
     ///
@@ -375,6 +446,50 @@ impl Timeline {
         found_larger: &mut bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if timestamp >= search_timestamp {
+                *found_larger = true;
+                return ControlFlow::Break(true);
+            } else {
+                *found_smaller = true;
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+    }
+
+    /// Obtain the possible timestamp range for the given lsn.
+    ///
+    /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
+    pub async fn get_timestamp_for_lsn(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<TimestampTz>, PageReconstructError> {
+        let mut max: Option<TimestampTz> = None;
+        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+            if let Some(max_prev) = max {
+                max = Some(max_prev.max(timestamp));
+            } else {
+                max = Some(timestamp);
+            }
+            ControlFlow::Continue(())
+        })
+        .await?;
+
+        Ok(max)
+    }
+
+    /// Runs the given function on all the timestamps for a given lsn
+    ///
+    /// The return value is either given by the closure, or set to the `Default`
+    /// impl's output.
+    async fn map_all_timestamps<T: Default>(
+        &self,
+        probe_lsn: Lsn,
+        ctx: &RequestContext,
+        mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
+    ) -> Result<T, PageReconstructError> {
         for segno in self
             .list_slru_segments(SlruKind::Clog, probe_lsn, ctx)
             .await?
@@ -392,16 +507,14 @@ impl Timeline {
                     timestamp_bytes.copy_from_slice(&clog_page[BLCKSZ as usize..]);
                     let timestamp = TimestampTz::from_be_bytes(timestamp_bytes);
 
-                    if timestamp >= search_timestamp {
-                        *found_larger = true;
-                        return Ok(true);
-                    } else {
-                        *found_smaller = true;
+                    match f(timestamp) {
+                        ControlFlow::Break(b) => return Ok(b),
+                        ControlFlow::Continue(()) => (),
                     }
                 }
             }
         }
-        Ok(false)
+        Ok(Default::default())
     }
 
     /// Get a list of SLRU segments
@@ -489,6 +602,24 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
+    pub async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        match self.get(AUX_FILES_KEY, lsn, ctx).await {
+            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
+                Ok(dir) => Ok(dir.files),
+                Err(e) => Err(PageReconstructError::from(e)),
+            },
+            Err(e) => {
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about AUX files: {}", e);
+                Ok(HashMap::new())
+            }
+        }
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -497,28 +628,22 @@ impl Timeline {
     pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
-        cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
+        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await.context("read dbdir")?;
+        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self
-                .list_rels(*spcnode, *dbnode, lsn, ctx)
-                .await
-                .context("list rels")?
-            {
-                if cancel.is_cancelled() {
+            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
+                if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
                 let relsize_key = rel_size_to_key(rel);
-                let mut buf = self
-                    .get(relsize_key, lsn, ctx)
-                    .await
-                    .with_context(|| format!("read relation size of {rel:?}"))?;
+                let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
                 total_size += relsize as u64;
@@ -531,11 +656,11 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
-    pub async fn collect_keyspace(
+    pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> anyhow::Result<KeySpace> {
+    ) -> Result<KeySpace, CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -544,7 +669,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialization failure")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
@@ -577,7 +702,7 @@ impl Timeline {
             let slrudir_key = slru_dir_to_key(kind);
             result.add_key(slrudir_key);
             let buf = self.get(slrudir_key, lsn, ctx).await?;
-            let dir = SlruSegmentDirectory::des(&buf).context("deserialization failure")?;
+            let dir = SlruSegmentDirectory::des(&buf)?;
             let mut segments: Vec<u32> = dir.segments.iter().cloned().collect();
             segments.sort_unstable();
             for segno in segments {
@@ -595,7 +720,7 @@ impl Timeline {
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf).context("deserialization failure")?;
+        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
         let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
         xids.sort_unstable();
         for xid in xids {
@@ -604,7 +729,9 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-
+        if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
+            result.add_key(AUX_FILES_KEY);
+        }
         Ok(result.to_keyspace())
     }
 
@@ -680,6 +807,12 @@ impl<'a> DatadirModification<'a> {
         })?;
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
+        // Create AuxFilesDirectory
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
         })?;
@@ -697,6 +830,20 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn init_empty_test_timeline(&mut self) -> anyhow::Result<()> {
+        self.init_empty()?;
+        self.put_control_file(bytes::Bytes::from_static(
+            b"control_file contents do not matter",
+        ))
+        .context("put_control_file")?;
+        self.put_checkpoint(bytes::Bytes::from_static(
+            b"checkpoint_file contents do not matter",
+        ))
+        .context("put_checkpoint_file")?;
+        Ok(())
+    }
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// NOTE: this will *not* implicitly extend the relation, if the page is beyond the
@@ -708,7 +855,7 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         rec: NeonWalRecord,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -735,7 +882,7 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -770,6 +917,12 @@ impl<'a> DatadirModification<'a> {
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
+
+            // Create AuxFilesDirectory as well
+            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+                files: HashMap::new(),
+            })?;
+            self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         }
         if r.is_none() {
             // Create RelDirectory
@@ -859,32 +1012,38 @@ impl<'a> DatadirModification<'a> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+    ) -> Result<(), RelationError> {
+        if rel.relnode == 0 {
+            return Err(RelationError::InvalidRelnode);
+        }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
+            .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
-            let buf = DbDirectory::ser(&dbdir)?;
+            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                .context("deserialize db")?
         };
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            anyhow::bail!("rel {rel} already exists");
+            return Err(RelationError::AlreadyExists);
         }
         self.put(
             rel_dir_key,
-            Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
+            Value::Image(Bytes::from(
+                RelDirectory::ser(&rel_dir).context("serialize")?,
+            )),
         );
 
         // Put size
@@ -909,7 +1068,7 @@ impl<'a> DatadirModification<'a> {
         nblocks: BlockNumber,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         let last_lsn = self.tline.get_last_record_lsn();
         if self.tline.get_rel_exists(rel, last_lsn, true, ctx).await? {
             let size_key = rel_size_to_key(rel);
@@ -940,7 +1099,7 @@ impl<'a> DatadirModification<'a> {
         nblocks: BlockNumber,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Put size
         let size_key = rel_size_to_key(rel);
@@ -961,7 +1120,7 @@ impl<'a> DatadirModification<'a> {
 
     /// Drop a relation.
     pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
@@ -1088,6 +1247,37 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub async fn put_file(
+        &mut self,
+        path: &str,
+        content: &[u8],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
+            Ok(buf) => AuxFilesDirectory::des(&buf)?,
+            Err(e) => {
+                // This is expected: historical databases do not have the key.
+                debug!("Failed to get info about AUX files: {}", e);
+                AuxFilesDirectory {
+                    files: HashMap::new(),
+                }
+            }
+        };
+        let path = path.to_string();
+        if content.is_empty() {
+            dir.files.remove(&path);
+        } else {
+            dir.files.insert(path, Bytes::copy_from_slice(content));
+        }
+        self.put(
+            AUX_FILES_KEY,
+            Value::Image(Bytes::from(
+                AuxFilesDirectory::ser(&dir).context("serialize")?,
+            )),
+        );
+        Ok(())
+    }
+
     ///
     /// Flush changes accumulated so far to the underlying repository.
     ///
@@ -1099,14 +1289,14 @@ impl<'a> DatadirModification<'a> {
     /// context, breaking the atomicity is OK. If the import is interrupted, the
     /// whole import fails and the timeline will be deleted anyway.
     /// (Or to be precise, it will be left behind for debugging purposes and
-    /// ignored, see https://github.com/neondatabase/neon/pull/1809)
+    /// ignored, see <https://github.com/neondatabase/neon/pull/1809>)
     ///
     /// Note: A consequence of flushing the pending operations is that they
     /// won't be visible to subsequent operations until `commit`. The function
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> anyhow::Result<()> {
+    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1114,19 +1304,20 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer();
+        let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut result: anyhow::Result<()> = Ok(());
-        self.pending_updates.retain(|&key, value| {
-            if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
-                false
+        let mut retained_pending_updates = HashMap::new();
+        for (key, value) in self.pending_updates.drain() {
+            if is_rel_block_key(key) || is_slru_block_key(key) {
+                // This bails out on first error without modifying pending_updates.
+                // That's Ok, cf this function's doc comment.
+                writer.put(key, self.lsn, &value, ctx).await?;
             } else {
-                true
+                retained_pending_updates.insert(key, value);
             }
-        });
-        result?;
+        }
+        self.pending_updates.extend(retained_pending_updates);
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1141,17 +1332,17 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> anyhow::Result<()> {
-        let writer = self.tline.writer();
+    pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+        let writer = self.tline.writer().await;
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value)?;
+            writer.put(key, lsn, &value, ctx).await?;
         }
         for key_range in self.pending_deletions.drain(..) {
-            writer.delete(key_range, lsn)?;
+            writer.delete(key_range, lsn).await?;
         }
 
         writer.finish_write(lsn);
@@ -1222,6 +1413,11 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AuxFilesDirectory {
+    files: HashMap<String, Bytes>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RelSizeEntry {
     nblocks: u32,
@@ -1270,9 +1466,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 02 pg_twophase
 //
 // 03 misc
-//    controlfile
+//    Controlfile
 //    checkpoint
 //    pg_version
+//
+// 04 aux files
 //
 // Below is a full list of the keyspace allocation:
 //
@@ -1311,6 +1509,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Checkpoint:
 // 03 00000000 00000000 00000000 00   00000001
+//
+// AuxFiles:
+// 03 00000000 00000000 00000000 00   00000002
+//
+
 //-- Section 01: relation data and metadata
 
 const DBDIR_KEY: Key = Key {
@@ -1534,6 +1737,15 @@ const CHECKPOINT_KEY: Key = Key {
     field6: 1,
 };
 
+const AUX_FILES_KEY: Key = Key {
+    field1: 0x03,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 2,
+};
+
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
@@ -1589,22 +1801,6 @@ fn is_slru_block_key(key: Key) -> bool {
     key.field1 == 0x01                // SLRU-related
         && key.field3 == 0x00000001   // but not SlruDir
         && key.field6 != 0xffffffff // and not SlruSegSize
-}
-
-#[cfg(test)]
-pub fn create_test_timeline(
-    tenant: &crate::tenant::Tenant,
-    timeline_id: utils::id::TimelineId,
-    pg_version: u32,
-    ctx: &RequestContext,
-) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant
-        .create_empty_timeline(timeline_id, Lsn(8), pg_version, ctx)?
-        .initialize(ctx)?;
-    let mut m = tline.begin_modification(Lsn(8));
-    m.init_empty()?;
-    m.commit()?;
-    Ok(tline)
 }
 
 #[allow(clippy::bool_assert_comparison)]

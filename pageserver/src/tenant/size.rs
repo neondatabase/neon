@@ -6,12 +6,11 @@ use std::sync::Arc;
 use anyhow::{bail, Context};
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
-use super::Tenant;
+use super::{LogicalSizeCalculationCause, Tenant};
 use crate::tenant::Timeline;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -29,7 +28,6 @@ use tenant_size_model::{Segment, StorageModel};
 /// needs. We will convert this into a StorageModel when it's time to perform
 /// the calculation.
 ///
-#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModelInputs {
     pub segments: Vec<SegmentMeta>,
@@ -37,11 +35,9 @@ pub struct ModelInputs {
 }
 
 /// A [`Segment`], with some extra information for display purposes
-#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SegmentMeta {
     pub segment: Segment,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub kind: LsnKind,
 }
@@ -77,32 +73,22 @@ pub enum LsnKind {
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
 /// part of [`ModelInputs`] from the HTTP api, explaining the inputs.
-#[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TimelineInputs {
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
 
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     pub ancestor_id: Option<TimelineId>,
 
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     ancestor_lsn: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     latest_gc_cutoff: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     horizon_cutoff: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pitr_cutoff: Lsn,
 
     /// Cutoff point based on GC settings
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     next_gc_cutoff: Lsn,
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     retention_param_cutoff: Option<Lsn>,
 }
 
@@ -110,11 +96,11 @@ pub struct TimelineInputs {
 ///
 /// Tenant size does not consider the latest state, but only the state until next_gc_cutoff, which
 /// is updated on-demand, during the start of this calculation and separate from the
-/// [`Timeline::latest_gc_cutoff`].
+/// [`TimelineInputs::latest_gc_cutoff`].
 ///
 /// For timelines in general:
 ///
-/// ```ignore
+/// ```text
 /// 0-----|---------|----|------------| · · · · · |·> lsn
 ///   initdb_lsn  branchpoints*  next_gc_cutoff  latest
 /// ```
@@ -126,6 +112,7 @@ pub(super) async fn gather_inputs(
     limit: &Arc<Semaphore>,
     max_retention_period: Option<u64>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    cause: LogicalSizeCalculationCause,
     ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
@@ -318,7 +305,15 @@ pub(super) async fn gather_inputs(
 
     // We left the 'size' field empty in all of the Segments so far.
     // Now find logical sizes for all of the points that might need or benefit from them.
-    fill_logical_sizes(&timelines, &mut segments, limit, logical_size_cache, ctx).await?;
+    fill_logical_sizes(
+        &timelines,
+        &mut segments,
+        limit,
+        logical_size_cache,
+        cause,
+        ctx,
+    )
+    .await?;
 
     Ok(ModelInputs {
         segments,
@@ -336,6 +331,7 @@ async fn fill_logical_sizes(
     segments: &mut [SegmentMeta],
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    cause: LogicalSizeCalculationCause,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     let timeline_hash: HashMap<TimelineId, Arc<Timeline>> = HashMap::from_iter(
@@ -353,10 +349,6 @@ async fn fill_logical_sizes(
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let cancel = tokio_util::sync::CancellationToken::new();
-    // be sure to cancel all spawned tasks if we are dropped
-    let _dg = cancel.clone().drop_guard();
-
     // For each point that would benefit from having a logical size available,
     // spawn a Task to fetch it, unless we have it cached already.
     for seg in segments.iter() {
@@ -373,13 +365,10 @@ async fn fill_logical_sizes(
                 let timeline = Arc::clone(timeline_hash.get(&timeline_id).unwrap());
                 let parallel_size_calcs = Arc::clone(limit);
                 let ctx = ctx.attached_child();
-                joinset.spawn(calculate_logical_size(
-                    parallel_size_calcs,
-                    timeline,
-                    lsn,
-                    ctx,
-                    cancel.child_token(),
-                ));
+                joinset.spawn(
+                    calculate_logical_size(parallel_size_calcs, timeline, lsn, cause, ctx)
+                        .in_current_span(),
+                );
             }
             e.insert(cached_size);
         }
@@ -405,10 +394,12 @@ async fn fill_logical_sizes(
                 have_any_error = true;
             }
             Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error)))) => {
-                warn!(
-                    timeline_id=%timeline.timeline_id,
-                    "failed to calculate logical size at {lsn}: {error:#}"
-                );
+                if !matches!(error, CalculateLogicalSizeError::Cancelled) {
+                    warn!(
+                        timeline_id=%timeline.timeline_id,
+                        "failed to calculate logical size at {lsn}: {error:#}"
+                    );
+                }
                 have_any_error = true;
             }
             Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size)))) => {
@@ -482,15 +473,15 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
+    cause: LogicalSizeCalculationCause,
     ctx: RequestContext,
-    cancel: CancellationToken,
 ) -> Result<TimelineAtLsnSizeResult, RecvError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not had been closed");
 
     let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn, ctx, cancel)
+        .spawn_ondemand_logical_size_calculation(lsn, cause, ctx)
         .instrument(info_span!("spawn_ondemand_logical_size_calculation"))
         .await?;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
