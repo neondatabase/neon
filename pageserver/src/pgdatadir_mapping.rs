@@ -662,20 +662,21 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<KeySpace, CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
+        // This function is responsible for appending keys in order, using implicit
+        // knowledge of how keys are defined.
         let mut result = KeySpaceAccum::new();
-
-        // The dbdir metadata always exists
-        result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
         let dbdir = DbDirectory::des(&buf)?;
 
+        let mut metadata_keys = Vec::new();
+
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
         for (spcnode, dbnode) in dbs {
-            result.add_key(relmap_file_key(spcnode, dbnode));
-            result.add_key(rel_dir_to_key(spcnode, dbnode));
+            metadata_keys.push(relmap_file_key(spcnode, dbnode));
+            metadata_keys.push(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
                 .list_rels(spcnode, dbnode, lsn, ctx)
@@ -689,7 +690,7 @@ impl Timeline {
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
-                result.add_key(relsize_key);
+                metadata_keys.push(relsize_key);
             }
         }
 
@@ -732,6 +733,13 @@ impl Timeline {
         if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
             result.add_key(AUX_FILES_KEY);
         }
+
+        // The dbdir metadata always exists
+        result.add_key(DBDIR_KEY);
+        for key in metadata_keys {
+            result.add_key(key);
+        }
+
         Ok(result.to_keyspace())
     }
 
@@ -1474,20 +1482,10 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 //
 // Below is a full list of the keyspace allocation:
 //
-// DbDir:
-// 00 00000000 00000000 00000000 00   00000000
-//
-// Filenodemap:
-// 00 SPCNODE  DBNODE   00000000 00   00000000
-//
-// RelDir:
-// 00 SPCNODE  DBNODE   00000000 00   00000001 (Postgres never uses relfilenode 0)
+
 //
 // RelBlock:
 // 00 SPCNODE  DBNODE   RELNODE  FORK BLKNUM
-//
-// RelSize:
-// 00 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
 //
 // SlruDir:
 // 01 kind     00000000 00000000 00   00000000
@@ -1513,11 +1511,31 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // AuxFiles:
 // 03 00000000 00000000 00000000 00   00000002
 //
+// DbDir:
+// 04 00000000 00000000 00000000 00   00000000
+//
+// Filenodemap:
+// 04 SPCNODE  DBNODE   00000000 00   00000000
+//
+// RelDir:
+// 04 SPCNODE  DBNODE   00000000 00   00000001 (Postgres never uses relfilenode 0)
+//
+// RelSize:
+// 04 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
 
 //-- Section 01: relation data and metadata
 
+/// Keys above this Key are required to serve a basebackup request
+pub(crate) const BASEBACKUP_CUT: Key = slru_dir_to_key(SlruKind::Clog);
+
+/// Keys aboe this Key are needed to make a logical size calculation
+///
+/// Ensuring that such keys are stored above the main range of user relation
+/// blocks enables much more efficient space management.
+pub(crate) const METADATA_CUT: Key = CONTROLFILE_KEY;
+
 const DBDIR_KEY: Key = Key {
-    field1: 0x00,
+    field1: 0x04,
     field2: 0,
     field3: 0,
     field4: 0,
@@ -1527,14 +1545,14 @@ const DBDIR_KEY: Key = Key {
 
 fn dbdir_key_range(spcnode: Oid, dbnode: Oid) -> Range<Key> {
     Key {
-        field1: 0x00,
+        field1: 0x04,
         field2: spcnode,
         field3: dbnode,
         field4: 0,
         field5: 0,
         field6: 0,
     }..Key {
-        field1: 0x00,
+        field1: 0x04,
         field2: spcnode,
         field3: dbnode,
         field4: 0xffffffff,
@@ -1545,7 +1563,7 @@ fn dbdir_key_range(spcnode: Oid, dbnode: Oid) -> Range<Key> {
 
 fn relmap_file_key(spcnode: Oid, dbnode: Oid) -> Key {
     Key {
-        field1: 0x00,
+        field1: 0x04,
         field2: spcnode,
         field3: dbnode,
         field4: 0,
@@ -1556,7 +1574,7 @@ fn relmap_file_key(spcnode: Oid, dbnode: Oid) -> Key {
 
 fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
     Key {
-        field1: 0x00,
+        field1: 0x04,
         field2: spcnode,
         field3: dbnode,
         field4: 0,
@@ -1578,7 +1596,7 @@ fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
 
 fn rel_size_to_key(rel: RelTag) -> Key {
     Key {
-        field1: 0x00,
+        field1: 0x04,
         field2: rel.spcnode,
         field3: rel.dbnode,
         field4: rel.relnode,
@@ -1607,7 +1625,7 @@ fn rel_key_range(rel: RelTag) -> Range<Key> {
 
 //-- Section 02: SLRUs
 
-fn slru_dir_to_key(kind: SlruKind) -> Key {
+const fn slru_dir_to_key(kind: SlruKind) -> Key {
     Key {
         field1: 0x01,
         field2: match kind {
