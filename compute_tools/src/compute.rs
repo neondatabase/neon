@@ -1056,9 +1056,12 @@ LIMIT 100",
             .batch_execute(&format!(
                 "BEGIN;
         ALTER TABLE {0} ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS neon_row_level ON {0};
+        DROP ROLE IF EXISTS {1};
         CREATE USER {1} WITH PASSWORD '{2}' IN GROUP {3};
         CREATE POLICY neon_row_level ON {0} TO {3}
-            USING ({4} = current_user);
+            USING ({4} = current_user)
+            WITH CHECK ({4} = current_user);
         COMMIT;",
                 &params.table_name,
                 &params.user_name,
