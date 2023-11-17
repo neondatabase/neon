@@ -1,6 +1,8 @@
 pub mod mock;
 pub mod neon;
 
+use self::neon::UserRowLevel;
+
 use super::messages::MetricsAuxInfo;
 use crate::{
     auth::{backend::Policy, ClientCredentials},
@@ -257,7 +259,7 @@ pub trait Api {
         dbname: String,
         username: String,
         policies: Vec<Policy>,
-    ) -> anyhow::Result<String>;
+    ) -> anyhow::Result<UserRowLevel>;
 }
 
 /// Various caches for [`console`](super).

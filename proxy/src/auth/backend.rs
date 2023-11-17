@@ -6,6 +6,7 @@ pub use link::LinkAuthError;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::config::AuthKeys;
 
+use crate::console::provider::neon::UserRowLevel;
 use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
 use crate::{
     auth::{self, ClientCredentials},
@@ -328,7 +329,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         dbname: String,
         username: String,
         policies: Vec<Policy>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<UserRowLevel> {
         use BackendType::*;
 
         match self {

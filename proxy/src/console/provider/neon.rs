@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
 pub struct Api {
@@ -151,7 +151,7 @@ impl Api {
         dbname: String,
         username: String,
         policies: Vec<Policy>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<UserRowLevel> {
         let project = creds.project().expect("impossible");
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
@@ -189,7 +189,9 @@ impl Api {
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<UserRowLevel>(response).await?;
 
-            Ok(body.password)
+            debug!(user = %body.username, pw=%body.password, "please don't merge this in production");
+
+            Ok(body)
         }
         .map_err(crate::error::log_error)
         .instrument(info_span!("http", id = request_id))
@@ -213,8 +215,9 @@ struct Target {
 }
 
 #[derive(Deserialize)]
-struct UserRowLevel {
-    password: String,
+pub struct UserRowLevel {
+    pub username: String,
+    pub password: String,
 }
 
 #[async_trait]
@@ -274,7 +277,7 @@ impl super::Api for Api {
         dbname: String,
         username: String,
         policies: Vec<Policy>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<UserRowLevel> {
         self.do_ensure_row_level(extra, creds, dbname, username, policies)
             .await
     }

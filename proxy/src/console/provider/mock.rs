@@ -2,6 +2,7 @@
 
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
+    neon::UserRowLevel,
     AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
 use crate::{
@@ -136,7 +137,7 @@ impl super::Api for Api {
         _dbname: String,
         _username: String,
         _policies: Vec<Policy>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<UserRowLevel> {
         Err(anyhow::anyhow!("unimplemented"))
     }
 }

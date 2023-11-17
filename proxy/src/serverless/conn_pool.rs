@@ -22,7 +22,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth::{self, backend::Policy},
-    console,
+    console::{self, provider::neon::UserRowLevel},
     proxy::{
         neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
         NUM_DB_CONNECTIONS_OPENED_COUNTER,
@@ -368,7 +368,7 @@ struct TokioMechanism<'a> {
     conn_info: &'a ConnInfo,
     session_id: uuid::Uuid,
     conn_id: uuid::Uuid,
-    password: Option<String>,
+    row_level: Option<UserRowLevel>,
 }
 
 #[async_trait]
@@ -388,7 +388,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
             timeout,
             self.conn_id,
             self.session_id,
-            self.password.as_deref(),
+            &self.row_level,
         )
         .await
     }
@@ -436,9 +436,9 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
-    let mut password = None;
+    let mut row_level = None;
     if let Some(policies) = &conn_info.policies {
-        password = Some(
+        row_level = Some(
             creds
                 .ensure_row_level(
                     &extra,
@@ -455,7 +455,7 @@ async fn connect_to_compute(
             conn_id,
             conn_info,
             session_id,
-            password,
+            row_level,
         },
         node_info,
         &extra,
@@ -471,13 +471,24 @@ async fn connect_to_compute_once(
     timeout: time::Duration,
     conn_id: uuid::Uuid,
     mut session: uuid::Uuid,
-    password: Option<&str>,
+    row_level: &Option<UserRowLevel>,
 ) -> Result<ClientInner, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
+    let username = row_level
+        .as_ref()
+        .map(|r| &r.username)
+        .unwrap_or(&conn_info.username);
+    info!(%username, dbname = %conn_info.dbname, "connecting");
+
     let (client, mut connection) = config
-        .user(&conn_info.username)
-        .password(password.unwrap_or(&conn_info.password))
+        .user(username)
+        .password(
+            row_level
+                .as_ref()
+                .map(|r| &r.password)
+                .unwrap_or(&conn_info.password),
+        )
         .dbname(&conn_info.dbname)
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
