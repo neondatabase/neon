@@ -187,9 +187,12 @@ impl Api {
             let start = Instant::now();
             let response = self.endpoint.execute(request).await?;
             info!(duration = ?start.elapsed(), "received http response");
-            let body = parse_body::<UserRowLevel>(response).await?;
+            let mut body = parse_body::<UserRowLevel>(response).await?;
 
-            debug!(user = %body.username, pw=%body.password, "please don't merge this in production");
+            // hack
+            body.username = body.username.to_lowercase();
+
+            // info!(user = %body.username, pw=%body.password, "please don't merge this in production");
 
             Ok(body)
         }
