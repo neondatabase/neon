@@ -647,20 +647,52 @@ impl RemoteTimelineClient {
     /// deletion won't actually be performed, until all previously scheduled
     /// upload operations, and the index file upload, have completed
     /// successfully.
+    ///
+    /// No work is done if the layers are not present in the remote index. Returns
+    /// false if no work was done.
     pub fn schedule_layer_file_deletion(
         self: &Arc<Self>,
         names: &[LayerFileName],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
         let with_generations =
             self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned());
 
-        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        if with_generations.is_empty() {
+            // No-op.
+            Ok(false)
+        } else {
+            self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
 
-        // Launch the tasks immediately, if possible
-        self.launch_queued_tasks(upload_queue);
+            // Launch the tasks immediately, if possible
+            self.launch_queued_tasks(upload_queue);
+            Ok(true)
+        }
+    }
+
+    /// Schedule layer deletions and wait for them to fully execute.
+    ///
+    /// This is not the normal way to delete layers: usually deletion is scheduled and
+    /// left to run in the background.  However, during startup in [`crate::tenant::Timeline::load_layer_map`]
+    /// we may find that there are some layers in the future wrt disk_consistent_lsn,
+    /// and drop them.  This is different to a normal deletion, because we are deleting layers that
+    /// we may soon re-upload with the same name: it's important that the deletions do not race with
+    /// those later uploads.  So this function includes a full flush of the deletion queue.
+    ///
+    /// TODO: remote, as we will no longer need this function when we are always running pageservers with
+    /// generations enabled, because layer keys after a restart will always differ to layers before
+    /// the restart by their generation suffix.
+    pub async fn flushing_delete_layers(
+        self: &Arc<Self>,
+        names: &[LayerFileName],
+    ) -> anyhow::Result<()> {
+        if self.schedule_layer_file_deletion(names)? {
+            self.wait_completion().await?;
+
+            self.deletion_queue_client.flush_execute().await?;
+        }
         Ok(())
     }
 

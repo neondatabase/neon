@@ -1709,10 +1709,7 @@ impl Timeline {
         guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         if let Some(rtc) = self.remote_client.as_ref() {
-            rtc.schedule_layer_file_deletion(&needs_cleanup)?;
-            rtc.schedule_index_upload_for_file_changes()?;
-            // Tenant::create_timeline will wait for these uploads to happen before returning, or
-            // on retry.
+            rtc.flushing_delete_layers(&needs_cleanup).await?;
         }
 
         info!(
