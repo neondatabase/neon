@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
 pub struct Api {
