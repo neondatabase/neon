@@ -423,7 +423,11 @@ pub fn handle_merge(client: &mut Client, dst_connstr: &str, src_connstr: &str) -
         src_conf.dbname(&db.name);
 
         let mut sub_client = dst_conf.connect(NoTls)?;
-        let create_sub = format!("create subscription sub_merge connection '{}' publication pub_merge with (create_slot=false, slot_name=merge_slot_{}, copy_data=false)", str::replace(src_connstr, "'",  "''"), &db.name);
+        let mut connstr_parts: Vec<&str> = src_connstr.split('/').collect();
+        connstr_parts.pop();
+        connstr_parts.push(&db.name);
+        let connstr = connstr_parts.join("/");
+        let create_sub = format!("create subscription sub_merge connection '{}' publication pub_merge with (create_slot=false, slot_name=merge_slot_{}, copy_data=false)", connstr, &db.name);
         sub_client.simple_query(&create_sub)?;
     }
 
