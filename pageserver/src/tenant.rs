@@ -291,6 +291,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+        match self {
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub async fn request_redo(
         &self,
         key: crate::repository::Key,
@@ -1699,6 +1709,11 @@ impl Tenant {
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
+
+        // Perhaps we did no work and the walredo process has been idle for some time:
+        // give it a chance to shut down to avoid leaving walredo process running indefinitely.
+        self.walredo_mgr
+            .maybe_quiesce(self.get_compaction_period() * 10);
 
         Ok(())
     }
