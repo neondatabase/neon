@@ -249,7 +249,9 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, ctx).await?;
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, ctx)
+            .await
+            .and_then(|res| res)?;
 
         // not production code
         let actual_filename = path.file_name().unwrap().to_owned();
@@ -295,18 +297,31 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
+    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
+    /// - inner has the success or transient failure
+    /// - outer has the permanent failure
     pub(super) async fn load(
         path: &Utf8Path,
         lsn: Lsn,
         summary: Option<Summary>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path)
-            .await
-            .with_context(|| format!("Failed to open file '{}'", path))?;
+    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
+        let file = match VirtualFile::open(path).await {
+            Ok(file) => file,
+            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
+        };
         let file = FileBlockReader::new(file);
-        let summary_blk = file.read_blk(0, ctx).await?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let summary_blk = match file.read_blk(0, ctx).await {
+            Ok(blk) => blk,
+            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
+        };
+
+        // length is the only way how this could fail, so it's not actually likely at all unless
+        // read_blk returns wrong sized block.
+        //
+        // TODO: confirm and make this into assertion
+        let actual_summary =
+            Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
 
         if let Some(mut expected_summary) = summary {
             // production code path
@@ -322,12 +337,12 @@ impl ImageLayerInner {
             }
         }
 
-        Ok(ImageLayerInner {
+        Ok(Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
             lsn,
             file,
-        })
+        }))
     }
 
     pub(super) async fn get_value_reconstruct_data(

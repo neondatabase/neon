@@ -367,12 +367,13 @@ impl PostgresRedoManager {
             self.apply_record_neon(key, &mut page, *record_lsn, record)?;
         }
         // Success!
-        let end_time = Instant::now();
-        let duration = end_time.duration_since(start_time);
+        let duration = start_time.elapsed();
+        // FIXME: using the same metric here creates a bimodal distribution by default, and because
+        // there could be multiple batch sizes this would be N+1 modal.
         WAL_REDO_TIME.observe(duration.as_secs_f64());
 
         debug!(
-            "neon applied {} WAL records in {} ms to reconstruct page image at LSN {}",
+            "neon applied {} WAL records in {} us to reconstruct page image at LSN {}",
             records.len(),
             duration.as_micros(),
             lsn
