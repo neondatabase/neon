@@ -291,6 +291,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+        match self {
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub async fn request_redo(
         &self,
         key: crate::repository::Key,
@@ -1649,21 +1659,15 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub async fn compaction_iteration(
+    async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Don't start doing work during shutdown
-        if let TenantState::Stopping { .. } = self.current_state() {
+    ) -> anyhow::Result<(), timeline::CompactionError> {
+        // Don't start doing work during shutdown, or when broken, we do not need those in the logs
+        if !self.is_active() {
             return Ok(());
         }
-
-        // We should only be called once the tenant has activated.
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run compaction iteration on inactive tenant"
-        );
 
         {
             let conf = self.tenant_conf.read().unwrap();

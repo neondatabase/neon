@@ -479,13 +479,6 @@ fn cli() -> clap::Command {
                 )
                 .value_name("FILECACHE_CONNSTR"),
         )
-        .arg(
-            // DEPRECATED, NO LONGER DOES ANYTHING.
-            // See https://github.com/neondatabase/cloud/issues/7516
-            Arg::new("file-cache-on-disk")
-                .long("file-cache-on-disk")
-                .action(clap::ArgAction::SetTrue),
-        )
 }
 
 #[test]

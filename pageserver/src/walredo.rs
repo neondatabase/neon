@@ -91,6 +91,7 @@ struct ProcessOutput {
 pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
+    last_redo_at: std::sync::Mutex<Option<Instant>>,
     redo_process: RwLock<Option<Arc<WalRedoProcess>>>,
 }
 
@@ -187,7 +188,23 @@ impl PostgresRedoManager {
         PostgresRedoManager {
             tenant_id,
             conf,
+            last_redo_at: std::sync::Mutex::default(),
             redo_process: RwLock::new(None),
+        }
+    }
+
+    /// This type doesn't have its own background task to check for idleness: we
+    /// rely on our owner calling this function periodically in its own housekeeping
+    /// loops.
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+        if let Ok(g) = self.last_redo_at.try_lock() {
+            if let Some(last_redo_at) = *g {
+                if last_redo_at.elapsed() >= idle_timeout {
+                    drop(g);
+                    let mut guard = self.redo_process.write().unwrap();
+                    *guard = None;
+                }
+            }
         }
     }
 
@@ -205,6 +222,8 @@ impl PostgresRedoManager {
         wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
+        *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
+
         let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
@@ -348,12 +367,13 @@ impl PostgresRedoManager {
             self.apply_record_neon(key, &mut page, *record_lsn, record)?;
         }
         // Success!
-        let end_time = Instant::now();
-        let duration = end_time.duration_since(start_time);
+        let duration = start_time.elapsed();
+        // FIXME: using the same metric here creates a bimodal distribution by default, and because
+        // there could be multiple batch sizes this would be N+1 modal.
         WAL_REDO_TIME.observe(duration.as_secs_f64());
 
         debug!(
-            "neon applied {} WAL records in {} ms to reconstruct page image at LSN {}",
+            "neon applied {} WAL records in {} us to reconstruct page image at LSN {}",
             records.len(),
             duration.as_micros(),
             lsn
