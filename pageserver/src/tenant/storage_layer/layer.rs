@@ -868,6 +868,9 @@ impl LayerInner {
             }
             Ok((Err(e), _permit)) => {
                 // FIXME: this should be with the spawned task and be cancellation sensitive
+                //
+                // while we should not need this, this backoff has turned out to be useful with
+                // a bug of unexpectedly deleted remote layer file (#5787).
                 let consecutive_failures =
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
