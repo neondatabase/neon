@@ -1710,11 +1710,6 @@ impl Tenant {
                 .await?;
         }
 
-        // Perhaps we did no work and the walredo process has been idle for some time:
-        // give it a chance to shut down to avoid leaving walredo process running indefinitely.
-        self.walredo_mgr
-            .maybe_quiesce(self.get_compaction_period() * 10);
-
         Ok(())
     }
 
