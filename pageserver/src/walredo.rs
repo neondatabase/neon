@@ -91,6 +91,7 @@ struct ProcessOutput {
 pub struct PostgresRedoManager {
     tenant_id: TenantId,
     conf: &'static PageServerConf,
+    last_redo_at: std::sync::Mutex<Option<Instant>>,
     redo_process: RwLock<Option<Arc<WalRedoProcess>>>,
 }
 
@@ -187,7 +188,23 @@ impl PostgresRedoManager {
         PostgresRedoManager {
             tenant_id,
             conf,
+            last_redo_at: std::sync::Mutex::default(),
             redo_process: RwLock::new(None),
+        }
+    }
+
+    /// This type doesn't have its own background task to check for idleness: we
+    /// rely on our owner calling this function periodically in its own housekeeping
+    /// loops.
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+        if let Ok(g) = self.last_redo_at.try_lock() {
+            if let Some(last_redo_at) = *g {
+                if last_redo_at.elapsed() >= idle_timeout {
+                    drop(g);
+                    let mut guard = self.redo_process.write().unwrap();
+                    *guard = None;
+                }
+            }
         }
     }
 
@@ -205,6 +222,8 @@ impl PostgresRedoManager {
         wal_redo_timeout: Duration,
         pg_version: u32,
     ) -> anyhow::Result<Bytes> {
+        *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
+
         let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
