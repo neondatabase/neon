@@ -199,14 +199,13 @@ impl PostgresRedoManager {
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         if let Ok(g) = self.last_redo_at.try_lock() {
             if let Some(last_redo_at) = *g {
-                if last_redo_at.elapsed() < idle_timeout {
-                    return;
+                if last_redo_at.elapsed() >= idle_timeout {
+                    drop(g);
+                    let mut guard = self.redo_process.write().unwrap();
+                    *guard = None;
                 }
             }
         }
-
-        let mut guard = self.redo_process.write().unwrap();
-        *guard = None;
     }
 
     ///
