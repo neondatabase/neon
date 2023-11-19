@@ -1649,21 +1649,15 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub async fn compaction_iteration(
+    async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Don't start doing work during shutdown
-        if let TenantState::Stopping { .. } = self.current_state() {
+    ) -> anyhow::Result<(), timeline::CompactionError> {
+        // Don't start doing work during shutdown, or when broken, we do not need those in the logs
+        if !self.is_active() {
             return Ok(());
         }
-
-        // We should only be called once the tenant has activated.
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run compaction iteration on inactive tenant"
-        );
 
         {
             let conf = self.tenant_conf.read().unwrap();
