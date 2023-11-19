@@ -1220,6 +1220,7 @@ impl DownloadedLayer {
                     LAYER_IMPL_METRICS.inc_permanent_loading_failures();
                     // TODO(#5815): we are not logging all errors, so temporarily log them **once**
                     // here as well
+                    let permanent = permanent.context("load layer");
                     tracing::error!("layer loading failed permanently: {permanent:#}");
                     Ok(Err(permanent))
                 }
