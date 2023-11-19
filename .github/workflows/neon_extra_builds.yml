@@ -234,6 +234,10 @@ jobs:
           cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
 
   check-codestyle-rust-arm:
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-arm')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 90
     runs-on: [ self-hosted, dev, arm64 ]
 
