@@ -180,7 +180,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
                     let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count,
+                        error_run_count + 1,
                         1.0,
                         MAX_BACKOFF_SECS,
                     );
@@ -261,7 +261,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     .await;
                 if let Err(e) = res {
                     let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count,
+                        error_run_count + 1,
                         1.0,
                         MAX_BACKOFF_SECS,
                     );
