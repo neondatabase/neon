@@ -197,22 +197,10 @@ impl PostgresRedoManager {
     /// rely on our owner calling this function periodically in its own housekeeping
     /// loops.
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
-        use std::sync::TryLockError;
-
-        {
-            let g = match self.last_redo_at.try_lock() {
-                Ok(g) => g,
-                Err(TryLockError::Poisoned(e)) => e.into_inner(),
-                Err(TryLockError::WouldBlock) => return,
-            };
-
-            match *g {
-                None => return,
-                Some(last_redo_at) if last_redo_at.elapsed() < idle_timeout => {
+        if let Ok(g) = self.last_redo_at.try_lock() {
+            if let Some(last_redo_at) = *g {
+                if last_redo_at.elapsed() < idle_timeout {
                     return;
-                }
-                Some(_too_long_ago) => {
-                    // fallthrough
                 }
             }
         }
