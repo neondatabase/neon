@@ -1663,7 +1663,7 @@ class NeonPageserver(PgProtocol):
             # these can happen anytime we do compactions from background task and shutdown pageserver
             r".*ERROR.*ancestor timeline \S+ is being stopped",
             # this is expected given our collaborative shutdown approach for the UploadQueue
-            ".*Compaction failed.*, retrying in .*: queue is in state Stopped.*",
+            ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
             # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
             ".*Error processing HTTP request: NotFound: Timeline .* was not found",
             ".*took more than expected to complete.*",
