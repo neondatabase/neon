@@ -277,23 +277,6 @@ jobs:
         env:
             RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
-      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
-      - name: Check formatting
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
-
-      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
-      - name: Check rust dependencies
-        if: ${{ !cancelled() }}
-        run: |
-          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
-          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-
-      # https://github.com/EmbarkStudios/cargo-deny
-      - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
-        run: cargo deny check
-
   gather-rust-build-stats:
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
