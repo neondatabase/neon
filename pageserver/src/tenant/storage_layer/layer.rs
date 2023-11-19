@@ -1227,6 +1227,7 @@ impl DownloadedLayer {
         };
         self.kind
             .get_or_try_init(init)
+            // return transient errors using `?`
             .await?
             .as_ref()
             .map_err(|e| {
