@@ -116,6 +116,10 @@ jobs:
         run: ./run_clippy.sh
 
   check-linux-arm-build:
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-arm')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
     timeout-minutes: 90
     runs-on: [ self-hosted, dev, arm64 ]
 
