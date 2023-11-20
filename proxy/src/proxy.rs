@@ -15,10 +15,15 @@ use crate::{
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use itertools::Itertools;
 use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{
+    register_histogram, register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec,
+    IntGaugeVec,
+};
+use regex::Regex;
 use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -101,6 +106,34 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         &["protocol", "cache_miss", "pool_miss", "outcome"],
         // largest bucket = 2^16 * 0.5ms = 32s
         exponential_buckets(0.0005, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "semaphore_control_plane_token_acquire_seconds",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 2^16 * 0.5ms = 32s
+        exponential_buckets(0.0005, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_LIMIT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "semaphore_control_plane_limit",
+        "Current limit of the semaphore control plane",
+        &["limit"], // 2 counters
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTION_ACCEPTED_BY_SNI: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_accepted_connections_by_sni",
+        "Number of connections (per sni).",
+        &["kind"],
     )
     .unwrap()
 });
@@ -481,7 +514,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
 }
 
 /// Try to connect to the compute node once.
-#[tracing::instrument(name = "connect_once", skip_all)]
+#[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     timeout: time::Duration,
@@ -568,6 +601,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             "api_console_other_server_error"
         }
         WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
+        WakeComputeError::TimeoutError => "timeout_error",
     };
     NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
 }
@@ -881,9 +915,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             allow_self_signed_compute,
         } = self;
 
+        let console_options = neon_options(params);
+
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
+            options: console_options.as_deref(),
         };
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
@@ -944,4 +981,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         node.stream.write_all(&read_buf).await?;
         proxy_pass(stream, node.stream, &aux).await
     }
+}
+
+pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
+    #[allow(unstable_name_collisions)]
+    let options: String = params
+        .options_raw()?
+        .filter(|opt| is_neon_param(opt))
+        .sorted() // we sort it to use as cache key
+        .intersperse(" ") // TODO: use impl from std once it's stabilized
+        .collect();
+
+    // Don't even bother with empty options.
+    if options.is_empty() {
+        return None;
+    }
+
+    Some(options)
+}
+
+pub fn is_neon_param(bytes: &str) -> bool {
+    static RE: OnceCell<Regex> = OnceCell::new();
+    RE.get_or_init(|| Regex::new(r"^neon_\w+:").unwrap());
+
+    RE.get().unwrap().is_match(bytes)
 }

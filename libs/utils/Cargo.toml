@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arc-swap.workspace = true
 sentry.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
@@ -55,6 +56,7 @@ bytes.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 camino-tempfile.workspace = true
+serde_assert.workspace = true
 
 [[bench]]
 name = "benchmarks"

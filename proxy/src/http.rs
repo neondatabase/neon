@@ -13,13 +13,13 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::Instant;
 use tracing::trace;
 
-use crate::url::ApiUrl;
+use crate::{rate_limiter, url::ApiUrl};
 use reqwest_middleware::RequestBuilder;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
 /// We deliberately don't want to replace this with a public static.
-pub fn new_client() -> ClientWithMiddleware {
+pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
         .dns_resolver(Arc::new(GaiResolver::default()))
         .connection_verbose(true)
@@ -28,6 +28,7 @@ pub fn new_client() -> ClientWithMiddleware {
 
     reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
+        .with(rate_limiter::Limiter::new(rate_limiter_config))
         .build()
 }
 

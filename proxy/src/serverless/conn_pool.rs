@@ -22,7 +22,10 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth, console,
-    proxy::{LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER, NUM_DB_CONNECTIONS_OPENED_COUNTER},
+    proxy::{
+        neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
+        NUM_DB_CONNECTIONS_OPENED_COUNTER,
+    },
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -41,6 +44,7 @@ pub struct ConnInfo {
     pub dbname: String,
     pub hostname: String,
     pub password: String,
+    pub options: Option<String>,
 }
 
 impl ConnInfo {
@@ -204,14 +208,13 @@ impl GlobalConnPool {
             } else {
                 info!("pool: reusing connection '{conn_info}'");
                 client.session.send(session_id)?;
+                tracing::Span::current().record(
+                    "pid",
+                    &tracing::field::display(client.inner.get_process_id()),
+                );
                 latency_timer.pool_hit();
                 latency_timer.success();
-                return Ok(Client {
-                    conn_id: client.conn_id,
-                    inner: Some(client),
-                    span: Span::current(),
-                    pool,
-                });
+                return Ok(Client::new(client, pool).await);
             }
         } else {
             let conn_id = uuid::Uuid::new_v4();
@@ -225,6 +228,12 @@ impl GlobalConnPool {
             )
             .await
         };
+        if let Ok(client) = &new_client {
+            tracing::Span::current().record(
+                "pid",
+                &tracing::field::display(client.inner.get_process_id()),
+            );
+        }
 
         match &new_client {
             // clear the hash. it's no longer valid
@@ -258,13 +267,8 @@ impl GlobalConnPool {
             }
             _ => {}
         }
-
-        new_client.map(|inner| Client {
-            conn_id: inner.conn_id,
-            inner: Some(inner),
-            span: Span::current(),
-            pool,
-        })
+        let new_client = new_client?;
+        Ok(Client::new(new_client, pool).await)
     }
 
     fn put(&self, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
@@ -390,7 +394,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
 // Wake up the destination if needed. Code here is a bit involved because
 // we reuse the code from the usual proxy and we need to prepare few structures
 // that this code expects.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
@@ -401,26 +405,25 @@ async fn connect_to_compute(
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
 
-    let credential_params = StartupMessageParams::new([
+    let params = StartupMessageParams::new([
         ("user", &conn_info.username),
         ("database", &conn_info.dbname),
         ("application_name", APP_NAME),
+        ("options", conn_info.options.as_deref().unwrap_or("")),
     ]);
 
     let creds = config
         .auth_backend
         .as_ref()
-        .map(|_| {
-            auth::ClientCredentials::parse(
-                &credential_params,
-                Some(&conn_info.hostname),
-                common_names,
-            )
-        })
+        .map(|_| auth::ClientCredentials::parse(&params, Some(&conn_info.hostname), common_names))
         .transpose()?;
+
+    let console_options = neon_options(&params);
+
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
         application_name: Some(APP_NAME),
+        options: console_options.as_deref(),
     };
 
     let node_info = creds
@@ -458,6 +461,7 @@ async fn connect_to_compute_once(
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
+    tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
 
     let (tx, mut rx) = tokio::sync::watch::channel(session);
 
@@ -544,6 +548,17 @@ pub struct Discard<'a> {
 }
 
 impl Client {
+    pub(self) async fn new(
+        inner: ClientInner,
+        pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
+    ) -> Self {
+        Self {
+            conn_id: inner.conn_id,
+            inner: Some(inner),
+            span: Span::current(),
+            pool,
+        }
+    }
     pub fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
         let Self {
             inner,

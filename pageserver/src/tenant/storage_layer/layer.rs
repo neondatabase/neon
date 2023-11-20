@@ -251,6 +251,7 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
+            .instrument(tracing::info_span!("get_value_reconstruct_data", layer=%self))
             .await
     }
 
@@ -867,6 +868,9 @@ impl LayerInner {
             }
             Ok((Err(e), _permit)) => {
                 // FIXME: this should be with the spawned task and be cancellation sensitive
+                //
+                // while we should not need this, this backoff has turned out to be useful with
+                // a bug of unexpectedly deleted remote layer file (#5787).
                 let consecutive_failures =
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
@@ -1195,7 +1199,7 @@ impl DownloadedLayer {
                 ));
                 delta_layer::DeltaLayerInner::load(&owner.path, summary, ctx)
                     .await
-                    .map(LayerKind::Delta)
+                    .map(|res| res.map(LayerKind::Delta))
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1206,21 +1210,32 @@ impl DownloadedLayer {
                 ));
                 image_layer::ImageLayerInner::load(&owner.path, lsn, summary, ctx)
                     .await
-                    .map(LayerKind::Image)
-            }
-            // this will be a permanent failure
-            .context("load layer");
+                    .map(|res| res.map(LayerKind::Image))
+            };
 
-            if res.is_err() {
-                LAYER_IMPL_METRICS.inc_permanent_loading_failures();
+            match res {
+                Ok(Ok(layer)) => Ok(Ok(layer)),
+                Ok(Err(transient)) => Err(transient),
+                Err(permanent) => {
+                    LAYER_IMPL_METRICS.inc_permanent_loading_failures();
+                    // TODO(#5815): we are not logging all errors, so temporarily log them **once**
+                    // here as well
+                    let permanent = permanent.context("load layer");
+                    tracing::error!("layer loading failed permanently: {permanent:#}");
+                    Ok(Err(permanent))
+                }
             }
-            res
         };
-        self.kind.get_or_init(init).await.as_ref().map_err(|e| {
-            // errors are not clonabled, cannot but stringify
-            // test_broken_timeline matches this string
-            anyhow::anyhow!("layer loading failed: {e:#}")
-        })
+        self.kind
+            .get_or_try_init(init)
+            // return transient errors using `?`
+            .await?
+            .as_ref()
+            .map_err(|e| {
+                // errors are not clonabled, cannot but stringify
+                // test_broken_timeline matches this string
+                anyhow::anyhow!("layer loading failed: {e:#}")
+            })
     }
 
     async fn get_value_reconstruct_data(
@@ -1291,6 +1306,7 @@ impl ResidentLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    #[tracing::instrument(skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,

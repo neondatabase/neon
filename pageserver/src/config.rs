@@ -161,7 +161,7 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
-    /// Path to a file containing public key for verifying JWT tokens.
+    /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
 
@@ -1314,12 +1314,6 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_syncs: NonZeroUsize::new(
-                        remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS
-                    )
-                        .unwrap(),
-                    max_sync_errors: NonZeroU32::new(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
-                        .unwrap(),
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
                 },
                 "Remote storage config should correctly parse the local FS config and fill other storage defaults"
@@ -1380,8 +1374,6 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_syncs,
-                    max_sync_errors,
                     storage: RemoteStorageKind::AwsS3(S3Config {
                         bucket_name: bucket_name.clone(),
                         bucket_region: bucket_region.clone(),

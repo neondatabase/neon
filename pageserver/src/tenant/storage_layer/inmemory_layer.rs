@@ -345,14 +345,19 @@ impl InMemoryLayer {
 
         let cursor = inner.file.block_cursor();
 
-        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
-        keys.sort_by_key(|k| k.0);
+        // Sort the keys because delta layer writer expects them sorted.
+        //
+        // NOTE: this sort can take up significant time if the layer has millions of
+        //       keys. To speed up all the comparisons we convert the key to i128 and
+        //       keep the value as a reference.
+        let mut keys: Vec<_> = inner.index.iter().map(|(k, m)| (k.to_i128(), m)).collect();
+        keys.sort_unstable_by_key(|k| k.0);
 
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
         for (key, vec_map) in keys.iter() {
-            let key = **key;
+            let key = Key::from_i128(*key);
             // Write all page versions
             for (lsn, pos) in vec_map.as_slice() {
                 cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;

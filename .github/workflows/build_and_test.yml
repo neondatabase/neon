@@ -172,10 +172,10 @@ jobs:
       # https://github.com/EmbarkStudios/cargo-deny
       - name: Check rust licenses/bans/advisories/sources
         if: ${{ !cancelled() }}
-        run: cargo deny check
+        run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -187,6 +187,7 @@ jobs:
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
     steps:
       - name: Fix git ownership
@@ -585,10 +586,13 @@ jobs:
         id: upload-coverage-report-new
         env:
           BUCKET: neon-github-public-dev
+          # A differential coverage report is available only for PRs.
+          # (i.e. for pushes into main/release branches we have a regular coverage report)
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
         run: |
-          BASELINE="$(git merge-base HEAD origin/main)"
           CURRENT="${COMMIT_SHA}"
+          BASELINE="$(git merge-base $BASE_SHA $CURRENT)"
 
           cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
 
@@ -723,6 +727,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+                           --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
@@ -847,7 +852,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.18.5
+      VM_BUILDER_VERSION: v0.19.0
 
     steps:
       - name: Checkout
@@ -869,8 +874,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -enable-file-cache \
-            -cgroup-uid=postgres \
+            -spec=vm-image-spec.yaml \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 

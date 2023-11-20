@@ -638,7 +638,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 ///
 /// Operations:
 /// - open ([`std::fs::OpenOptions::open`])
-/// - close (dropping [`std::fs::File`])
+/// - close (dropping [`crate::virtual_file::VirtualFile`])
 /// - close-by-replace (close by replacement algorithm)
 /// - read (`read_at`)
 /// - write (`write_at`)
@@ -962,6 +962,32 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
     .expect("failed to define a metric")
 });
 
+pub(crate) struct TenantManagerMetrics {
+    pub(crate) tenant_slots: UIntGauge,
+    pub(crate) tenant_slot_writes: IntCounter,
+    pub(crate) unexpected_errors: IntCounter,
+}
+
+pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
+    TenantManagerMetrics {
+    tenant_slots: register_uint_gauge!(
+        "pageserver_tenant_manager_slots",
+        "How many slots currently exist, including all attached, secondary and in-progress operations",
+    )
+    .expect("failed to define a metric"),
+    tenant_slot_writes: register_int_counter!(
+        "pageserver_tenant_manager_slot_writes",
+        "Writes to a tenant slot, including all of create/attach/detach/delete"
+    )
+    .expect("failed to define a metric"),
+    unexpected_errors: register_int_counter!(
+        "pageserver_tenant_manager_unexpected_errors_total",
+        "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
+    )
+    .expect("failed to define a metric"),
+}
+});
+
 pub(crate) struct DeletionQueueMetrics {
     pub(crate) keys_submitted: IntCounter,
     pub(crate) keys_dropped: IntCounter,
@@ -1199,15 +1225,6 @@ pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the Postgres WAL redo process",
-        redo_histogram_time_buckets!(),
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_records_histogram",
@@ -1234,6 +1251,46 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub(crate) struct WalRedoProcessCounters {
+    pub(crate) started: IntCounter,
+    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+}
+
+#[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
+pub(crate) enum WalRedoKillCause {
+    WalRedoProcessDrop,
+    NoLeakChildDrop,
+    Startup,
+}
+
+impl Default for WalRedoProcessCounters {
+    fn default() -> Self {
+        let started = register_int_counter!(
+            "pageserver_wal_redo_process_started_total",
+            "Number of WAL redo processes started",
+        )
+        .unwrap();
+
+        let killed = register_int_counter_vec!(
+            "pageserver_wal_redo_process_stopped_total",
+            "Number of WAL redo processes stopped",
+            &["cause"],
+        )
+        .unwrap();
+        Self {
+            started,
+            killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
+                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause_str: &'static str = cause.into();
+                killed.with_label_values(&[cause_str])
+            })),
+        }
+    }
+}
+
+pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
+    Lazy::new(WalRedoProcessCounters::default);
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
@@ -1884,6 +1941,9 @@ pub fn preinitialize_metrics() {
     // Deletion queue stats
     Lazy::force(&DELETION_QUEUE);
 
+    // Tenant manager stats
+    Lazy::force(&TENANT_MANAGER);
+
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
         .into_iter()
@@ -1899,7 +1959,6 @@ pub fn preinitialize_metrics() {
         &READ_NUM_FS_LAYERS,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
-        &WAL_REDO_WAIT_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
     ]

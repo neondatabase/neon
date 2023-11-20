@@ -289,7 +289,9 @@ impl DeltaLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        let loaded = DeltaLayerInner::load(&path, None, ctx).await?;
+        let loaded = DeltaLayerInner::load(&path, None, ctx)
+            .await
+            .and_then(|res| res)?;
 
         // not production code
         let actual_filename = path.file_name().unwrap().to_owned();
@@ -610,18 +612,28 @@ impl Drop for DeltaLayerWriter {
 }
 
 impl DeltaLayerInner {
+    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
+    /// - inner has the success or transient failure
+    /// - outer has the permanent failure
     pub(super) async fn load(
         path: &Utf8Path,
         summary: Option<Summary>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path)
-            .await
-            .with_context(|| format!("Failed to open file '{path}'"))?;
+    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
+        let file = match VirtualFile::open(path).await {
+            Ok(file) => file,
+            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
+        };
         let file = FileBlockReader::new(file);
 
-        let summary_blk = file.read_blk(0, ctx).await?;
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
+        let summary_blk = match file.read_blk(0, ctx).await {
+            Ok(blk) => blk,
+            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
+        };
+
+        // TODO: this should be an assertion instead; see ImageLayerInner::load
+        let actual_summary =
+            Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
 
         if let Some(mut expected_summary) = summary {
             // production code path
@@ -636,11 +648,11 @@ impl DeltaLayerInner {
             }
         }
 
-        Ok(DeltaLayerInner {
+        Ok(Ok(DeltaLayerInner {
             file,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
-        })
+        }))
     }
 
     pub(super) async fn get_value_reconstruct_data(
