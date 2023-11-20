@@ -245,6 +245,9 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
         raise AssertionError("Could not count databases")
     assert result[0] == 0, "Database 'failure' still exists after drop"
 
+    with pytest.raises(psycopg2.InternalError):
+        cur.execute("CREATE DATABASE trololobus WITH OWNER neon_superuser")
+
     conn.close()
 
 

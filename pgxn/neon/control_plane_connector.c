@@ -501,9 +501,16 @@ HandleCreateDb(CreatedbStmt *stmt)
 
 	entry->type = Op_Set;
 	if (downer && downer->arg)
+        {
+		const char *owner_name = defGetString(downer);
+		if(strcmp(owner_name, "neon_superuser") == 0)
+			elog(ERROR, "Can't create a database with owner neon_superuser");
 		entry->owner = get_role_oid(defGetString(downer), false);
+        }
 	else
+        {
 		entry->owner = GetUserId();
+        }
 }
 
 static void
