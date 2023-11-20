@@ -98,6 +98,23 @@ typedef enum
 	SS_IDLE,
 
 	/*
+	 * Waiting for neon walreader socket to receive chunk of WAL to send to
+	 * this safekeeper.
+	 *
+	 * Note: socket management is done completely inside walproposer_pg for
+	 * simplicity, and thus simulation doesn't test it. Which is fine as
+	 * simulation is mainly aimed at consensus checks, not waiteventset
+	 * management.
+	 *
+	 * Also, while in this state we don't touch safekeeper socket, so in
+	 * theory it might close connection as inactive. This can be addressed if
+	 * needed; however, while fetching WAL we should regularly send it, so the
+	 * problem is unlikely. Vice versa is also true (SS_ACTIVE doesn't handle
+	 * walreader socket), but similarly shouldn't be a problem.
+	 */
+	SS_WAIT_REMOTE_WAL,
+
+	/*
 	 * Active phase, when we acquired quorum and have WAL to send or feedback
 	 * to read.
 	 */
@@ -344,6 +361,11 @@ typedef struct Safekeeper
 	 * Position in wait event set. Equal to -1 if no event
 	 */
 	int			eventPos;
+
+	/*
+	 * Neon WAL reader position in wait event set, or -1 if no socket.
+	 */
+	int			nwrEventPos;
 #endif
 
 
@@ -453,7 +475,7 @@ typedef struct walproposer_api
 	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
 
 	/* Read WAL from disk to buf. */
-	bool		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
+	NeonWALReadResult (*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
 
 	/* Allocate WAL reader. */
 	void		(*wal_reader_allocate) (Safekeeper *sk);
@@ -660,7 +682,7 @@ extern void WalProposerFree(WalProposer *wp);
  * recreate set from scratch, hence the export.
  */
 extern uint32 SafekeeperStateDesiredEvents(SafekeeperState state);
-
+extern Safekeeper *GetDonor(WalProposer *wp);
 
 #define WPEVENT		1337		/* special log level for walproposer internal
 								 * events */

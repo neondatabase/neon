@@ -94,6 +94,10 @@ static void XLogBroadcastWalProposer(WalProposer *wp);
 static void XLogWalPropWrite(char *buf, Size nbytes, XLogRecPtr recptr);
 static void XLogWalPropClose(XLogRecPtr recptr);
 
+static void add_nwr_event_set(Safekeeper *sk, uint32 events);
+static void update_nwr_event_set(Safekeeper *sk, uint32 events);
+static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
+
 static void
 init_walprop_config(bool syncSafekeepers)
 {
@@ -1424,20 +1428,54 @@ XLogWalPropClose(XLogRecPtr recptr)
 	walpropFile = -1;
 }
 
-static bool
+static NeonWALReadResult
 walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count)
 {
-	return NeonWALRead(sk->xlogreader,
-					   buf,
-					   startptr,
-					   count,
-					   walprop_pg_get_timeline_id());
+	NeonWALReadResult res;
+
+	res = NeonWALRead(sk->xlogreader,
+					  buf,
+					  startptr,
+					  count,
+					  walprop_pg_get_timeline_id());
+	switch (res)
+	{
+		case NEON_WALREAD_SUCCESS:
+			/* don't wake up us until we send the chunk */
+			update_nwr_event_set(sk, 0);
+
+			/*
+			 * If we have the socket subscribed, but walreader doesn't need
+			 * any events, it must mean that remote connection just closed
+			 * hoping to do next read locally. Remove the socket then.
+			 */
+			if (NeonWALReaderEvents(sk->xlogreader) == 0)
+				rm_safekeeper_event_set(sk, false);
+			return res;
+		case NEON_WALREAD_WOULDBLOCK:
+
+			/*
+			 * TODO: instead of reattaching socket (and thus recreating WES)
+			 * each time we should keep it if possible, i.e. if connection is
+			 * already established. Note that single neon_walreader object can
+			 * switch between local and remote reads multiple times during its
+			 * lifetime, so careful bookkeeping is needed here.
+			 */
+			rm_safekeeper_event_set(sk, false);
+			add_nwr_event_set(sk, NeonWALReaderEvents(sk->xlogreader));
+			return res;
+		case NEON_WALREAD_ERROR:
+			rm_safekeeper_event_set(sk, false);
+			return res;
+		default:
+			Assert(false);
+	}
 }
 
 static void
 walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, sk->wp);
 	if (sk->xlogreader == NULL)
 		elog(FATAL, "Failed to allocate xlog reader");
 }
@@ -1465,11 +1503,28 @@ walprop_pg_init_event_set(WalProposer *wp)
 	if (waitEvents)
 		elog(FATAL, "double-initialization of event set");
 
-	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + wp->n_safekeepers);
+	/* for each sk, we have socket plus potentially socket for neon walreader */
+	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + 2 * wp->n_safekeepers);
 	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
 					  MyLatch, NULL);
 	AddWaitEventToSet(waitEvents, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
 					  NULL, NULL);
+}
+
+/* add safekeeper socket to wait event set */
+static void
+walprop_pg_add_safekeeper_event_set(Safekeeper *sk, uint32 events)
+{
+	Assert(sk->eventPos == -1);
+	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk), NULL, sk);
+}
+
+/* add neon wal reader socket to wait event set */
+static void
+add_nwr_event_set(Safekeeper *sk, uint32 events)
+{
+	Assert(sk->nwrEventPos == -1);
+	sk->nwrEventPos = AddWaitEventToSet(waitEvents, events, NeonWALReaderSocket(sk->xlogreader), NULL, sk);
 }
 
 static void
@@ -1481,21 +1536,46 @@ walprop_pg_update_event_set(Safekeeper *sk, uint32 events)
 	ModifyWaitEvent(waitEvents, sk->eventPos, events, NULL);
 }
 
+/* Can be called when nwr socket doesn't exist, does nothing in this case. */
 static void
-walprop_pg_add_safekeeper_event_set(Safekeeper *sk, uint32 events)
+update_nwr_event_set(Safekeeper *sk, uint32 events)
 {
-	sk->eventPos = AddWaitEventToSet(waitEvents, events, walprop_socket(sk), NULL, sk);
+	/* eventPos = -1 when we don't have an event */
+	if (sk->nwrEventPos != -1)
+		ModifyWaitEvent(waitEvents, sk->nwrEventPos, events, NULL);
 }
 
-/*
- * Hack: provides a way to remove the event corresponding to an individual walproposer from the set.
- *
- * Note: Internally, this completely reconstructs the event set. It should be avoided if possible.
- */
 static void
 walprop_pg_rm_safekeeper_event_set(Safekeeper *to_remove)
 {
+	rm_safekeeper_event_set(to_remove, true);
+}
+
+/*
+ * A hacky way to remove single event from the event set. Can be called if event
+ * doesn't exist, does nothing in this case.
+ *
+ * Note: Internally, this completely reconstructs the event set. It should be
+ * avoided if possible.
+ *
+ * If is_sk is true, socket of connection to safekeeper is removed; otherwise
+ * socket of neon wal reader.
+ */
+static void
+rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk)
+{
 	WalProposer *wp = to_remove->wp;
+
+	/*
+	 * Shortpath for exiting if have nothing to do. We never call this
+	 * function with safekeeper socket not existing, but do that with neon
+	 * walreader socket.
+	 */
+	if ((is_sk && to_remove->eventPos == -1) ||
+		(!is_sk && to_remove->nwrEventPos == -1))
+	{
+		return;
+	}
 
 	/* Remove the existing event set, assign sk->eventPos = -1 */
 	walprop_pg_free_event_set(wp);
@@ -1514,14 +1594,27 @@ walprop_pg_rm_safekeeper_event_set(Safekeeper *to_remove)
 		Safekeeper *sk = &wp->safekeeper[i];
 
 		if (sk == to_remove)
+		{
+			if (is_sk)
+				sk->eventPos = -1;
+			else
+				sk->nwrEventPos = -1;
 			continue;
+		}
 
-		/* If this safekeeper isn't offline, add an event for it! */
+		/* If this safekeeper isn't offline, add events for it! */
 		if (sk->state != SS_OFFLINE)
 		{
-			desired_events = SafekeeperStateDesiredEvents(sk->state);
-			/* will set sk->eventPos */
-			wp->api.add_safekeeper_event_set(sk, desired_events);
+			if (!is_sk)
+			{
+				desired_events = SafekeeperStateDesiredEvents(sk->state);
+				/* will set sk->eventPos */
+				wp->api.add_safekeeper_event_set(sk, desired_events);
+			}
+			else if (NeonWALReaderEvents(sk->xlogreader) != 0)
+			{
+				add_nwr_event_set(sk, NeonWALReaderEvents(sk->xlogreader));
+			}
 		}
 	}
 }

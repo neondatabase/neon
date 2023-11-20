@@ -1334,17 +1334,28 @@ SendAppendRequests(Safekeeper *sk)
 		/* write the WAL itself */
 		enlargeStringInfo(&sk->outbuf, req->endLsn - req->beginLsn);
 		/* wal_read will raise error on failure */
-		if (!wp->api.wal_read(sk,
-							  &sk->outbuf.data[sk->outbuf.len],
-							  req->beginLsn,
-							  req->endLsn - req->beginLsn))
+		switch (wp->api.wal_read(sk,
+								 &sk->outbuf.data[sk->outbuf.len],
+								 req->beginLsn,
+								 req->endLsn - req->beginLsn))
 		{
-			walprop_log(WARNING, "WAL reading for node %s:%s failed: %s",
-						sk->host, sk->port,
-						NeonWALReaderErrMsg(sk->xlogreader));
-			ShutdownConnection(sk);
-			return false;
+			case NEON_WALREAD_SUCCESS:
+				break;
+			case NEON_WALREAD_WOULDBLOCK:
+				walprop_log(LOG, "wal reading wouldblock");
+				/* todo */
+				ShutdownConnection(sk);
+				return false;
+			case NEON_WALREAD_ERROR:
+				walprop_log(WARNING, "WAL reading for node %s:%s failed: %s",
+							sk->host, sk->port,
+							NeonWALReaderErrMsg(sk->xlogreader));
+				ShutdownConnection(sk);
+				return false;
+			default:
+				Assert(false);
 		}
+
 		sk->outbuf.len += req->endLsn - req->beginLsn;
 
 		writeResult = wp->api.conn_async_write(sk, sk->outbuf.data, sk->outbuf.len);
@@ -1565,6 +1576,52 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
 	 * Get the smallest LSN committed by quorum
 	 */
 	return responses[wp->n_safekeepers - wp->quorum];
+}
+
+/*
+ * Return safekeeper with active connection from which WAL can be downloaded, or
+ * none if it doesn't exist.
+ */
+Safekeeper *
+GetDonor(WalProposer *wp)
+{
+	XLogRecPtr	donor_lsn = InvalidXLogRecPtr;
+	Safekeeper *donor = NULL;
+	int			i;
+
+	if (wp->n_votes < wp->quorum)
+	{
+		walprop_log(WARNING, "GetDonor called before elections are winned");
+		return NULL;
+	}
+
+	/*
+	 * First, consider node which had determined our term start LSN as we know
+	 * about its position immediately after election before any feedbacks are
+	 * sent.
+	 */
+	if (wp->safekeeper[wp->donor].state == SS_ACTIVE)
+	{
+		donor = &wp->safekeeper[wp->donor];
+		donor_lsn = wp->propEpochStartLsn;
+	}
+
+	/*
+	 * But also check feedbacks from all nodes with live connections and take
+	 * the highest one. Note: if node sends feedbacks it already processed
+	 * elected message so its term is fine.
+	 */
+	for (i = 0; i < wp->n_safekeepers; i++)
+	{
+		Safekeeper *sk = &wp->safekeeper[i];
+
+		if (sk->state == SS_ACTIVE && sk->appendResponse.flushLsn >= donor_lsn)
+		{
+			donor = sk;
+			donor_lsn = sk->appendResponse.flushLsn;
+		}
+	}
+	return donor;
 }
 
 static void
