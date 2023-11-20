@@ -507,16 +507,16 @@ HandleCreateDb(CreatedbStmt *stmt)
 
 	entry->type = Op_Set;
 	if (downer && downer->arg)
-        {
+	{
 		const char *owner_name = defGetString(downer);
 		if (RoleIsNeonSuperuser(owner_name))
 			elog(ERROR, "can't create a database with owner neon_superuser");
 		entry->owner = get_role_oid(owner_name, false);
-        }
+	}
 	else
-        {
+	{
 		entry->owner = GetUserId();
-        }
+	}
 }
 
 static void
@@ -632,7 +632,7 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	InitRoleTableIfNeeded();
 	DefElem    *dpass = NULL;
 	ListCell   *option;
-        const char *role_name = stmt->role->rolename;
+	const char *role_name = stmt->role->rolename;
 	if (RoleIsNeonSuperuser(role_name))
 		elog(ERROR, "can't ALTER neon_superuser");
 
