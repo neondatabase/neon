@@ -475,6 +475,12 @@ NeonXactCallback(XactEvent event, void *arg)
 	Assert(CurrentDdlTable == &RootTable);
 }
 
+static bool
+RoleIsNeonSuperuser(const char *role_name)
+{
+    return strcmp(role_name, "neon_superuser") == 0;
+}
+
 static void
 HandleCreateDb(CreatedbStmt *stmt)
 {
@@ -503,8 +509,8 @@ HandleCreateDb(CreatedbStmt *stmt)
 	if (downer && downer->arg)
         {
 		const char *owner_name = defGetString(downer);
-		if(strcmp(owner_name, "neon_superuser") == 0)
-			elog(ERROR, "Can't create a database with owner neon_superuser");
+		if (RoleIsNeonSuperuser(owner_name))
+			elog(ERROR, "can't create a database with owner neon_superuser");
 		entry->owner = get_role_oid(owner_name, false);
         }
 	else
@@ -529,8 +535,10 @@ HandleAlterOwner(AlterOwnerStmt *stmt)
 
 	if (!found)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
-
-	entry->owner = get_role_oid(get_rolespec_name(stmt->newowner), false);
+	const char *new_owner = get_rolespec_name(stmt->newowner);
+	if (RoleIsNeonSuperuser(new_owner))
+		elog(ERROR, "can't alter owner to neon_superuser");
+	entry->owner = get_role_oid(new_owner, false);
 	entry->type = Op_Set;
 }
 
@@ -624,6 +632,9 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	InitRoleTableIfNeeded();
 	DefElem    *dpass = NULL;
 	ListCell   *option;
+        const char *role_name = stmt->role->rolename;
+	if (RoleIsNeonSuperuser(role_name))
+		elog(ERROR, "can't ALTER neon_superuser");
 
 	foreach(option, stmt->options)
 	{
@@ -638,7 +649,7 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	bool		found = false;
 	RoleEntry  *entry = hash_search(
 									CurrentDdlTable->role_table,
-									stmt->role->rolename,
+									role_name,
 									HASH_ENTER,
 									&found);
 
