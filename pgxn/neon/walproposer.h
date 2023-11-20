@@ -10,6 +10,7 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
+#include "libpqwalproposer.h"
 #include "neon_walreader.h"
 
 #define SK_MAGIC 0xCafeCeefu
@@ -24,42 +25,8 @@
  */
 #define WL_NO_EVENTS 0
 
-struct WalProposerConn;			/* Defined in implementation (walprop_pg.c) */
+struct WalProposerConn;			/* Defined in libpqwalproposer.h */
 typedef struct WalProposerConn WalProposerConn;
-
-/* Possible return values from ReadPGAsync */
-typedef enum
-{
-	/* The full read was successful. buf now points to the data */
-	PG_ASYNC_READ_SUCCESS,
-
-	/*
-	 * The read is ongoing. Wait until the connection is read-ready, then try
-	 * again.
-	 */
-	PG_ASYNC_READ_TRY_AGAIN,
-	/* Reading failed. Check PQerrorMessage(conn) */
-	PG_ASYNC_READ_FAIL,
-} PGAsyncReadResult;
-
-/* Possible return values from WritePGAsync */
-typedef enum
-{
-	/* The write fully completed */
-	PG_ASYNC_WRITE_SUCCESS,
-
-	/*
-	 * The write started, but you'll need to call PQflush some more times to
-	 * finish it off. We just tried, so it's best to wait until the connection
-	 * is read- or write-ready to try again.
-	 *
-	 * If it becomes read-ready, call PQconsumeInput and flush again. If it
-	 * becomes write-ready, just call PQflush.
-	 */
-	PG_ASYNC_WRITE_TRY_FLUSH,
-	/* Writing failed. Check PQerrorMessage(conn) */
-	PG_ASYNC_WRITE_FAIL,
-} PGAsyncWriteResult;
 
 /*
  * WAL safekeeper state, which is used to wait for some event.
@@ -405,31 +372,6 @@ typedef enum
 	 */
 } WalProposerConnectPollStatusType;
 
-/* Re-exported and modified ExecStatusType */
-typedef enum
-{
-	/* We received a single CopyBoth result */
-	WP_EXEC_SUCCESS_COPYBOTH,
-
-	/*
-	 * Any success result other than a single CopyBoth was received. The
-	 * specifics of the result were already logged, but it may be useful to
-	 * provide an error message indicating which safekeeper messed up.
-	 *
-	 * Do not expect PQerrorMessage to be appropriately set.
-	 */
-	WP_EXEC_UNEXPECTED_SUCCESS,
-
-	/*
-	 * No result available at this time. Wait until read-ready, then call
-	 * again. Internally, this is returned when PQisBusy indicates that
-	 * PQgetResult would block.
-	 */
-	WP_EXEC_NEEDS_INPUT,
-	/* Catch-all failure. Check PQerrorMessage. */
-	WP_EXEC_FAILED,
-} WalProposerExecStatusType;
-
 /* Re-exported ConnStatusType */
 typedef enum
 {
@@ -712,6 +654,7 @@ extern void WalProposerStart(WalProposer *wp);
 extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
+
 /*
  * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to
  * recreate set from scratch, hence the export.

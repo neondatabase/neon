@@ -316,12 +316,6 @@ ShutdownConnection(Safekeeper *sk)
 	sk->voteResponse.termHistory.entries = NULL;
 
 	sk->wp->api.rm_safekeeper_event_set(sk);
-
-	if (sk->xlogreader)
-	{
-		NeonWALReaderFree(sk->xlogreader);
-		sk->xlogreader = NULL;
-	}
 }
 
 /*
