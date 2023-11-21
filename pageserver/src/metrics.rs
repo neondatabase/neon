@@ -638,7 +638,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 ///
 /// Operations:
 /// - open ([`std::fs::OpenOptions::open`])
-/// - close (dropping [`std::fs::File`])
+/// - close (dropping [`crate::virtual_file::VirtualFile`])
 /// - close-by-replace (close by replacement algorithm)
 /// - read (`read_at`)
 /// - write (`write_at`)

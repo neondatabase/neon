@@ -307,7 +307,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     )
     gc_thread = Thread(target=lambda: do_gc_target(pageserver_http, tenant_id, timeline_id))
     gc_thread.start()
-    time.sleep(1)
+    time.sleep(5)
     # By now the gc task is spawned but in sleep for another second due to the failpoint.
 
     log.info("detaching tenant")

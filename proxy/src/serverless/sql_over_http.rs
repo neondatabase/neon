@@ -250,7 +250,7 @@ pub async fn handle(
     Ok(response)
 }
 
-#[instrument(name = "sql-over-http", skip_all)]
+#[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
     request: Request<Body>,
     sni_hostname: Option<String>,

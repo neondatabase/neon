@@ -514,7 +514,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
 }
 
 /// Try to connect to the compute node once.
-#[tracing::instrument(name = "connect_once", skip_all)]
+#[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     timeout: time::Duration,
