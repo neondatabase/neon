@@ -244,6 +244,9 @@ pub(super) async fn handle_walreceiver_connection(
 
     info!("last_record_lsn {last_rec_lsn} starting replication from {startpoint}, safekeeper is at {end_of_wal}...");
 
+    // tokio::task::block_in_place(move || {
+    //     tokio::runtime::Handle::current().block_on(async move {
+
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
     let copy_stream = replication_client.copy_both_simple(&query).await?;
@@ -293,6 +296,8 @@ pub(super) async fn handle_walreceiver_connection(
 
         let status_update = match replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
+                let prof_guard = crate::profiling::profpoint_start();
+
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.
                 let data = xlog_data.data();
@@ -330,6 +335,7 @@ pub(super) async fn handle_walreceiver_connection(
                     caught_up = true;
                 }
 
+                drop(prof_guard);
                 Some(endlsn)
             }
 
@@ -417,6 +423,11 @@ pub(super) async fn handle_walreceiver_connection(
                 .await?;
         }
     }
+
+    // Ok(())
+    // })?;
+    // Ok::<(), WalReceiverError>(())
+    // })?;
 
     Ok(())
 }

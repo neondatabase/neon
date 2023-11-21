@@ -618,3 +618,65 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     reader.read_to_end(&mut buf).await?;
     Ok(Bytes::from(buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tenant::harness::*;
+
+    #[tokio::test]
+    async fn test_basic() -> anyhow::Result<()> {
+        let pg_version = 15;
+        let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
+
+        // We can't use create_test_timeline because it doesn't create a real
+        // checkpoint, and Walingest::new tries to parse the garbage data.
+        let tline = tenant
+            .bootstrap_timeline(TIMELINE_ID, pg_version, &ctx)
+            .await?;
+
+        // Steps to reconstruct this test data:
+        // 1. Run the pgbench python test
+        // 2. Take the first wal segment file from safekeeper
+        // 3. Grep sk logs for "restart decoder" to get startpoint
+        // 4. Run just the decoder from this test to get the endpoint.
+        //    It's the last LSN the decoder will output.
+        let pg_version = 15;
+        let path = "test_data/sk_wal_segment_from_pgbench";
+        let startpoint = Lsn::from_hex("14AEC08").unwrap();
+        let endpoint = Lsn::from_hex("1FFFF98").unwrap();
+
+        // We fully read this into memory before decoding to get a
+        // more accurate perf profile of the decoder.
+        let bytes = std::fs::read(path)?;
+
+        let profiler_guard = crate::profiling::init_profiler();
+        let prof_guard = crate::profiling::profpoint_start();
+        let started_at = std::time::Instant::now();
+
+        // Feed bytes to the decoder
+        let xlogoff: usize = startpoint.segment_offset(WAL_SEGMENT_SIZE);
+        let mut decoder = WalStreamDecoder::new(startpoint, pg_version);
+        decoder.feed_bytes(&bytes[xlogoff..]);
+        println!("decoding {} bytes", bytes.len() - xlogoff);
+
+        // Decode and ingest wal
+        let mut walingest = WalIngest::new(tline.as_ref(), startpoint, &ctx).await?;
+        let mut modification = tline.begin_modification(endpoint);
+        let mut decoded = DecodedWALRecord::default();
+        while let Some((lsn, recdata)) = decoder.poll_decode()? {
+            walingest
+                .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                .await?;
+        }
+
+        let duration = started_at.elapsed();
+        println!("done in {:?}", duration);
+        drop(prof_guard);
+
+        #[cfg(feature = "profiling")]
+        crate::profiling::exit_profiler(&profiler_guard);
+
+        Ok(())
+    }
+}

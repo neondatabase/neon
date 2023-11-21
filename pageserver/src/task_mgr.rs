@@ -121,6 +121,7 @@ pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 
 pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
+        // .worker_threads(1)
         .thread_name("walreceiver worker")
         .enable_all()
         .build()

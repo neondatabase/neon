@@ -36,6 +36,8 @@ mod profiling_impl {
 
     pub struct ProfilingGuard(PhantomUnsend);
 
+    unsafe impl Send for ProfilingGuard {}
+
     impl Drop for ProfilingGuard {
         fn drop(&mut self) {
             pprof::stop_profiling();

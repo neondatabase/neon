@@ -255,7 +255,7 @@ fn startup_checkpoint(started_at: Instant, phase: &str, human_phase: &str) {
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()> {  // TODO this should be anyhow::Result<!>
     // Monotonic time for later calculating startup duration
     let started_startup_at = Instant::now();
 
@@ -272,6 +272,8 @@ fn start_pageserver(
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
     pageserver::preinitialize_metrics();
+
+    let profiler_guard = pageserver::profiling::init_profiler();
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -674,10 +676,14 @@ fn start_pageserver(
                 "Got {}. Terminating in immediate shutdown mode",
                 signal.name()
             );
+
+            #[cfg(feature = "profiling")]
+            pageserver::profiling::exit_profiler(&profiler_guard);
+
             std::process::exit(111);
         }
 
-        Signal::Interrupt | Signal::Terminate => {
+        Signal::Quit | Signal::Interrupt | Signal::Terminate => {
             info!(
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
@@ -689,6 +695,10 @@ fn start_pageserver(
             shutdown_pageserver.take();
             let bg_remote_storage = remote_storage.clone();
             let bg_deletion_queue = deletion_queue.clone();
+
+            #[cfg(feature = "profiling")]
+            pageserver::profiling::exit_profiler(&profiler_guard);
+
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(
                 bg_remote_storage.map(|_| bg_deletion_queue),
                 0,
