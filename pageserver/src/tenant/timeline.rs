@@ -3497,21 +3497,22 @@ impl Timeline {
             }
 
             // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
-            let mut layer_paths: Vec<Utf8PathBuf> = new_layers
+            let layer_paths: Vec<Utf8PathBuf> = new_layers
                 .iter()
                 .map(|l| l.local_path().to_owned())
                 .collect();
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            //
-            // FIXME: spawn_blocking above for this
-            par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
+            par_fsync::par_fsync_async(&layer_paths)
+                .await
+                .context("fsync all new layers")?;
 
-            par_fsync::par_fsync(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
+            let timeline_dir = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+
+            par_fsync::par_fsync_async(&[timeline_dir])
+                .await
                 .context("fsync of timeline dir")?;
-
-            layer_paths.pop().unwrap();
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
