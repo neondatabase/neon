@@ -2878,7 +2878,7 @@ impl Tenant {
     /// - after initialization complete, remove the temp dir.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn bootstrap_timeline(
+    pub async fn bootstrap_timeline(
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
