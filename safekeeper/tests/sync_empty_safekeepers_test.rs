@@ -38,10 +38,12 @@ fn run_walproposer_generate_wal() {
 
     test.poll_for_duration(30);
 
-    for i in 0..100 {
-        wp.write_tx(1);
-        test.poll_for_duration(5);
-    }
+    test.poll_for_duration(30000);
+
+    // for i in 0..100 {
+    //     wp.write_tx(1);
+    //     test.poll_for_duration(5);
+    // }
 }
 
 // #[test]

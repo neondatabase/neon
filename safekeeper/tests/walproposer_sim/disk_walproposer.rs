@@ -15,7 +15,7 @@ impl DiskWalProposer {
     pub fn new() -> Arc<DiskWalProposer> {
         Arc::new(DiskWalProposer {
             state: Mutex::new(State {
-                write_lsn: Lsn(0),
+                internal_available_lsn: Lsn(0),
                 disk: BlockStorage::new(),
             }),
         })
@@ -27,8 +27,8 @@ impl DiskWalProposer {
 }
 
 pub struct State {
+    internal_available_lsn: Lsn,
     // TODO: add horizon_lsn
-    write_lsn: Lsn,
     disk: BlockStorage,
 }
 
@@ -38,11 +38,21 @@ impl State {
         // TODO: fail on reading uninitialized data
     }
 
+    /// Update the internal available LSN to the given value.
+    pub fn reset_to(&mut self, lsn: Lsn) {
+        self.internal_available_lsn = lsn;
+    }
+
+    /// Get current LSN.
+    pub fn flush_rec_ptr(&self) -> Lsn {
+        self.internal_available_lsn
+    }
+
     pub fn insert_logical_message(&mut self, prefix: &str, msg: &[u8]) -> anyhow::Result<()> {
         let mut insert = InsertLM{
             num_rdata: 0,
             mainrdata_len: 0,
-            lsn: self.write_lsn,
+            lsn: self.internal_available_lsn, // TODO: fix this
             disk: &mut self.disk,
             scratch: Vec::new(),
         };

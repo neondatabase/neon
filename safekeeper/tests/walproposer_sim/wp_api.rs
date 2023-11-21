@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use slowsim::{network::TCP, node_os::NodeOs, world::NodeId};
+use slowsim::{network::TCP, node_os::NodeOs, world::{NodeId, NodeEvent}};
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
@@ -169,6 +169,18 @@ impl ApiImpl for SimulationApi {
     ) -> walproposer::bindings::PGAsyncReadResult {
         println!("conn_async_read");
         let conn = self.get_conn(sk);
+        let peeked = self.os.epoll_peek(0);
+        match peeked {
+            Some(NodeEvent::Message((_, tcp))) => {
+                if tcp.id() != conn.socket.as_ref().unwrap().id() {
+                    return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN;
+                }
+            }
+            _ => {
+                return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN
+            }
+        }
+
         let event = self
             .os
             .epoll_recv(0)
@@ -350,11 +362,24 @@ impl ApiImpl for SimulationApi {
     }
 
     fn start_streaming(&self, startpos: u64, callback: &walproposer::walproposer::StreamingCallback) {
+        let disk = &self.disk;
+        assert!(startpos == disk.lock().flush_rec_ptr().0);
+        let mut broadcasted = Lsn(startpos);
+
         loop {
-            let available = Lsn(startpos);
-            // TODO: hook into last available LSN
-            callback.broadcast(available, available);
+            let available = disk.lock().flush_rec_ptr();
+            assert!(available >= broadcasted);
+            callback.broadcast(broadcasted, available);
+            broadcasted = available;
             callback.poll();
         }
+    }
+
+    fn process_safekeeper_feedback(&self, _wp: &mut walproposer::bindings::WalProposer, commit_lsn: u64) {
+        println!("process_safekeeper_feedback, commit_lsn={}", commit_lsn);
+    }
+
+    fn get_flush_rec_ptr(&self) -> u64 {
+        self.disk.lock().flush_rec_ptr().0
     }
 }

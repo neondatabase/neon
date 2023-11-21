@@ -179,6 +179,7 @@ impl Test {
         };
 
         let disk = DiskWalProposer::new();
+        disk.lock().reset_to(lsn);
 
         // start the client thread
         let guc = self.safekeepers_guc.clone();
