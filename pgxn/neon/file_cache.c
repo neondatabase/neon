@@ -82,6 +82,7 @@ typedef struct FileCacheControl
 	uint32 limit; /* shared copy of lfc_size_limit */
 	uint64 hits;
 	uint64 misses;
+	uint64 writes;
 	dlist_head lru; /* double linked list for LRU replacement algorithm */
 } FileCacheControl;
 
@@ -214,6 +215,7 @@ lfc_shmem_startup(void)
 		lfc_ctl->used = 0;
 		lfc_ctl->hits = 0;
 		lfc_ctl->misses = 0;
+		lfc_ctl->writes = 0;
 		dlist_init(&lfc_ctl->lru);
 
 		/* Recreate file cache on restart */
@@ -623,6 +625,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	generation = lfc_ctl->generation;
 	entry_offset = entry->offset;
+	lfc_ctl->writes += 1;
 	LWLockRelease(lfc_lock);
 
 	rc = pwrite(lfc_desc, buffer, BLCKSZ, ((off_t)entry_offset*BLOCKS_PER_CHUNK + chunk_offs)*BLCKSZ);
@@ -719,6 +722,11 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			key = "file_cache_used";
 			if (lfc_ctl)
 				value = lfc_ctl->used;
+			break;
+		case 3:
+			key = "file_cache_writes";
+			if (lfc_ctl)
+				value = lfc_ctl->writes;
 			break;
 		default:
 			SRF_RETURN_DONE(funcctx);
