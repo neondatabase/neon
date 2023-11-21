@@ -3,9 +3,9 @@ use std::{
     cell::RefCell,
     ops::DerefMut,
     panic::AssertUnwindSafe,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{atomic::{AtomicU64, AtomicBool}, Arc},
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, error};
 
 use super::{
     chan::Chan,
@@ -340,6 +340,8 @@ pub struct Node {
     pub rng: Mutex<StdRng>,
     /// Every node can set a result string, which can be read by the test.
     pub result: Mutex<(i32, String)>,
+    /// If set to true, next panic will not crash the whole test. This is used for controlled exit.
+    pub crash_token: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,6 +365,7 @@ impl Node {
             join_handle: Mutex::new(None),
             rng: Mutex::new(rng),
             result: Mutex::new((-1, String::new())),
+            crash_token: AtomicBool::new(false),
         }
     }
 
@@ -404,6 +407,12 @@ impl Node {
                     debug!("Node {} finished successfully", node.id);
                 }
                 Err(e) => {
+                    if !node.crash_token.load(std::sync::atomic::Ordering::SeqCst) {
+                        error!("Node {} finished with panic: {:?}", node.id, e);
+                        std::process::exit(1);
+                    } else {
+                        node.crash_token.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
                     debug!("Node {} finished with panic: {:?}", node.id, e);
                 }
             }

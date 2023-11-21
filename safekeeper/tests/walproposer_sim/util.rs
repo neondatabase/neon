@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 use walproposer::walproposer::{Config, Wrapper};
 
-use super::{disk::Disk, log::SimClock};
+use super::{disk::Disk, log::SimClock, disk_walproposer::DiskWalProposer, wp_api};
 
 pub struct SkNode {
     pub node: Arc<Node>,
@@ -124,6 +124,7 @@ impl Test {
         // start the client thread
         let guc = self.safekeepers_guc.clone();
         let ttid = self.ttid.clone();
+        let disk = DiskWalProposer::new();
         client_node.launch(move |os| {
             let config = Config {
                 ttid,
@@ -132,7 +133,13 @@ impl Test {
                 safekeeper_connection_timeout: 5000,
                 sync_safekeepers: true,
             };
-            let api = SimulationApi::new(os, &config);
+            let args = wp_api::Args {
+                os,
+                config: config.clone(),
+                disk,
+                redo_start_lsn: None,
+            };
+            let api = SimulationApi::new(args);
             let wp = Wrapper::new(Box::new(api), config);
             wp.start();
         });
@@ -164,16 +171,19 @@ impl Test {
     pub fn launch_walproposer(&self, lsn: Lsn) -> WalProposer {
         let client_node = self.world.new_node();
 
-        let _lsn = if lsn.0 == 0 {
+        let lsn = if lsn.0 == 0 {
             // usual LSN after basebackup
             Lsn(21623024)
         } else {
             lsn
         };
 
+        let disk = DiskWalProposer::new();
+
         // start the client thread
         let guc = self.safekeepers_guc.clone();
         let ttid = self.ttid.clone();
+        let wp_disk = disk.clone();
         client_node.launch(move |os| {
             //     let sim_redo_start_lsn = lsn.0;
 
@@ -184,14 +194,20 @@ impl Test {
                 safekeeper_connection_timeout: 5000,
                 sync_safekeepers: false,
             };
-            let api = SimulationApi::new(os, &config);
+            let args = wp_api::Args {
+                os,
+                config: config.clone(),
+                disk: wp_disk,
+                redo_start_lsn: Some(lsn),
+            };
+            let api = SimulationApi::new(args);
             let wp = Wrapper::new(Box::new(api), config);
             wp.start();
         });
 
         self.world.await_all();
 
-        WalProposer { node: client_node }
+        WalProposer { node: client_node, disk }
     }
 
     pub fn poll_for_duration(&self, duration: u64) {
@@ -216,6 +232,7 @@ impl Test {
         // fake walproposer
         let mut wp = WalProposer {
             node: wait_node.clone(),
+            disk: DiskWalProposer::new(),
         };
         let mut sync_in_progress = true;
 
@@ -299,6 +316,7 @@ impl Test {
 
 pub struct WalProposer {
     pub node: Arc<Node>,
+    pub disk: Arc<DiskWalProposer>,
 }
 
 impl WalProposer {

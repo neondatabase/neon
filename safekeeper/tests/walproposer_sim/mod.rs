@@ -4,3 +4,4 @@ pub mod safekeeper;
 pub mod storage;
 pub mod util;
 pub mod wp_api;
+pub mod disk_walproposer;

@@ -1,6 +1,6 @@
 use std::{
-    cell::{RefCell, RefMut},
-    ffi::CStr,
+    cell::{RefCell, RefMut, UnsafeCell},
+    ffi::CStr, sync::Arc,
 };
 
 use bytes::Bytes;
@@ -8,9 +8,11 @@ use slowsim::{network::TCP, node_os::NodeOs, world::NodeId};
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
-    bindings::{WL_SOCKET_CLOSED, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE},
+    bindings::{WL_SOCKET_CLOSED, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE, PageserverFeedback, pg_atomic_uint64, WalProposerPoll},
     walproposer::{ApiImpl, Config},
 };
+
+use super::disk_walproposer::DiskWalProposer;
 
 struct SafekeeperConn {
     host: String,
@@ -43,12 +45,22 @@ impl SafekeeperConn {
 pub struct SimulationApi {
     os: NodeOs,
     safekeepers: RefCell<Vec<SafekeeperConn>>,
+    disk: Arc<DiskWalProposer>,
+    redo_start_lsn: Option<Lsn>,
+    shmem: UnsafeCell<walproposer::bindings::WalproposerShmemState>,
+}
+
+pub struct Args {
+    pub os: NodeOs,
+    pub config: Config,
+    pub disk: Arc<DiskWalProposer>,
+    pub redo_start_lsn: Option<Lsn>,
 }
 
 impl SimulationApi {
-    pub fn new(os: NodeOs, config: &Config) -> Self {
+    pub fn new(args: Args) -> Self {
         // initialize connection state for each safekeeper
-        let sk_conns = config
+        let sk_conns = args.config
             .safekeepers_list
             .iter()
             .map(|s| {
@@ -60,8 +72,24 @@ impl SimulationApi {
             .collect::<Vec<_>>();
 
         Self {
-            os,
+            os: args.os,
             safekeepers: RefCell::new(sk_conns),
+            disk: args.disk,
+            redo_start_lsn: args.redo_start_lsn,
+            shmem: UnsafeCell::new(walproposer::bindings::WalproposerShmemState {
+                mutex: 0,
+                feedback: PageserverFeedback {
+                    currentClusterSize: 0,
+                    last_received_lsn: 0,
+                    disk_consistent_lsn: 0,
+                    remote_consistent_lsn: 0,
+                    replytime: 0,
+                },
+                mineLastElectedTerm: 0,
+                backpressureThrottlingTime: pg_atomic_uint64 {
+                    value: 0,
+                }
+            }),
         }
     }
 
@@ -173,8 +201,26 @@ impl ApiImpl for SimulationApi {
         true
     }
 
+    fn conn_async_write(
+        &self,
+        sk: &mut walproposer::bindings::Safekeeper,
+        buf: &[u8],
+    ) -> walproposer::bindings::PGAsyncWriteResult {
+        println!("conn_async_write: {:?}", buf);
+        let mut conn = self.get_conn(sk);
+        let socket = conn.socket.as_mut().unwrap();
+        socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
+            buf,
+        )));
+        walproposer::bindings::PGAsyncWriteResult_PG_ASYNC_WRITE_SUCCESS
+    }
+
     fn wal_reader_allocate(&self, _: &mut walproposer::bindings::Safekeeper) {
         println!("wal_reader_allocate")
+    }
+
+    fn wal_read(&self, _sk: &mut walproposer::bindings::Safekeeper, buf: &mut [u8], startpos: u64) {
+        self.disk.lock().read(startpos, buf);
     }
 
     fn free_event_set(&self, _: &mut walproposer::bindings::WalProposer) {
@@ -283,7 +329,7 @@ impl ApiImpl for SimulationApi {
     fn finish_sync_safekeepers(&self, lsn: u64) {
         println!("finish_sync_safekeepers, lsn={}", lsn);
         self.os.set_result(0, Lsn(lsn).to_string());
-        panic!("sync safekeepers finished at lsn={}", lsn);
+        self.os.exit(format!("sync safekeepers finished at lsn={}", lsn));
     }
 
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
@@ -292,5 +338,23 @@ impl ApiImpl for SimulationApi {
 
     fn after_election(&self, _wp: &mut walproposer::bindings::WalProposer) {
         println!("after_election");
+    }
+
+    fn get_redo_start_lsn(&self) -> u64 {
+        println!("get_redo_start_lsn -> {:?}", self.redo_start_lsn);
+        self.redo_start_lsn.expect("redo_start_lsn is not set").0
+    }
+
+    fn get_shmem_state(&self) -> *mut walproposer::bindings::WalproposerShmemState {
+        self.shmem.get()
+    }
+
+    fn start_streaming(&self, startpos: u64, callback: &walproposer::walproposer::StreamingCallback) {
+        loop {
+            let available = Lsn(startpos);
+            // TODO: hook into last available LSN
+            callback.broadcast(available, available);
+            callback.poll();
+        }
     }
 }

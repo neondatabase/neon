@@ -22,6 +22,7 @@ use crate::bindings::WalProposerExecStatusType;
 use crate::bindings::WalproposerShmemState;
 use crate::bindings::XLogRecPtr;
 use crate::walproposer::ApiImpl;
+use crate::walproposer::StreamingCallback;
 use crate::walproposer::WaitResult;
 
 extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemState {
@@ -36,7 +37,8 @@ extern "C" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).start_streaming(startpos)
+        let callback = StreamingCallback::new(wp);
+        (*api).start_streaming(startpos, &callback);
     }
 }
 

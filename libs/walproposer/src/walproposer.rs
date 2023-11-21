@@ -1,7 +1,7 @@
 use std::ffi::CString;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use utils::id::TenantTimelineId;
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
@@ -16,11 +16,11 @@ use crate::{
 ///
 /// Refer to `pgxn/neon/walproposer.h` for documentation.
 pub trait ApiImpl {
-    fn get_shmem_state(&self) -> &mut crate::bindings::WalproposerShmemState {
+    fn get_shmem_state(&self) -> *mut crate::bindings::WalproposerShmemState {
         todo!()
     }
 
-    fn start_streaming(&self, _startpos: u64) {
+    fn start_streaming(&self, _startpos: u64, _callback: &StreamingCallback) {
         todo!()
     }
 
@@ -162,6 +162,7 @@ pub enum WaitResult {
     Network(*mut Safekeeper, u32),
 }
 
+#[derive(Clone)]
 pub struct Config {
     /// Tenant and timeline id
     pub ttid: TenantTimelineId,
@@ -244,6 +245,24 @@ impl Drop for Wrapper {
 
             WalProposerFree(self.wp);
         }
+    }
+}
+
+pub struct StreamingCallback {
+    wp: *mut WalProposer,
+}
+
+impl StreamingCallback {
+    pub fn new(wp: *mut WalProposer) -> StreamingCallback {
+        StreamingCallback { wp }
+    }
+
+    pub fn broadcast(&self, startpos: Lsn, endpos: Lsn) {
+        unsafe { WalProposerBroadcast(self.wp, startpos.0, endpos.0) }
+    }
+
+    pub fn poll(&self) {
+        unsafe { WalProposerPoll(self.wp) }
     }
 }
 

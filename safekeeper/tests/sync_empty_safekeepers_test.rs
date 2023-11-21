@@ -23,26 +23,26 @@ fn sync_empty_safekeepers() {
     info!("Sucessfully synced (again) empty safekeepers at 0/0");
 }
 
-// #[test]
-// fn run_walproposer_generate_wal() {
-//     let clock = init_logger();
-//     let mut config = TestConfig::new(Some(clock));
-//     // config.network.timeout = Some(250);
-//     let test = config.start(1337);
+#[test]
+fn run_walproposer_generate_wal() {
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    // config.network.timeout = Some(250);
+    let test = config.start(1337);
 
-//     let lsn = test.sync_safekeepers().unwrap();
-//     assert_eq!(lsn, Lsn(0));
-//     info!("Sucessfully synced empty safekeepers at 0/0");
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
-//     let mut wp = test.launch_walproposer(lsn);
+    let mut wp = test.launch_walproposer(lsn);
 
-//     test.poll_for_duration(30);
+    test.poll_for_duration(30);
 
-//     for i in 0..100 {
-//         wp.write_tx(1);
-//         test.poll_for_duration(5);
-//     }
-// }
+    for i in 0..100 {
+        wp.write_tx(1);
+        test.poll_for_duration(5);
+    }
+}
 
 // #[test]
 // fn crash_safekeeper() {

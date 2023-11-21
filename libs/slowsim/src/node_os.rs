@@ -168,4 +168,10 @@ impl NodeOs {
     pub fn log_event(&self, data: String) {
         self.world.add_event(self.id(), data)
     }
+
+    pub fn exit(&self, reason: String) {
+        let prev = self.internal.crash_token.swap(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!prev, "crash_token should be set only once");
+        panic!("exit: {}", reason);
+    }
 }
