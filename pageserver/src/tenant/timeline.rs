@@ -1719,6 +1719,28 @@ impl Timeline {
         if let Some(rtc) = self.remote_client.as_ref() {
             rtc.schedule_layer_file_deletion(&needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
+            // This barrier orders above DELETEs before any later operations.
+            // This is critical because code executing after the barrier might
+            // create again the objects that we just scheduled for deletion.
+            // For example, if we just scheduled deletion of an image layer "from the future",
+            // later compaction might run again and re-create the same image layer.
+            // "from the future" here means an image layer whose LSN is > IndexPart::disk_consistent_lsn.
+            // "same" here means same key range and LSN.
+            // DELETEs and PUTs can race in the upload queue, so if the PUT is executed
+            // before the DELETE, the DELETE deletes the wrong layer.
+            //
+            // 1. a future image layer is created and uploaded
+            // 2. ps restart
+            // 3. the future layer from (1) is deleted during load layer map
+            // 4. image layer is re-created and uploaded
+            // 5. deletion queue would like to delete (1) but actually deletes (4)
+            // 6. delete by name works as expected, but it now deletes the wrong (later) version
+            //
+            // See https://github.com/neondatabase/neon/issues/5878
+            //
+            // NB: generation numbers naturally protect against this because they disambiguate
+            //     (1) and (4)
+            rtc.schedule_barrier()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
         }
