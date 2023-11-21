@@ -356,7 +356,6 @@ mod tests {
         round_trip_test::<false>(&blobs).await?;
         round_trip_test::<true>(&blobs).await?;
 
-        #[cfg(feature = "profiling")]
         crate::profiling::exit_profiler(&profiler_guard);
         Ok(())
     }

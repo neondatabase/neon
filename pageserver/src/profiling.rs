@@ -83,5 +83,5 @@ mod profiling_impl {
         None
     }
 
-    // pub fn exit_profiler(profiler_guard: &Option<pprof::ProfilerGuard>) {}
+    pub fn exit_profiler(profiler_guard: &Option<DummyProfilerGuard>) {}
 }

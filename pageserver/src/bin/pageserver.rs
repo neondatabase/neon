@@ -677,13 +677,12 @@ fn start_pageserver(
                 signal.name()
             );
 
-            #[cfg(feature = "profiling")]
             pageserver::profiling::exit_profiler(&profiler_guard);
 
             std::process::exit(111);
         }
 
-        Signal::Quit | Signal::Interrupt | Signal::Terminate => {
+        Signal::Interrupt | Signal::Terminate => {
             info!(
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
@@ -696,7 +695,6 @@ fn start_pageserver(
             let bg_remote_storage = remote_storage.clone();
             let bg_deletion_queue = deletion_queue.clone();
 
-            #[cfg(feature = "profiling")]
             pageserver::profiling::exit_profiler(&profiler_guard);
 
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(

@@ -655,9 +655,13 @@ mod tests {
         let started_at = std::time::Instant::now();
 
         // Feed bytes to the decoder
+        // TODO try feeding in many small chunks
         let xlogoff: usize = startpoint.segment_offset(WAL_SEGMENT_SIZE);
         let mut decoder = WalStreamDecoder::new(startpoint, pg_version);
-        decoder.feed_bytes(&bytes[xlogoff..]);
+        // decoder.feed_bytes(&bytes[xlogoff..]);
+        for chunk in bytes[xlogoff..].chunks(50) {
+            decoder.feed_bytes(chunk);
+        }
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
         // Decode and ingest wal
@@ -674,7 +678,6 @@ mod tests {
         println!("done in {:?}", duration);
         drop(prof_guard);
 
-        #[cfg(feature = "profiling")]
         crate::profiling::exit_profiler(&profiler_guard);
 
         Ok(())
