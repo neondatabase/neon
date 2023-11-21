@@ -128,6 +128,14 @@ impl IndexPart {
     pub fn get_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn
     }
+
+    pub fn from_s3_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice::<IndexPart>(bytes)
+    }
+
+    pub fn to_s3_bytes(&self) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(self)
+    }
 }
 
 impl TryFrom<&UploadQueueInitialized> for IndexPart {
@@ -201,7 +209,7 @@ mod tests {
             deleted_at: None,
         };
 
-        let part = serde_json::from_str::<IndexPart>(example).unwrap();
+        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -239,7 +247,7 @@ mod tests {
             deleted_at: None,
         };
 
-        let part = serde_json::from_str::<IndexPart>(example).unwrap();
+        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -279,7 +287,7 @@ mod tests {
                 "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap())
         };
 
-        let part = serde_json::from_str::<IndexPart>(example).unwrap();
+        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -323,7 +331,7 @@ mod tests {
             deleted_at: None,
         };
 
-        let empty_layers_parsed = serde_json::from_str::<IndexPart>(empty_layers_json).unwrap();
+        let empty_layers_parsed = IndexPart::from_s3_bytes(empty_layers_json.as_bytes()).unwrap();
 
         assert_eq!(empty_layers_parsed, expected);
     }
@@ -361,7 +369,7 @@ mod tests {
                 "2023-07-31T09:00:00.123000000", "%Y-%m-%dT%H:%M:%S.%f").unwrap())
         };
 
-        let part = serde_json::from_str::<IndexPart>(example).unwrap();
+        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 }

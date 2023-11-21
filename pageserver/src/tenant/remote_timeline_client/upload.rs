@@ -33,8 +33,9 @@ pub(super) async fn upload_index_part<'a>(
     });
     pausable_failpoint!("before-upload-index-pausable");
 
-    let index_part_bytes =
-        serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;
+    let index_part_bytes = index_part
+        .to_s3_bytes()
+        .context("serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 

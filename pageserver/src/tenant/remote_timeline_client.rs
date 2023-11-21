@@ -1229,16 +1229,18 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(delete) => self
-                    .deletion_queue_client
-                    .push_layers(
-                        self.tenant_id,
-                        self.timeline_id,
-                        self.generation,
-                        delete.layers.clone(),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e)),
+                UploadOp::Delete(delete) => {
+                    pausable_failpoint!("before-delete-layer-pausable");
+                    self.deletion_queue_client
+                        .push_layers(
+                            self.tenant_id,
+                            self.timeline_id,
+                            self.generation,
+                            delete.layers.clone(),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))
+                }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
