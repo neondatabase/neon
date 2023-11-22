@@ -127,9 +127,13 @@ pub(super) async fn delete_local_layer_files(
     tenant_id: TenantId,
     timeline: &Timeline,
 ) -> anyhow::Result<()> {
-    info!("waiting for locks");
-    let guards = tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock());
-    info!("got locks, deleting layer files");
+    let guards = async { tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock()) };
+    let guards = crate::timed(
+        guards,
+        "acquire gc and compaction locks",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
 
     // NB: storage_sync upload tasks that reference these layers have been cancelled
     //     by the caller.
