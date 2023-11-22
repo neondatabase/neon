@@ -91,7 +91,7 @@ def test_wal_restore_initdb(
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
 
-    initdb_path = Path(
+    initdb_zst_path = Path(
         test_output_dir
         / "repo"
         / "local_fs_remote_storage"
@@ -103,9 +103,9 @@ def test_wal_restore_initdb(
         / "initdb.tar.zst"
     )
 
-    decompress_zstd(initdb_path, data_dir)
+    decompress_zstd(initdb_zst_path, data_dir)
     with VanillaPostgres(
-        data_dir, PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version), port
+        data_dir, PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version), port, init = False
     ) as restored:
         pg_bin.run_capture(
             [
