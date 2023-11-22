@@ -312,10 +312,22 @@ pub struct Timeline {
     /// to the timeline should drop out when this token fires.
     pub(crate) cancel: CancellationToken,
 
-    /// Make sure we only have one running compaction at a time.
+    /// Make sure we only have one running compaction at a time in tests.
+    ///
+    /// Must only be taken in two places:
+    /// - [`Timeline::compact`] (this file)
+    /// - [`delete::delete_local_layer_files`]
+    ///
+    /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     compaction_lock: tokio::sync::Mutex<()>,
 
-    /// Make sure we only have one running gc at a time.
+    /// Make sure we only have one running gc at a time in tests.
+    ///
+    /// Must only be taken in two places:
+    /// - [`Timeline::gc`] (this file)
+    /// - [`delete::delete_local_layer_files`]
+    ///
+    /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     gc_lock: tokio::sync::Mutex<()>,
 }
 
