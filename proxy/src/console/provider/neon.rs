@@ -5,9 +5,13 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, http, scram};
+use crate::{
+    auth::{backend::Policy, ClientCredentials},
+    compute, http, scram,
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
@@ -139,6 +143,84 @@ impl Api {
         .instrument(info_span!("http", id = request_id))
         .await
     }
+
+    async fn do_ensure_row_level(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials<'_>,
+        dbname: String,
+        username: String,
+        policies: Vec<Policy>,
+    ) -> anyhow::Result<UserRowLevel> {
+        let project = creds.project().expect("impossible");
+        let request_id = uuid::Uuid::new_v4().to_string();
+        async {
+            let request = self
+                .endpoint
+                .post("proxy_ensure_role_level_sec")
+                .header("X-Request-ID", &request_id)
+                .header("Authorization", format!("Bearer {}", &self.jwt))
+                .query(&[("session_id", extra.session_id)])
+                // .query(&[
+                //     ("application_name", extra.application_name),
+                //     ("project", Some(project)),
+                //     ("dbname", Some(&dbname)),
+                //     ("username", Some(&username)),
+                //     ("options", extra.options),
+                // ])
+                .json(&EnsureRowLevelReq {
+                    project: project.to_owned(),
+                    targets: policies
+                        .into_iter()
+                        .map(|p| Target {
+                            database_name: dbname.clone(),
+                            table_name: p.table,
+                            row_level_user_id: username.clone(),
+                            role_name: "enduser".to_owned(),
+                            column_name: p.column,
+                        })
+                        .collect(),
+                })
+                .build()?;
+
+            info!(url = request.url().as_str(), "sending http request");
+            let start = Instant::now();
+            let response = self.endpoint.execute(request).await?;
+            info!(duration = ?start.elapsed(), "received http response");
+            let mut body = parse_body::<UserRowLevel>(response).await?;
+
+            // hack
+            body.username = body.username.to_lowercase();
+
+            // info!(user = %body.username, pw=%body.password, "please don't merge this in production");
+
+            Ok(body)
+        }
+        .map_err(crate::error::log_error)
+        .instrument(info_span!("http", id = request_id))
+        .await
+    }
+}
+
+#[derive(Serialize)]
+struct EnsureRowLevelReq {
+    project: String,
+    targets: Vec<Target>,
+}
+
+#[derive(Serialize)]
+struct Target {
+    database_name: String,
+    table_name: String,
+    row_level_user_id: String,
+    role_name: String,
+    column_name: String,
+}
+
+#[derive(Deserialize)]
+pub struct UserRowLevel {
+    pub username: String,
+    pub password: String,
 }
 
 #[async_trait]
@@ -187,6 +269,20 @@ impl super::Api for Api {
         info!(key = &*key, "created a cache entry for compute node info");
 
         Ok(cached)
+    }
+
+    /// Get the password for the RLS user
+    #[tracing::instrument(skip_all)]
+    async fn ensure_row_level(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials,
+        dbname: String,
+        username: String,
+        policies: Vec<Policy>,
+    ) -> anyhow::Result<UserRowLevel> {
+        self.do_ensure_row_level(extra, creds, dbname, username, policies)
+            .await
     }
 }
 

@@ -3,10 +3,12 @@
 //! Handles both SQL over HTTP and SQL over Websockets.
 
 mod conn_pool;
+pub mod jwt_auth;
 mod sql_over_http;
 mod websocket;
 
 use anyhow::bail;
+use dashmap::DashMap;
 use hyper::StatusCode;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
@@ -31,6 +33,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
+use self::jwt_auth::JWKSetCaches;
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
@@ -41,6 +45,9 @@ pub async fn task_main(
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
+    let jwk_cache_pool = Arc::new(JWKSetCaches {
+        map: DashMap::new(),
+    });
 
     // shutdown the connection pool
     tokio::spawn({
@@ -85,6 +92,7 @@ pub async fn task_main(
             let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
+            let jwk_cache_pool = jwk_cache_pool.clone();
 
             async move {
                 let peer_addr = match client_addr {
@@ -96,13 +104,20 @@ pub async fn task_main(
                     move |req: Request<Body>| {
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
+                        let jwk_cache_pool = jwk_cache_pool.clone();
 
                         async move {
                             let cancel_map = Arc::new(CancelMap::default());
                             let session_id = uuid::Uuid::new_v4();
 
                             request_handler(
-                                req, config, conn_pool, cancel_map, session_id, sni_name,
+                                req,
+                                config,
+                                conn_pool,
+                                jwk_cache_pool,
+                                cancel_map,
+                                session_id,
+                                sni_name,
                             )
                             .instrument(info_span!(
                                 "serverless",
@@ -167,6 +182,7 @@ async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
     conn_pool: Arc<conn_pool::GlobalConnPool>,
+    jwk_cache_pool: Arc<JWKSetCaches>,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
@@ -204,6 +220,7 @@ async fn request_handler(
             request,
             sni_hostname,
             conn_pool,
+            jwk_cache_pool,
             session_id,
             &config.http_config,
         )
@@ -214,7 +231,7 @@ async fn request_handler(
             .header("Access-Control-Allow-Origin", "*")
             .header(
                 "Access-Control-Allow-Headers",
-                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In",
+                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In, Authorization",
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code

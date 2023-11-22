@@ -3,8 +3,10 @@ mod hacks;
 mod link;
 
 pub use link::LinkAuthError;
+use serde::{Deserialize, Serialize};
 use tokio_postgres::config::AuthKeys;
 
+use crate::console::provider::neon::UserRowLevel;
 use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
 use crate::{
     auth::{self, ClientCredentials},
@@ -319,4 +321,41 @@ impl BackendType<'_, ClientCredentials<'_>> {
             Test(x) => x.wake_compute().map(Some),
         }
     }
+
+    /// Get the password for the RLS user
+    pub async fn ensure_row_level(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        dbname: String,
+        username: String,
+        policies: Vec<Policy>,
+    ) -> anyhow::Result<UserRowLevel> {
+        use BackendType::*;
+
+        match self {
+            Console(api, creds) => {
+                api.ensure_row_level(extra, creds, dbname, username, policies)
+                    .await
+            }
+            Postgres(api, creds) => {
+                api.ensure_row_level(extra, creds, dbname, username, policies)
+                    .await
+            }
+            Link(_) => Err(anyhow::anyhow!("not on link")),
+            Test(_) => Err(anyhow::anyhow!("not on test")),
+        }
+    }
 }
+
+// TODO(conrad): policies can be quite complex. Figure out how to configure this
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct Policy {
+    pub table: String,
+    pub column: String,
+}
+
+// enum PolicyType {
+//     ForSelect(),
+//     ForUpdate()
+// }

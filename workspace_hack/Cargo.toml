@@ -54,7 +54,7 @@ ring = { version = "0.16", features = ["std"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 smallvec = { version = "1", default-features = false, features = ["write"] }
 time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }

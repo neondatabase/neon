@@ -1,9 +1,11 @@
 pub mod mock;
 pub mod neon;
 
+use self::neon::UserRowLevel;
+
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::ClientCredentials,
+    auth::{backend::Policy, ClientCredentials},
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
@@ -248,6 +250,16 @@ pub trait Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+
+    /// Get the password for the RLS user
+    async fn ensure_row_level(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials,
+        dbname: String,
+        username: String,
+        policies: Vec<Policy>,
+    ) -> anyhow::Result<UserRowLevel>;
 }
 
 /// Various caches for [`console`](super).
