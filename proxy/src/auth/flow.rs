@@ -7,6 +7,7 @@ use crate::{
 };
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 use sha2::{Digest, Sha256};
+use tracing::info;
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -138,6 +139,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         if !scram::METHODS.contains(&sasl.method) {
             return Err(super::AuthError::bad_auth_method(sasl.method));
         }
+
+        info!("client chooses {}", sasl.method);
 
         let secret = self.state.0;
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)
