@@ -862,7 +862,7 @@ def test_compaction_waits_for_upload(
             not path.exists()
         ), "l0 should now be removed because of L0 => L1 compaction and completed uploads"
 
-    # We should not have hit the error handling path in uploads where the remote file is gone
+    # We should not have hit the error handling path in uploads where a uploaded file is gone
     assert not env.pageserver.log_contains(
         "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
     )
