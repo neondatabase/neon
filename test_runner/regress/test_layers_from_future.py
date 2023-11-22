@@ -201,6 +201,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
                 "a correct implementation would never let the later PUT overtake the earlier DELETE"
             )
             break
+        time.sleep(1)
 
     # Window has passed, unstuck the delete, let upload queue drain.
     log.info("unstuck the DELETE")
