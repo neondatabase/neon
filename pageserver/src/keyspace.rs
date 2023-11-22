@@ -5,7 +5,7 @@ use std::ops::Range;
 ///
 /// Represents a set of Keys, in a compact form.
 ///
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeySpace {
     /// Contiguous ranges of keys that belong to the key space. In key order,
     /// and with no overlap.

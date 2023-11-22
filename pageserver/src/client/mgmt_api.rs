@@ -93,6 +93,22 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn keyspace(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<crate::http::models::partitioning::Partitioning> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace?check_serialization_roundtrip=true",
+            self.mgmt_api_endpoint
+        );
+        self.get(&uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     async fn get<U: IntoUrl>(&self, uri: U) -> Result<reqwest::Response> {
         self.request(Method::GET, uri, ()).await
     }
