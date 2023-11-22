@@ -1,7 +1,10 @@
 //! Main authentication flow.
 
 use super::{AuthErrorImpl, PasswordHackPayload};
-use crate::{sasl, scram, stream::PqStream};
+use crate::{
+    sasl, scram,
+    stream::{PqStream, Stream},
+};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -50,17 +53,17 @@ impl AuthMethod for CleartextPassword {
 
 /// This wrapper for [`PqStream`] performs client authentication.
 #[must_use]
-pub struct AuthFlow<'a, Stream, State> {
+pub struct AuthFlow<'a, S, State> {
     /// The underlying stream which implements libpq's protocol.
-    stream: &'a mut PqStream<Stream>,
+    stream: &'a mut PqStream<Stream<S>>,
     /// State might contain ancillary data (see [`Self::begin`]).
     state: State,
 }
 
 /// Initial state of the stream wrapper.
-impl<'a, S: AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
+impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     /// Create a new wrapper for client authentication.
-    pub fn new(stream: &'a mut PqStream<S>) -> Self {
+    pub fn new(stream: &'a mut PqStream<Stream<S>>) -> Self {
         Self {
             stream,
             state: Begin,

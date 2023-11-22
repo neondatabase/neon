@@ -231,7 +231,10 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             if !read_buf.is_empty() {
                 bail!("data is sent before server replied with EncryptionResponse");
             }
-            Ok(raw.upgrade(tls_config).await?)
+
+            Ok(Stream::Tls {
+                tls: Box::new(raw.upgrade(tls_config).await?),
+            })
         }
         unexpected => {
             info!(
