@@ -120,13 +120,12 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 }
 
 /// Wrapper for upgrading raw streams into secure streams.
-/// NOTE: it should be possible to decompose this object as necessary.
 pub enum Stream<S> {
     /// We always begin with a raw stream,
     /// which may then be upgraded into a secure stream.
     Raw { raw: S },
-    /// We box [`TlsStream`] since it can be quite large.
     Tls {
+        /// We box [`TlsStream`] since it can be quite large.
         tls: Box<TlsStream<S>>,
         certified_key: Option<Arc<CertifiedKey>>,
     },

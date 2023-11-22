@@ -69,12 +69,10 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
         let mut cert_digest = Vec::new();
 
         if let Some(key) = stream.get_ref().certified_key() {
-            dbg!(&key.cert);
             cert_digest = Sha256::new()
                 .chain_update(&key.cert[0].0)
                 .finalize()
                 .to_vec();
-            dbg!(&cert_digest);
         }
 
         Self {

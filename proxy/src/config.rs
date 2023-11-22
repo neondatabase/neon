@@ -197,7 +197,6 @@ impl CertResolver {
         if let Some(mut sni_name) = server_name {
             loop {
                 if let Some(cert) = self.certs.get(sni_name) {
-                    dbg!(&cert.cert);
                     return Some(cert.clone());
                 }
                 if let Some((_, rest)) = sni_name.split_once('.') {
@@ -217,7 +216,6 @@ impl CertResolver {
             // a) Instead of multi-cert approach use single cert with extra
             //    domains listed in Subject Alternative Name (SAN).
             // b) Deploy separate proxy instances for extra domains.
-            dbg!(&self.default.as_ref().unwrap().cert);
             self.default.as_ref().cloned()
         }
     }

@@ -92,17 +92,13 @@ impl sasl::Mechanism for Exchange<'_> {
                 client_first_message_bare,
                 server_first_message,
             } => {
-                dbg!(&cbind_flag);
                 let client_final_message = ClientFinalMessage::parse(input)
                     .ok_or(SaslError::BadClientMessage("invalid client-final-message"))?;
 
                 let channel_binding = cbind_flag.encode(|_| {
-                    dbg!(self.cert_digest)
-                        .map(base64::encode)
+                    self.cert_digest
                         .ok_or(SaslError::ChannelBindingFailed("no cert digest provided"))
                 })?;
-                dbg!(&channel_binding);
-                dbg!(&client_final_message.channel_binding);
 
                 // This might've been caused by a MITM attack
                 if client_final_message.channel_binding != channel_binding {
