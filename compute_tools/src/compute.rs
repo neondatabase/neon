@@ -83,6 +83,7 @@ pub struct ComputeState {
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub pspec: Option<ParsedSpec>,
+    pub merge_src_connstr: Option<String>,
     pub metrics: ComputeMetrics,
 }
 
@@ -94,6 +95,7 @@ impl ComputeState {
             last_active: None,
             error: None,
             pspec: None,
+            merge_src_connstr: None,
             metrics: ComputeMetrics::default(),
         }
     }
@@ -624,6 +626,22 @@ impl ComputeNode {
 
         // clean up
         let _ok = fs::remove_dir_all(pgdata);
+        Ok(())
+    }
+
+    /// Merge two branches
+    #[instrument(skip_all)]
+    pub fn merge(&self, src_connstr: &str) -> Result<()> {
+        let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+        handle_merge(&mut client, self.connstr.as_str(), &src_connstr)?;
+        Ok(())
+    }
+
+    /// Mark brnach as mergeable
+    #[instrument(skip_all)]
+    pub fn set_mergeable(&self) -> Result<()> {
+        let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+        handle_set_mergeable(&mut client, self.connstr.as_str())?;
         Ok(())
     }
 

@@ -407,6 +407,58 @@ fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent
     Ok(())
 }
 
+#[instrument(skip_all)]
+pub fn handle_merge(client: &mut Client, dst_connstr: &str, src_connstr: &str) -> Result<()> {
+    info!("Merge branch into {}", dst_connstr);
+    let existing_dbs = get_existing_dbs(client)?;
+
+    for (_, db) in existing_dbs {
+        if db.name.starts_with("template") {
+            continue;
+        }
+        let mut dst_conf = Config::from_str(dst_connstr)?;
+        dst_conf.dbname(&db.name);
+
+        let mut src_conf = Config::from_str(src_connstr)?;
+        src_conf.dbname(&db.name);
+
+        let mut sub_client = dst_conf.connect(NoTls)?;
+        let mut connstr_parts: Vec<&str> = src_connstr.split('/').collect();
+        connstr_parts.pop();
+        connstr_parts.push(&db.name);
+        let connstr = connstr_parts.join("/");
+        let create_sub = format!("create subscription sub_merge connection '{}' publication pub_merge with (create_slot=false, slot_name=merge_slot_{}, copy_data=false)", connstr, &db.name);
+        sub_client.simple_query(&create_sub)?;
+    }
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+pub fn handle_set_mergeable(client: &mut Client, connstr: &str) -> Result<()> {
+    info!("Mark branch as mergeable");
+    let existing_dbs = get_existing_dbs(client)?;
+
+    for (_, db) in existing_dbs {
+        if db.name.starts_with("template") {
+            continue;
+        }
+        let mut conf = Config::from_str(connstr)?;
+        conf.dbname(&db.name);
+
+        let mut db_client = conf.connect(NoTls)?;
+
+        let create_slot = format!(
+            "select pg_create_logical_replication_slot('merge_slot_{}', 'pgoutput')",
+            &db.name
+        );
+        db_client.simple_query(&create_slot)?;
+        db_client.simple_query("create publication pub_merge for all tables")?;
+    }
+
+    Ok(())
+}
+
 /// It follows mostly the same logic as `handle_roles()` excepting that we
 /// does not use an explicit transactions block, since major database operations
 /// like `CREATE DATABASE` and `DROP DATABASE` do not support it. Statement-level

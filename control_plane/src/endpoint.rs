@@ -572,7 +572,11 @@ impl Endpoint {
                         }
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
-                        | ComputeStatus::Configuration => {
+                        | ComputeStatus::Configuration
+                        | ComputeStatus::MergePending
+                        | ComputeStatus::Merging
+                        | ComputeStatus::SetMergeablePending
+                        | ComputeStatus::SetMergeable => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
@@ -661,6 +665,51 @@ impl Endpoint {
             ))
             .send()?;
 
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text() {
+                Ok(err_body) => format!("Error: {}", err_body),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
+    pub fn merge_from(&self, merge_from: &Arc<Endpoint>) -> Result<()> {
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(format!(
+                "http://{}:{}/merge",
+                self.http_address.ip(),
+                self.http_address.port()
+            ))
+            .body(merge_from.connstr())
+            .send()?;
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text() {
+                Ok(err_body) => format!("Error: {}", err_body),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
+    pub fn set_mergeable(&self) -> Result<()> {
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(format!(
+                "http://{}:{}/set_mergeable",
+                self.http_address.ip(),
+                self.http_address.port()
+            ))
+            .send()?;
         let status = response.status();
         if !(status.is_client_error() || status.is_server_error()) {
             Ok(())

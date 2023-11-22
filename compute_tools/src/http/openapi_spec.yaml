@@ -85,6 +85,61 @@ paths:
                 description: Error text or 'true' if check passed.
                 example: "true"
 
+  /merge:
+    post:
+      tags:
+      - Merge
+      summary: Merge branches.
+      description: |
+        This is a blocking API endpoint, i.e. it blocks waiting until
+        compute is finished configuration and is in `Running` state.
+        Optional non-blocking mode could be added later.
+      operationId: mergeBranches
+      requestBody:
+        description: connection string of target branch
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        200:
+          description: Merge finished.
+          content:
+            application/json:OK
+              schema:
+                $ref: "#/components/schemas/ComputeState"
+        500:
+          description: Merge request failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
+  /set_mergeable:
+    post:
+      tags:
+      - Set mergeable
+      summary: Mark branch as mergeable.
+      description: |
+        This is a blocking API endpoint, i.e. it blocks waiting until
+        compute is finished configuration and is in `Running` state.
+        Optional non-blocking mode could be added later.
+      operationId: markBranchMergeable
+      responses:
+        200:
+          description: Branch marked as mergeable
+          content:
+            application/json:OK
+              schema:
+                $ref: "#/components/schemas/ComputeState"
+        500:
+          description: Set mergeable request failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
   /configure:
     post:
       tags:

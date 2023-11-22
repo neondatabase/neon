@@ -32,6 +32,35 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
             // std::thread::sleep(std::time::Duration::from_millis(10000));
 
             compute.set_status(new_status);
+        } else if state.status == ComputeStatus::MergePending {
+            info!("got merge request");
+            state.status = ComputeStatus::Merging;
+            compute.state_changed.notify_all();
+            let connstr = state.merge_src_connstr.clone().unwrap();
+            drop(state);
+
+            let mut new_status = ComputeStatus::Failed;
+            if let Err(e) = compute.merge(&connstr) {
+                info!("could not merge compute node: {}", e);
+            } else {
+                new_status = ComputeStatus::Running;
+                info!("merge complete");
+            }
+            compute.set_status(new_status);
+        } else if state.status == ComputeStatus::SetMergeablePending {
+            info!("got set mergeable request");
+            state.status = ComputeStatus::SetMergeable;
+            compute.state_changed.notify_all();
+            drop(state);
+
+            let mut new_status = ComputeStatus::Failed;
+            if let Err(e) = compute.set_mergeable() {
+                info!("could not mark branch as mergeable: {}", e);
+            } else {
+                new_status = ComputeStatus::Running;
+                info!("marked as mergeable");
+            }
+            compute.set_status(new_status);
         } else if state.status == ComputeStatus::Failed {
             info!("compute node is now in Failed state, exiting");
             break;
