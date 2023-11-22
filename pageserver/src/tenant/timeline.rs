@@ -57,7 +57,7 @@ use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
 use crate::pgdatadir_mapping::LsnForTimestamp;
-use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
+use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
 use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
 use pageserver_api::reltag::RelTag;
@@ -2124,7 +2124,7 @@ impl Timeline {
             }
 
             // Recurse into ancestor if needed
-            if Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+            if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
                 trace!(
                     "going into ancestor {}, cont_lsn is {}",
                     timeline.ancestor_lsn,
