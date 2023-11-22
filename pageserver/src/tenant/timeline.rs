@@ -321,7 +321,7 @@ pub struct Timeline {
     /// Timeline deletion will acquire both compaction and gc locks in whatever order.
     compaction_lock: tokio::sync::Mutex<()>,
 
-    /// Make sure we only have one running gc at a time in tests.
+    /// Make sure we only have one running gc at a time.
     ///
     /// Must only be taken in two places:
     /// - [`Timeline::gc`] (this file)
