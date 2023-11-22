@@ -192,10 +192,9 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     start = time.monotonic()
     while True:
         post_stat = future_layer_path.stat()
-        if pre_stat.st_mtime_ns != post_stat.st_mtime_ns:
-            # changed inode <=> overwritten
-            log.warn("observed PUT overtake the stucked DELETE => bug isn't fixed yet")
-            break
+        assert (
+            pre_stat.st_mtime_ns == post_stat.st_mtime_ns
+        ), "observed PUT overtake the stucked DELETE => bug isn't fixed yet"
         if time.monotonic() - start > max_race_opportunity_window:
             log.info(
                 "a correct implementation would never let the later PUT overtake the earlier DELETE"
