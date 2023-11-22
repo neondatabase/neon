@@ -1271,7 +1271,7 @@ async fn timeline_compact_handler(
     check_permission(&request, Some(tenant_id))?;
 
     let mut flags = EnumSet::empty();
-    if let Some(true) = parse_query_param::<_, bool>(&request, "force_repartition")? {
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
     async {
@@ -1297,7 +1297,7 @@ async fn timeline_checkpoint_handler(
     check_permission(&request, Some(tenant_id))?;
 
     let mut flags = EnumSet::empty();
-    if let Some(true) = parse_query_param::<_, bool>(&request, "force_repartition")? {
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
     async {

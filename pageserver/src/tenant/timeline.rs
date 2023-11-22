@@ -1721,13 +1721,15 @@ impl Timeline {
             rtc.schedule_index_upload_for_file_changes()?;
             // This barrier orders above DELETEs before any later operations.
             // This is critical because code executing after the barrier might
-            // create again the objects that we just scheduled for deletion.
+            // create again objects with the same key that we just scheduled for deletion.
             // For example, if we just scheduled deletion of an image layer "from the future",
             // later compaction might run again and re-create the same image layer.
             // "from the future" here means an image layer whose LSN is > IndexPart::disk_consistent_lsn.
             // "same" here means same key range and LSN.
-            // DELETEs and PUTs can race in the upload queue, so if the PUT is executed
-            // before the DELETE, the DELETE deletes the wrong layer.
+            //
+            // Without a barrier between above DELETEs and the re-creation's PUTs,
+            // the upload queue may execute the PUT first, then the DELETE.
+            // In our example, we will end up with an IndexPart referencing a non-existent object.
             //
             // 1. a future image layer is created and uploaded
             // 2. ps restart
