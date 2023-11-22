@@ -867,8 +867,7 @@ impl RemoteTimelineClient {
 
     /// Wait for all previously scheduled operations to complete, and then stop.
     ///
-    /// Not cancellation safe! If cancelled, then the same task must call this operation again
-    /// until it completes.
+    /// Not cancellation safe!
     pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), StopError> {
         let rx = {
             let mut guard = self.upload_queue.lock().unwrap();
@@ -890,18 +889,20 @@ impl RemoteTimelineClient {
             ) {
                 None
             } else {
+                // danger here with cancellation is that imagine an upload queue:
+                // 1. <some other task>
+                // 2. shutdown (cancelled)
+                // 3. shutdown (waited) <-- one inserted on the next line
+                //
+                // now the signal for 3. never comes
                 Some(self.schedule_shutdown(upload_queue))
             }
         };
 
         if let Some(rx) = rx {
-            match rx.await {
-                Ok(_) => {}
-                Err(_closed) => {
-                    // someone else called stop before we got to
-                    return Ok(());
-                }
-            }
+            // regardless of our "Shutdown" operation getting run, always try to stop; it is
+            // idempotent.
+            drop(rx.await);
         }
 
         self.stop()
