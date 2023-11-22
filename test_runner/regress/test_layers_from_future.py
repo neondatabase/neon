@@ -151,6 +151,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     )
     log.info(f"future layer path: {future_layer_path}")
     pre_stat = future_layer_path.stat()
+    time.sleep(1.1) # so that we can use change in pre_stat.st_mtime to detect overwrites
 
     # force removal of layers from the future
     tenant_conf = ps_http.tenant_config(tenant_id)
@@ -193,7 +194,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     while True:
         post_stat = future_layer_path.stat()
         assert (
-            pre_stat.st_mtime_ns == post_stat.st_mtime_ns
+            pre_stat.st_mtime == post_stat.st_mtime
         ), "observed PUT overtake the stucked DELETE => bug isn't fixed yet"
         if time.monotonic() - start > max_race_opportunity_window:
             log.info(
@@ -218,4 +219,4 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
 
     log.info("assert that the overwritten layer won")
     final_stat = future_layer_path.stat()
-    assert final_stat.st_mtime_ns != pre_stat.st_mtime_ns
+    assert final_stat.st_mtime != pre_stat.st_mtime
