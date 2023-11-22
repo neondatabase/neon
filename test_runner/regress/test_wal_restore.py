@@ -70,6 +70,7 @@ def decompress_zstd(
         decompressor = zstandard.ZstdDecompressor()
         with open(input_file_name, "rb") as input_file:
             decompressor.copy_stream(input_file, temp)
+        temp.seek(0)
         with tarfile.open(fileobj=temp) as tfile:
             tfile.extractall(path=output_dir)
 
