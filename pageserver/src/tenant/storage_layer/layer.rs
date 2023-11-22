@@ -1419,6 +1419,8 @@ impl Default for LayerImplMetrics {
     fn default() -> Self {
         use enum_map::Enum;
 
+        // reminder: these will be pageserver_layer_* with "_total" suffix
+
         let started_evictions = metrics::register_int_counter!(
             "pageserver_layer_started_evictions",
             "Evictions started in the Layer implementation"
@@ -1454,7 +1456,6 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
-        // reminder: this will be pageserver_layer_gcs_count_total with "_total" suffix
         let failed_deletes = metrics::register_int_counter_vec!(
             "pageserver_layer_failed_deletes_count",
             "Different reasons for garbage collections to have failed",
