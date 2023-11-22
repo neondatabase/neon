@@ -670,6 +670,12 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             info!("creating system extensions with query: {}", query);
             client.simple_query(query)?;
         }
+        if libs.contains("pg_wait_sampling") {
+            // Create extension only if this compute really needs it
+            let query = "CREATE EXTENSION IF NOT EXISTS pg_wait_sampling";
+            info!("creating system extensions with query: {}", query);
+            client.simple_query(query)?;
+        }
     }
 
     Ok(())

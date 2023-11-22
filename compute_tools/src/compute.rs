@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::BufRead;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -14,6 +15,7 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use notify::event;
 use postgres::{Client, NoTls};
 use tokio;
 use tokio_postgres;
@@ -644,8 +646,29 @@ impl ComputeNode {
             } else {
                 vec![]
             })
+            .stderr(Stdio::piped())
             .spawn()
             .expect("cannot start postgres process");
+
+        let stderr = pg.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stderr);
+            let mut last_lines = vec![];
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    if line.starts_with("2023-") {
+                        // print all lines from the previous postgres instance
+                        let combined = format!("PG:{}\n", last_lines.join("\u{200B}"));
+                        let res = std::io::stderr().lock().write_all(combined.as_bytes());
+                        if let Err(e) = res {
+                            error!("failed to write to stderr: {}", e);
+                        }
+                        last_lines.clear();
+                    }
+                    last_lines.push(line);
+                }
+            }
+        });
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
