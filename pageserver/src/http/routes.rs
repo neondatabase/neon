@@ -28,10 +28,6 @@ use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
-use super::models::{
-    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
-    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
-};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
@@ -49,6 +45,10 @@ use crate::tenant::timeline::Timeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
+use pageserver_api::models::{
+    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
+    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
+};
 use utils::{
     auth::SwappableJwtAuth,
     generation::Generation,
@@ -64,7 +64,7 @@ use utils::{
 };
 
 // Imports only used for testing APIs
-use super::models::ConfigureFailpointsRequest;
+use pageserver_api::models::ConfigureFailpointsRequest;
 
 pub struct State {
     conf: &'static PageServerConf,
@@ -1487,70 +1487,10 @@ async fn timeline_collect_keyspace(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    struct Partitioning {
-        keys: crate::keyspace::KeySpace,
-
-        at_lsn: Lsn,
-    }
-
-    impl serde::Serialize for Partitioning {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeMap;
-            let mut map = serializer.serialize_map(Some(2))?;
-            map.serialize_key("keys")?;
-            map.serialize_value(&KeySpace(&self.keys))?;
-            map.serialize_key("at_lsn")?;
-            map.serialize_value(&WithDisplay(&self.at_lsn))?;
-            map.end()
-        }
-    }
-
-    struct WithDisplay<'a, T>(&'a T);
-
-    impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            serializer.collect_str(&self.0)
-        }
-    }
-
-    struct KeySpace<'a>(&'a crate::keyspace::KeySpace);
-
-    impl<'a> serde::Serialize for KeySpace<'a> {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeSeq;
-            let mut seq = serializer.serialize_seq(Some(self.0.ranges.len()))?;
-            for kr in &self.0.ranges {
-                seq.serialize_element(&KeyRange(kr))?;
-            }
-            seq.end()
-        }
-    }
-
-    struct KeyRange<'a>(&'a std::ops::Range<crate::repository::Key>);
-
-    impl<'a> serde::Serialize for KeyRange<'a> {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeTuple;
-            let mut t = serializer.serialize_tuple(2)?;
-            t.serialize_element(&WithDisplay(&self.0.start))?;
-            t.serialize_element(&WithDisplay(&self.0.end))?;
-            t.end()
-        }
-    }
-
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
+
+    let check_serialization_roundtrip: bool =
+        parse_query_param(&request, "check_serialization_roundtrip")?.unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -1561,7 +1501,20 @@ async fn timeline_collect_keyspace(
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
-        json_response(StatusCode::OK, Partitioning { keys, at_lsn })
+        let res = crate::http::models::partitioning::Partitioning { keys, at_lsn };
+        if check_serialization_roundtrip {
+            (|| {
+                let ser = serde_json::ser::to_vec(&res).context("serialize")?;
+                let de: crate::http::models::partitioning::Partitioning =
+                    serde_json::from_slice(&ser).context("deserialize")?;
+                anyhow::ensure!(de == res, "not equal");
+                info!("passed serialization rountrip check");
+                Ok(())
+            })()
+            .context("serialization rountrip")
+            .map_err(ApiError::InternalServerError)?;
+        }
+        json_response(StatusCode::OK, res)
     }
     .instrument(info_span!("timeline_collect_keyspace", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
