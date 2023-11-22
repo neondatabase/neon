@@ -18,7 +18,7 @@ use utils::{
 
 use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -766,6 +766,36 @@ impl PagestreamBeMessage {
         }
 
         bytes.into()
+    }
+
+    pub fn deserialize(buf: Bytes) -> anyhow::Result<Self> {
+        let mut buf = buf.reader();
+        let msg_tag = buf.read_u8()?;
+        match msg_tag {
+            100 => todo!(),
+            101 => todo!(),
+            102 => {
+                let buf = buf.get_ref();
+                /* TODO use constant */
+                if buf.len() == 8192 {
+                    Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+                        page: buf.clone(),
+                    }))
+                } else {
+                    anyhow::bail!("invalid page size: {}", buf.len());
+                }
+            }
+            103 => {
+                let buf = buf.get_ref();
+                let cstr = std::ffi::CStr::from_bytes_until_nul(buf)?;
+                let rust_str = cstr.to_str()?;
+                Ok(PagestreamBeMessage::Error(PagestreamErrorResponse {
+                    message: rust_str.to_owned(),
+                }))
+            }
+            104 => todo!(),
+            _ => bail!("unknown tag: {:?}", msg_tag),
+        }
     }
 }
 
