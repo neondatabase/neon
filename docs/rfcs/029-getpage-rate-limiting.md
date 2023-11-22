@@ -85,8 +85,8 @@ So, regarding the above performance & economic arguments, it is fair to say that
 ## Solution: Limiting IOPS
 
 **The consequence of the above analysis must be that Pageserver limits IOPS; unless we want to start charging for IOPS**.
-Limiting IOPS sets the correct incentive to scale up computes (=> DRAM) to an adequate level for the given workload.
-Neon makes this scaling Compute up and down exceptionally easy through Neon Autoscaling.
+Limiting IOPS sets the correct incentive for a thrashing Compute to scale up its DRAM to the working set size.
+Neon Autoscaling will make this easy, [eventually](https://github.com/neondatabase/neon/pull/3913).
 
 ## The Design Space
 
