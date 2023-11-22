@@ -1970,10 +1970,9 @@ pub(crate) async fn immediate_gc(
         &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
         false,
         async move {
-            // TODO: why is there a failpoint for cfg(feature = "testing") method
             fail::fail_point!("immediate_gc_task_pre");
 
-            #[allow(unused_mut)] // why is this function not #[cfg(feature = "testing")]?????
+            #[allow(unused_mut)]
             let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
                 .instrument(info_span!("manual_gc", %tenant_id, %timeline_id))
