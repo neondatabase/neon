@@ -124,10 +124,6 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         ip.disk_consistent_lsn < last_record_lsn
     ), "sanity check for what above loop is supposed to do"
 
-    # ps_http.patch_tenant_config_client_side(tenant_id, inserts={"checkpoint_distance": , "compaction_threshold": 3})
-
-    time.sleep(2)  # pitr_interval
-
     # create the image layer from the future
     ps_http.timeline_compact(tenant_id, timeline_id, force_repartition=True)
     assert (
@@ -159,7 +155,8 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     # force removal of layers from the future
     tenant_conf = ps_http.tenant_config(tenant_id)
     ps_http.tenant_detach(tenant_id)
-    ps_http.configure_failpoints(("before-delete-layer-pausable", "pause"))
+    failpoint_name = "before-delete-layer-pausable"
+    ps_http.configure_failpoints((failpoint_name, "pause"))
     ps_http.tenant_attach(tenant_id, tenant_conf.tenant_specific_overrides)
     wait_until_tenant_active(ps_http, tenant_id)
 
@@ -172,41 +169,46 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
 
     # NB: the layer file is unlinked index part now, but, because we made the delete
     # operation stuck, the layer file itself is still in the remote_storage
+    def delete_at_pause_point():
+        assert env.pageserver.log_contains(f".*{tenant_id}.*at failpoint.*{failpoint_name}")
+
+    wait_until(10, 0.5, delete_at_pause_point)
     assert future_layer_path.exists()
 
     # wait for re-ingestion of the WAL from safekeepers into the in-memory layer
     # (this happens in parallel to the above)
     wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, last_record_lsn)
+
     # re-do image layer generation
     # This will produce the same image layer and queue an upload.
     # However, we still have the deletion for the layer queued, stuck on the failpoint.
-    # So, we have a PUT and a DELETE for the same layer file name racing with each other.
-    # Due to the stuckness of the deletion, the PUT will overtake the DELETE.
-    # Futher, the we have the index part update.
-    # However, these only get scheduled once there are no other inprogress tasks.
-    # But, the stuck layer deletion task is an inprogress task.
-    # So, wait for the file to be replaced
+    # An incorrect implementation would let the PUT execute before the DELETE.
+    # The later code in this test asserts that this doesn't happen.
     ps_http.timeline_compact(tenant_id, timeline_id, force_repartition=True)
 
-    unpause_after_secs = 4
+    # Let things sit for some time; a good implementation makes no progress because
+    # we can't execute the PUT before the DELETE. A bad implementation would do that.
+    max_race_opportunity_window = 4
     start = time.monotonic()
     while True:
         post_stat = future_layer_path.stat()
-        if pre_stat.st_ino != post_stat.st_ino:
+        if pre_stat.st_mtime_ns != post_stat.st_mtime_ns:
             # changed inode <=> overwritten
             log.warn("observed PUT overtake the stucked DELETE => bug isn't fixed yet")
             break
-        if time.monotonic() - start > unpause_after_secs:
+        if time.monotonic() - start > max_race_opportunity_window:
             log.info(
                 "a correct implementation would never let the later PUT overtake the earlier DELETE"
             )
             break
 
+    # Window has passed, unstuck the delete, let upload queue drain.
     log.info("unstuck the DELETE")
     ps_http.configure_failpoints(("before-delete-layer-pausable", "off"))
 
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
+    # Examine the resulting S3 state.
     log.info("integrity-check the remote storage")
     ip = get_index_part()
     for layer_file_name in ip.layer_metadata.keys():
@@ -214,3 +216,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
             tenant_id, timeline_id, layer_file_name
         )
         assert layer_path.exists(), f"{layer_file_name.to_str()}"
+
+    log.info("assert that the overwritten layer won")
+    final_stat = future_layer_path.stat()
+    assert final_stat.st_mtime_ns != pre_stat.st_mtime_ns

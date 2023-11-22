@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Tuple, Union
 
 from fixtures.types import KEY_MAX, KEY_MIN, Key, Lsn
 
@@ -131,18 +131,13 @@ def is_future_layer(layer_file_name: LayerFileName, disk_consistent_lsn: Lsn):
 
 
 @dataclass
-class IndexPart:
-    version: int
-    deleted_at: Optional[str]
+class IndexPartDump:
     layer_metadata: Dict[LayerFileName, IndexLayerMetadata]
     disk_consistent_lsn: Lsn
-    # TODO: metadata: TimelineMetadata
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> "IndexPart":
-        return IndexPart(
-            version=int(d["version"]),
-            deleted_at=d.get("deleted_at"),
+    def from_json(cls, d: Dict[str, Any]) -> "IndexPartDump":
+        return IndexPartDump(
             layer_metadata={
                 parse_layer_file_name(n): IndexLayerMetadata.from_json(v)
                 for n, v in d["layer_metadata"].items()

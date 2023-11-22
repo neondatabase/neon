@@ -42,7 +42,7 @@ from urllib3.util.retry import Retry
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.types import IndexPart
+from fixtures.pageserver.types import IndexPartDump
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
@@ -1567,11 +1567,11 @@ class Pagectl(AbstractNeonCli):
 
     COMMAND = "pagectl"
 
-    def dump_index_part(self, path: Path) -> IndexPart:
+    def dump_index_part(self, path: Path) -> IndexPartDump:
         res = self.raw_cli(["index-part", "dump", str(path)])
         res.check_returncode()
         parsed = json.loads(res.stdout)
-        return IndexPart.from_json(parsed)
+        return IndexPartDump.from_json(parsed)
 
 
 class NeonAttachmentService:
