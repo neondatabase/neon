@@ -267,9 +267,34 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
     ));
 
     let (_client, _conn) = tokio_postgres::Config::new()
+        .channel_binding(tokio_postgres::config::ChannelBinding::Require)
         .user("user")
         .dbname("db")
         .password(password)
+        .ssl_mode(SslMode::Require)
+        .connect_raw(server, client_config.make_tls_connect()?)
+        .await?;
+
+    proxy.await?
+}
+
+#[tokio::test]
+async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
+    let (client, server) = tokio::io::duplex(1024);
+
+    let (client_config, server_config) =
+        generate_tls_config("generic-project-name.localhost", "localhost")?;
+    let proxy = tokio::spawn(dummy_proxy(
+        client,
+        Some(server_config),
+        Scram::new("password")?,
+    ));
+
+    let (_client, _conn) = tokio_postgres::Config::new()
+        .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
+        .user("user")
+        .dbname("db")
+        .password("password")
         .ssl_mode(SslMode::Require)
         .connect_raw(server, client_config.make_tls_connect()?)
         .await?;
