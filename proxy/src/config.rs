@@ -1,6 +1,6 @@
 use crate::auth;
 use anyhow::{bail, ensure, Context, Ok};
-use rustls::sign;
+use rustls::{sign, Certificate, PrivateKey};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
@@ -53,7 +53,7 @@ pub fn configure_tls(
     let mut cert_resolver = CertResolver::new();
 
     // add default certificate
-    cert_resolver.add_cert(key_path, cert_path, true)?;
+    cert_resolver.add_cert_path(key_path, cert_path, true)?;
 
     // add extra certificates
     if let Some(certs_dir) = certs_dir {
@@ -65,7 +65,7 @@ pub fn configure_tls(
                 let key_path = path.join("tls.key");
                 let cert_path = path.join("tls.crt");
                 if key_path.exists() && cert_path.exists() {
-                    cert_resolver.add_cert(
+                    cert_resolver.add_cert_path(
                         &key_path.to_string_lossy(),
                         &cert_path.to_string_lossy(),
                         false,
@@ -106,7 +106,7 @@ impl CertResolver {
         Self::default()
     }
 
-    fn add_cert(
+    fn add_cert_path(
         &mut self,
         key_path: &str,
         cert_path: &str,
@@ -122,28 +122,37 @@ impl CertResolver {
             keys.pop().map(rustls::PrivateKey).unwrap()
         };
 
-        let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
-
         let cert_chain_bytes = std::fs::read(cert_path)
             .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
 
         let cert_chain = {
             rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                .context(format!(
+                .with_context(|| {
+                    format!(
                     "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
-                ))?
+                )
+                })?
                 .into_iter()
                 .map(rustls::Certificate)
                 .collect()
         };
 
+        self.add_cert(priv_key, cert_chain, is_default)
+    }
+
+    pub fn add_cert(
+        &mut self,
+        priv_key: PrivateKey,
+        cert_chain: Vec<Certificate>,
+        is_default: bool,
+    ) -> anyhow::Result<()> {
+        let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
+
         let common_name = {
-            let pem = x509_parser::pem::parse_x509_pem(&cert_chain_bytes)
-                .context(format!(
-                    "Failed to parse PEM object from bytes from file at '{cert_path}'."
-                ))?
+            let pem = x509_parser::parse_x509_certificate(&cert_chain[0].0)
+                .context("Failed to parse PEM object from cerficiate")?
                 .1;
-            let common_name = pem.parse_x509()?.subject().to_string();
+            let common_name = pem.subject().to_string();
 
             // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
             // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
@@ -157,9 +166,7 @@ impl CertResolver {
                 common_name.strip_prefix("CN=").map(|s| s.to_string())
             }
         }
-        .context(format!(
-            "Failed to parse common name from certificate at '{cert_path}'."
-        ))?;
+        .context("Failed to parse common name from certificate")?;
 
         let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
 
@@ -172,7 +179,7 @@ impl CertResolver {
         Ok(())
     }
 
-    fn get_common_names(&self) -> HashSet<String> {
+    pub fn get_common_names(&self) -> HashSet<String> {
         self.certs.keys().map(|s| s.to_string()).collect()
     }
 }

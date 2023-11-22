@@ -15,6 +15,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(
     hostname: &str,
+    common_name: &str,
 ) -> anyhow::Result<(rustls::Certificate, rustls::Certificate, rustls::PrivateKey)> {
     let ca = rcgen::Certificate::from_params({
         let mut params = rcgen::CertificateParams::default();
@@ -22,7 +23,15 @@ fn generate_certs(
         params
     })?;
 
-    let cert = rcgen::generate_simple_self_signed(vec![hostname.into()])?;
+    let cert = rcgen::Certificate::from_params({
+        let mut params = rcgen::CertificateParams::new(vec![hostname.into()]);
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        params
+    })?;
+
     Ok((
         rustls::Certificate(ca.serialize_der()?),
         rustls::Certificate(cert.serialize_der_with_signer(&ca)?),
@@ -50,21 +59,24 @@ fn generate_tls_config<'a>(
     hostname: &'a str,
     common_name: &'a str,
 ) -> anyhow::Result<(ClientConfig<'a>, TlsConfig)> {
-    let (ca, cert, key) = generate_certs(hostname)?;
+    let (ca, cert, key) = generate_certs(hostname, common_name)?;
 
     let tls_config = {
         let config = rustls::ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(vec![cert], key)?
+            .with_single_cert(vec![cert.clone()], key.clone())?
             .into();
 
-        let common_names = Some([common_name.to_owned()].iter().cloned().collect());
+        let mut cert_resolver = CertResolver::new();
+        cert_resolver.add_cert(key, vec![cert], true)?;
+
+        let common_names = Some(cert_resolver.get_common_names());
 
         TlsConfig {
             config,
             common_names,
-            cert_resolver: Arc::new(CertResolver::new()),
+            cert_resolver: Arc::new(cert_resolver),
         }
     };
 
