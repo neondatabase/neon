@@ -66,12 +66,11 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
     ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
     ".*task iteration took longer than the configured period.*",
-    # this is until #3501
-    ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
     # these can happen anytime we do compactions from background task and shutdown pageserver
     r".*ERROR.*ancestor timeline \S+ is being stopped",
     # this is expected given our collaborative shutdown approach for the UploadQueue
     ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
+    ".*Compaction failed.*, retrying in .*: ShuttingDown",
     # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
     ".*Error processing HTTP request: NotFound: Timeline .* was not found",
     ".*took more than expected to complete.*",
