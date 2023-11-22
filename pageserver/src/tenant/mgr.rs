@@ -792,8 +792,6 @@ pub(crate) async fn set_new_tenant_config(
 impl TenantManager {
     /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or is not fitting to the query.
     /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-    ///
-    /// This method is cancel-safe.
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,
