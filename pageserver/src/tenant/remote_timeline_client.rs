@@ -867,9 +867,11 @@ impl RemoteTimelineClient {
 
     /// Wait for all previously scheduled operations to complete, and then stop.
     ///
-    /// Not cancellation safe!
+    /// Not cancellation safe: On cancellation the queue is left in ackward state of refusing new
+    /// operations but proper stop is yet to be called. On cancel the original or some later task
+    /// must call `stop` or `shutdown`.
     pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), StopError> {
-        let rx = {
+        let fut = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
                 UploadQueue::Stopped(_) => return Ok(()),
@@ -883,44 +885,25 @@ impl RemoteTimelineClient {
             // TODO: if launch_queued_tasks were to be refactored to accept a &mut UploadQueue
             // in every place we would not have to jump through this hoop, and this method could be
             // made cancellable.
-            if matches!(
-                upload_queue.queued_operations.front(),
-                Some(UploadOp::Shutdown(_))
-            ) {
-                None
-            } else {
-                // danger here with cancellation is that imagine an upload queue:
-                // 1. <some other task>
-                // 2. shutdown (cancelled)
-                // 3. shutdown (waited) <-- one inserted on the next line
-                //
-                // now the signal for 3. never comes
-                Some(self.schedule_shutdown(upload_queue))
+            if !upload_queue.shutting_down {
+                upload_queue.shutting_down = true;
+                upload_queue.queued_operations.push_back(UploadOp::Shutdown);
+                // this operation is not counted similar to Barrier
+
+                self.launch_queued_tasks(upload_queue);
             }
+
+            upload_queue.shutdown_ready.clone().acquire_owned()
         };
 
-        if let Some(rx) = rx {
-            // regardless of our "Shutdown" operation getting run, always try to stop; it is
-            // idempotent.
-            drop(rx.await);
+        match fut.await {
+            Ok(_permit) => unreachable!("shutdown_ready should not have been added permits"),
+            Err(_closed) => {
+                // expected
+            }
         }
 
         self.stop()
-    }
-
-    fn schedule_shutdown(
-        self: &Arc<Self>,
-        upload_queue: &mut UploadQueueInitialized,
-    ) -> tokio::sync::oneshot::Receiver<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let op = UploadOp::Shutdown(Some(tx));
-
-        upload_queue.queued_operations.push_back(op);
-        // this operation is not counted similar to Barrier
-
-        self.launch_queued_tasks(upload_queue);
-
-        rx
     }
 
     /// Set the deleted_at field in the remote index file.
@@ -1143,7 +1126,7 @@ impl RemoteTimelineClient {
     ///
     /// The caller needs to already hold the `upload_queue` lock.
     fn launch_queued_tasks(self: &Arc<Self>, upload_queue: &mut UploadQueueInitialized) {
-        while let Some(next_op) = upload_queue.queued_operations.front_mut() {
+        while let Some(next_op) = upload_queue.queued_operations.front() {
             // Can we run this task now?
             let can_run_now = match next_op {
                 UploadOp::UploadLayer(_, _) => {
@@ -1160,7 +1143,7 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
                 }
 
-                UploadOp::Barrier(_) | UploadOp::Shutdown(_) => {
+                UploadOp::Barrier(_) | UploadOp::Shutdown => {
                     upload_queue.inprogress_tasks.is_empty()
                 }
             };
@@ -1175,14 +1158,10 @@ impl RemoteTimelineClient {
                 break;
             }
 
-            if let UploadOp::Shutdown(maybe_tx) = next_op {
-                if let Some(tx) = maybe_tx.take() {
-                    if tx.send(()).is_err() {
-                        tracing::error!("RemoteTimelineClient::shutdown has been cancelled; this should never happen.");
-                    };
-                }
+            if let UploadOp::Shutdown = next_op {
                 // leave the op in the queue but do not start more tasks; it will be dropped when
                 // the stop is called.
+                upload_queue.shutdown_ready.close();
                 break;
             }
 
@@ -1206,7 +1185,7 @@ impl RemoteTimelineClient {
                     sender.send_replace(());
                     continue;
                 }
-                UploadOp::Shutdown(_) => unreachable!("shutdown is intentionally never popped off"),
+                UploadOp::Shutdown => unreachable!("shutdown is intentionally never popped off"),
             };
 
             // Assign unique ID to this task
@@ -1345,7 +1324,7 @@ impl RemoteTimelineClient {
                         .await
                         .map_err(|e| anyhow::anyhow!(e))
                 }
-                unexpected @ UploadOp::Barrier(_) | unexpected @ UploadOp::Shutdown(_) => {
+                unexpected @ UploadOp::Barrier(_) | unexpected @ UploadOp::Shutdown => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
                     warn!("unexpected {unexpected:?} operation in perform_upload_task");
@@ -1442,7 +1421,7 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_deletions -= 1;
                     None
                 }
-                UploadOp::Barrier(..) | UploadOp::Shutdown(..) => unreachable!(),
+                UploadOp::Barrier(..) | UploadOp::Shutdown => unreachable!(),
             };
 
             // Launch any queued tasks that were unblocked by this one.
@@ -1497,7 +1476,7 @@ impl RemoteTimelineClient {
                     reason: "should we track deletes? positive or negative sign?",
                 },
             ),
-            UploadOp::Barrier(..) | UploadOp::Shutdown(_) => {
+            UploadOp::Barrier(..) | UploadOp::Shutdown => {
                 // we do not account these
                 return None;
             }
@@ -1565,6 +1544,8 @@ impl RemoteTimelineClient {
                         queued_operations: VecDeque::default(),
                         #[cfg(feature = "testing")]
                         dangling_files: HashMap::default(),
+                        shutting_down: false,
+                        shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
                     };
 
                     let upload_queue = std::mem::replace(

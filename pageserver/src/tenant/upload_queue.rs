@@ -90,6 +90,14 @@ pub(crate) struct UploadQueueInitialized {
     /// bug causing leaks, then it's better to not leave this enabled for production builds.
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
+
+    /// Set to true when we have inserted the first `UploadOp::Shutdown` into the `inprogress_tasks`.
+    pub(crate) shutting_down: bool,
+
+    /// Permitless semaphore on which any number of `RemoteTimelineClient::shutdown` futures can
+    /// wait on until one of them stops the queue. The semaphore is closed when
+    /// `RemoteTimelineClient::launch_queued_tasks` encounters `UploadOp::Shutdown`.
+    pub(crate) shutdown_ready: Arc<tokio::sync::Semaphore>,
 }
 
 impl UploadQueueInitialized {
@@ -148,6 +156,8 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            shutting_down: false,
+            shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -195,6 +205,8 @@ impl UploadQueue {
             queued_operations: VecDeque::new(),
             #[cfg(feature = "testing")]
             dangling_files: HashMap::new(),
+            shutting_down: false,
+            shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -207,7 +219,7 @@ impl UploadQueue {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
             UploadQueue::Initialized(x) => {
-                if !matches!(x.queued_operations.front(), Some(UploadOp::Shutdown(_))) {
+                if !x.shutting_down {
                     Ok(x)
                 } else {
                     anyhow::bail!("queue is shutting down")
@@ -259,7 +271,7 @@ pub(crate) enum UploadOp {
 
     /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
     /// this is the same as a Barrier.
-    Shutdown(Option<tokio::sync::oneshot::Sender<()>>),
+    Shutdown,
 }
 
 impl std::fmt::Display for UploadOp {
@@ -281,7 +293,7 @@ impl std::fmt::Display for UploadOp {
                 write!(f, "Delete({} layers)", delete.layers.len())
             }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
-            UploadOp::Shutdown(_) => write!(f, "Shutdown"),
+            UploadOp::Shutdown => write!(f, "Shutdown"),
         }
     }
 }
