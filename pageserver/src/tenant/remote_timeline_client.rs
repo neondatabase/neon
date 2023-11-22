@@ -1178,9 +1178,7 @@ impl RemoteTimelineClient {
             if let UploadOp::Shutdown(maybe_tx) = next_op {
                 if let Some(tx) = maybe_tx.take() {
                     if tx.send(()).is_err() {
-                        tracing::error!(
-                                "RemoteTimelineClient::shutdown has been cancelled; this should never happen."
-                        );
+                        tracing::error!("RemoteTimelineClient::shutdown has been cancelled; this should never happen.");
                     };
                 }
                 // leave the op in the queue but do not start more tasks; it will be dropped when
