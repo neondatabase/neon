@@ -826,9 +826,11 @@ def test_compaction_waits_for_upload(
         assert path.exists(), "uploads are stuck still over compaction"
 
     compacted_layers = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
-
     overlap = compacted_layers.intersection(upload_stuck_layers)
     assert len(overlap) == 0, "none of the L0's should remain after L0 => L1 compaction"
+    assert (
+        len(compacted_layers) == 1
+    ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
 
     def gcs_completed():
         m = client.get_metric_value("pageserver_layer_gcs_count_total", {"state": "completed"})
