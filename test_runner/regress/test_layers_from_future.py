@@ -150,7 +150,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     )
     log.info(f"future layer path: {future_layer_path}")
     pre_stat = future_layer_path.stat()
-    time.sleep(1.1) # so that we can use change in pre_stat.st_mtime to detect overwrites
+    time.sleep(1.1)  # so that we can use change in pre_stat.st_mtime to detect overwrites
 
     # force removal of layers from the future
     tenant_conf = ps_http.tenant_config(tenant_id)
