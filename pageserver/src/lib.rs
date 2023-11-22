@@ -25,6 +25,7 @@ pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
 
+pub mod client;
 pub mod failpoint_support;
 
 use crate::task_mgr::TaskKind;
