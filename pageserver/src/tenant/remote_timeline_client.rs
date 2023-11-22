@@ -916,7 +916,7 @@ impl RemoteTimelineClient {
         let op = UploadOp::Shutdown(Some(tx));
 
         upload_queue.queued_operations.push_back(op);
-        // this operation is not counted either
+        // this operation is not counted similar to Barrier
 
         self.launch_queued_tasks(upload_queue);
 
