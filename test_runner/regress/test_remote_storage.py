@@ -784,8 +784,13 @@ def test_compaction_waits_for_upload(
     client = env.pageserver.http_client()
     layers_at_creation = client.layer_map_info(tenant_id, timeline_id)
     deltas_at_creation = len(layers_at_creation.delta_layers())
+    assert (
+        deltas_at_creation == 1
+    ), "are you fixing #5863? make sure we end up with 2 deltas at the end of endpoint lifecycle"
 
-    # Now make the flushing hang
+    # Make new layer uploads get stuck.
+    # Note that timeline creation waits for the initial layers to reach remote storage.
+    # So at this point, the `layers_at_creation` are in remote storage.
     client.configure_failpoints(("before-upload-layer-pausable", "pause"))
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
@@ -795,26 +800,16 @@ def test_compaction_waits_for_upload(
 
         client.timeline_checkpoint(tenant_id, timeline_id)
         deltas_at_first = len(client.layer_map_info(tenant_id, timeline_id).delta_layers())
-        assert deltas_at_first > deltas_at_creation
+        assert (
+            deltas_at_first == 2
+        ), "are you fixing #5863? just add one more checkpoint after 'CREATE TABLE bar ...' statement."
 
         endpoint.safe_psql("CREATE TABLE bar AS SELECT x FROM generate_series(1, 10000) g(x)")
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-
-        if deltas_at_first < 2:
-            # why complicate with conditionals? we might fix the initdb image layer optimization
-            client.timeline_checkpoint(tenant_id, timeline_id)
-            deltas_at_second = len(client.layer_map_info(tenant_id, timeline_id).delta_layers())
-            assert deltas_at_second > deltas_at_first
-            assert deltas_at_second == 2
-
         endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    # the layers_at_creation have been uploaded because otherwise the timeline create would had hang
-    upload_stuck_layers = (
-        client.layer_map_info(tenant_id, timeline_id).historic_by_name()
-        - layers_at_creation.historic_by_name()
-    )
+    layers_before_last_checkpoint = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
+    upload_stuck_layers = layers_before_last_checkpoint - layers_at_creation.historic_by_name()
 
     assert len(upload_stuck_layers) > 0
 
