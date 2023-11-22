@@ -286,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
     logging::init(
         LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
     )?;
 
     let args = Cli::parse();

@@ -66,9 +66,17 @@ pub enum TracingErrorLayerEnablement {
     EnableWithRustLogFilter,
 }
 
+/// Where the logging should output to.
+#[derive(Clone, Copy)]
+pub enum Output {
+    Stdout,
+    Stderr,
+}
+
 pub fn init(
     log_format: LogFormat,
     tracing_error_layer_enablement: TracingErrorLayerEnablement,
+    output: Output,
 ) -> anyhow::Result<()> {
     // We fall back to printing all spans at info-level or above if
     // the RUST_LOG environment variable is not set.
@@ -85,7 +93,12 @@ pub fn init(
         let log_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_ansi(false)
-            .with_writer(std::io::stdout);
+            .with_writer(move || -> Box<dyn std::io::Write> {
+                match output {
+                    Output::Stdout => Box::new(std::io::stdout()),
+                    Output::Stderr => Box::new(std::io::stderr()),
+                }
+            });
         let log_layer = match log_format {
             LogFormat::Json => log_layer.json().boxed(),
             LogFormat::Plain => log_layer.boxed(),
