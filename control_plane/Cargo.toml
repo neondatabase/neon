@@ -25,8 +25,7 @@ thiserror.workspace = true
 toml.workspace = true
 tokio.workspace = true
 url.workspace = true
-# Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
-# instead, so that recompile times are better.
+pageserver = { path = "../pageserver" }
 pageserver_api.workspace = true
 postgres_backend.workspace = true
 safekeeper_api.workspace = true
