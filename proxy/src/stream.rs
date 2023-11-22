@@ -18,7 +18,7 @@ use tokio_rustls::server::TlsStream;
 /// or [`AsyncWrite`] to prevent subtle errors (e.g. trying
 /// to pass random malformed bytes through the connection).
 pub struct PqStream<S> {
-    framed: Framed<S>,
+    pub(crate) framed: Framed<S>,
 }
 
 impl<S> PqStream<S> {

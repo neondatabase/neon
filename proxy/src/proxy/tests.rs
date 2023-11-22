@@ -1,5 +1,7 @@
 //! A group of high-level tests for connection establishing logic and auth.
-//!
+
+mod mitm;
+
 use super::*;
 use crate::auth::backend::TestBackend;
 use crate::auth::ClientCredentials;
@@ -10,7 +12,7 @@ use async_trait::async_trait;
 use rstest::rstest;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(
@@ -47,7 +49,14 @@ struct ClientConfig<'a> {
 impl ClientConfig<'_> {
     fn make_tls_connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         self,
-    ) -> anyhow::Result<impl tokio_postgres::tls::TlsConnect<S>> {
+    ) -> anyhow::Result<
+        impl tokio_postgres::tls::TlsConnect<
+            S,
+            Error = impl std::fmt::Debug,
+            Future = impl Send,
+            Stream = RustlsStream<S>,
+        >,
+    > {
         let mut mk = MakeRustlsConnect::new(self.config);
         let tls = MakeTlsConnect::<S>::make_tls_connect(&mut mk, self.hostname)?;
         Ok(tls)
