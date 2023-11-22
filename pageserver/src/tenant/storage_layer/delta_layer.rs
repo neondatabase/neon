@@ -609,7 +609,6 @@ impl Drop for DeltaLayerWriter {
     }
 }
 
-
 #[derive(thiserror::Error, Debug)]
 pub enum RewriteSummaryError {
     #[error("magic mismatch")]
