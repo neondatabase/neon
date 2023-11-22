@@ -23,7 +23,8 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 /// A list of supported SCRAM methods.
-pub const METHODS: &[&str] = &["SCRAM-SHA-256", "SCRAM-SHA-256-PLUS"];
+pub const METHODS_PLUS: &[&str] = &["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"];
+pub const METHODS: &[&str] = &["SCRAM-SHA-256"];
 
 /// Decode base64 into array without any heap allocations
 fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N]> {
@@ -79,7 +80,11 @@ mod tests {
         const NONCE: [u8; 18] = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
         ];
-        let mut exchange = Exchange::new(&secret, || NONCE, None);
+        let mut exchange = Exchange::new(
+            &secret,
+            || NONCE,
+            crate::config::TlsServerEndPoint::Undefined,
+        );
 
         let client_first = "n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
         let client_final = "c=biws,r=rOprNGfwEbeRWgbNEkqOAQIDBAUGBwgJCgsMDQ4PEBES,p=rw1r5Kph5ThxmaUBC2GAQ6MfXbPnNkFiTIvdb/Rear0=";

@@ -472,13 +472,14 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         }
                         let tls_stream = raw.upgrade(tls.to_server_config()).await?;
 
-                        let certified_key = tls
+                        let (_, tls_server_end_point) = tls
                             .cert_resolver
-                            .resolve(tls_stream.get_ref().1.server_name());
+                            .resolve(tls_stream.get_ref().1.server_name())
+                            .context("missing certificate")?;
 
                         stream = PqStream::new(Stream::Tls {
                             tls: Box::new(tls_stream),
-                            certified_key,
+                            tls_server_end_point,
                         });
                     }
                 }

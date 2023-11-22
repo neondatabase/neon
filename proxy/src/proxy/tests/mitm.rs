@@ -124,6 +124,28 @@ impl Encoder<Bytes> for PgFrame {
     }
 }
 
+/// If the client doesn't support channel bindings, it can be exploited.
+#[tokio::test]
+async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
+    let (server, client, client_config, server_config) = proxy_mitm(false).await;
+    let proxy = tokio::spawn(dummy_proxy(
+        client,
+        Some(server_config),
+        Scram::new("password")?,
+    ));
+
+    let _client_err = tokio_postgres::Config::new()
+        .channel_binding(tokio_postgres::config::ChannelBinding::Disable)
+        .user("user")
+        .dbname("db")
+        .password("password")
+        .ssl_mode(SslMode::Require)
+        .connect_raw(server, client_config.make_tls_connect()?)
+        .await?;
+
+    proxy.await?
+}
+
 /// If the client chooses SCRAM-PLUS, it will fail
 #[tokio::test]
 async fn scram_auth_prefer_channel_binding() -> anyhow::Result<()> {
@@ -153,8 +175,7 @@ async fn scram_auth_prefer_channel_binding() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// If the MITM pretends like SCRAM-PLUS isn't available, it can be exploited
-/// TODO: is this expected? This feels like a logjam situation
+/// If the MITM pretends like SCRAM-PLUS isn't available, but the client supports it, it will fail
 #[tokio::test]
 async fn scram_auth_prefer_channel_binding_intercept() -> anyhow::Result<()> {
     let (server, client, client_config, server_config) = proxy_mitm(true).await;
@@ -164,16 +185,23 @@ async fn scram_auth_prefer_channel_binding_intercept() -> anyhow::Result<()> {
         Scram::new("password")?,
     ));
 
-    let (_client, _conn) = tokio_postgres::Config::new()
+    let _client_err = tokio_postgres::Config::new()
         .channel_binding(tokio_postgres::config::ChannelBinding::Prefer)
         .user("user")
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
         .connect_raw(server, client_config.make_tls_connect()?)
-        .await?;
+        .await
+        .err()
+        .context("client shouldn't be able to connect")?;
 
-    proxy.await?
+    let _server_err = proxy
+        .await?
+        .err()
+        .context("server shouldn't accept client")?;
+
+    Ok(())
 }
 
 /// If the client chooses SCRAM-PLUS, it will fail

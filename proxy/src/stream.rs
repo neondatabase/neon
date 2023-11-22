@@ -1,10 +1,10 @@
+use crate::config::TlsServerEndPoint;
 use crate::error::UserFacingError;
 use anyhow::bail;
 use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
-use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -127,7 +127,8 @@ pub enum Stream<S> {
     Tls {
         /// We box [`TlsStream`] since it can be quite large.
         tls: Box<TlsStream<S>>,
-        certified_key: Option<Arc<CertifiedKey>>,
+        /// Channel binding parameter
+        tls_server_end_point: TlsServerEndPoint,
     },
 }
 
@@ -147,10 +148,13 @@ impl<S> Stream<S> {
         }
     }
 
-    pub fn certified_key(&self) -> Option<&CertifiedKey> {
+    pub fn tls_server_end_point(&self) -> TlsServerEndPoint {
         match self {
-            Stream::Raw { .. } => None,
-            Stream::Tls { certified_key, .. } => certified_key.as_deref(),
+            Stream::Raw { .. } => TlsServerEndPoint::Undefined,
+            Stream::Tls {
+                tls_server_end_point,
+                ..
+            } => *tls_server_end_point,
         }
     }
 }
