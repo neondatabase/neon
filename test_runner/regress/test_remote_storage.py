@@ -832,26 +832,29 @@ def test_compaction_waits_for_upload(
         len(compacted_layers) == 1
     ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
 
-    def gcs_completed():
+    def layer_deletes_completed():
         m = client.get_metric_value("pageserver_layer_gcs_count_total", {"state": "completed"})
         if m is None:
             return 0
         return int(m)
 
     # if initdb created an initial delta layer, it might already be gc'd
-    assert gcs_completed() <= 1
+    # because it was uploaded before the failpoint was enabled. however, the
+    # deletion is not guaranteed to be complete.
+    assert layer_deletes_completed() <= 1
 
     client.configure_failpoints(("before-upload-layer-pausable", "off"))
 
     # Ensure that this actually terminates
     wait_upload_queue_empty(client, tenant_id, timeline_id)
 
-    def until_gcs_completed():
-        gcs = gcs_completed()
-        log.info(f"gcs: {gcs}")
-        assert gcs >= len(upload_stuck_layers)
+    def until_layer_deletes_completed():
+        deletes = layer_deletes_completed()
+        log.info(f"layer_deletes: {deletes}")
+        # ensure that initdb delta layer AND the previously stuck are now deleted
+        assert deletes >= len(upload_stuck_layers) + 1
 
-    wait_until(10, 1, until_gcs_completed)
+    wait_until(10, 1, until_layer_deletes_completed)
 
     for name in upload_stuck_layers:
         path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
