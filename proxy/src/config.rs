@@ -27,6 +27,7 @@ pub struct MetricCollectionConfig {
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_names: Option<HashSet<String>>,
+    pub cert_resolver: Arc<CertResolver>,
 }
 
 pub struct HttpConfig {
@@ -76,32 +77,33 @@ pub fn configure_tls(
 
     let common_names = cert_resolver.get_common_names();
 
+    let cert_resolver = Arc::new(cert_resolver);
+
     let config = rustls::ServerConfig::builder()
         .with_safe_default_cipher_suites()
         .with_safe_default_kx_groups()
         // allow TLS 1.2 to be compatible with older client libraries
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_no_client_auth()
-        .with_cert_resolver(Arc::new(cert_resolver))
+        .with_cert_resolver(cert_resolver.clone())
         .into();
 
     Ok(TlsConfig {
         config,
         common_names: Some(common_names),
+        cert_resolver,
     })
 }
 
-struct CertResolver {
+#[derive(Default)]
+pub struct CertResolver {
     certs: HashMap<String, Arc<rustls::sign::CertifiedKey>>,
     default: Option<Arc<rustls::sign::CertifiedKey>>,
 }
 
 impl CertResolver {
-    fn new() -> Self {
-        Self {
-            certs: HashMap::new(),
-            default: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn add_cert(
@@ -178,17 +180,24 @@ impl CertResolver {
 impl rustls::server::ResolvesServerCert for CertResolver {
     fn resolve(
         &self,
-        _client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        self.resolve(client_hello.server_name())
+    }
+}
+
+impl CertResolver {
+    pub fn resolve(&self, server_name: Option<&str>) -> Option<Arc<rustls::sign::CertifiedKey>> {
         // loop here and cut off more and more subdomains until we find
         // a match to get a proper wildcard support. OTOH, we now do not
         // use nested domains, so keep this simple for now.
         //
         // With the current coding foo.com will match *.foo.com and that
         // repeats behavior of the old code.
-        if let Some(mut sni_name) = _client_hello.server_name() {
+        if let Some(mut sni_name) = server_name {
             loop {
                 if let Some(cert) = self.certs.get(sni_name) {
+                    dbg!(&cert.cert);
                     return Some(cert.clone());
                 }
                 if let Some((_, rest)) = sni_name.split_once('.') {
@@ -208,6 +217,7 @@ impl rustls::server::ResolvesServerCert for CertResolver {
             // a) Instead of multi-cert approach use single cert with extra
             //    domains listed in Subject Alternative Name (SAN).
             // b) Deploy separate proxy instances for extra domains.
+            dbg!(&self.default.as_ref().unwrap().cert);
             self.default.as_ref().cloned()
         }
     }

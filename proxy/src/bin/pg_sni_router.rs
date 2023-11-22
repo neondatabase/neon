@@ -234,6 +234,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
             Ok(Stream::Tls {
                 tls: Box::new(raw.upgrade(tls_config).await?),
+                certified_key: None,
             })
         }
         unexpected => {

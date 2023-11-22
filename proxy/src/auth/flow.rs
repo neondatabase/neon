@@ -6,6 +6,7 @@ use crate::{
     stream::{PqStream, Stream},
 };
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use sha2::{Digest, Sha256};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -58,15 +59,28 @@ pub struct AuthFlow<'a, S, State> {
     stream: &'a mut PqStream<Stream<S>>,
     /// State might contain ancillary data (see [`Self::begin`]).
     state: State,
+    cert_digest: Vec<u8>,
 }
 
 /// Initial state of the stream wrapper.
 impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     /// Create a new wrapper for client authentication.
     pub fn new(stream: &'a mut PqStream<Stream<S>>) -> Self {
+        let mut cert_digest = Vec::new();
+
+        if let Some(key) = stream.get_ref().certified_key() {
+            dbg!(&key.cert);
+            cert_digest = Sha256::new()
+                .chain_update(&key.cert[0].0)
+                .finalize()
+                .to_vec();
+            dbg!(&cert_digest);
+        }
+
         Self {
             stream,
             state: Begin,
+            cert_digest,
         }
     }
 
@@ -77,6 +91,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
         Ok(AuthFlow {
             stream: self.stream,
             state: method,
+            cert_digest: self.cert_digest,
         })
     }
 }
@@ -128,7 +143,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 
         let secret = self.state.0;
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)
-            .authenticate(scram::Exchange::new(secret, rand::random, None))
+            .authenticate(scram::Exchange::new(
+                secret,
+                rand::random,
+                Some(&self.cert_digest),
+            ))
             .await?;
 
         Ok(outcome)

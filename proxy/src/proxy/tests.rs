@@ -3,6 +3,7 @@
 use super::*;
 use crate::auth::backend::TestBackend;
 use crate::auth::ClientCredentials;
+use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
@@ -63,6 +64,7 @@ fn generate_tls_config<'a>(
         TlsConfig {
             config,
             common_names,
+            cert_resolver: Arc::new(CertResolver::new()),
         }
     };
 

@@ -8,6 +8,7 @@ use super::signature::SignatureBuilder;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
+#[derive(Debug)]
 struct TlsServerEndPoint;
 
 impl std::fmt::Display for TlsServerEndPoint {
@@ -91,14 +92,17 @@ impl sasl::Mechanism for Exchange<'_> {
                 client_first_message_bare,
                 server_first_message,
             } => {
+                dbg!(&cbind_flag);
                 let client_final_message = ClientFinalMessage::parse(input)
                     .ok_or(SaslError::BadClientMessage("invalid client-final-message"))?;
 
                 let channel_binding = cbind_flag.encode(|_| {
-                    self.cert_digest
+                    dbg!(self.cert_digest)
                         .map(base64::encode)
                         .ok_or(SaslError::ChannelBindingFailed("no cert digest provided"))
                 })?;
+                dbg!(&channel_binding);
+                dbg!(&client_final_message.channel_binding);
 
                 // This might've been caused by a MITM attack
                 if client_final_message.channel_binding != channel_binding {

@@ -4,6 +4,7 @@ use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
+use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -125,7 +126,10 @@ pub enum Stream<S> {
     /// which may then be upgraded into a secure stream.
     Raw { raw: S },
     /// We box [`TlsStream`] since it can be quite large.
-    Tls { tls: Box<TlsStream<S>> },
+    Tls {
+        tls: Box<TlsStream<S>>,
+        certified_key: Option<Arc<CertifiedKey>>,
+    },
 }
 
 impl<S: Unpin> Unpin for Stream<S> {}
@@ -140,7 +144,14 @@ impl<S> Stream<S> {
     pub fn sni_hostname(&self) -> Option<&str> {
         match self {
             Stream::Raw { .. } => None,
-            Stream::Tls { tls } => tls.get_ref().1.server_name(),
+            Stream::Tls { tls, .. } => tls.get_ref().1.server_name(),
+        }
+    }
+
+    pub fn certified_key(&self) -> Option<&CertifiedKey> {
+        match self {
+            Stream::Raw { .. } => None,
+            Stream::Tls { certified_key, .. } => certified_key.as_deref(),
         }
     }
 }
@@ -173,7 +184,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Stream<S> {
     ) -> task::Poll<io::Result<()>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_read(context, buf),
-            Self::Tls { tls } => Pin::new(tls).poll_read(context, buf),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_read(context, buf),
         }
     }
 }
@@ -186,7 +197,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     ) -> task::Poll<io::Result<usize>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_write(context, buf),
-            Self::Tls { tls } => Pin::new(tls).poll_write(context, buf),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_write(context, buf),
         }
     }
 
@@ -196,7 +207,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     ) -> task::Poll<io::Result<()>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_flush(context),
-            Self::Tls { tls } => Pin::new(tls).poll_flush(context),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_flush(context),
         }
     }
 
@@ -206,7 +217,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     ) -> task::Poll<io::Result<()>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_shutdown(context),
-            Self::Tls { tls } => Pin::new(tls).poll_shutdown(context),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_shutdown(context),
         }
     }
 }

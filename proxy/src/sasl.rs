@@ -36,6 +36,7 @@ pub enum Error {
 
 impl UserFacingError for Error {
     fn to_string_client(&self) -> String {
+        dbg!(self);
         use Error::*;
         match self {
             // TODO: add support for channel binding
