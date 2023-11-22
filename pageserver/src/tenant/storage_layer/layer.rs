@@ -486,7 +486,7 @@ impl Drop for LayerInner {
             return;
         }
 
-        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
+        let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
@@ -514,7 +514,7 @@ impl Drop for LayerInner {
                 }
                 Err(e) => {
                     tracing::error!("failed to remove garbage collected layer: {e}");
-                    LAYER_IMPL_METRICS.inc_gc_removes_failed();
+                    LAYER_IMPL_METRICS.inc_delete_removes_failed();
                     false
                 }
             };
@@ -536,15 +536,15 @@ impl Drop for LayerInner {
                         } else {
                             tracing::warn!("scheduling deletion on drop failed: {e:#}");
                         }
-                        LAYER_IMPL_METRICS.inc_gcs_failed(GcFailed::DeleteSchedulingFailed);
+                        LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
                     } else {
-                        LAYER_IMPL_METRICS.inc_completed_gcs();
+                        LAYER_IMPL_METRICS.inc_completed_deletes();
                     }
                 }
             } else {
                 // no need to nag that timeline is gone: under normal situation on
                 // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_gcs_failed(GcFailed::TimelineGone);
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
             }
         });
     }
@@ -599,7 +599,7 @@ impl LayerInner {
         );
 
         if res.is_ok() {
-            LAYER_IMPL_METRICS.inc_started_gcs();
+            LAYER_IMPL_METRICS.inc_started_deletes();
         }
     }
 
@@ -1408,9 +1408,9 @@ struct LayerImplMetrics {
     completed_evictions: IntCounter,
     cancelled_evictions: enum_map::EnumMap<EvictionCancelled, IntCounter>,
 
-    started_gcs: IntCounter,
-    completed_gcs: IntCounter,
-    failed_gcs: enum_map::EnumMap<GcFailed, IntCounter>,
+    started_deletes: IntCounter,
+    completed_deletes: IntCounter,
+    failed_deletes: enum_map::EnumMap<DeleteFailed, IntCounter>,
 
     rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
 }
@@ -1443,29 +1443,29 @@ impl Default for LayerImplMetrics {
             cancelled_evictions.with_label_values(&[s])
         }));
 
-        let started_gcs = metrics::register_int_counter!(
-            "pageserver_layer_started_gcs",
+        let started_deletes = metrics::register_int_counter!(
+            "pageserver_layer_started_deletes",
             "Garbage collections pending in the Layer implementation"
         )
         .unwrap();
-        let completed_gcs = metrics::register_int_counter!(
-            "pageserver_layer_completed_gcs",
+        let completed_deletes = metrics::register_int_counter!(
+            "pageserver_layer_completed_deletes",
             "Garbage collections completed in the Layer implementation"
         )
         .unwrap();
 
         // reminder: this will be pageserver_layer_gcs_count_total with "_total" suffix
-        let failed_gcs = metrics::register_int_counter_vec!(
-            "pageserver_layer_failed_gcs_count",
+        let failed_deletes = metrics::register_int_counter_vec!(
+            "pageserver_layer_failed_deletes_count",
             "Different reasons for garbage collections to have failed",
             &["reason"]
         )
         .unwrap();
 
-        let failed_gcs = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-            let reason = GcFailed::from_usize(i);
+        let failed_deletes = enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+            let reason = DeleteFailed::from_usize(i);
             let s = reason.as_str();
-            failed_gcs.with_label_values(&[s])
+            failed_deletes.with_label_values(&[s])
         }));
 
         let rare_counters = metrics::register_int_counter_vec!(
@@ -1486,9 +1486,9 @@ impl Default for LayerImplMetrics {
             completed_evictions,
             cancelled_evictions,
 
-            started_gcs,
-            completed_gcs,
-            failed_gcs,
+            started_deletes,
+            completed_deletes,
+            failed_deletes,
 
             rare_counters,
         }
@@ -1506,19 +1506,19 @@ impl LayerImplMetrics {
         self.cancelled_evictions[reason].inc()
     }
 
-    fn inc_started_gcs(&self) {
-        self.started_gcs.inc();
+    fn inc_started_deletes(&self) {
+        self.started_deletes.inc();
     }
-    fn inc_completed_gcs(&self) {
-        self.completed_gcs.inc();
+    fn inc_completed_deletes(&self) {
+        self.completed_deletes.inc();
     }
-    fn inc_gcs_failed(&self, reason: GcFailed) {
-        self.failed_gcs[reason].inc();
+    fn inc_deletes_failed(&self, reason: DeleteFailed) {
+        self.failed_deletes[reason].inc();
     }
 
     /// Counted separatedly from failed gcs because we will complete the gc attempt regardless of
     /// failure to delete local file.
-    fn inc_gc_removes_failed(&self) {
+    fn inc_delete_removes_failed(&self) {
         self.rare_counters[RareEvent::GcRemoveFailed].inc();
     }
 
@@ -1592,16 +1592,16 @@ impl EvictionCancelled {
 }
 
 #[derive(enum_map::Enum)]
-enum GcFailed {
+enum DeleteFailed {
     TimelineGone,
     DeleteSchedulingFailed,
 }
 
-impl GcFailed {
+impl DeleteFailed {
     fn as_str(&self) -> &'static str {
         match self {
-            GcFailed::TimelineGone => "timeline_gone",
-            GcFailed::DeleteSchedulingFailed => "delete_scheduling_failed",
+            DeleteFailed::TimelineGone => "timeline_gone",
+            DeleteFailed::DeleteSchedulingFailed => "delete_scheduling_failed",
         }
     }
 }
