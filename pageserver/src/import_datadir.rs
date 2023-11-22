@@ -11,7 +11,8 @@ use async_compression::{tokio::write::ZstdEncoder, zstd::CParameter, Level};
 use bytes::Bytes;
 use camino::Utf8Path;
 use futures::StreamExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use nix::NixPath;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_tar::Archive;
 use tokio_tar::Builder;
 use tokio_tar::HeaderMode;
@@ -695,10 +696,12 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     for entry in WalkDir::new(pgdata_path) {
         let entry = entry?;
         let metadata = entry.metadata().expect("error getting dir entry metadata");
-        if metadata.is_file() {
-            let path = entry.path();
-            paths.push(path.to_owned());
+        // Also allow directories so that we also get empty directories
+        if !(metadata.is_file() || metadata.is_dir()) {
+            continue;
         }
+        let path = entry.path();
+        paths.push(path.to_owned());
     }
     // Don't rely on file system order for listing as it may be non-deterministic
     paths.sort();
@@ -712,6 +715,10 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     builder.mode(HeaderMode::Deterministic);
     for path in paths {
         let rel_path = path.strip_prefix(pgdata_path)?;
+        if rel_path.is_empty() {
+            // The top directory should not be compressed
+            continue;
+        }
         builder.append_path_with_name(&path, rel_path).await?;
     }
     let mut zstd = builder.into_inner().await?;
