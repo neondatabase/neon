@@ -45,8 +45,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     image_creation_threshold = 1
 
     tenant_config = {
-        "pitr_interval": "1s",  # set to non-zero, so GC actually does something
-        "gc_period": "0s",  # we want to control when GC runs
+        "gc_period": "0s",  # disable GC (shouldn't matter for this test but still)
         "compaction_period": "0s",  # we want to control when compaction runs
         "checkpoint_timeout": "24h",  # something we won't reach
         "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
