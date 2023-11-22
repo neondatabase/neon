@@ -245,7 +245,7 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     tenant, timeline = env.neon_cli.create_tenant()
-    client = env.pageserver.http_client()
+    env.pageserver.http_client()
 
     main_branch = env.endpoints.create_start("main", tenant_id=tenant)
     main_cur = main_branch.connect().cursor()
