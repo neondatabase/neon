@@ -3763,13 +3763,11 @@ impl Timeline {
         Ok(())
     }
 
-    ///
     /// Garbage collect layer files on a timeline that are no longer needed.
     ///
     /// Currently, we don't make any attempt at removing unneeded page versions
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
-    ///
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
         let _g = self.gc_lock.lock().await;
         let timer = self.metrics.garbage_collect_histo.start_timer();
@@ -3962,6 +3960,8 @@ impl Timeline {
             //
             // This unconditionally schedules also an index_part.json update, even though, we will
             // be doing one a bit later with the unlinked gc'd layers.
+            //
+            // TODO: remove when implementing <https://github.com/neondatabase/neon/issues/4099>.
             self.update_metadata_file(self.disk_consistent_lsn.load(), None)
                 .await?;
 
@@ -3997,9 +3997,7 @@ impl Timeline {
         Ok(result)
     }
 
-    ///
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
-    ///
     async fn reconstruct_value(
         &self,
         key: Key,
