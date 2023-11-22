@@ -110,11 +110,11 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
     Ok(())
 }
 
-/// Grab the layer_removal_cs lock, and actually perform the deletion.
+/// Grab the compaction and gc locks, and actually perform the deletion.
 ///
-/// This lock prevents prevents GC or compaction from running at the same time.
-/// The GC task doesn't register itself with the timeline it's operating on,
-/// so it might still be running even though we called `shutdown_tasks`.
+/// The locks prevent GC or compaction from running at the same time. The background tasks do not
+/// register themselves with the timeline it's operating on, so it might still be running even
+/// though we called `shutdown_tasks`.
 ///
 /// Note that there are still other race conditions between
 /// GC, compaction and timeline deletion. See
@@ -150,8 +150,8 @@ pub(super) async fn delete_local_layer_files(
     // because of a previous failure/cancellation at/after
     // failpoint timeline-delete-after-rm.
     //
-    // It can also happen if we race with tenant detach, because,
-    // it doesn't grab the layer_removal_cs lock.
+    // ErrorKind::NotFound can also happen if we race with tenant detach, because,
+    // no locks are shared.
     //
     // For now, log and continue.
     // warn! level is technically not appropriate for the
