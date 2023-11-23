@@ -361,9 +361,15 @@ impl ApiImpl for SimulationApi {
         debug!("walprop_log[{}] {}", level, msg);
         if level == Level::Fatal || level == Level::Panic {
             if msg == "Failed to recover state" {
+                // Recovery connection broken in the middle of recovery
                 self.os.exit(msg.to_owned());
             }
             if msg.contains("rejects our connection request with term") {
+                // collected quorum with lower term, then got rejected by next connected safekeeper
+                self.os.exit(msg.to_owned());
+            }
+            if msg.contains("collected propEpochStartLsn") && msg.contains(", but basebackup LSN ") {
+                // sync-safekeepers collected wrong quorum, walproposer collected another quorum
                 self.os.exit(msg.to_owned());
             }
             panic!("unknown FATAL error from walproposer: {}", msg);
@@ -434,6 +440,7 @@ impl ApiImpl for SimulationApi {
             let event = conn.recv();
             match event {
                 NodeEvent::Closed(_) => {
+                    debug!("connection closed in recovery");
                     break;
                 }
                 NodeEvent::Message((AnyMessage::Bytes(b), _)) => {

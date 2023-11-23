@@ -126,7 +126,7 @@ impl Test {
         let ttid = self.ttid.clone();
         let disk = DiskWalProposer::new();
         client_node.launch(move |os| {
-            let _enter = info_span!("sync").entered();
+            let _enter = info_span!("sync", started=os.now()).entered();
             let config = Config {
                 ttid,
                 safekeepers_list: guc,
@@ -187,7 +187,7 @@ impl Test {
         let ttid = self.ttid.clone();
         let wp_disk = disk.clone();
         client_node.launch(move |os| {
-            let _enter = info_span!("walproposer").entered();
+            let _enter = info_span!("walproposer", started=os.now()).entered();
             let config = Config {
                 ttid,
                 safekeepers_list: guc,

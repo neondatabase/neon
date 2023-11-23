@@ -34,6 +34,9 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-lib=static=walproposer");
     println!("cargo:rustc-link-search={walproposer_lib_search_str}");
 
+    // Rebuild crate when libwalproposer.a changes
+    println!("cargo:rerun-if-changed={walproposer_lib_search_str}/libwalproposer.a");
+
     let pg_config_bin = pg_install_abs.join("v16").join("bin").join("pg_config");
     let inc_server_path: String = if pg_config_bin.exists() {
         let output = Command::new(pg_config_bin)
