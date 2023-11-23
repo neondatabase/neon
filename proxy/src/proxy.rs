@@ -178,7 +178,7 @@ impl LatencyTimer {
     }
 
     pub fn pause(&mut self) -> LatencyTimerPause<'_> {
-        // stop the stopwatch and record thannae time that we have accumulated
+        // stop the stopwatch and record the time that we have accumulated
         let start = self.start.take().expect("latency timer should be started");
         self.accumulated += start.elapsed();
         LatencyTimerPause { timer: self }
