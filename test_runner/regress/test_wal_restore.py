@@ -1,10 +1,9 @@
-import os
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
-import tempfile
 import zstandard
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
