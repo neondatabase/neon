@@ -19,7 +19,7 @@ from functools import cached_property
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, cast
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Type, cast
 from urllib.parse import urlparse
 
 import asyncpg
@@ -1622,57 +1622,7 @@ class NeonPageserver(PgProtocol):
         # env.pageserver.allowed_errors.append(".*could not open garage door.*")
         #
         # The entries in the list are regular experessions.
-        self.allowed_errors = [
-            # All tests print these, when starting up or shutting down
-            ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
-            ".*Shutdown task error: walreceiver connection handling failure.*",
-            ".*wal_connection_manager.*tcp connect error: Connection refused.*",
-            ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Postgres connection error.*",
-            ".*serving compute connection task.*exited with error: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Postgres query error.*",
-            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
-            # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
-            ".*Connection aborted: unexpected message from server*",
-            ".*kill_and_wait_impl.*: wait successful.*",
-            ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
-            ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
-            # safekeeper connection can fail with this, in the window between timeline creation
-            # and streaming start
-            ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
-            # Tests related to authentication and authorization print these
-            ".*Error processing HTTP request: Forbidden",
-            # intentional failpoints
-            ".*failpoint ",
-            # FIXME: These need investigation
-            ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
-            ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
-            ".*Removing intermediate uninit mark file.*",
-            # Tenant::delete_timeline() can cause any of the four following errors.
-            # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
-            ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
-            ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
-            ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
-            ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
-            ".*compaction_loop.*Compaction failed.*, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
-            ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
-            ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
-            ".*task iteration took longer than the configured period.*",
-            # this is until #3501
-            ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
-            # these can happen anytime we do compactions from background task and shutdown pageserver
-            r".*ERROR.*ancestor timeline \S+ is being stopped",
-            # this is expected given our collaborative shutdown approach for the UploadQueue
-            ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
-            # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
-            ".*Error processing HTTP request: NotFound: Timeline .* was not found",
-            ".*took more than expected to complete.*",
-            # these can happen during shutdown, but it should not be a reason to fail a test
-            ".*completed, took longer than expected.*",
-            # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
-            # and it is not a failure of our code when it happens.
-            ".*DeleteObjects.*We encountered an internal error. Please try again.*",
-        ]
+        self.allowed_errors = default_pageserver_allowed_errors()
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
@@ -1782,27 +1732,9 @@ class NeonPageserver(PgProtocol):
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.workdir, "pageserver.log"), "r")
-        error_or_warn = re.compile(r"\s(ERROR|WARN)")
-        errors = []
-        while True:
-            line = logfile.readline()
-            if not line:
-                break
+        errors = scan_pageserver_log_for_errors(logfile, self.allowed_errors)
 
-            if error_or_warn.search(line):
-                # Is this a torn log line?  This happens when force-killing a process and restarting
-                # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
-                if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
-                    continue
-
-                # It's an ERROR or WARN. Is it in the allow-list?
-                for a in self.allowed_errors:
-                    if re.match(a, line):
-                        break
-                else:
-                    errors.append(line)
-
-        for error in errors:
+        for _lineno, error in errors:
             log.info(f"not allowed error: {error.strip()}")
 
         assert not errors
@@ -1858,6 +1790,85 @@ class NeonPageserver(PgProtocol):
 
         client = self.http_client()
         return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+
+
+def scan_pageserver_log_for_errors(
+    input: Iterable[str], allowed_errors: List[str]
+) -> List[Tuple[int, str]]:
+    error_or_warn = re.compile(r"\s(ERROR|WARN)")
+    errors = []
+    for lineno, line in enumerate(input, start=1):
+        if len(line) == 0:
+            continue
+
+        if error_or_warn.search(line):
+            # Is this a torn log line?  This happens when force-killing a process and restarting
+            # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+            if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                continue
+
+            # It's an ERROR or WARN. Is it in the allow-list?
+            for a in allowed_errors:
+                if re.match(a, line):
+                    break
+            else:
+                errors.append((lineno, line))
+    return errors
+
+
+def default_pageserver_allowed_errors():
+    """Why as a function not a constant somewhere? These lists are modified, and this is the easiest way to create unique instances."""
+    return [
+        # All tests print these, when starting up or shutting down
+        ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
+        ".*Shutdown task error: walreceiver connection handling failure.*",
+        ".*wal_connection_manager.*tcp connect error: Connection refused.*",
+        ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
+        ".*serving compute connection task.*exited with error: Postgres connection error.*",
+        ".*serving compute connection task.*exited with error: Connection reset by peer.*",
+        ".*serving compute connection task.*exited with error: Postgres query error.*",
+        ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
+        # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
+        ".*Connection aborted: unexpected message from server*",
+        ".*kill_and_wait_impl.*: wait successful.*",
+        ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
+        ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
+        # safekeeper connection can fail with this, in the window between timeline creation
+        # and streaming start
+        ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
+        # Tests related to authentication and authorization print these
+        ".*Error processing HTTP request: Forbidden",
+        # intentional failpoints
+        ".*failpoint ",
+        # FIXME: These need investigation
+        ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
+        ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
+        ".*Removing intermediate uninit mark file.*",
+        # Tenant::delete_timeline() can cause any of the four following errors.
+        # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
+        ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
+        ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
+        ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
+        ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
+        ".*compaction_loop.*Compaction failed.*, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
+        ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
+        ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
+        ".*task iteration took longer than the configured period.*",
+        # this is until #3501
+        ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
+        # these can happen anytime we do compactions from background task and shutdown pageserver
+        r".*ERROR.*ancestor timeline \S+ is being stopped",
+        # this is expected given our collaborative shutdown approach for the UploadQueue
+        ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
+        # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
+        ".*Error processing HTTP request: NotFound: Timeline .* was not found",
+        ".*took more than expected to complete.*",
+        # these can happen during shutdown, but it should not be a reason to fail a test
+        ".*completed, took longer than expected.*",
+        # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
+        # and it is not a failure of our code when it happens.
+        ".*DeleteObjects.*We encountered an internal error. Please try again.*",
+    ]
 
 
 def append_pageserver_param_overrides(
@@ -3372,3 +3383,35 @@ def parse_project_git_version_output(s: str) -> str:
         return commit
 
     raise ValueError(f"unable to parse --version output: '{s}'")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    def check_allowed_errors_impl():
+        import sys
+
+        allowed_errors = default_pageserver_allowed_errors()
+
+        # add any test specifics here
+
+        errors = scan_pageserver_log_for_errors(sys.stdin, allowed_errors)
+
+        for lineno, error in errors:
+            print(f"-:{lineno}: {error}", file=sys.stderr)
+
+        if len(errors) > 0:
+            print(f"\n{len(errors)} errors", file=sys.stderr)
+            sys.exit(1)
+
+        sys.exit(0)
+
+    parser = argparse.ArgumentParser(
+        "neon_fixtures", description="do some checks done in test suite on demand"
+    )
+    subparsers = parser.add_subparsers()
+
+    check_allowed_errors = subparsers.add_parser(
+        "check_allowed_errors", help="check stdin against pageserver global allowed_errors"
+    )
+    check_allowed_errors.set_defaults(func=check_allowed_errors_impl)
