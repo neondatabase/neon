@@ -41,7 +41,7 @@ impl State {
         // TODO: fail on reading uninitialized data
     }
 
-    fn write(&mut self, pos: u64, buf: &[u8]) {
+    pub fn write(&mut self, pos: u64, buf: &[u8]) {
         self.disk.write(pos, buf);
     }
 
@@ -73,10 +73,7 @@ impl State {
         rdatas.push(prefix_bytes);
         rdatas.push(msg);
 
-        const XLOG_INCLUDE_ORIGIN: u8 = 0x01;
-        insert_wal_record(self, rdatas, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE);
-
-        Ok(())
+        insert_wal_record(self, rdatas, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE)
     }
 }
 

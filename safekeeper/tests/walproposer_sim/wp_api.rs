@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use slowsim::{network::TCP, node_os::NodeOs, world::{NodeId, NodeEvent}};
+use slowsim::{network::TCP, node_os::NodeOs, world::{NodeId, NodeEvent}, proto::AnyMessage};
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
@@ -48,6 +48,7 @@ pub struct SimulationApi {
     disk: Arc<DiskWalProposer>,
     redo_start_lsn: Option<Lsn>,
     shmem: UnsafeCell<walproposer::bindings::WalproposerShmemState>,
+    config: Config,
 }
 
 pub struct Args {
@@ -90,6 +91,7 @@ impl SimulationApi {
                     value: 0,
                 }
             }),
+            config: args.config,
         }
     }
 
@@ -204,8 +206,8 @@ impl ApiImpl for SimulationApi {
     }
 
     fn conn_blocking_write(&self, sk: &mut walproposer::bindings::Safekeeper, buf: &[u8]) -> bool {
-        println!("conn_blocking_write: {:?}", buf);
         let mut conn = self.get_conn(sk);
+        println!("conn_blocking_write to {}: {:?}", conn.node_id, buf);
         let socket = conn.socket.as_mut().unwrap();
         socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
             buf,
@@ -218,12 +220,17 @@ impl ApiImpl for SimulationApi {
         sk: &mut walproposer::bindings::Safekeeper,
         buf: &[u8],
     ) -> walproposer::bindings::PGAsyncWriteResult {
-        println!("conn_async_write: {:?}", buf);
         let mut conn = self.get_conn(sk);
-        let socket = conn.socket.as_mut().unwrap();
-        socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
-            buf,
-        )));
+        println!("conn_async_write to {}: {:?}", conn.node_id, buf);
+        if let Some(socket) = conn.socket.as_mut() {
+            socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
+                buf,
+            )));
+        } else {
+            // connection is already closed
+            println!("conn_async_write: writing to a closed socket!");
+            // TODO: maybe we should return error here?
+        }
         walproposer::bindings::PGAsyncWriteResult_PG_ASYNC_WRITE_SUCCESS
     }
 
@@ -368,7 +375,12 @@ impl ApiImpl for SimulationApi {
 
     fn start_streaming(&self, startpos: u64, callback: &walproposer::walproposer::StreamingCallback) {
         let disk = &self.disk;
-        assert!(startpos == disk.lock().flush_rec_ptr().0);
+        let disk_lsn = disk.lock().flush_rec_ptr().0;
+        println!("start_streaming at {} (disk_lsn={})", startpos, disk_lsn);
+        if startpos < disk_lsn {
+            println!("startpos < disk_lsn, it means we wrote some transaction even before streaming started");
+        }
+        assert!(startpos <= disk_lsn);
         let mut broadcasted = Lsn(startpos);
 
         loop {
@@ -392,5 +404,53 @@ impl ApiImpl for SimulationApi {
 
     fn confirm_wal_streamed(&self, _wp: &mut walproposer::bindings::WalProposer, lsn: u64) {
         println!("confirm_wal_streamed: {}", Lsn(lsn))
+    }
+
+    fn recovery_download(&self, sk: &mut walproposer::bindings::Safekeeper, mut startpos: u64, endpos: u64) -> bool {
+        let replication_prompt = format!(
+            "START_REPLICATION {} {} {} {}",
+            self.config.ttid.tenant_id,
+            self.config.ttid.timeline_id,
+            startpos,
+            endpos,
+        );
+        let async_conn = self.get_conn(sk);
+        println!("recovery_download from {} to {}, sk={}", startpos, endpos, async_conn.node_id);
+
+        let conn = self.os.open_tcp_nopoll(async_conn.node_id);
+        conn.send(slowsim::proto::AnyMessage::Bytes(replication_prompt.into()));
+
+        while startpos < endpos {
+            let event = conn.recv();
+            match event {
+                NodeEvent::Closed(_) => {
+                    break;
+                }
+                NodeEvent::Message((AnyMessage::Bytes(b), _)) => {
+                    println!("got recovery bytes from safekeeper");
+                    self.disk.lock().write(startpos, &b);
+                    startpos += b.len() as u64;
+                }
+                NodeEvent::Message(_) => unreachable!(),
+                NodeEvent::Accept(_) => unreachable!(),
+                NodeEvent::Internal(_) => unreachable!(),
+                NodeEvent::WakeTimeout(_) => unreachable!(),
+            }
+        }
+
+        println!("recovery finished at {}", startpos);
+
+        startpos == endpos
+    }
+
+    fn conn_finish(&self, sk: &mut walproposer::bindings::Safekeeper) {
+        let mut conn = self.get_conn(sk);
+        println!("conn_finish to {}", conn.node_id);
+        if let Some(socket) = conn.socket.as_mut() {
+            socket.close();
+        } else {
+            // connection is already closed
+        }
+        conn.socket = None;
     }
 }
