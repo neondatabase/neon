@@ -1514,6 +1514,7 @@ impl Tenant {
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
@@ -1588,7 +1589,7 @@ impl Tenant {
                     .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, ctx)
+                self.bootstrap_timeline(new_timeline_id, pg_version, load_existing_initdb, ctx)
                     .await?
             }
         };
@@ -2900,6 +2901,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
@@ -2922,8 +2924,6 @@ impl Tenant {
                 format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
-        // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
-        run_initdb(self.conf, &pgdata_path, pg_version)?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&pgdata_path) {
@@ -2931,31 +2931,45 @@ impl Tenant {
                 error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
         }
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
-
-        // Upload the created data dir to S3
-        if let Some(storage) = &self.remote_storage {
-            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
-            let pgdata_zstd = Bytes::from(pgdata_zstd);
-            backoff::retry(
-                || async {
-                    self::remote_timeline_client::upload_initdb_dir(
-                        storage,
-                        &self.tenant_id,
-                        &timeline_id,
-                        pgdata_zstd.clone(),
-                    )
-                    .await
-                },
-                |_| false,
-                3,
-                u32::MAX,
-                "persist_initdb_tar_zst",
-                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+        if let Some(existing_initdb_timeline_id) = load_existing_initdb {
+            let Some(storage) = &self.remote_storage else {
+                bail!("No storage configured but load_existing_initdb set to {existing_initdb_timeline_id}.");
+            };
+            self::remote_timeline_client::download_initdb_tar_zst(
+                storage,
+                &self.tenant_id,
+                &existing_initdb_timeline_id,
             )
             .await?;
+        } else {
+            // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
+            run_initdb(self.conf, &pgdata_path, pg_version)?;
+
+            // Upload the created data dir to S3
+            if let Some(storage) = &self.remote_storage {
+                let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
+                let pgdata_zstd = Bytes::from(pgdata_zstd);
+                backoff::retry(
+                    || async {
+                        self::remote_timeline_client::upload_initdb_dir(
+                            storage,
+                            &self.tenant_id,
+                            &timeline_id,
+                            pgdata_zstd.clone(),
+                        )
+                        .await
+                    },
+                    |_| false,
+                    3,
+                    u32::MAX,
+                    "persist_initdb_tar_zst",
+                    // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                    backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+                )
+                .await?;
+            }
         }
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.

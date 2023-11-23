@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::task::{self, Poll};
 
 use anyhow::{bail, ensure, Context, Result};
+use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::{tokio::write::ZstdEncoder, zstd::CParameter, Level};
 use bytes::Bytes;
 use camino::Utf8Path;
@@ -731,4 +732,11 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
         warn!("compressed {INITDB_PATH} size of {compressed_len} is above limit {INITDB_TAR_ZST_WARN_LIMIT}.");
     }
     Ok(compressed.buf)
+}
+
+pub async fn extract_tar_zst(pgdata_path: &Utf8Path, tar_zst: &[u8]) -> Result<()> {
+    let tar = ZstdDecoder::new(tar_zst);
+    let mut archive = Archive::new(tar);
+    archive.unpack(pgdata_path).await?;
+    Ok(())
 }

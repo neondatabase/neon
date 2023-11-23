@@ -188,6 +188,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
+pub(crate) use download::download_initdb_tar_zst;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 pub(crate) use upload::upload_initdb_dir;

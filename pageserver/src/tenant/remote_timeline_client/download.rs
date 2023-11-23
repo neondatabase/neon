@@ -25,8 +25,8 @@ use utils::id::{TenantId, TimelineId};
 
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
-    parse_remote_index_path, remote_index_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
-    FAILED_REMOTE_OP_RETRIES,
+    parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
 };
 
 static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
@@ -357,6 +357,31 @@ pub(super) async fn download_index_part(
                 .await
         }
     }
+}
+
+pub(crate) async fn download_initdb_tar_zst(
+    storage: &GenericRemoteStorage,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+) -> Result<Vec<u8>, DownloadError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
+    let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
+
+    download_retry(
+        || async {
+            let mut download = storage.download(&remote_path).await?;
+
+            let mut buffer = Vec::new();
+            tokio::io::copy(&mut download.download_stream, &mut buffer)
+                .await
+                .with_context(|| format!("download initdb.tar.zst at {remote_path:?}"))
+                .map_err(DownloadError::Other)?;
+            Ok(buffer)
+        },
+        &format!("download {remote_path}"),
+    )
+    .await
 }
 
 /// Helper function to handle retries for a download operation.
