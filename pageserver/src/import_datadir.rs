@@ -700,11 +700,11 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
         if !(metadata.is_file() || metadata.is_dir()) {
             continue;
         }
-        let path = entry.path();
-        paths.push(path.to_owned());
+        let path = entry.into_path();
+        paths.push(path);
     }
-    // Don't rely on file system order for listing as it may be non-deterministic
-    paths.sort();
+    // Do a sort to get a more consistent listing
+    paths.sort_unstable();
     let zstd = ZstdEncoder::with_quality_and_params(
         YieldingVec::new(),
         Level::Default,
@@ -716,7 +716,8 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     for path in paths {
         let rel_path = path.strip_prefix(pgdata_path)?;
         if rel_path.is_empty() {
-            // The top directory should not be compressed
+            // The top directory should not be compressed,
+            // the tar crate doesn't like that
             continue;
         }
         builder.append_path_with_name(&path, rel_path).await?;
