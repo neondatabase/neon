@@ -418,6 +418,11 @@ impl TestBackend for TestConnectMechanism {
             x => panic!("expecting action {:?}, wake_compute is called instead", x),
         }
     }
+    fn get_auth_info(
+        &self,
+    ) -> Result<console::provider::AuthInfo, console::errors::GetAuthInfoError> {
+        unimplemented!()
+    }
 }
 
 fn helper_create_cached_node_info() -> CachedNodeInfo {

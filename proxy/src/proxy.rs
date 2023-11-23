@@ -24,7 +24,7 @@ use prometheus::{
     IntGaugeVec,
 };
 use regex::Regex;
-use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
+use std::{error::Error, io, net::SocketAddr, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -138,6 +138,15 @@ pub static NUM_CONNECTION_ACCEPTED_BY_SNI: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_allowed_ips_number",
+        "Number of allowed ips",
+        vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0],
+    )
+    .unwrap()
+});
+
 pub struct LatencyTimer {
     // time since the stopwatch was started
     start: Option<Instant>,
@@ -169,7 +178,7 @@ impl LatencyTimer {
     }
 
     pub fn pause(&mut self) -> LatencyTimerPause<'_> {
-        // stop the stopwatch and record the time that we have accumulated
+        // stop the stopwatch and record thannae time that we have accumulated
         let start = self.start.take().expect("latency timer should be started");
         self.accumulated += start.elapsed();
         LatencyTimerPause { timer: self }
@@ -265,7 +274,7 @@ pub async fn task_main(
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
-                let (socket, _) = accept_result?;
+                let (socket, peer_addr) = accept_result?;
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
@@ -285,7 +294,7 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr).await
                     }
                     .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
@@ -366,6 +375,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
+    peer_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -399,7 +409,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names, peer_addr))
             .transpose();
 
         match result {
@@ -620,6 +630,7 @@ where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
     M::Error: From<WakeComputeError>,
 {
+    // TODO(anna): add call to get_role_secret. And check ip allowlist.
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once

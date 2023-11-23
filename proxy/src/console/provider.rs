@@ -204,12 +204,19 @@ pub struct ConsoleReqExtra<'a> {
 }
 
 /// Auth secret which is managed by the cloud.
-pub enum AuthInfo {
+pub enum AuthSecret {
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 
     /// [SCRAM](crate::scram) authentication info.
     Scram(scram::ServerSecret),
+}
+
+#[derive(Default)]
+pub struct AuthInfo {
+    pub secret: Option<AuthSecret>,
+    /// List of IP addresses allowed for the autorization.
+    pub allowed_ips: Vec<String>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -240,7 +247,7 @@ pub trait Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials,
-    ) -> Result<Option<AuthInfo>, errors::GetAuthInfoError>;
+    ) -> Result<AuthInfo, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(

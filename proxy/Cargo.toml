@@ -24,6 +24,7 @@ hostname.workspace = true
 humantime.workspace = true
 hyper-tungstenite.workspace = true
 hyper.workspace = true
+ipnet.workspace = true
 itertools.workspace = true
 md5.workspace = true
 metrics.workspace = true
