@@ -12,8 +12,8 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
 )
 from fixtures.port_distributor import PortDistributor
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.remote_storage import LocalFsStorage
+from fixtures.types import Lsn, TenantId, TimelineId
 
 
 @pytest.mark.skipif(
