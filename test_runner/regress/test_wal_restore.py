@@ -85,8 +85,8 @@ def test_wal_restore_initdb(
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
-    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
     original_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
     env.pageserver.stop()
     port = port_distributor.get_port()
