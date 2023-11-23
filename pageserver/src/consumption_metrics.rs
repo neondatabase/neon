@@ -46,8 +46,8 @@ pub async fn collect_metrics(
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
     local_disk_storage: Utf8PathBuf,
-    ctx: RequestContext,
     cancel: CancellationToken,
+    ctx: RequestContext,
 ) -> anyhow::Result<()> {
     if _cached_metric_collection_interval != Duration::ZERO {
         tracing::warn!(
@@ -68,8 +68,8 @@ pub async fn collect_metrics(
         async move {
             calculate_synthetic_size_worker(
                 synthetic_size_calculation_interval,
-                &worker_ctx,
                 &cancel,
+                &worker_ctx,
             )
             .instrument(info_span!("synthetic_size_worker"))
             .await?;
@@ -248,8 +248,8 @@ async fn reschedule(
 /// Caclculate synthetic size for each active tenant
 async fn calculate_synthetic_size_worker(
     synthetic_size_calculation_interval: Duration,
-    ctx: &RequestContext,
     cancel: &CancellationToken,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
     scopeguard::defer! {
@@ -280,7 +280,7 @@ async fn calculate_synthetic_size_worker(
                 // Same for the loop that fetches computed metrics.
                 // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
                 // which turns out is really handy to understand the system.
-                if let Err(e) = tenant.calculate_synthetic_size(cause, ctx, cancel).await {
+                if let Err(e) = tenant.calculate_synthetic_size(cause, cancel, ctx).await {
                     error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
             }

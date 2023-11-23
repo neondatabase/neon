@@ -625,8 +625,8 @@ fn start_pageserver(
                     conf.synthetic_size_calculation_interval,
                     conf.id,
                     local_disk_storage,
-                    metrics_ctx,
                     cancel,
+                    metrics_ctx,
                 )
                 .instrument(info_span!("metrics_collection"))
                 .await?;

@@ -366,8 +366,8 @@ impl Timeline {
     pub async fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
-        ctx: &RequestContext,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         // We use this method to figure out the branching LSN for the new branch, but the

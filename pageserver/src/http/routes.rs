@@ -565,7 +565,7 @@ async fn get_lsn_by_timestamp_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline
-        .find_lsn_for_timestamp(timestamp_pg, &ctx, &cancel)
+        .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
 
     if version.unwrap_or(0) > 1 {
@@ -858,8 +858,8 @@ async fn tenant_size_handler(
         .gather_size_inputs(
             retention_period,
             LogicalSizeCalculationCause::TenantSizeHandler,
-            &ctx,
             &cancel,
+            &ctx,
         )
         .await
         .map_err(ApiError::InternalServerError)?;
@@ -1252,7 +1252,7 @@ async fn timeline_gc_handler(
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req, &ctx, cancel).await?;
+    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req, cancel, &ctx).await?;
     let gc_result = wait_task_done
         .await
         .context("wait for gc task")

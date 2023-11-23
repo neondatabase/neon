@@ -3685,8 +3685,8 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
-        ctx: &RequestContext,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
@@ -3700,7 +3700,7 @@ impl Timeline {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
                 match self
-                    .find_lsn_for_timestamp(pitr_timestamp, ctx, cancel)
+                    .find_lsn_for_timestamp(pitr_timestamp, cancel, ctx)
                     .await?
                 {
                     LsnForTimestamp::Present(lsn) => lsn,
