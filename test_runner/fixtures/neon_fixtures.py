@@ -42,6 +42,7 @@ from urllib3.util.retry import Retry
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.types import IndexPartDump
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
@@ -702,6 +703,7 @@ class NeonEnv:
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
         self.neon_cli = NeonCli(env=self)
+        self.pagectl = Pagectl(env=self)
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.pageservers: List[NeonPageserver] = []
@@ -1556,6 +1558,20 @@ class ComputeCtl(AbstractNeonCli):
     """
 
     COMMAND = "compute_ctl"
+
+
+class Pagectl(AbstractNeonCli):
+    """
+    A typed wrapper around the `pagectl` utility CLI tool.
+    """
+
+    COMMAND = "pagectl"
+
+    def dump_index_part(self, path: Path) -> IndexPartDump:
+        res = self.raw_cli(["index-part", "dump", str(path)])
+        res.check_returncode()
+        parsed = json.loads(res.stdout)
+        return IndexPartDump.from_json(parsed)
 
 
 class NeonAttachmentService:

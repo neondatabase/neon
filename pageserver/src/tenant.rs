@@ -13,6 +13,7 @@
 
 use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
+use enumset::EnumSet;
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
@@ -1700,7 +1701,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
-                .compact(cancel, ctx)
+                .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
@@ -4345,7 +4346,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4360,7 +4363,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4375,7 +4380,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4390,7 +4397,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
@@ -4467,7 +4476,9 @@ mod tests {
                 )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4553,7 +4564,9 @@ mod tests {
                 )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4649,7 +4662,9 @@ mod tests {
                 )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 

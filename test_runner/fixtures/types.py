@@ -1,4 +1,5 @@
 import random
+from dataclasses import dataclass
 from functools import total_ordering
 from typing import Any, Type, TypeVar, Union
 
@@ -36,6 +37,11 @@ class Lsn:
             return NotImplemented
         return self.lsn_int < other.lsn_int
 
+    def __gt__(self, other: Any) -> bool:
+        if not isinstance(other, Lsn):
+            raise NotImplementedError
+        return self.lsn_int > other.lsn_int
+
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Lsn):
             return NotImplemented
@@ -47,8 +53,31 @@ class Lsn:
             return NotImplemented
         return self.lsn_int - other.lsn_int
 
+    def __add__(self, other: Union[int, "Lsn"]) -> "Lsn":
+        if isinstance(other, int):
+            return Lsn(self.lsn_int + other)
+        elif isinstance(other, Lsn):
+            return Lsn(self.lsn_int + other.lsn_int)
+        else:
+            raise NotImplementedError
+
     def __hash__(self) -> int:
         return hash(self.lsn_int)
+
+    def as_int(self) -> int:
+        return self.lsn_int
+
+
+@dataclass(frozen=True)
+class Key:
+    key_int: int
+
+    def as_int(self) -> int:
+        return self.key_int
+
+
+KEY_MAX = Key(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+KEY_MIN = Key(0)
 
 
 @total_ordering

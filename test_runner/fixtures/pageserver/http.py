@@ -432,12 +432,18 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def timeline_compact(
+        self, tenant_id: TenantId, timeline_id: TimelineId, force_repartition=False
+    ):
         self.is_testing_enabled_or_skip()
+        query = {}
+        if force_repartition:
+            query["force_repartition"] = "true"
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
+            params=query,
         )
         log.info(f"Got compact request response code: {res.status_code}")
         self.verbose_error(res)
@@ -466,12 +472,18 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         return res_json
 
-    def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def timeline_checkpoint(
+        self, tenant_id: TenantId, timeline_id: TimelineId, force_repartition=False
+    ):
         self.is_testing_enabled_or_skip()
+        query = {}
+        if force_repartition:
+            query["force_repartition"] = "true"
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
+            params=query,
         )
         log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)

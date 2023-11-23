@@ -816,7 +816,7 @@ impl RemoteTimelineClient {
         let mut receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
-            self.schedule_barrier(upload_queue)
+            self.schedule_barrier0(upload_queue)
         };
 
         if receiver.changed().await.is_err() {
@@ -825,7 +825,14 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    fn schedule_barrier(
+    pub(crate) fn schedule_barrier(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        self.schedule_barrier0(upload_queue);
+        Ok(())
+    }
+
+    fn schedule_barrier0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
     ) -> tokio::sync::watch::Receiver<()> {
@@ -1229,16 +1236,18 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(delete) => self
-                    .deletion_queue_client
-                    .push_layers(
-                        self.tenant_id,
-                        self.timeline_id,
-                        self.generation,
-                        delete.layers.clone(),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e)),
+                UploadOp::Delete(delete) => {
+                    pausable_failpoint!("before-delete-layer-pausable");
+                    self.deletion_queue_client
+                        .push_layers(
+                            self.tenant_id,
+                            self.timeline_id,
+                            self.generation,
+                            delete.layers.clone(),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))
+                }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
