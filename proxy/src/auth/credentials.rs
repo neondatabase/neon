@@ -173,18 +173,18 @@ pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<String>) -> 
     false
 }
 
-fn check_ip(ip: &IpAddr, range: &str) -> anyhow::Result<bool> {
-    if range.contains('/') {
-        let subnet: ipnet::IpNet = range.parse()?;
+fn check_ip(ip: &IpAddr, pattern: &str) -> anyhow::Result<bool> {
+    if pattern.contains('/') {
+        let subnet: ipnet::IpNet = pattern.parse()?;
         return Ok(subnet.contains(ip));
     }
-    if let Some((start, end)) = range.split_once('-') {
+    if let Some((start, end)) = pattern.split_once('-') {
         // let range: ipnet::IpAddrRange = range.parse()?;
         let start: IpAddr = start.parse()?;
         let end: IpAddr = end.parse()?;
         Ok(start <= *ip && *ip <= end)
     } else {
-        let addr: IpAddr = range.parse()?;
+        let addr: IpAddr = pattern.parse()?;
         Ok(addr.eq(ip))
     }
 }
@@ -399,6 +399,50 @@ mod tests {
             "projectneon_endpoint_type:read_write neon_lsn:0/2"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_peer_addr_is_in_list() {
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        assert!(check_peer_addr_is_in_list(&peer_addr, &vec![]));
+        assert!(check_peer_addr_is_in_list(
+            &peer_addr,
+            &vec!["127.0.0.1".into()]
+        ));
+        assert!(!check_peer_addr_is_in_list(
+            &peer_addr,
+            &vec!["8.8.8.8".into()]
+        ));
+        // If there is an incorrect address, it will be skipped.
+        assert!(check_peer_addr_is_in_list(
+            &peer_addr,
+            &vec!["88.8.8".into(), "127.0.0.1".into()]
+        ));
+    }
+
+    #[test]
+    fn test_check_ipv4() -> anyhow::Result<()> {
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        // Success
+        assert!(check_ip(&peer_addr, "127.0.0.1")?);
+        assert!(check_ip(&peer_addr, "127.0.0.0/31")?);
+        assert!(check_ip(&peer_addr, "127.0.0.2/30")?);
+        assert!(check_ip(&peer_addr, "0.0.0.0-200.0.1.2")?);
+        assert!(check_ip(&peer_addr, "127.0.0.1-127.0.0.1")?);
+
+        // Not success
+        assert!(!check_ip(&peer_addr, "127.0.0.0")?);
+        assert!(!check_ip(&peer_addr, "127.0.0.2/31")?);
+        assert!(!check_ip(&peer_addr, "0.0.0.0-126.0.1.2")?);
+        assert!(!check_ip(&peer_addr, "127.0.1.2-128.1.1.1")?);
+        // There is no check that for range start <= end. But it's fine as long as for all this cases the result is false.
+        assert!(!check_ip(&peer_addr, "127.0.0.1-127.0.0.0")?);
+
+        // Error
+        assert!(check_ip(&peer_addr, "300.0.1.2").is_err());
+        assert!(check_ip(&peer_addr, "30.1.2").is_err());
+        assert!(check_ip(&peer_addr, "127.0.0.1/33").is_err());
         Ok(())
     }
 }
