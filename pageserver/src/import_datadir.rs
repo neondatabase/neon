@@ -722,7 +722,7 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
         builder.append_path_with_name(&path, rel_path).await?;
     }
     let mut zstd = builder.into_inner().await?;
-    zstd.flush().await?;
+    zstd.shutdown().await?;
     let compressed = zstd.into_inner();
     let compressed_len = compressed.buf.len();
     const INITDB_TAR_ZST_WARN_LIMIT: usize = 2_000_000;
