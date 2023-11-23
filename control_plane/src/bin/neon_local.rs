@@ -415,6 +415,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 None,
                 None,
                 Some(pg_version),
+                None,
             )?;
             let new_timeline_id = timeline_info.timeline_id;
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -495,6 +496,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 None,
                 None,
                 Some(pg_version),
+                None,
             )?;
             let new_timeline_id = timeline_info.timeline_id;
 
@@ -581,6 +583,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 None,
                 start_lsn,
                 Some(ancestor_timeline_id),
+                None,
                 None,
             )?;
             let new_timeline_id = timeline_info.timeline_id;

@@ -559,6 +559,7 @@ impl PageServerNode {
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
+        load_existing_initdb: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
         // If timeline ID was not specified, generate one
         let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
@@ -572,6 +573,7 @@ impl PageServerNode {
             ancestor_start_lsn,
             ancestor_timeline_id,
             pg_version,
+            load_existing_initdb,
         })
         .send()?
         .error_from_body()?
