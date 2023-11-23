@@ -972,6 +972,17 @@ DetermineEpochStartLsn(WalProposer *wp)
 		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
 	}
 
+	if (wp->truncateLsn == InvalidXLogRecPtr && wp->timelineStartLsn == wp->propEpochStartLsn)
+	{
+		/*
+		 * If truncateLsn is 0 everywhere, we are bootstrapping -- nothing was
+		 * committed yet. But if timelineStartLsn is not 0, we already know
+		 * the first record location, so we can bump truncateLsn to it.
+		 */
+		wp->truncateLsn = wp->timelineStartLsn;
+		walprop_log(LOG, "bumped truncateLsn to timelineStartLsn %X/%X", LSN_FORMAT_ARGS(wp->truncateLsn));
+	}
+
 	/*
 	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so it
 	 * should never be zero at this point, if we know timelineStartLsn.
