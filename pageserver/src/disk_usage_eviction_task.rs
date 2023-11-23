@@ -125,7 +125,7 @@ pub fn launch_disk_usage_global_eviction_task(
 async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
-    _storage: &GenericRemoteStorage,
+    storage: &GenericRemoteStorage,
     tenants_dir: &Utf8Path,
     cancel: CancellationToken,
 ) {
@@ -149,8 +149,14 @@ async fn disk_usage_eviction_task(
         let start = Instant::now();
 
         async {
-            let res =
-                disk_usage_eviction_task_iteration(state, task_config, tenants_dir, &cancel).await;
+            let res = disk_usage_eviction_task_iteration(
+                state,
+                task_config,
+                storage,
+                tenants_dir,
+                &cancel,
+            )
+            .await;
 
             match res {
                 Ok(()) => {}
@@ -181,12 +187,13 @@ pub trait Usage: Clone + Copy + std::fmt::Debug {
 async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
+    storage: &GenericRemoteStorage,
     tenants_dir: &Utf8Path,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
-    let res = disk_usage_eviction_task_iteration_impl(state, usage_pre, cancel).await;
+    let res = disk_usage_eviction_task_iteration_impl(state, storage, usage_pre, cancel).await;
     match res {
         Ok(outcome) => {
             debug!(?outcome, "disk_usage_eviction_iteration finished");
@@ -270,6 +277,7 @@ struct LayerCount {
 
 pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     state: &State,
+    _storage: &GenericRemoteStorage,
     usage_pre: U,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
@@ -410,11 +418,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             };
 
             js.spawn(async move {
-                let rtc = candidate
-                    .timeline
-                    .remote_client
-                    .as_ref()
-                    .expect("TODO: add back the witness");
+                let rtc =
+                    candidate.timeline.remote_client.as_ref().expect(
+                        "holding the witness, all timelines must have remote timeline client",
+                    );
                 let file_size = candidate.layer.layer_desc().file_size;
                 candidate
                     .layer
