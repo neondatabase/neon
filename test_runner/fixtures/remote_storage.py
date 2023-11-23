@@ -12,6 +12,7 @@ import boto3
 from mypy_boto3_s3 import S3Client
 
 from fixtures.log_helper import log
+from fixtures.pageserver.types import LayerFileName
 from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
@@ -86,6 +87,11 @@ class LocalFsStorage:
 
     def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
+
+    def layer_path(
+        self, tenant_id: TenantId, timeline_id: TimelineId, layer_file_name: LayerFileName
+    ):
+        return self.timeline_path(tenant_id, timeline_id) / layer_file_name.to_str()
 
     def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME

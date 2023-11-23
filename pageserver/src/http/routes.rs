@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use enumset::EnumSet;
 use futures::TryFutureExt;
 use humantime::format_rfc3339;
 use hyper::header;
@@ -42,6 +43,7 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
+use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
@@ -1268,11 +1270,15 @@ async fn timeline_compact_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let mut flags = EnumSet::empty();
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
+        flags |= CompactFlags::ForceRepartition;
+    }
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
         timeline
-            .compact(&cancel, &ctx)
+            .compact(&cancel, flags, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
         json_response(StatusCode::OK, ())
@@ -1289,6 +1295,11 @@ async fn timeline_checkpoint_handler(
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
+
+    let mut flags = EnumSet::empty();
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
+        flags |= CompactFlags::ForceRepartition;
+    }
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
@@ -1297,7 +1308,7 @@ async fn timeline_checkpoint_handler(
             .await
             .map_err(ApiError::InternalServerError)?;
         timeline
-            .compact(&cancel, &ctx)
+            .compact(&cancel, flags, &ctx)
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
 

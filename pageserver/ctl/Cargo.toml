@@ -18,3 +18,5 @@ tokio.workspace = true
 utils.workspace = true
 svg_fmt.workspace = true
 workspace_hack.workspace = true
+serde.workspace = true
+serde_json.workspace = true

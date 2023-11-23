@@ -10,6 +10,7 @@ mod walreceiver;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::models::{
@@ -437,6 +438,11 @@ pub enum LogicalSizeCalculationCause {
     TenantSizeHandler,
 }
 
+#[derive(enumset::EnumSetType)]
+pub(crate) enum CompactFlags {
+    ForceRepartition,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -694,6 +700,7 @@ impl Timeline {
     pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
+        flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
         // this wait probably never needs any "long time spent" logging, because we already nag if
@@ -766,6 +773,7 @@ impl Timeline {
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
+                flags,
                 ctx,
             )
             .await
@@ -1711,6 +1719,30 @@ impl Timeline {
         if let Some(rtc) = self.remote_client.as_ref() {
             rtc.schedule_layer_file_deletion(&needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
+            // This barrier orders above DELETEs before any later operations.
+            // This is critical because code executing after the barrier might
+            // create again objects with the same key that we just scheduled for deletion.
+            // For example, if we just scheduled deletion of an image layer "from the future",
+            // later compaction might run again and re-create the same image layer.
+            // "from the future" here means an image layer whose LSN is > IndexPart::disk_consistent_lsn.
+            // "same" here means same key range and LSN.
+            //
+            // Without a barrier between above DELETEs and the re-creation's PUTs,
+            // the upload queue may execute the PUT first, then the DELETE.
+            // In our example, we will end up with an IndexPart referencing a non-existent object.
+            //
+            // 1. a future image layer is created and uploaded
+            // 2. ps restart
+            // 3. the future layer from (1) is deleted during load layer map
+            // 4. image layer is re-created and uploaded
+            // 5. deletion queue would like to delete (1) but actually deletes (4)
+            // 6. delete by name works as expected, but it now deletes the wrong (later) version
+            //
+            // See https://github.com/neondatabase/neon/issues/5878
+            //
+            // NB: generation numbers naturally protect against this because they disambiguate
+            //     (1) and (4)
+            rtc.schedule_barrier()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
         }
@@ -2525,7 +2557,12 @@ impl Timeline {
                 // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
                 // require downloading anything during initial import.
                 let (partitioning, _lsn) = self
-                    .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
+                    .repartition(
+                        self.initdb_lsn,
+                        self.get_compaction_target_size(),
+                        EnumSet::empty(),
+                        ctx,
+                    )
                     .await?;
 
                 if self.cancel.is_cancelled() {
@@ -2744,12 +2781,16 @@ impl Timeline {
         &self,
         lsn: Lsn,
         partition_size: u64,
+        flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         {
             let partitioning_guard = self.partitioning.lock().unwrap();
             let distance = lsn.0 - partitioning_guard.1 .0;
-            if partitioning_guard.1 != Lsn(0) && distance <= self.repartition_threshold {
+            if partitioning_guard.1 != Lsn(0)
+                && distance <= self.repartition_threshold
+                && !flags.contains(CompactFlags::ForceRepartition)
+            {
                 debug!(
                     distance,
                     threshold = self.repartition_threshold,
