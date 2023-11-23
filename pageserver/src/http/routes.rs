@@ -550,7 +550,7 @@ async fn timeline_detail_handler(
 
 async fn get_lsn_by_timestamp_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -566,7 +566,9 @@ async fn get_lsn_by_timestamp_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
+    let result = timeline
+        .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
+        .await?;
 
     if version.unwrap_or(0) > 1 {
         #[derive(serde::Serialize)]
@@ -842,7 +844,7 @@ async fn tenant_delete_handler(
 /// without modifying anything anyway.
 async fn tenant_size_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -858,6 +860,7 @@ async fn tenant_size_handler(
         .gather_size_inputs(
             retention_period,
             LogicalSizeCalculationCause::TenantSizeHandler,
+            &cancel,
             &ctx,
         )
         .await
@@ -1242,7 +1245,7 @@ async fn failpoints_handler(
 // Run GC immediately on given timeline.
 async fn timeline_gc_handler(
     mut request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1251,7 +1254,7 @@ async fn timeline_gc_handler(
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req, &ctx).await?;
+    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req, cancel, &ctx).await?;
     let gc_result = wait_task_done
         .await
         .context("wait for gc task")

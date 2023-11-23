@@ -3,7 +3,7 @@
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{mgr, LogicalSizeCalculationCause};
+use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::NodeId;
 
@@ -37,6 +38,7 @@ type RawMetric = (MetricsKey, (EventType, u64));
 type Cache = HashMap<MetricsKey, (EventType, u64)>;
 
 /// Main thread that serves metrics collection
+#[allow(clippy::too_many_arguments)]
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
@@ -44,6 +46,7 @@ pub async fn collect_metrics(
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
     local_disk_storage: Utf8PathBuf,
+    cancel: CancellationToken,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
     if _cached_metric_collection_interval != Duration::ZERO {
@@ -63,9 +66,13 @@ pub async fn collect_metrics(
         "synthetic size calculation",
         false,
         async move {
-            calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx)
-                .instrument(info_span!("synthetic_size_worker"))
-                .await?;
+            calculate_synthetic_size_worker(
+                synthetic_size_calculation_interval,
+                &cancel,
+                &worker_ctx,
+            )
+            .instrument(info_span!("synthetic_size_worker"))
+            .await?;
             Ok(())
         },
     );
@@ -241,6 +248,7 @@ async fn reschedule(
 /// Caclculate synthetic size for each active tenant
 async fn calculate_synthetic_size_worker(
     synthetic_size_calculation_interval: Duration,
+    cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
@@ -272,7 +280,12 @@ async fn calculate_synthetic_size_worker(
                 // Same for the loop that fetches computed metrics.
                 // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
                 // which turns out is really handy to understand the system.
-                if let Err(e) = tenant.calculate_synthetic_size(cause, ctx).await {
+                if let Err(e) = tenant.calculate_synthetic_size(cause, cancel, ctx).await {
+                    if let Some(PageReconstructError::Cancelled) =
+                        e.downcast_ref::<PageReconstructError>()
+                    {
+                        return Ok(());
+                    }
                     error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
             }

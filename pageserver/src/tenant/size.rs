@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context};
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
@@ -113,11 +114,12 @@ pub(super) async fn gather_inputs(
     max_retention_period: Option<u64>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
     cause: LogicalSizeCalculationCause,
+    cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
     tenant
-        .refresh_gc_info(ctx)
+        .refresh_gc_info(cancel, ctx)
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
