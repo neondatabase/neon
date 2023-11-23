@@ -935,7 +935,7 @@ paths:
                   format: hex
                 pg_version:
                   type: integer
-                load_existing_initdb:
+                existing_initdb_timeline_id:
                   type: string
                   format: hex
       responses:

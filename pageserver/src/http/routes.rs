@@ -439,7 +439,7 @@ async fn timeline_create_handler(
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-            request_data.load_existing_initdb,
+            request_data.existing_initdb_timeline_id,
             state.broker_client.clone(),
             &ctx,
         )

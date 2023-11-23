@@ -180,7 +180,7 @@ pub struct TimelineCreateRequest {
     #[serde(default)]
     pub ancestor_timeline_id: Option<TimelineId>,
     #[serde(default)]
-    pub load_existing_initdb: Option<TimelineId>,
+    pub existing_initdb_timeline_id: Option<TimelineId>,
     #[serde(default)]
     pub ancestor_start_lsn: Option<Lsn>,
     pub pg_version: Option<u32>,
