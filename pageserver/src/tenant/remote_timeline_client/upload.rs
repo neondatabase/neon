@@ -1,6 +1,7 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
 use std::io::ErrorKind;
@@ -9,7 +10,9 @@ use tokio::fs;
 use super::Generation;
 use crate::{
     config::PageServerConf,
-    tenant::remote_timeline_client::{index::IndexPart, remote_index_path, remote_path},
+    tenant::remote_timeline_client::{
+        index::IndexPart, remote_index_path, remote_initdb_archive_path, remote_path,
+    },
 };
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
@@ -103,4 +106,23 @@ pub(super) async fn upload_timeline_layer<'a>(
         .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
     Ok(())
+}
+
+/// Uploads the given `initdb` data to the remote storage.
+pub(crate) async fn upload_initdb_dir(
+    storage: &GenericRemoteStorage,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    initdb_dir: Bytes,
+) -> anyhow::Result<()> {
+    tracing::trace!("uploading initdb dir");
+
+    let size = initdb_dir.len();
+    let bytes = tokio::io::BufReader::new(std::io::Cursor::new(initdb_dir));
+
+    let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
+    storage
+        .upload_storage_object(bytes, size, &remote_path)
+        .await
+        .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }

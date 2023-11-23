@@ -1224,6 +1224,7 @@ class NeonCli(AbstractNeonCli):
         self,
         new_branch_name: str,
         tenant_id: Optional[TenantId] = None,
+        timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
         cmd = [
             "timeline",
@@ -1235,6 +1236,9 @@ class NeonCli(AbstractNeonCli):
             "--pg-version",
             self.env.pg_version,
         ]
+
+        if timeline_id is not None:
+            cmd.extend(["--timeline-id", str(timeline_id)])
 
         res = self.raw_cli(cmd)
         res.check_returncode()

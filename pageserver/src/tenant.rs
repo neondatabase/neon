@@ -12,6 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use futures::FutureExt;
@@ -24,6 +25,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
@@ -2895,7 +2897,7 @@ impl Tenant {
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
-    /// - after initialization complete, remove the temp dir.
+    /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
@@ -2935,6 +2937,30 @@ impl Tenant {
         }
         let pgdata_path = &initdb_path;
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+
+        // Upload the created data dir to S3
+        if let Some(storage) = &self.remote_storage {
+            let pgdata_zstd = import_datadir::create_tar_zst(pgdata_path).await?;
+            let pgdata_zstd = Bytes::from(pgdata_zstd);
+            backoff::retry(
+                || async {
+                    self::remote_timeline_client::upload_initdb_dir(
+                        storage,
+                        &self.tenant_id,
+                        &timeline_id,
+                        pgdata_zstd.clone(),
+                    )
+                    .await
+                },
+                |_| false,
+                3,
+                u32::MAX,
+                "persist_initdb_tar_zst",
+                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            )
+            .await?;
+        }
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.

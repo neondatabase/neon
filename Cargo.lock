@@ -193,6 +193,8 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "tokio",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -6033,6 +6035,9 @@ dependencies = [
  "tungstenite",
  "url",
  "uuid",
+ "zstd",
+ "zstd-safe",
+ "zstd-sys",
 ]
 
 [[package]]
