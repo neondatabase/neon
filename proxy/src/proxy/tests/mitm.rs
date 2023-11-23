@@ -15,8 +15,14 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::TlsConnect;
 use tokio_util::codec::{Decoder, Encoder};
 
+enum Intercept {
+    None,
+    Methods,
+    SASLResponse,
+}
+
 async fn proxy_mitm(
-    intercept: bool,
+    intercept: Intercept,
 ) -> (DuplexStream, DuplexStream, ClientConfig<'static>, TlsConfig) {
     let (end_server1, client1) = tokio::io::duplex(1024);
     let (server2, end_client2) = tokio::io::duplex(1024);
@@ -53,7 +59,7 @@ async fn proxy_mitm(
                     match message {
                         Some(Ok(message)) => {
                             // intercept SASL and return only SCRAM-SHA-256 ;)
-                            if intercept && message.starts_with(b"R") && message[5..].starts_with(&[0,0,0,10]) {
+                            if matches!(intercept, Intercept::Methods) && message.starts_with(b"R") && message[5..].starts_with(&[0,0,0,10]) {
                                 end_client.send(Bytes::from_static(b"R\0\0\0\x17\0\0\0\x0aSCRAM-SHA-256\0\0")).await.unwrap();
                                 continue;
                             }
@@ -64,7 +70,21 @@ async fn proxy_mitm(
                 }
                 message = end_client.next() => {
                     match message {
-                        Some(Ok(message)) => end_server.send(message).await.unwrap(),
+                        Some(Ok(message)) => {
+                            // intercept SASL response and return SCRAM-SHA-256 with no channel binding ;)
+                            if matches!(intercept, Intercept::SASLResponse) && message.starts_with(b"p") && message[5..].starts_with(b"SCRAM-SHA-256-PLUS\0") {
+                                let sasl_message = &message[1+4+19+4..];
+                                let mut new_message = b"n,,".to_vec();
+                                new_message.extend_from_slice(sasl_message.strip_prefix(b"p=tls-server-end-point,,").unwrap());
+
+                                let mut buf = BytesMut::new();
+                                frontend::sasl_initial_response("SCRAM-SHA-256", &new_message, &mut buf).unwrap();
+
+                                end_server.send(buf.freeze()).await.unwrap();
+                                continue;
+                            }
+                            end_server.send(message).await.unwrap()
+                        }
                         _ => break,
                     }
                 }
@@ -127,7 +147,7 @@ impl Encoder<Bytes> for PgFrame {
 /// If the client doesn't support channel bindings, it can be exploited.
 #[tokio::test]
 async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
-    let (server, client, client_config, server_config) = proxy_mitm(false).await;
+    let (server, client, client_config, server_config) = proxy_mitm(Intercept::None).await;
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
@@ -149,94 +169,68 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
 /// If the client chooses SCRAM-PLUS, it will fail
 #[tokio::test]
 async fn scram_auth_prefer_channel_binding() -> anyhow::Result<()> {
-    let (server, client, client_config, server_config) = proxy_mitm(false).await;
-    let proxy = tokio::spawn(dummy_proxy(
-        client,
-        Some(server_config),
-        Scram::new("password")?,
-    ));
-
-    let _client_err = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Prefer)
-        .user("user")
-        .dbname("db")
-        .password("password")
-        .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
-        .await
-        .err()
-        .context("client shouldn't be able to connect")?;
-
-    let _server_err = proxy
-        .await?
-        .err()
-        .context("server shouldn't accept client")?;
-
-    Ok(())
+    connect_failure(
+        Intercept::None,
+        tokio_postgres::config::ChannelBinding::Prefer,
+    )
+    .await
 }
 
 /// If the MITM pretends like SCRAM-PLUS isn't available, but the client supports it, it will fail
 #[tokio::test]
 async fn scram_auth_prefer_channel_binding_intercept() -> anyhow::Result<()> {
-    let (server, client, client_config, server_config) = proxy_mitm(true).await;
-    let proxy = tokio::spawn(dummy_proxy(
-        client,
-        Some(server_config),
-        Scram::new("password")?,
-    ));
+    connect_failure(
+        Intercept::Methods,
+        tokio_postgres::config::ChannelBinding::Prefer,
+    )
+    .await
+}
 
-    let _client_err = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Prefer)
-        .user("user")
-        .dbname("db")
-        .password("password")
-        .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
-        .await
-        .err()
-        .context("client shouldn't be able to connect")?;
-
-    let _server_err = proxy
-        .await?
-        .err()
-        .context("server shouldn't accept client")?;
-
-    Ok(())
+/// If the MITM pretends like the client doesn't support channel bindings, it will fail
+#[tokio::test]
+async fn scram_auth_prefer_channel_binding_intercept_response() -> anyhow::Result<()> {
+    connect_failure(
+        Intercept::SASLResponse,
+        tokio_postgres::config::ChannelBinding::Prefer,
+    )
+    .await
 }
 
 /// If the client chooses SCRAM-PLUS, it will fail
 #[tokio::test]
 async fn scram_auth_require_channel_binding() -> anyhow::Result<()> {
-    let (server, client, client_config, server_config) = proxy_mitm(false).await;
-    let proxy = tokio::spawn(dummy_proxy(
-        client,
-        Some(server_config),
-        Scram::new("password")?,
-    ));
-
-    let _client_err = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Require)
-        .user("user")
-        .dbname("db")
-        .password("password")
-        .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
-        .await
-        .err()
-        .context("client shouldn't be able to connect")?;
-
-    let _server_err = proxy
-        .await?
-        .err()
-        .context("server shouldn't accept client")?;
-
-    Ok(())
+    connect_failure(
+        Intercept::None,
+        tokio_postgres::config::ChannelBinding::Require,
+    )
+    .await
 }
 
 /// If the client requires SCRAM-PLUS, and it is spoofed to remove SCRAM-PLUS, it will fail
 #[tokio::test]
 async fn scram_auth_require_channel_binding_intercept() -> anyhow::Result<()> {
-    let (server, client, client_config, server_config) = proxy_mitm(true).await;
+    connect_failure(
+        Intercept::Methods,
+        tokio_postgres::config::ChannelBinding::Require,
+    )
+    .await
+}
+
+/// If the client requires SCRAM-PLUS, and it is spoofed to remove SCRAM-PLUS, it will fail
+#[tokio::test]
+async fn scram_auth_require_channel_binding_intercept_response() -> anyhow::Result<()> {
+    connect_failure(
+        Intercept::SASLResponse,
+        tokio_postgres::config::ChannelBinding::Require,
+    )
+    .await
+}
+
+async fn connect_failure(
+    intercept: Intercept,
+    channel_binding: tokio_postgres::config::ChannelBinding,
+) -> anyhow::Result<()> {
+    let (server, client, client_config, server_config) = proxy_mitm(intercept).await;
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
@@ -244,7 +238,7 @@ async fn scram_auth_require_channel_binding_intercept() -> anyhow::Result<()> {
     ));
 
     let _client_err = tokio_postgres::Config::new()
-        .channel_binding(tokio_postgres::config::ChannelBinding::Require)
+        .channel_binding(channel_binding)
         .user("user")
         .dbname("db")
         .password("password")
