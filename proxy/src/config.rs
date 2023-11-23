@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use x509_parser::der_parser::oid;
+use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -128,8 +128,8 @@ pub enum TlsServerEndPoint {
 impl TlsServerEndPoint {
     pub fn new(cert: &Certificate) -> anyhow::Result<Self> {
         let sha256_oids = [
-            oid!(1.2.840 .10045 .4 .3 .2), // ecdsa-with-SHA256: <https://oidref.com/1.2.840.10045.4.3.2>
-            oid!(1.2.840 .113549 .1 .1 .11), // sha256WithRSAEncryption: <https://oidref.com/1.2.840.113549.1.1.11>
+            oid_registry::OID_SIG_ECDSA_WITH_SHA256,
+            oid_registry::OID_PKCS1_SHA256WITHRSA,
         ];
 
         let pem = x509_parser::parse_x509_certificate(&cert.0)
