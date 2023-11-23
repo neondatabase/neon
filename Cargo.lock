@@ -2907,6 +2907,8 @@ dependencies = [
  "git-version",
  "pageserver",
  "postgres_ffi",
+ "serde",
+ "serde_json",
  "svg_fmt",
  "tokio",
  "utils",
@@ -2996,10 +2998,12 @@ name = "pageserver_api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "byteorder",
  "bytes",
  "const_format",
  "enum-map",
+ "hex",
  "postgres_ffi",
  "serde",
  "serde_json",
@@ -3221,7 +3225,7 @@ dependencies = [
 [[package]]
 name = "postgres"
 version = "0.19.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3234,7 +3238,7 @@ dependencies = [
 [[package]]
 name = "postgres-native-tls"
 version = "0.5.0"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
 dependencies = [
  "native-tls",
  "tokio",
@@ -3245,7 +3249,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
 dependencies = [
  "base64 0.20.0",
  "byteorder",
@@ -3263,7 +3267,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.4"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -3521,6 +3525,7 @@ dependencies = [
  "sha2",
  "socket2 0.5.3",
  "sync_wrapper",
+ "task-local-extensions",
  "thiserror",
  "tls-listener",
  "tokio",
@@ -4932,7 +4937,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.7"
-source = "git+https://github.com/neondatabase/rust-postgres.git?rev=ce7260db5998fe27167da42503905a12e7ad9048#ce7260db5998fe27167da42503905a12e7ad9048"
+source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#988d0ddb4184c408fa7fc1bd0ecca7993c02978f"
 dependencies = [
  "async-trait",
  "byteorder",

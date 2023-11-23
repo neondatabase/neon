@@ -9,6 +9,24 @@ refactoring, additional comments, and so forth. Let's try to raise the
 bar, and clean things up as we go. Try to leave code in a better shape
 than it was before.
 
+## Pre-commit hook
+
+We have a sample pre-commit hook in `pre-commit.py`.
+To set it up, run:
+
+```bash
+ln -s ../../pre-commit.py .git/hooks/pre-commit
+```
+
+This will run following checks on staged files before each commit:
+- `rustfmt`
+- checks for python files, see [obligatory checks](/docs/sourcetree.md#obligatory-checks).
+
+There is also a separate script `./run_clippy.sh` that runs `cargo clippy` on the whole project
+and `./scripts/reformat` that runs all formatting tools to ensure the project is up to date.
+
+If you want to skip the hook, run `git commit` with `--no-verify` option.
+
 ## Submitting changes
 
 1. Get at least one +1 on your PR before you push.

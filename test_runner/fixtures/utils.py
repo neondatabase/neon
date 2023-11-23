@@ -6,7 +6,16 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 from urllib.parse import urlencode
 
 import allure
@@ -14,6 +23,10 @@ import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
+from fixtures.pageserver.types import (
+    parse_delta_layer,
+    parse_image_layer,
+)
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgBin
@@ -191,26 +204,6 @@ def get_timeline_dir_size(path: Path) -> int:
             _ = parse_delta_layer(dir_entry.name)
             sz += dir_entry.stat().st_size
     return sz
-
-
-def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
-    """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
-    parts = f_name.split("__")
-    key_parts = parts[0].split("-")
-    return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
-
-
-def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
-    """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
-    parts = f_name.split("__")
-    key_parts = parts[0].split("-")
-    lsn_parts = parts[1].split("-")
-    return (
-        int(key_parts[0], 16),
-        int(key_parts[1], 16),
-        int(lsn_parts[0], 16),
-        int(lsn_parts[1], 16),
-    )
 
 
 def get_scale_for_db(size_mb: int) -> int:

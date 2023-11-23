@@ -513,6 +513,7 @@ impl DeletionQueueClient {
     ) -> Result<(), DeletionQueueError> {
         if current_generation.is_none() {
             debug!("Enqueuing deletions in legacy mode, skipping queue");
+
             let mut layer_paths = Vec::new();
             for (layer, generation) in layers {
                 layer_paths.push(remote_layer_path(

@@ -180,16 +180,16 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
                     let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count,
+                        error_run_count + 1,
                         1.0,
                         MAX_BACKOFF_SECS,
                     );
                     error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
                     error!(
-                        "Compaction failed {error_run_count} times, retrying in {:?}: {e:?}",
-                        wait_duration
+                        "Compaction failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
                     );
-                    Duration::from_secs_f64(wait_duration)
+                    wait_duration
                 } else {
                     error_run_count = 0;
                     period
@@ -197,6 +197,10 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             };
 
             warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+
+            // Perhaps we did no work and the walredo process has been idle for some time:
+            // give it a chance to shut down to avoid leaving walredo process running indefinitely.
+            tenant.walredo_mgr.maybe_quiesce(period * 10);
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -261,16 +265,16 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     .await;
                 if let Err(e) = res {
                     let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count,
+                        error_run_count + 1,
                         1.0,
                         MAX_BACKOFF_SECS,
                     );
                     error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
                     error!(
-                        "Gc failed {error_run_count} times, retrying in {:?}: {e:?}",
-                        wait_duration
+                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
                     );
-                    Duration::from_secs_f64(wait_duration)
+                    wait_duration
                 } else {
                     error_run_count = 0;
                     period

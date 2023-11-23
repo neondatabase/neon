@@ -14,6 +14,7 @@
 use anyhow::{bail, Context};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+use enumset::EnumSet;
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
@@ -293,6 +294,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+        match self {
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub async fn request_redo(
         &self,
         key: crate::repository::Key,
@@ -1651,21 +1662,15 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub async fn compaction_iteration(
+    async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Don't start doing work during shutdown
-        if let TenantState::Stopping { .. } = self.current_state() {
+    ) -> anyhow::Result<(), timeline::CompactionError> {
+        // Don't start doing work during shutdown, or when broken, we do not need those in the logs
+        if !self.is_active() {
             return Ok(());
         }
-
-        // We should only be called once the tenant has activated.
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run compaction iteration on inactive tenant"
-        );
 
         {
             let conf = self.tenant_conf.read().unwrap();
@@ -1697,7 +1702,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
-                .compact(cancel, ctx)
+                .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
@@ -3526,6 +3531,7 @@ pub(crate) mod harness {
                 // enable it in case the tests exercise code paths that use
                 // debug_assert_current_span_has_tenant_and_timeline_id
                 logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+                logging::Output::Stdout,
             )
             .expect("Failed to init test logging")
         });
@@ -4320,7 +4326,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4335,7 +4343,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4350,7 +4360,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4365,7 +4377,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
@@ -4436,7 +4450,9 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4516,7 +4532,9 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4606,7 +4624,9 @@ mod tests {
                 .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 

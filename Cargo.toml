@@ -136,6 +136,7 @@ strum_macros = "0.24"
 svg_fmt = "0.4.1"
 sync_wrapper = "0.1.2"
 tar = "0.4"
+task-local-extensions = "0.1.4"
 test-context = "0.1"
 thiserror = "1.0"
 tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
@@ -164,11 +165,11 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="ce7260db5998fe27167da42503905a12e7ad9048" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="ce7260db5998fe27167da42503905a12e7ad9048" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="ce7260db5998fe27167da42503905a12e7ad9048" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="ce7260db5998fe27167da42503905a12e7ad9048" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="ce7260db5998fe27167da42503905a12e7ad9048" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 ## Other git libraries
 heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
@@ -205,7 +206,7 @@ tonic-build = "0.9"
 
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="ce7260db5998fe27167da42503905a12e7ad9048" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 ################# Binary contents sections
 
