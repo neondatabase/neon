@@ -65,7 +65,7 @@ def decompress_zstd(
     output_dir: Path,
 ):
     log.info(f"decompressing zstd to: {output_dir}")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     with tempfile.TemporaryFile(suffix=".tar") as temp:
         decompressor = zstandard.ZstdDecompressor()
         with open(input_file_name, "rb") as input_file:
