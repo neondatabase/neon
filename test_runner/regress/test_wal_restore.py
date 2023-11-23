@@ -13,7 +13,7 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
 )
 from fixtures.port_distributor import PortDistributor
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 
 
 @pytest.mark.skipif(
@@ -88,6 +88,7 @@ def test_wal_restore_initdb(
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+    original_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
     env.pageserver.stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
@@ -125,4 +126,6 @@ def test_wal_restore_initdb(
             ]
         )
         restored.start()
+        restored_lsn = Lsn(restored.safe_psql("SELECT pg_current_wal_insert_lsn()", user="cloud_admin")[0][0])
+        log.info(f"original lsn: {original_lsn}, restored lsn: {restored_lsn}")
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
