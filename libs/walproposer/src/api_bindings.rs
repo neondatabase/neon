@@ -278,7 +278,8 @@ extern "C" fn wait_event_set(
             }
             WaitResult::Timeout => {
                 *event_sk = std::ptr::null_mut();
-                *events = crate::bindings::WL_TIMEOUT;
+                // WaitEventSetWait returns 0 for timeout.
+                *events = 0;
                 0
             }
             WaitResult::Network(sk, event_mask) => {

@@ -308,7 +308,7 @@ impl ApiImpl for SimulationApi {
                 let mut sk = self.find_conn(tcp);
                 // TODO: ???
                 sk.socket = None;
-                walproposer::walproposer::WaitResult::Network(sk.raw_ptr, WL_SOCKET_CLOSED)
+                walproposer::walproposer::WaitResult::Network(sk.raw_ptr, WL_SOCKET_READABLE)
             }
             slowsim::world::NodeEvent::Message((msg, tcp)) => {
                 let _ = match msg {

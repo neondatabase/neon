@@ -67,30 +67,30 @@ fn crash_safekeeper() {
     test.poll_for_duration(1000);
 }
 
-// #[test]
-// fn test_simple_restart() {
-//     let clock = init_logger();
-//     let mut config = TestConfig::new(Some(clock));
-//     // config.network.timeout = Some(250);
-//     let test = config.start(1337);
+#[test]
+fn test_simple_restart() {
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    // config.network.timeout = Some(250);
+    let test = config.start(1337);
 
-//     let lsn = test.sync_safekeepers().unwrap();
-//     assert_eq!(lsn, Lsn(0));
-//     info!("Sucessfully synced empty safekeepers at 0/0");
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
-//     let mut wp = test.launch_walproposer(lsn);
+    let mut wp = test.launch_walproposer(lsn);
 
-//     test.poll_for_duration(30);
+    test.poll_for_duration(30);
 
-//     wp.write_tx(3);
-//     test.poll_for_duration(100);
+    wp.write_tx(3);
+    test.poll_for_duration(100);
 
-//     wp.stop();
-//     drop(wp);
+    wp.stop();
+    drop(wp);
 
-//     let lsn = test.sync_safekeepers().unwrap();
-//     info!("Sucessfully synced safekeepers at {}", lsn);
-// }
+    let lsn = test.sync_safekeepers().unwrap();
+    info!("Sucessfully synced safekeepers at {}", lsn);
+}
 
 // #[test]
 // fn test_simple_schedule() -> anyhow::Result<()> {
