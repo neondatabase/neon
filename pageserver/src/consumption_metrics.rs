@@ -38,6 +38,7 @@ type RawMetric = (MetricsKey, (EventType, u64));
 type Cache = HashMap<MetricsKey, (EventType, u64)>;
 
 /// Main thread that serves metrics collection
+#[allow(clippy::too_many_arguments)]
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
