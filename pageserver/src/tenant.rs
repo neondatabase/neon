@@ -2575,9 +2575,24 @@ impl Tenant {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        let gc_timelines = self
+        let gc_timelines = match self
             .refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                if let Some(PageReconstructError::Cancelled) =
+                    e.downcast_ref::<PageReconstructError>()
+                {
+                    // Handle cancellation
+                    totals.elapsed = now.elapsed();
+                    return Ok(totals);
+                } else {
+                    // Propagate other errors
+                    return Err(e);
+                }
+            }
+        };
 
         crate::failpoint_support::sleep_millis_async!(
             "gc_iteration_internal_after_getting_gc_timelines"
