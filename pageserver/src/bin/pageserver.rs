@@ -626,6 +626,7 @@ fn start_pageserver(
                     conf.id,
                     local_disk_storage,
                     metrics_ctx,
+                    cancel,
                 )
                 .instrument(info_span!("metrics_collection"))
                 .await?;

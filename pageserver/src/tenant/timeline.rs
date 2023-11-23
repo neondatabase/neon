@@ -3686,6 +3686,7 @@ impl Timeline {
         cutoff_horizon: Lsn,
         pitr: Duration,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
         //
@@ -3698,7 +3699,10 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self.find_lsn_for_timestamp(pitr_timestamp, ctx).await? {
+                match self
+                    .find_lsn_for_timestamp(pitr_timestamp, ctx, cancel)
+                    .await?
+                {
                     LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
                         // The timestamp is in the future. That sounds impossible,

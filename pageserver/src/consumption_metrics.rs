@@ -8,6 +8,7 @@ use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
 use reqwest::Url;
+use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -45,6 +46,7 @@ pub async fn collect_metrics(
     node_id: NodeId,
     local_disk_storage: Utf8PathBuf,
     ctx: RequestContext,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     if _cached_metric_collection_interval != Duration::ZERO {
         tracing::warn!(
@@ -63,7 +65,7 @@ pub async fn collect_metrics(
         "synthetic size calculation",
         false,
         async move {
-            calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx)
+            calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx, &cancel)
                 .instrument(info_span!("synthetic_size_worker"))
                 .await?;
             Ok(())
@@ -242,6 +244,7 @@ async fn reschedule(
 async fn calculate_synthetic_size_worker(
     synthetic_size_calculation_interval: Duration,
     ctx: &RequestContext,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
     scopeguard::defer! {
@@ -272,7 +275,7 @@ async fn calculate_synthetic_size_worker(
                 // Same for the loop that fetches computed metrics.
                 // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
                 // which turns out is really handy to understand the system.
-                if let Err(e) = tenant.calculate_synthetic_size(cause, ctx).await {
+                if let Err(e) = tenant.calculate_synthetic_size(cause, ctx, cancel).await {
                     error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
             }

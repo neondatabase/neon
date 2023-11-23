@@ -1630,6 +1630,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<GcResult> {
         // Don't start doing work during shutdown
         if let TenantState::Stopping { .. } = self.current_state() {
@@ -1651,7 +1652,7 @@ impl Tenant {
             }
         }
 
-        self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+        self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx, cancel)
             .await
     }
 
@@ -2569,12 +2570,13 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
         let gc_timelines = self
-            .refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
+            .refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx, cancel)
             .await?;
 
         crate::failpoint_support::sleep_millis_async!(
@@ -2620,6 +2622,7 @@ impl Tenant {
     pub async fn refresh_gc_info(
         &self,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
@@ -2630,7 +2633,7 @@ impl Tenant {
         // refresh all timelines
         let target_timeline_id = None;
 
-        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
+        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx, cancel)
             .await
     }
 
@@ -2640,6 +2643,7 @@ impl Tenant {
         horizon: u64,
         pitr: Duration,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // grab mutex to prevent new timelines from being created here.
         let gc_cs = self.gc_cs.lock().await;
@@ -2712,7 +2716,7 @@ impl Tenant {
                     .map(|&x| x.1)
                     .collect();
                 timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, ctx)
+                    .update_gc_info(branchpoints, cutoff, pitr, ctx, cancel)
                     .await?;
 
                 gc_timelines.push(timeline);
@@ -3126,6 +3130,7 @@ impl Tenant {
         max_retention_period: Option<u64>,
         cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
             .conf
@@ -3148,6 +3153,7 @@ impl Tenant {
             &mut shared_cache,
             cause,
             ctx,
+            cancel,
         )
         .await
     }
@@ -3160,8 +3166,9 @@ impl Tenant {
         &self,
         cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(None, cause, ctx).await?;
+        let inputs = self.gather_size_inputs(None, cause, ctx, cancel).await?;
 
         let size = inputs.calculate()?;
 
@@ -3932,8 +3939,9 @@ mod tests {
         // FIXME: this doesn't actually remove any layer currently, given how the flushing
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
+        let cancel = CancellationToken::new();
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx, &cancel)
             .await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
@@ -4035,8 +4043,9 @@ mod tests {
 
         tline.set_broken("test".to_owned());
 
+        let cancel = CancellationToken::new();
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx, &cancel)
             .await?;
 
         // The branchpoints should contain all timelines, even ones marked
@@ -4081,8 +4090,9 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
+        let cancel = CancellationToken::new();
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx, &cancel)
             .await?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25), &ctx).await.is_ok());
 
@@ -4110,7 +4120,13 @@ mod tests {
 
         // run gc on parent
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &ctx,
+                &CancellationToken::new(),
+            )
             .await?;
 
         // Check that the data is still accessible on the branch.
@@ -4412,7 +4428,13 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
 
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &ctx,
+                    &CancellationToken::new(),
+                )
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&CancellationToken::new(), &ctx).await?;
@@ -4492,7 +4514,13 @@ mod tests {
             // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &ctx,
+                    &CancellationToken::new(),
+                )
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&CancellationToken::new(), &ctx).await?;
@@ -4582,7 +4610,13 @@ mod tests {
             // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &ctx,
+                    &CancellationToken::new(),
+                )
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&CancellationToken::new(), &ctx).await?;

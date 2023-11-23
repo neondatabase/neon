@@ -458,6 +458,7 @@ impl Timeline {
             &mut throwaway_cache,
             LogicalSizeCalculationCause::EvictionTaskImitation,
             ctx,
+            cancel,
         )
         .instrument(info_span!("gather_inputs"));
 
