@@ -13,6 +13,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.port_distributor import PortDistributor
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.remote_storage import LocalFsStorage
 
 
 @pytest.mark.skipif(
@@ -87,26 +88,20 @@ def test_wal_restore_initdb(
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    original_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
+    original_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     env.pageserver.stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"
 
-    initdb_zst_path = Path(
-        test_output_dir
-        / "repo"
-        / "local_fs_remote_storage"
-        / "pageserver"
-        / "tenants"
-        / str(tenant_id)
-        / "timelines"
-        / str(timeline_id)
-        / "initdb.tar.zst"
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    initdb_zst_path = (
+        env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst"
     )
 
     decompress_zstd(initdb_zst_path, data_dir)
     with VanillaPostgres(
-        data_dir, PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version), port, init = False
+        data_dir, PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version), port, init=False
     ) as restored:
         pg_bin.run_capture(
             [
@@ -125,6 +120,8 @@ def test_wal_restore_initdb(
             ]
         )
         restored.start()
-        restored_lsn = Lsn(restored.safe_psql("SELECT pg_current_wal_insert_lsn()", user="cloud_admin")[0][0])
+        restored_lsn = Lsn(
+            restored.safe_psql("SELECT pg_current_wal_flush_lsn()", user="cloud_admin")[0][0]
+        )
         log.info(f"original lsn: {original_lsn}, restored lsn: {restored_lsn}")
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
