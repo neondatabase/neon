@@ -3,7 +3,7 @@
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{mgr, LogicalSizeCalculationCause};
+use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
@@ -281,6 +281,11 @@ async fn calculate_synthetic_size_worker(
                 // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
                 // which turns out is really handy to understand the system.
                 if let Err(e) = tenant.calculate_synthetic_size(cause, cancel, ctx).await {
+                    if let Some(PageReconstructError::Cancelled) =
+                        e.downcast_ref::<PageReconstructError>()
+                    {
+                        return Ok(());
+                    }
                     error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
             }
