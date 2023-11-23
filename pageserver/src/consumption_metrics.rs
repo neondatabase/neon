@@ -8,11 +8,11 @@ use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
 use reqwest::Url;
-use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::NodeId;
 
@@ -65,9 +65,13 @@ pub async fn collect_metrics(
         "synthetic size calculation",
         false,
         async move {
-            calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx, &cancel)
-                .instrument(info_span!("synthetic_size_worker"))
-                .await?;
+            calculate_synthetic_size_worker(
+                synthetic_size_calculation_interval,
+                &worker_ctx,
+                &cancel,
+            )
+            .instrument(info_span!("synthetic_size_worker"))
+            .await?;
             Ok(())
         },
     );
