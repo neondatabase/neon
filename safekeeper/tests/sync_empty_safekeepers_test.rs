@@ -169,7 +169,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
     let mut config = TestConfig::new(Some(clock));
     config.network.keepalive_timeout = Some(100);
 
-    for i in 0..300 {
+    for i in 0..3000 {
         let seed: u64 = rand::thread_rng().gen();
         config.network = generate_network_opts(seed);
 
@@ -201,7 +201,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // test.run_schedule(&schedule)?;
     // test.world.deallocate();
 
-    let seed = 3649773280641776194;
+    let seed = 9120690372659445518;
     config.network = generate_network_opts(seed);
     info!("network: {:?}", config.network);
     let test = config.start(seed);

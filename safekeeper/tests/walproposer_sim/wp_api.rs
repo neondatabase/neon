@@ -5,6 +5,7 @@ use std::{
 
 use bytes::Bytes;
 use slowsim::{network::TCP, node_os::NodeOs, world::{NodeId, NodeEvent}, proto::AnyMessage};
+use tracing::debug;
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
@@ -119,7 +120,7 @@ impl SimulationApi {
 
 impl ApiImpl for SimulationApi {
     fn get_current_timestamp(&self) -> i64 {
-        println!("get_current_timestamp");
+        debug!("get_current_timestamp");
         0
     }
 
@@ -127,12 +128,12 @@ impl ApiImpl for SimulationApi {
         &self,
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerConnStatusType {
-        println!("conn_status");
+        debug!("conn_status");
         walproposer::bindings::WalProposerConnStatusType_WP_CONNECTION_OK
     }
 
     fn conn_connect_start(&self, sk: &mut walproposer::bindings::Safekeeper) {
-        println!("conn_connect_start");
+        debug!("conn_connect_start");
         let mut conn = self.get_conn(sk);
 
         assert!(conn.socket.is_none());
@@ -146,12 +147,12 @@ impl ApiImpl for SimulationApi {
         &self,
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerConnectPollStatusType {
-        println!("conn_connect_poll");
+        debug!("conn_connect_poll");
         walproposer::bindings::WalProposerConnectPollStatusType_WP_CONN_POLLING_OK
     }
 
     fn conn_send_query(&self, sk: &mut walproposer::bindings::Safekeeper, query: &str) -> bool {
-        println!("conn_send_query: {}", query);
+        debug!("conn_send_query: {}", query);
         self.get_conn(sk).is_start_wal_push = true;
         true
     }
@@ -160,7 +161,7 @@ impl ApiImpl for SimulationApi {
         &self,
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerExecStatusType {
-        println!("conn_get_query_result");
+        debug!("conn_get_query_result");
         walproposer::bindings::WalProposerExecStatusType_WP_EXEC_SUCCESS_COPYBOTH
     }
 
@@ -169,7 +170,7 @@ impl ApiImpl for SimulationApi {
         sk: &mut walproposer::bindings::Safekeeper,
         vec: &mut Vec<u8>,
     ) -> walproposer::bindings::PGAsyncReadResult {
-        println!("conn_async_read");
+        debug!("conn_async_read");
         let conn = self.get_conn(sk);
         let peeked = self.os.epoll_peek(0);
         match peeked {
@@ -207,7 +208,7 @@ impl ApiImpl for SimulationApi {
 
     fn conn_blocking_write(&self, sk: &mut walproposer::bindings::Safekeeper, buf: &[u8]) -> bool {
         let mut conn = self.get_conn(sk);
-        println!("conn_blocking_write to {}: {:?}", conn.node_id, buf);
+        debug!("conn_blocking_write to {}: {:?}", conn.node_id, buf);
         let socket = conn.socket.as_mut().unwrap();
         socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
             buf,
@@ -221,21 +222,21 @@ impl ApiImpl for SimulationApi {
         buf: &[u8],
     ) -> walproposer::bindings::PGAsyncWriteResult {
         let mut conn = self.get_conn(sk);
-        println!("conn_async_write to {}: {:?}", conn.node_id, buf);
+        debug!("conn_async_write to {}: {:?}", conn.node_id, buf);
         if let Some(socket) = conn.socket.as_mut() {
             socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
                 buf,
             )));
         } else {
             // connection is already closed
-            println!("conn_async_write: writing to a closed socket!");
+            debug!("conn_async_write: writing to a closed socket!");
             // TODO: maybe we should return error here?
         }
         walproposer::bindings::PGAsyncWriteResult_PG_ASYNC_WRITE_SUCCESS
     }
 
     fn wal_reader_allocate(&self, _: &mut walproposer::bindings::Safekeeper) {
-        println!("wal_reader_allocate")
+        debug!("wal_reader_allocate")
     }
 
     fn wal_read(&self, _sk: &mut walproposer::bindings::Safekeeper, buf: &mut [u8], startpos: u64) {
@@ -243,15 +244,15 @@ impl ApiImpl for SimulationApi {
     }
 
     fn free_event_set(&self, _: &mut walproposer::bindings::WalProposer) {
-        println!("free_event_set")
+        debug!("free_event_set")
     }
 
     fn init_event_set(&self, _: &mut walproposer::bindings::WalProposer) {
-        println!("init_event_set")
+        debug!("init_event_set")
     }
 
     fn update_event_set(&self, sk: &mut walproposer::bindings::Safekeeper, event_mask: u32) {
-        println!(
+        debug!(
             "update_event_set, sk={:?}, events_mask={:#b}",
             sk as *mut walproposer::bindings::Safekeeper, event_mask
         );
@@ -262,7 +263,7 @@ impl ApiImpl for SimulationApi {
         sk: &mut walproposer::bindings::Safekeeper,
         event_mask: u32,
     ) {
-        println!(
+        debug!(
             "add_safekeeper_event_set, sk={:?}, events_mask={:#b}",
             sk as *mut walproposer::bindings::Safekeeper, event_mask
         );
@@ -277,7 +278,7 @@ impl ApiImpl for SimulationApi {
         for conn in conns.iter_mut() {
             if conn.socket.is_some() && conn.is_connecting {
                 conn.is_connecting = false;
-                println!("wait_event_set, connecting to {}:{}", conn.host, conn.port);
+                debug!("wait_event_set, connecting to {}:{}", conn.host, conn.port);
                 return walproposer::walproposer::WaitResult::Network(
                     conn.raw_ptr,
                     WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE,
@@ -285,7 +286,7 @@ impl ApiImpl for SimulationApi {
             }
             if conn.socket.is_some() && conn.is_start_wal_push {
                 conn.is_start_wal_push = false;
-                println!(
+                debug!(
                     "wait_event_set, start wal push to {}:{}",
                     conn.host, conn.port
                 );
@@ -298,7 +299,7 @@ impl ApiImpl for SimulationApi {
         drop(conns);
 
         let peek = self.os.epoll_peek(timeout_millis);
-        println!(
+        debug!(
             "wait_event_set, timeout_millis={}, peek={:?}",
             timeout_millis, peek
         );
@@ -337,7 +338,7 @@ impl ApiImpl for SimulationApi {
             slowsim::world::NodeEvent::Accept(_) => unreachable!(),
             slowsim::world::NodeEvent::WakeTimeout(_) => unreachable!(),
         };
-        println!(
+        debug!(
             "wait_event_set, timeout_millis={}, res={:?}",
             timeout_millis, res,
         );
@@ -345,19 +346,19 @@ impl ApiImpl for SimulationApi {
     }
 
     fn strong_random(&self, buf: &mut [u8]) -> bool {
-        println!("strong_random");
+        debug!("strong_random");
         buf.fill(0);
         true
     }
 
     fn finish_sync_safekeepers(&self, lsn: u64) {
-        println!("finish_sync_safekeepers, lsn={}", lsn);
+        debug!("finish_sync_safekeepers, lsn={}", lsn);
         self.os.set_result(0, Lsn(lsn).to_string());
         self.os.exit(format!("sync safekeepers finished at lsn={}", lsn));
     }
 
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
-        println!("walprop_log[{}] {}", level, msg);
+        debug!("walprop_log[{}] {}", level, msg);
         if level == Level::Fatal || level == Level::Panic {
             if msg == "Failed to recover state" {
                 self.os.exit(msg.to_owned());
@@ -370,11 +371,11 @@ impl ApiImpl for SimulationApi {
     }
 
     fn after_election(&self, _wp: &mut walproposer::bindings::WalProposer) {
-        println!("after_election");
+        debug!("after_election");
     }
 
     fn get_redo_start_lsn(&self) -> u64 {
-        println!("get_redo_start_lsn -> {:?}", self.redo_start_lsn);
+        debug!("get_redo_start_lsn -> {:?}", self.redo_start_lsn);
         self.redo_start_lsn.expect("redo_start_lsn is not set").0
     }
 
@@ -385,9 +386,9 @@ impl ApiImpl for SimulationApi {
     fn start_streaming(&self, startpos: u64, callback: &walproposer::walproposer::StreamingCallback) {
         let disk = &self.disk;
         let disk_lsn = disk.lock().flush_rec_ptr().0;
-        println!("start_streaming at {} (disk_lsn={})", startpos, disk_lsn);
+        debug!("start_streaming at {} (disk_lsn={})", startpos, disk_lsn);
         if startpos < disk_lsn {
-            println!("startpos < disk_lsn, it means we wrote some transaction even before streaming started");
+            debug!("startpos < disk_lsn, it means we wrote some transaction even before streaming started");
         }
         assert!(startpos <= disk_lsn);
         let mut broadcasted = Lsn(startpos);
@@ -402,17 +403,17 @@ impl ApiImpl for SimulationApi {
     }
 
     fn process_safekeeper_feedback(&self, _wp: &mut walproposer::bindings::WalProposer, commit_lsn: u64) {
-        println!("process_safekeeper_feedback, commit_lsn={}", commit_lsn);
+        debug!("process_safekeeper_feedback, commit_lsn={}", commit_lsn);
     }
 
     fn get_flush_rec_ptr(&self) -> u64 {
         let lsn = self.disk.lock().flush_rec_ptr();
-        println!("get_flush_rec_ptr: {}", lsn);
+        debug!("get_flush_rec_ptr: {}", lsn);
         lsn.0
     }
 
     fn confirm_wal_streamed(&self, _wp: &mut walproposer::bindings::WalProposer, lsn: u64) {
-        println!("confirm_wal_streamed: {}", Lsn(lsn))
+        debug!("confirm_wal_streamed: {}", Lsn(lsn))
     }
 
     fn recovery_download(&self, sk: &mut walproposer::bindings::Safekeeper, mut startpos: u64, endpos: u64) -> bool {
@@ -424,7 +425,7 @@ impl ApiImpl for SimulationApi {
             endpos,
         );
         let async_conn = self.get_conn(sk);
-        println!("recovery_download from {} to {}, sk={}", startpos, endpos, async_conn.node_id);
+        debug!("recovery_download from {} to {}, sk={}", startpos, endpos, async_conn.node_id);
 
         let conn = self.os.open_tcp_nopoll(async_conn.node_id);
         conn.send(slowsim::proto::AnyMessage::Bytes(replication_prompt.into()));
@@ -436,7 +437,7 @@ impl ApiImpl for SimulationApi {
                     break;
                 }
                 NodeEvent::Message((AnyMessage::Bytes(b), _)) => {
-                    println!("got recovery bytes from safekeeper");
+                    debug!("got recovery bytes from safekeeper");
                     self.disk.lock().write(startpos, &b);
                     startpos += b.len() as u64;
                 }
@@ -447,14 +448,14 @@ impl ApiImpl for SimulationApi {
             }
         }
 
-        println!("recovery finished at {}", startpos);
+        debug!("recovery finished at {}", startpos);
 
         startpos == endpos
     }
 
     fn conn_finish(&self, sk: &mut walproposer::bindings::Safekeeper) {
         let mut conn = self.get_conn(sk);
-        println!("conn_finish to {}", conn.node_id);
+        debug!("conn_finish to {}", conn.node_id);
         if let Some(socket) = conn.socket.as_mut() {
             socket.close();
         } else {

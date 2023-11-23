@@ -37,8 +37,8 @@ impl FormatTime for SimClock {
 }
 
 pub fn init_logger() -> SimClock {
-    // TODO: get it from env
-    let debug_enabled = true;
+    // check env for DEBUG
+    let debug_enabled = std::env::var("RUST_TRACEBACK").is_ok();
 
     let clock = SimClock::default();
     let base_logger = tracing_subscriber::fmt()
@@ -47,13 +47,16 @@ pub fn init_logger() -> SimClock {
         // .with_ansi(true) TODO
         .with_max_level(match debug_enabled {
             true => tracing::Level::DEBUG,
-            false => tracing::Level::INFO,
+            false => tracing::Level::WARN,
         })
         .with_writer(std::io::stdout);
     base_logger.init();
 
     // logging::replace_panic_hook_with_tracing_panic_hook().forget();
-    // std::panic::set_hook(Box::new(|_| {}));
+    
+    if !debug_enabled {
+        std::panic::set_hook(Box::new(|_| {}));
+    }
 
     clock
 }

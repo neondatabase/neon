@@ -9,7 +9,7 @@ use slowsim::{
     world::World,
     world::{Node, NodeEvent, SEvent},
 };
-use tracing::{debug, warn};
+use tracing::{debug, warn, info_span};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 use walproposer::walproposer::{Config, Wrapper};
 
@@ -126,6 +126,7 @@ impl Test {
         let ttid = self.ttid.clone();
         let disk = DiskWalProposer::new();
         client_node.launch(move |os| {
+            let _enter = info_span!("sync").entered();
             let config = Config {
                 ttid,
                 safekeepers_list: guc,
@@ -186,6 +187,7 @@ impl Test {
         let ttid = self.ttid.clone();
         let wp_disk = disk.clone();
         client_node.launch(move |os| {
+            let _enter = info_span!("walproposer").entered();
             let config = Config {
                 ttid,
                 safekeepers_list: guc,
