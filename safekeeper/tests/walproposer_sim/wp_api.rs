@@ -358,6 +358,15 @@ impl ApiImpl for SimulationApi {
 
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
         println!("walprop_log[{}] {}", level, msg);
+        if level == Level::Fatal || level == Level::Panic {
+            if msg == "Failed to recover state" {
+                self.os.exit(msg.to_owned());
+            }
+            if msg.contains("rejects our connection request with term") {
+                self.os.exit(msg.to_owned());
+            }
+            panic!("unknown FATAL error from walproposer: {}", msg);
+        }
     }
 
     fn after_election(&self, _wp: &mut walproposer::bindings::WalProposer) {

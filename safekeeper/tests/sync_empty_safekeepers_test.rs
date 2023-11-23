@@ -1,6 +1,8 @@
 
 
 
+use std::sync::Arc;
+
 use rand::Rng;
 use tracing::{info, warn};
 use utils::lsn::Lsn;
@@ -183,62 +185,62 @@ fn test_random_schedules() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #[test]
-// fn test_one_schedule() -> anyhow::Result<()> {
-//     enable_debug();
-//     let clock = init_logger();
-//     let mut config = TestConfig::new(Some(clock));
-//     config.network.keepalive_timeout = Some(100);
+#[test]
+fn test_one_schedule() -> anyhow::Result<()> {
+    // enable_debug();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    config.network.keepalive_timeout = Some(100);
 
-//     // let seed = 6762900106769428342;
-//     // let test = config.start(seed);
-//     // warn!("Running test with seed {}", seed);
+    // let seed = 6762900106769428342;
+    // let test = config.start(seed);
+    // warn!("Running test with seed {}", seed);
 
-//     // let schedule = generate_schedule(seed);
-//     // info!("schedule: {:?}", schedule);
-//     // test.run_schedule(&schedule)?;
-//     // test.world.deallocate();
+    // let schedule = generate_schedule(seed);
+    // info!("schedule: {:?}", schedule);
+    // test.run_schedule(&schedule)?;
+    // test.world.deallocate();
 
-//     let seed = 3649773280641776194;
-//     config.network = generate_network_opts(seed);
-//     info!("network: {:?}", config.network);
-//     let test = config.start(seed);
-//     warn!("Running test with seed {}", seed);
+    let seed = 3649773280641776194;
+    config.network = generate_network_opts(seed);
+    info!("network: {:?}", config.network);
+    let test = config.start(seed);
+    warn!("Running test with seed {}", seed);
 
-//     let schedule = generate_schedule(seed);
-//     info!("schedule: {:?}", schedule);
-//     test.run_schedule(&schedule).unwrap();
-//     validate_events(test.world.take_events());
-//     test.world.deallocate();
+    let schedule = generate_schedule(seed);
+    info!("schedule: {:?}", schedule);
+    test.run_schedule(&schedule).unwrap();
+    // validate_events(test.world.take_events());
+    test.world.deallocate();
 
-//     Ok(())
-// }
+    Ok(())
+}
 
-// #[test]
-// fn test_res_dealloc() -> anyhow::Result<()> {
-//     // enable_debug();
-//     let clock = init_logger();
-//     let mut config = TestConfig::new(Some(clock));
+#[test]
+fn test_res_dealloc() -> anyhow::Result<()> {
+    // enable_debug();
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
 
-//     // print pid
-//     let pid = unsafe { libc::getpid() };
-//     info!("pid: {}", pid);
+    // print pid
+    // let pid = unsafe { libc::getpid() };
+    // info!("pid: {}", pid);
 
-//     let seed = 123456;
-//     config.network = generate_network_opts(seed);
-//     let test = config.start(seed);
-//     warn!("Running test with seed {}", seed);
+    let seed = 123456;
+    config.network = generate_network_opts(seed);
+    let test = config.start(seed);
+    warn!("Running test with seed {}", seed);
 
-//     let schedule = generate_schedule(seed);
-//     info!("schedule: {:?}", schedule);
-//     test.run_schedule(&schedule).unwrap();
-//     test.world.stop_all();
+    let schedule = generate_schedule(seed);
+    info!("schedule: {:?}", schedule);
+    test.run_schedule(&schedule).unwrap();
+    test.world.stop_all();
 
-//     let world = test.world.clone();
-//     drop(test);
-//     info!("world strong count: {}", Arc::strong_count(&world));
-//     world.deallocate();
-//     info!("world strong count: {}", Arc::strong_count(&world));
+    let world = test.world.clone();
+    drop(test);
+    info!("world strong count: {}", Arc::strong_count(&world));
+    world.deallocate();
+    info!("world strong count: {}", Arc::strong_count(&world));
 
-//     Ok(())
-// }
+    Ok(())
+}

@@ -342,7 +342,15 @@ extern "C" fn log_internal(
     }
 }
 
-#[derive(Debug)]
+extern "C" fn after_election(wp: *mut WalProposer) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).after_election(&mut (*wp))
+    }
+}
+
+#[derive(Debug,PartialEq)]
 pub enum Level {
     Debug5,
     Debug4,
