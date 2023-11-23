@@ -516,6 +516,7 @@ impl Node {
         *self.network.lock() = Chan::new();
 
         self.world.wait_group.add(1);
+        self.set_crash_token();
         park.crash_panic();
         // self.world.debug_print_state();
         self.world.wait_group.wait();
@@ -523,6 +524,11 @@ impl Node {
 
     pub fn deallocate(&self) {
         self.network.lock().clear();
+    }
+
+    pub fn set_crash_token(&self) {
+        let prev = self.crash_token.swap(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!prev, "crash_token should be set only once");
     }
 }
 

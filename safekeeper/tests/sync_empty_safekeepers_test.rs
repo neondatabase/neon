@@ -44,28 +44,28 @@ fn run_walproposer_generate_wal() {
     }
 }
 
-// #[test]
-// fn crash_safekeeper() {
-//     let clock = init_logger();
-//     let mut config = TestConfig::new(Some(clock));
-//     // config.network.timeout = Some(250);
-//     let test = config.start(1337);
+#[test]
+fn crash_safekeeper() {
+    let clock = init_logger();
+    let mut config = TestConfig::new(Some(clock));
+    // config.network.timeout = Some(250);
+    let test = config.start(1337);
 
-//     let lsn = test.sync_safekeepers().unwrap();
-//     assert_eq!(lsn, Lsn(0));
-//     info!("Sucessfully synced empty safekeepers at 0/0");
+    let lsn = test.sync_safekeepers().unwrap();
+    assert_eq!(lsn, Lsn(0));
+    info!("Sucessfully synced empty safekeepers at 0/0");
 
-//     let mut wp = test.launch_walproposer(lsn);
+    let mut wp = test.launch_walproposer(lsn);
 
-//     test.poll_for_duration(30);
+    test.poll_for_duration(30);
 
-//     wp.write_tx(3);
+    wp.write_tx(3);
 
-//     test.servers[0].restart();
+    test.servers[0].restart();
 
-//     test.poll_for_duration(100);
-//     test.poll_for_duration(1000);
-// }
+    test.poll_for_duration(100);
+    test.poll_for_duration(1000);
+}
 
 // #[test]
 // fn test_simple_restart() {
