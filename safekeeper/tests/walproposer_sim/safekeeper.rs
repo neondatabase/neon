@@ -304,7 +304,7 @@ impl ConnState {
 
             match msg {
                 ProposerAcceptorMessage::Greeting(ref greeting) => {
-                    debug!("start handshake with walproposer {:?}", self.tcp,);
+                    tracing::info!("start handshake with walproposer {:?} {:?}", self.tcp, greeting);
                     let server_info = ServerInfo {
                         pg_version: greeting.pg_version,
                         system_id: greeting.system_id,

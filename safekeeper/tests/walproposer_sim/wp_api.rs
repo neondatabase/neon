@@ -321,7 +321,12 @@ impl ApiImpl for SimulationApi {
                     WL_SOCKET_READABLE,
                 )
             }
-            slowsim::world::NodeEvent::Internal(_) => todo!(), // TODO: latch
+            slowsim::world::NodeEvent::Internal(_) => {
+                let ev2 = self.os.epoll_recv(0);
+                assert!(ev2.is_some());
+                // TODO: distinguish different types?
+                walproposer::walproposer::WaitResult::Latch
+            }
             slowsim::world::NodeEvent::Accept(_) => unreachable!(),
             slowsim::world::NodeEvent::WakeTimeout(_) => unreachable!(),
         };
@@ -380,6 +385,12 @@ impl ApiImpl for SimulationApi {
     }
 
     fn get_flush_rec_ptr(&self) -> u64 {
-        self.disk.lock().flush_rec_ptr().0
+        let lsn = self.disk.lock().flush_rec_ptr();
+        println!("get_flush_rec_ptr: {}", lsn);
+        lsn.0
+    }
+
+    fn confirm_wal_streamed(&self, _wp: &mut walproposer::bindings::WalProposer, lsn: u64) {
+        println!("confirm_wal_streamed: {}", Lsn(lsn))
     }
 }

@@ -186,8 +186,6 @@ impl Test {
         let ttid = self.ttid.clone();
         let wp_disk = disk.clone();
         client_node.launch(move |os| {
-            //     let sim_redo_start_lsn = lsn.0;
-
             let config = Config {
                 ttid,
                 safekeepers_list: guc,
@@ -322,9 +320,14 @@ pub struct WalProposer {
 
 impl WalProposer {
     pub fn write_tx(&mut self, cnt: usize) {
+        for _ in 0..cnt {
+            self.disk.lock().insert_logical_message("prefix", b"message").expect("failed to generate logical message");
+        }
+
+        // now we need to set "Latch" in walproposer
         self.node
             .network_chan()
-            .send(NodeEvent::Internal(AnyMessage::Just32(cnt as u32)));
+            .send(NodeEvent::Internal(AnyMessage::Just32(0)));
     }
 
     pub fn stop(&self) {
