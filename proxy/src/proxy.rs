@@ -630,7 +630,6 @@ where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
     M::Error: From<WakeComputeError>,
 {
-    // TODO(anna): add call to get_role_secret. And check ip allowlist.
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once

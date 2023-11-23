@@ -156,7 +156,7 @@ async fn auth_quirks_creds(
     // TODO: make `creds.project` more type-safe.
     assert!(creds.project.is_some());
     info!("fetching user's authentication info");
-    // TODO: this will slow down both "hacks" below; we probably need a cache.
+    // TODO(anna): this will slow down both "hacks" below; we probably need a cache.
     let AuthInfo {
         secret,
         allowed_ips,
