@@ -733,6 +733,13 @@ pub fn handle_alter_extension_neon(
         // which may happen in two cases:
         // - extension was just installed
         // - extension was already installed and is up to date
+        let create_extension_neon_query = "CREATE EXTENSION IF NOT EXISTS neon";
+        info!(
+            "create extension neon query for db {} : {}",
+            &db.name, &create_extension_neon_query
+        );
+        db_client.simple_query(create_extension_neon_query)?;
+
         let alter_extension_neon_query = "ALTER EXTENSION neon UPDATE";
         info!(
             "alter extension neon query for db {} : {}",
