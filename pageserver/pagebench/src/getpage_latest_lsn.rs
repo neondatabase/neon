@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Measure performance of the GetPage API, targeting the latest LSN.
+/// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
@@ -46,7 +46,7 @@ struct Output {
     total: PerTaskOutput,
 }
 
-const LATENCY_PERCENTILES: [f64; 3] = [99.0, 99.9, 99.99];
+const LATENCY_PERCENTILES: [f64; 3] = [95.0, 99.00, 99.90, 99.99];
 
 struct LatencyPercentiles {
     latency_percentiles: [Duration; 3],
