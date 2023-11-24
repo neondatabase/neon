@@ -12,6 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use futures::FutureExt;
@@ -24,6 +25,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
@@ -1630,6 +1632,7 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         // Don't start doing work during shutdown
@@ -1652,7 +1655,7 @@ impl Tenant {
             }
         }
 
-        self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+        self.gc_iteration_internal(target_timeline_id, horizon, pitr, cancel, ctx)
             .await
     }
 
@@ -2569,14 +2572,30 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        let gc_timelines = self
-            .refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
-            .await?;
+        let gc_timelines = match self
+            .refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                if let Some(PageReconstructError::Cancelled) =
+                    e.downcast_ref::<PageReconstructError>()
+                {
+                    // Handle cancellation
+                    totals.elapsed = now.elapsed();
+                    return Ok(totals);
+                } else {
+                    // Propagate other errors
+                    return Err(e);
+                }
+            }
+        };
 
         crate::failpoint_support::sleep_millis_async!(
             "gc_iteration_internal_after_getting_gc_timelines"
@@ -2600,7 +2619,7 @@ impl Tenant {
         // See comments in [`Tenant::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
-            if task_mgr::is_shutdown_requested() {
+            if task_mgr::is_shutdown_requested() || cancel.is_cancelled() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;
@@ -2620,6 +2639,7 @@ impl Tenant {
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
     pub async fn refresh_gc_info(
         &self,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // since this method can now be called at different rates than the configured gc loop, it
@@ -2631,7 +2651,7 @@ impl Tenant {
         // refresh all timelines
         let target_timeline_id = None;
 
-        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
+        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
             .await
     }
 
@@ -2640,6 +2660,7 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // grab mutex to prevent new timelines from being created here.
@@ -2713,7 +2734,7 @@ impl Tenant {
                     .map(|&x| x.1)
                     .collect();
                 timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, ctx)
+                    .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
                     .await?;
 
                 gc_timelines.push(timeline);
@@ -2876,7 +2897,7 @@ impl Tenant {
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
-    /// - after initialization complete, remove the temp dir.
+    /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
@@ -2916,6 +2937,30 @@ impl Tenant {
         }
         let pgdata_path = &initdb_path;
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+
+        // Upload the created data dir to S3
+        if let Some(storage) = &self.remote_storage {
+            let pgdata_zstd = import_datadir::create_tar_zst(pgdata_path).await?;
+            let pgdata_zstd = Bytes::from(pgdata_zstd);
+            backoff::retry(
+                || async {
+                    self::remote_timeline_client::upload_initdb_dir(
+                        storage,
+                        &self.tenant_id,
+                        &timeline_id,
+                        pgdata_zstd.clone(),
+                    )
+                    .await
+                },
+                |_| false,
+                3,
+                u32::MAX,
+                "persist_initdb_tar_zst",
+                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            )
+            .await?;
+        }
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
@@ -3126,6 +3171,7 @@ impl Tenant {
         // (only if it is shorter than the real cutoff).
         max_retention_period: Option<u64>,
         cause: LogicalSizeCalculationCause,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
@@ -3148,6 +3194,7 @@ impl Tenant {
             max_retention_period,
             &mut shared_cache,
             cause,
+            cancel,
             ctx,
         )
         .await
@@ -3160,9 +3207,10 @@ impl Tenant {
     pub async fn calculate_synthetic_size(
         &self,
         cause: LogicalSizeCalculationCause,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(None, cause, ctx).await?;
+        let inputs = self.gather_size_inputs(None, cause, cancel, ctx).await?;
 
         let size = inputs.calculate()?;
 
@@ -3934,7 +3982,13 @@ mod tests {
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
@@ -4037,7 +4091,13 @@ mod tests {
         tline.set_broken("test".to_owned());
 
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
 
         // The branchpoints should contain all timelines, even ones marked
@@ -4083,7 +4143,13 @@ mod tests {
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25), &ctx).await.is_ok());
 
@@ -4111,7 +4177,13 @@ mod tests {
 
         // run gc on parent
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
 
         // Check that the data is still accessible on the branch.
@@ -4421,7 +4493,13 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
 
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
                 .await?;
             tline.freeze_and_flush().await?;
             tline
@@ -4503,7 +4581,13 @@ mod tests {
             // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
                 .await?;
             tline.freeze_and_flush().await?;
             tline
@@ -4595,7 +4679,13 @@ mod tests {
             // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
                 .await?;
             tline.freeze_and_flush().await?;
             tline

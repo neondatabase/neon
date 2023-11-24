@@ -550,7 +550,7 @@ async fn timeline_detail_handler(
 
 async fn get_lsn_by_timestamp_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -566,7 +566,9 @@ async fn get_lsn_by_timestamp_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    let result = timeline.find_lsn_for_timestamp(timestamp_pg, &ctx).await?;
+    let result = timeline
+        .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
+        .await?;
 
     if version.unwrap_or(0) > 1 {
         #[derive(serde::Serialize)]
@@ -842,7 +844,7 @@ async fn tenant_delete_handler(
 /// without modifying anything anyway.
 async fn tenant_size_handler(
     request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -858,6 +860,7 @@ async fn tenant_size_handler(
         .gather_size_inputs(
             retention_period,
             LogicalSizeCalculationCause::TenantSizeHandler,
+            &cancel,
             &ctx,
         )
         .await
@@ -1242,7 +1245,7 @@ async fn failpoints_handler(
 // Run GC immediately on given timeline.
 async fn timeline_gc_handler(
     mut request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1251,7 +1254,7 @@ async fn timeline_gc_handler(
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req, &ctx).await?;
+    let wait_task_done = mgr::immediate_gc(tenant_id, timeline_id, gc_req, cancel, &ctx).await?;
     let gc_result = wait_task_done
         .await
         .context("wait for gc task")
@@ -1686,8 +1689,24 @@ where
                 let token_cloned = token.clone();
                 let result = handler(r, token).await;
                 if token_cloned.is_cancelled() {
-                    info!("Cancelled request finished");
+                    // dropguard has executed: we will never turn this result into response.
+                    //
+                    // at least temporarily do {:?} logging; these failures are rare enough but
+                    // could hide difficult errors.
+                    match &result {
+                        Ok(response) => {
+                            let status = response.status();
+                            info!(%status, "Cancelled request finished successfully")
+                        }
+                        Err(e) => error!("Cancelled request finished with an error: {e:?}"),
+                    }
                 }
+                // only logging for cancelled panicked request handlers is the tracing_panic_hook,
+                // which should suffice.
+                //
+                // there is still a chance to lose the result due to race between
+                // returning from here and the actual connection closing happening
+                // before outer task gets to execute. leaving that up for #5815.
                 result
             }
             .in_current_span(),

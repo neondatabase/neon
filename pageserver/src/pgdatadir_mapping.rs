@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -365,6 +366,7 @@ impl Timeline {
     pub async fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
@@ -383,6 +385,9 @@ impl Timeline {
         let mut found_smaller = false;
         let mut found_larger = false;
         while low < high {
+            if cancel.is_cancelled() {
+                return Err(PageReconstructError::Cancelled);
+            }
             // cannot overflow, high and low are both smaller than u64::MAX / 2
             let mid = (high + low) / 2;
 
