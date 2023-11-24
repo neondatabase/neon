@@ -65,7 +65,7 @@ subtle = { version = "2" }
 time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-rustls = { version = "0.24" }
-tokio-util = { version = "0.7", features = ["codec", "compat", "io"] }
+tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.19", features = ["serde"] }
 tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "timeout", "util"] }
