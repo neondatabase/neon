@@ -181,8 +181,10 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 {
 	if (state->rem_state == RS_NONE)
 	{
+		XLogRecPtr	donor_lsn;
+
 		/* no connection yet; start one */
-		Safekeeper *donor = GetDonor(state->wp);
+		Safekeeper *donor = GetDonor(state->wp, &donor_lsn);
 
 		if (donor == NULL)
 		{
@@ -191,12 +193,13 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			return NEON_WALREAD_ERROR;
 		}
 		snprintf(state->donor_name, sizeof(state->donor_name), "%s:%s", donor->host, donor->port);
-		elog(LOG, "establishing connection to %s to fetch WAL", state->donor_name);
+		elog(LOG, "establishing connection to %s, flush_lsn %X/%X to fetch WAL",
+			 state->donor_name, LSN_FORMAT_ARGS(donor_lsn));
 		state->wp_conn = libpqwp_connect_start(donor->conninfo);
 		if (PQstatus(state->wp_conn->pg_conn) == CONNECTION_BAD)
 		{
 			snprintf(state->err_msg, sizeof(state->err_msg),
-					 "failed to connect to %s:%s to fetch WAL: immediately failed with %s",
+					 "failed to connect to %s to fetch WAL: immediately failed with %s",
 					 state->donor_name, PQerrorMessage(state->wp_conn->pg_conn));
 			NeonWALReaderResetRemote(state);
 			return NEON_WALREAD_ERROR;
@@ -260,13 +263,13 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 				return NEON_WALREAD_WOULDBLOCK;
 			case WP_EXEC_FAILED:
 				snprintf(state->err_msg, sizeof(state->err_msg),
-						 "get result from %s failed: %s",
+						 "get START_REPLICATION result from %s failed: %s",
 						 state->donor_name, PQerrorMessage(state->wp_conn->pg_conn));
 				NeonWALReaderResetRemote(state);
 				return NEON_WALREAD_ERROR;
 			default:			/* can't happen */
 				snprintf(state->err_msg, sizeof(state->err_msg),
-						 "get result from %s: unexpected result",
+						 "get START_REPLICATION result from %s: unexpected result",
 						 state->donor_name);
 				NeonWALReaderResetRemote(state);
 				return NEON_WALREAD_ERROR;

@@ -98,8 +98,26 @@ typedef enum
 	SS_IDLE,
 
 	/*
-	 * Waiting for neon walreader socket to receive chunk of WAL to send to
-	 * this safekeeper.
+	 * Active phase, when we acquired quorum and have WAL to send or feedback
+	 * to read.
+	 */
+	SS_ACTIVE,
+} SafekeeperState;
+
+/*
+ * Sending WAL substates of SS_ACTIVE.
+ */
+typedef enum
+{
+	/*
+	 * We are ready to send more WAL, waiting for latch set to learn about
+	 * more WAL becoming available (or just a timeout to send heartbeat).
+	 */
+	SS_ACTIVE_SEND,
+
+	/*
+	 * Polling neon_walreader to receive chunk of WAL (probably remotely) to
+	 * send to this safekeeper.
 	 *
 	 * Note: socket management is done completely inside walproposer_pg for
 	 * simplicity, and thus simulation doesn't test it. Which is fine as
@@ -112,14 +130,13 @@ typedef enum
 	 * problem is unlikely. Vice versa is also true (SS_ACTIVE doesn't handle
 	 * walreader socket), but similarly shouldn't be a problem.
 	 */
-	SS_WAIT_REMOTE_WAL,
+	SS_ACTIVE_READ_WAL,
 
 	/*
-	 * Active phase, when we acquired quorum and have WAL to send or feedback
-	 * to read.
+	 * Waiting for write readiness to flush the socket.
 	 */
-	SS_ACTIVE,
-} SafekeeperState;
+	SS_ACTIVE_FLUSH,
+} SafekeeperActiveState;
 
 /* Consensus logical timestamp. */
 typedef uint64 term_t;
@@ -329,12 +346,11 @@ typedef struct Safekeeper
 	 */
 	XLogRecPtr	startStreamingAt;
 
-	bool		flushWrite;		/* set to true if we need to call AsyncFlush,*
-								 * to flush pending messages */
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
 	SafekeeperState state;		/* safekeeper state machine state */
+	SafekeeperActiveState active_state;
 	TimestampTz latestMsgReceivedAt;	/* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */
 	VoteResponse voteResponse;	/* the vote */
@@ -485,6 +501,9 @@ typedef struct walproposer_api
 
 	/* Update events for an existing safekeeper connection. */
 	void		(*update_event_set) (Safekeeper *sk, uint32 events);
+
+	/* Configure wait event set for yield in SS_ACTIVE. */
+	void		(*active_state_update_event_set) (Safekeeper *sk);
 
 	/* Add a new safekeeper connection to the event set. */
 	void		(*add_safekeeper_event_set) (Safekeeper *sk, uint32 events);
@@ -681,8 +700,9 @@ extern void WalProposerFree(WalProposer *wp);
  * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to
  * recreate set from scratch, hence the export.
  */
-extern uint32 SafekeeperStateDesiredEvents(SafekeeperState state);
-extern Safekeeper *GetDonor(WalProposer *wp);
+extern void SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_events);
+extern Safekeeper *GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn);
+
 
 #define WPEVENT		1337		/* special log level for walproposer internal
 								 * events */
