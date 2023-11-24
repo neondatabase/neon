@@ -20,7 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
 
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, info, Instrument};
 
 project_git_version!(GIT_VERSION);
 
@@ -151,7 +151,7 @@ async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
-    let mut connections = tokio::task::JoinSet::new();
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
 
     loop {
         tokio::select! {
@@ -178,36 +178,16 @@ async fn task_main(
                     .instrument(tracing::info_span!("handle_client", ?session_id))
                 );
             }
-            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
-            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
-            // This only counts for this loop and it will be enabled again on next `select!`.
-            //
-            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
-            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
-            // not get called again, even if there are more connections to remove.
-            Some(res) = connections.join_next() => {
-                if let Err(e) = res {
-                    if !e.is_panic() && !e.is_cancelled() {
-                        warn!("unexpected error from joined connection task: {e:?}");
-                    }
-                }
-            }
             _ = cancellation_token.cancelled() => {
+                connections.close();
                 drop(listener);
                 break;
             }
         }
     }
 
-    // Drain connections
-    info!("waiting for all client connections to finish");
-    while let Some(res) = connections.join_next().await {
-        if let Err(e) = res {
-            if !e.is_panic() && !e.is_cancelled() {
-                warn!("unexpected error from joined connection task: {e:?}");
-            }
-        }
-    }
+    connections.wait().await;
+
     info!("all client connections have finished");
     Ok(())
 }
