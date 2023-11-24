@@ -13,8 +13,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::linear_histo::LinearHisto;
-
 /// Measure performance of the GetPage API, targeting the latest LSN.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
@@ -83,8 +81,7 @@ struct PerTaskOutput {
 }
 
 struct PerTaskStats {
-    // latency_histo: hdrhistogram::Histogram<u64>,
-    linear_hist: LinearHisto,
+    latency_histo: hdrhistogram::Histogram<u64>,
 }
 
 impl PerTaskStats {
@@ -92,30 +89,29 @@ impl PerTaskStats {
         Self {
             // Initialize with fixed bounds so that we panic at runtime instead of resizing the histogram,
             // which would skew the benchmark results.
-            // latency_histo: hdrhistogram::Histogram::new_with_bounds(1, 1_000_000_000, 3).unwrap(),
-            linear_hist: LinearHisto::new(),
+            latency_histo: hdrhistogram::Histogram::new_with_bounds(1, 1_000_000_000, 3).unwrap(),
         }
     }
     fn observe(&mut self, latency: Duration) -> anyhow::Result<()> {
-        // let micros: u64 = latency
-        //     .as_micros()
-        //     .try_into()
-        //     .context("latency greater than u64")?;
-        // // self.latency_histo
-        //     .record(micros)
-        //     .context("add to histogram")?;
-        self.linear_hist.observe(latency);
+        let micros: u64 = latency
+            .as_micros()
+            .try_into()
+            .context("latency greater than u64")?;
+        self.latency_histo
+            .record(micros)
+            .context("add to histogram")?;
         Ok(())
     }
     fn output(&self) -> PerTaskOutput {
-        let latency_percentiles =
-            std::array::from_fn(|idx| self.linear_hist.percentile(LATENCY_PERCENTILES[idx]));
+        let latency_percentiles = std::array::from_fn(|idx| {
+            let micros = self
+                .latency_histo
+                .value_at_percentile(LATENCY_PERCENTILES[idx]);
+            Duration::from_micros(micros)
+        });
         PerTaskOutput {
-            request_count: 0,
-            latency_mean: self
-                .linear_hist
-                .mean()
-                .unwrap_or_else(|| { eprintln!("{:?}", self.linear_hist); Duration::from_micros(666) }),
+            request_count: self.latency_histo.len(),
+            latency_mean: Duration::from_micros(self.latency_histo.mean() as u64),
             latency_percentiles: LatencyPercentiles {
                 latency_percentiles,
             },
@@ -124,11 +120,9 @@ impl PerTaskStats {
 
     fn add(&mut self, other: &Self) {
         let Self {
-            // ref mut latency_histo,
-            ref mut linear_hist,
+            ref mut latency_histo,
         } = self;
-        // latency_histo.add(&other.latency_histo).unwrap();
-        linear_hist.add(&other.linear_hist);
+        latency_histo.add(&other.latency_histo).unwrap();
     }
 }
 
