@@ -16,3 +16,7 @@ pub fn bkpimg_is_compressed(bimg_info: u8) -> bool {
 
     (bimg_info & ANY_COMPRESS_FLAG) != 0
 }
+
+pub fn bkpimg_is_compressed_lz4(bimg_info: u8) -> bool {
+    (bimg_info & BKPIMAGE_COMPRESS_LZ4) != 0
+}
