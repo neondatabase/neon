@@ -2933,6 +2933,7 @@ dependencies = [
  "hdrhistogram",
  "humantime",
  "humantime-serde",
+ "once_cell",
  "pageserver",
  "rand 0.8.5",
  "serde",
