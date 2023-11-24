@@ -1689,8 +1689,20 @@ where
                 let token_cloned = token.clone();
                 let result = handler(r, token).await;
                 if token_cloned.is_cancelled() {
-                    info!("Cancelled request finished");
+                    // dropguard has executed: we will never turn this result into response.
+                    //
+                    // at least temporarily do debug logging; these failures are rare enough but
+                    // could hide difficult errors.
+                    match &result {
+                        Ok(response) => {
+                            let status = response.status();
+                            info!(%status, "Cancelled request finished successfully")
+                        }
+                        Err(e) => error!("Cancelled requested finished with an error: {e:?}"),
+                    }
                 }
+                // only logging for cancelled panicked request handlers is the tracing_panic_hook,
+                // which should suffice.
                 result
             }
             .in_current_span(),
