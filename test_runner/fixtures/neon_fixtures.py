@@ -724,8 +724,8 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        self.control_plane_api = None
-        self.attachment_service = None
+        self.control_plane_api: Optional[str] = None
+        self.attachment_service: Optional[NeonAttachmentService] = None
         if config.enable_generations:
             self.enable_generations()
 
@@ -820,11 +820,11 @@ class NeonEnv:
         if not start:
             # TODO: assert that we haven't `self.start()`ed yet
             pass
-        assert self.control_plane_api == None
-        assert self.attachment_service == None
+        assert self.control_plane_api is None
+        assert self.attachment_service is None
         attachment_service_port = self.port_distributor.get_port()
-        self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
-        self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
+        self.control_plane_api = f"http://127.0.0.1:{attachment_service_port}"
+        self.attachment_service = NeonAttachmentService(self)
         if start:
             self.attachment_service.start()
 
@@ -1566,15 +1566,17 @@ class ComputeCtl(AbstractNeonCli):
 
     COMMAND = "compute_ctl"
 
+
 # class GetpageBenchLibpq(AbstractNeonCli):
 #     """
 #     A typed wrapper around the `getpage_bench_libpq` CLI.
 #     """
-# 
+#
 #     COMMAND = "getpage_bench_libpq"
-# 
+#
 #     def run(self):
 #         pass
+
 
 class NeonAttachmentService:
     def __init__(self, env: NeonEnv):

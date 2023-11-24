@@ -1,14 +1,15 @@
 import json
-from pathlib import Path
 import shutil
 import subprocess
-from fixtures.compare_fixtures import NeonCompare
-from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from pathlib import Path
+from typing import List
+
+from fixtures.benchmark_fixture import NeonBenchmarker
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, last_flush_lsn_upload
 from fixtures.pageserver.utils import wait_until_tenant_active
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId
-from fixtures.log_helper import log
-from fixtures.benchmark_fixture import NeonBenchmarker
 
 
 def test_getpage_throughput(
@@ -69,8 +70,10 @@ def test_getpage_throughput(
             for file in tl.iterdir():
                 shutil.copy2(file, dst_tl_dir)
                 if "__" in file.name:
-                    cmd = [
-                        env.neon_binpath / "pagectl",  # TODO: abstract this like the other binaries
+                    cmd: List[str] = [
+                        str(
+                            env.neon_binpath / "pagectl"
+                        ),  # TODO: abstract this like the other binaries
                         "layer",
                         "rewrite-summary",
                         str(dst_tl_dir / file.name),
@@ -110,9 +113,12 @@ def test_getpage_throughput(
         "10000",
         *[str(tenant) for tenant in tenants],
     ]
+    log.info(f"command: {' '.join(cmd)}")
     basepath = pg_bin.run_capture(cmd)
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
     with open(results_path, "r") as f:
         results = json.load(f)
+
+    log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
