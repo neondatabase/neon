@@ -419,7 +419,6 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
 
     pageserver_http.tenant_create(env.initial_tenant)
 
-    # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
     failpoint = "flush-layer-cancel-after-writing-layer-out-pausable"
     pageserver_http.configure_failpoints((failpoint, "pause"))
 
