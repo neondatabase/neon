@@ -42,7 +42,7 @@ def test_getpage_throughput(
     template_tenant, template_timeline = env.neon_cli.create_tenant(conf=tenant_config_cli)
     template_tenant_gen = int(ps_http.tenant_status(template_tenant)["generation"])
     with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
-        pg_bin.run_capture(["pgbench", "-i", "-s50", ep.connstr()])
+        pg_bin.run_capture(["pgbench", "-i", "-s1", ep.connstr()])
         last_flush_lsn_upload(env, ep, template_tenant, template_timeline)
     ps_http.tenant_detach(template_tenant)
 
@@ -53,7 +53,7 @@ def test_getpage_throughput(
     src_timelines_dir: Path = remote_storage.tenant_path(template_tenant) / "timelines"
     assert src_timelines_dir.is_dir(), f"{src_timelines_dir} is not a directory"
     tenants = [template_tenant]
-    for i in range(0, 200):
+    for i in range(0, 1):
         new_tenant = TenantId.generate()
         tenants.append(new_tenant)
         log.info("Duplicating tenant #%s: %s", i, new_tenant)
@@ -107,11 +107,9 @@ def test_getpage_throughput(
         ps_http.base_url,
         "--page-service-connstring",
         env.pageserver.connstr(password=None),
-        "--num-tasks",
-        "1",
-        "--num-requests",
-        "200000",
-        *[str(tenant) for tenant in tenants],
+        "--runtime",
+        "10s",
+        *[f"{tenant}/{template_timeline}" for tenant in tenants],
     ]
     log.info(f"command: {' '.join(cmd)}")
     basepath = pg_bin.run_capture(cmd)
