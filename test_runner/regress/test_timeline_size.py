@@ -136,7 +136,7 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
             SELECT
                 pg_size_pretty(pg_cluster_size()),
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
-            FROM backpressure_lsns();
+            FROM neon.backpressure_lsns();
             """
         )[0]
         log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
