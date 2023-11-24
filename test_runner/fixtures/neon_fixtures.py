@@ -42,7 +42,7 @@ from urllib3.util.retry import Retry
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.allowed_errors import (
-    default_pageserver_allowed_errors,
+    DEFAULT_PAGESERVER_ALLOWED_ERRORS,
     scan_pageserver_log_for_errors,
 )
 from fixtures.pageserver.http import PageserverHttpClient
@@ -1626,7 +1626,7 @@ class NeonPageserver(PgProtocol):
         # env.pageserver.allowed_errors.append(".*could not open garage door.*")
         #
         # The entries in the list are regular experessions.
-        self.allowed_errors = default_pageserver_allowed_errors()
+        self.allowed_errors = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
