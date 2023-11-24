@@ -2,10 +2,20 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use tracing::{error, info, info_span, warn};
-use utils::{crashsafe, fs_ext, id::TimelineId, lsn::Lsn};
+use tracing::{info, info_span, warn};
+use utils::{
+    crashsafe,
+    id::{TenantId, TimelineId},
+    lsn::Lsn,
+};
 
-use crate::{context::RequestContext, import_datadir, tenant::Tenant};
+use crate::{
+    config::PageServerConf,
+    context::RequestContext,
+    import_datadir,
+    tenant::Tenant,
+    virtual_file::{on_fatal_io_error, MaybeFatalIo},
+};
 
 use super::Timeline;
 
@@ -62,13 +72,8 @@ impl<'t> UninitializedTimeline<'t> {
                 "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
-                uninit_mark.remove_uninit_mark().with_context(|| {
-                    format!(
-                        "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
-                    )
-                })?;
+                uninit_mark.remove_uninit_mark();
                 v.insert(Arc::clone(&new_timeline));
-
                 new_timeline.maybe_spawn_flush_loop();
             }
         }
@@ -126,29 +131,6 @@ impl<'t> UninitializedTimeline<'t> {
     }
 }
 
-impl Drop for UninitializedTimeline<'_> {
-    fn drop(&mut self) {
-        if let Some((_, uninit_mark)) = self.raw_timeline.take() {
-            let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_id, timeline_id = %self.timeline_id).entered();
-            error!("Timeline got dropped without initializing, cleaning its files");
-            cleanup_timeline_directory(uninit_mark);
-        }
-    }
-}
-
-pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
-    let timeline_path = &uninit_mark.timeline_path;
-    match fs_ext::ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
-        Ok(()) => {
-            info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
-        }
-        Err(e) => {
-            error!("Failed to clean up uninitialized timeline directory {timeline_path:?}: {e:?}")
-        }
-    }
-    drop(uninit_mark); // mark handles its deletion on drop, gets retained if timeline dir exists
-}
-
 /// An uninit mark file, created along the timeline dir to ensure the timeline either gets fully initialized and loaded into pageserver's memory,
 /// or gets removed eventually.
 ///
@@ -158,58 +140,133 @@ pub(crate) struct TimelineUninitMark {
     uninit_mark_deleted: bool,
     uninit_mark_path: Utf8PathBuf,
     pub(crate) timeline_path: Utf8PathBuf,
+    common_parent: Utf8PathBuf,
 }
 
 impl TimelineUninitMark {
-    pub(crate) fn new(uninit_mark_path: Utf8PathBuf, timeline_path: Utf8PathBuf) -> Self {
-        Self {
+    pub(crate) fn new(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<Self> {
+        let timeline_path = conf.timeline_path(&tenant_id, &timeline_id);
+        let uninit_mark_path = conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
+
+        // assert they share the same parent
+        let timeline_parent_path = timeline_path
+            .parent()
+            .expect("timeline_path must have a parent");
+        let uninit_mark_parent_path = uninit_mark_path
+            .parent()
+            .expect("uninit mark path must have a parent");
+        assert_eq!(timeline_parent_path, uninit_mark_parent_path);
+        let common_parent = uninit_mark_parent_path;
+
+        // crate the uninit file
+        let _ = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&uninit_mark_path)
+            .context("create uninit mark file")?;
+        crashsafe::fsync_file_and_parent(&common_parent).context("fsync uninit mark file")?;
+
+        Ok(Self {
             uninit_mark_deleted: false,
+            common_parent: common_parent.to_owned(),
             uninit_mark_path,
             timeline_path,
-        }
+        })
     }
 
-    fn remove_uninit_mark(mut self) -> anyhow::Result<()> {
-        if !self.uninit_mark_deleted {
-            self.delete_mark_file_if_present()?;
-        }
+    fn remove_uninit_mark(mut self) {
+        // remove the uninit mark
+        fs::remove_file(&self.uninit_mark_path).fatal_err(&format!(
+            "TimelineUninitMark::drop: remove_file uninit mark: {}",
+            self.uninit_mark_path
+        ));
 
-        Ok(())
-    }
+        // fsync to persist the removal
+        crashsafe::fsync(&self.common_parent).fatal_err(&format!(
+            "TimelineUninitMark::drop: fsync common parent dir: {}",
+            self.common_parent
+        ));
 
-    fn delete_mark_file_if_present(&mut self) -> anyhow::Result<()> {
-        let uninit_mark_file = &self.uninit_mark_path;
-        let uninit_mark_parent = uninit_mark_file
-            .parent()
-            .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        fs_ext::ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
-            format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
-        })?;
-        crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
         self.uninit_mark_deleted = true;
-
-        Ok(())
     }
 }
 
 impl Drop for TimelineUninitMark {
     fn drop(&mut self) {
         if !self.uninit_mark_deleted {
-            if self.timeline_path.exists() {
-                error!(
-                    "Uninit mark {} is not removed, timeline {} stays uninitialized",
-                    self.uninit_mark_path, self.timeline_path
-                )
-            } else {
-                // unblock later timeline creation attempts
-                warn!(
-                    "Removing intermediate uninit mark file {}",
+            // unblock later timeline creation attempts
+            let _entered =
+                info_span!("TimelineUninitMark_drop", timeline_path=%self.timeline_path).entered();
+            warn!("removing timeline dir and uninit mark file");
+
+            // sanity-check: ensure the uninit mark file still exists on disk
+            let uninit_mark_file_exists = self.uninit_mark_path.try_exists().fatal_err(&format!(
+                "TimelineUninitMark::drop: stat() uninit mark file: {}",
+                self.uninit_mark_path
+            ));
+            if !uninit_mark_file_exists {
+                panic!(
+                    "uninit mark file assumed to exists but doesn't: {}",
                     self.uninit_mark_path
                 );
-                if let Err(e) = self.delete_mark_file_if_present() {
-                    error!("Failed to remove the uninit mark file: {e}")
+            }
+
+            // recursively delete `timeline_path`, ignoring NotFound errors and aborting the process on all others.
+            match fs::remove_dir_all(&self.timeline_path) {
+                Ok(()) => {
+                    info!("timeline dir removed successfully");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // this can happen both if the timeline_path does not exist
+                    // and if the timeline_path exists and there's another thread
+                    // still operating on that directory and our remove_dir_all call
+                    // effectively got hit by time-of-check vs time-of-use.
+                    // Disambiguate by calling remove_dir against the timeline_path
+                    match std::fs::remove_dir(&self.timeline_path) {
+                        Ok(()) => {
+                            warn!("retrying timeline dir removal succeeded after NotFound, this is indicative of a race condition");
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // this is the good case: the first NotFound was because the dir didn't exist
+                            info!("timeline dir does not exist");
+                        }
+                        Err(e) => {
+                            on_fatal_io_error(&e, &format!("TimelineUninitMark::drop: remove_dir_all failed with NotFound, then remove_dir failed: {}", self.timeline_path));
+                        }
+                    }
+                }
+                Err(e) => {
+                    on_fatal_io_error(
+                        &e,
+                        &format!(
+                            "TimelineUninitMark::drop: delete timeline directory: {:?}",
+                            self.timeline_path
+                        ),
+                    );
                 }
             }
+
+            // fsync to order timelines_dir removal before unint mark removal
+            crashsafe::fsync(&self.common_parent).fatal_err(&format!(
+                "TimelineUninitMark::drop: fsync after timeline dir removal: {}",
+                self.common_parent,
+            ));
+
+            // remove the uninit mark
+            fs::remove_file(&self.common_parent).fatal_err(&format!(
+                "TimelineUninitMark::drop: remove_file uninit mark: {}",
+                self.common_parent,
+            ));
+
+            // fsync to persist the removal
+            crashsafe::fsync(&self.common_parent).fatal_err(&format!(
+                "TimelineUninitMark::drop: fsync common parent dir: {}",
+                self.common_parent,
+            ));
         }
     }
 }

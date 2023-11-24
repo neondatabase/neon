@@ -86,7 +86,6 @@ use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
-use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
@@ -3091,7 +3090,7 @@ impl Tenant {
             .await
         {
             error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
-            cleanup_timeline_directory(uninit_mark);
+            drop(uninit_mark); // does the cleanup
             return Err(e);
         }
 
@@ -3143,20 +3142,8 @@ impl Tenant {
             "Timeline {timeline_path} already exists, cannot create its uninit mark file",
         );
 
-        let uninit_mark_path = self
-            .conf
-            .timeline_uninit_mark_file_path(tenant_id, timeline_id);
-        fs::File::create(&uninit_mark_path)
-            .context("Failed to create uninit mark file")
-            .and_then(|_| {
-                crashsafe::fsync_file_and_parent(&uninit_mark_path)
-                    .context("Failed to fsync uninit mark file")
-            })
-            .with_context(|| {
-                format!("Failed to crate uninit mark for timeline {tenant_id}/{timeline_id}")
-            })?;
-
-        let uninit_mark = TimelineUninitMark::new(uninit_mark_path, timeline_path);
+        let uninit_mark = TimelineUninitMark::new(self.conf, tenant_id, timeline_id)
+            .context("create uninit mark")?;
 
         Ok(uninit_mark)
     }
