@@ -8,6 +8,7 @@ use std::{net::SocketAddr, sync::Arc};
 use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
+use proxy::proxy::run_until_cancelled;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -153,38 +154,34 @@ async fn task_main(
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let tls_config = Arc::clone(&tls_config);
-                let dest_suffix = Arc::clone(&dest_suffix);
+        let session_id = uuid::Uuid::new_v4();
+        let tls_config = Arc::clone(&tls_config);
+        let dest_suffix = Arc::clone(&dest_suffix);
 
-                connections.spawn(
-                    async move {
-                        socket
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
+        connections.spawn(
+            async move {
+                socket
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
 
-                        info!(%peer_addr, "serving");
-                        handle_client(dest_suffix, tls_config, tls_server_end_point, socket).await
-                    }
-                    .unwrap_or_else(|e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!("per-client task finished with an error: {e:#}");
-                    })
-                    .instrument(tracing::info_span!("handle_client", ?session_id))
-                );
+                info!(%peer_addr, "serving");
+                handle_client(dest_suffix, tls_config, tls_server_end_point, socket).await
             }
-            _ = cancellation_token.cancelled() => {
-                connections.close();
-                drop(listener);
-                break;
-            }
-        }
+            .unwrap_or_else(|e| {
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
+            })
+            .instrument(tracing::info_span!("handle_client", ?session_id)),
+        );
     }
+
+    connections.close();
+    drop(listener);
 
     connections.wait().await;
 

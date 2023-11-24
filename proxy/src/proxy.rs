@@ -277,6 +277,21 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub async fn run_until_cancelled<F: std::future::Future>(
+    f: F,
+    cancellation_token: &CancellationToken,
+) -> Option<F::Output> {
+    match futures::future::select(
+        std::pin::pin!(f),
+        std::pin::pin!(cancellation_token.cancelled()),
+    )
+    .await
+    {
+        futures::future::Either::Left((f, _)) => Some(f),
+        futures::future::Either::Right(((), _)) => None,
+    }
+}
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
@@ -293,47 +308,56 @@ pub async fn task_main(
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let cancel_map = Arc::clone(&cancel_map);
-                connections.spawn(
-                    async move {
-                        info!("accepted postgres client connection");
+        let session_id = uuid::Uuid::new_v4();
+        let cancel_map = Arc::clone(&cancel_map);
+        connections.spawn(
+            async move {
+                info!("accepted postgres client connection");
 
-                        let mut socket = WithClientIp::new(socket);
-                        let mut peer_addr = peer_addr;
-                        if let Some(ip) = socket.wait_for_addr().await? {
-                            peer_addr = ip;
-                            tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
-                        } else if config.require_client_ip {
-                            bail!("missing required client IP");
-                        }
+                let mut socket = WithClientIp::new(socket);
+                let mut peer_addr = peer_addr;
+                if let Some(ip) = socket.wait_for_addr().await? {
+                    peer_addr = ip;
+                    tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                } else if config.require_client_ip {
+                    bail!("missing required client IP");
+                }
 
-                        socket
-                            .inner
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
+                socket
+                    .inner
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr.ip()).await
-                    }
-                    .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
-                    .unwrap_or_else(move |e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!(?session_id, "per-client task finished with an error: {e:#}");
-                    }),
-                );
+                handle_client(
+                    config,
+                    &cancel_map,
+                    session_id,
+                    socket,
+                    ClientMode::Tcp,
+                    peer_addr.ip(),
+                )
+                .await
             }
-            _ = cancellation_token.cancelled() => {
-                connections.close();
-                drop(listener);
-                break;
-            }
-        }
+            .instrument(info_span!(
+                "handle_client",
+                ?session_id,
+                peer_addr = tracing::field::Empty
+            ))
+            .unwrap_or_else(move |e| {
+                // Acknowledge that the task has finished with an error.
+                error!(?session_id, "per-client task finished with an error: {e:#}");
+            }),
+        );
     }
+
+    connections.close();
+    drop(listener);
+
     // Drain connections
     connections.wait().await;
 
