@@ -2600,6 +2600,8 @@ impl Timeline {
                 )
             };
 
+        pausable_failpoint!("flush-layer-cancel-after-writing-layer-out-pausable");
+
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
         }

@@ -10,7 +10,9 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId, TimelineId
+from fixtures.utils import wait_until
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -222,3 +224,72 @@ def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilde
     assert (
         timeline_dirs == initial_timeline_dirs
     ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+
+def test_long_timeline_create_then_tenant_delete(neon_env_builder: NeonEnvBuilder):
+    """Reproduction of 2023-11-23 stuck tenants investigation"""
+
+    # do not use default tenant/timeline creation because it would output the failpoint log message too early
+    env = neon_env_builder.init_configs()
+    env.start()
+    pageserver_http = env.pageserver.http_client()
+
+    pageserver_http.tenant_create(env.initial_tenant)
+
+    # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
+    failpoint = "flush-layer-cancel-after-writing-layer-out-pausable"
+    pageserver_http.configure_failpoints((failpoint, "pause"))
+
+    def hit_pausable_failpoint_and_later_fail():
+        with pytest.raises(
+            PageserverApiException, match="new timeline \\S+ has invalid disk_consistent_lsn"
+        ):
+            pageserver_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline
+            )
+
+    def start_deletion():
+        pageserver_http.tenant_delete(env.initial_tenant)
+
+    def has_hit_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {failpoint}") is not None
+
+    def deletion_has_started_waiting_for_timelines():
+        assert env.pageserver.log_contains("Waiting for timelines...") is not None
+
+    def tenant_is_broken():
+        assert (
+            env.pageserver.log_contains(
+                "Marking Stopping tenant as Broken state, reason: timelines dir not empty"
+            )
+            is not None
+        )
+
+        status = pageserver_http.tenant_status(env.initial_tenant)
+        assert status["state"]["slug"] == "Broken"
+
+    from threading import Thread
+
+    creation = Thread(target=hit_pausable_failpoint_and_later_fail)
+    creation.start()
+
+    deletion = None
+
+    try:
+        wait_until(10, 1, has_hit_failpoint)
+
+        # it should start ok, sync up with the stuck creation, then fail because disk_consistent_lsn was not updated
+        # then deletion should fail and set the tenant broken
+        deletion = Thread(target=start_deletion)
+        deletion.start()
+
+        wait_until(10, 1, deletion_has_started_waiting_for_timelines)
+
+        pageserver_http.configure_failpoints((failpoint, "off"))
+
+        # this is the reproduction; there are also unallowed errors
+        wait_until(10, 1, tenant_is_broken)
+    finally:
+        creation.join()
+        if deletion is not None:
+            deletion.join()
