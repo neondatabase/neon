@@ -1646,7 +1646,7 @@ class NeonPageserver(PgProtocol):
         # env.pageserver.allowed_errors.append(".*could not open garage door.*")
         #
         # The entries in the list are regular experessions.
-        self.allowed_errors = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+        self.allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
