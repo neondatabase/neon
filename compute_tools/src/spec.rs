@@ -675,78 +675,29 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     Ok(())
 }
 
-/// connect to template1 and postgres to create neon extension
-/// that will be available in all databases
-pub fn handle_extension_neon(connstr: &str) -> Result<()> {
-    for dbname in ["template1", "postgres"].iter() {
-        let mut conf = Config::from_str(connstr)?;
-        conf.dbname(dbname);
-        let mut template1_client = conf.connect(NoTls)?;
-
-        let create_extension_neon_query = "CREATE EXTENSION IF NOT EXISTS neon";
-        info!(
-            "creating neon extension with query: {} in db {}",
-            create_extension_neon_query, dbname
-        );
-        template1_client.simple_query(create_extension_neon_query)?;
-    }
-
-    Ok(())
-}
-
-/// Run ALTER EXTENSION neon UPDATE for each valid database
+/// Run CREATE and ALTER EXTENSION neon UPDATE for postgres database
 #[instrument(skip_all)]
-pub fn handle_alter_extension_neon(
-    spec: &ComputeSpec,
-    client: &mut Client,
-    connstr: &str,
-) -> Result<()> {
-    info!("modifying database permissions");
-    let existing_dbs = get_existing_dbs(client)?;
+pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
+    info!("handle extension neon");
 
-    // We'd better do this at db creation time, but we don't always know when it happens.
-    for db in &spec.cluster.databases {
-        match existing_dbs.get(&db.name) {
-            Some(pg_db) => {
-                if pg_db.restrict_conn || pg_db.invalid {
-                    info!(
-                        "skipping grants for db {} (invalid: {}, connections not allowed: {})",
-                        db.name, pg_db.invalid, pg_db.restrict_conn
-                    );
-                    continue;
-                }
-            }
-            None => {
-                bail!(
-                    "database {} doesn't exist in Postgres after handle_databases()",
-                    db.name
-                );
-            }
-        }
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon";
+    client.simple_query(query)?;
 
-        let mut conf = Config::from_str(connstr)?;
-        conf.dbname(&db.name);
+    query = "CREATE EXTENSION IF NOT EXISTS neon WITH SCHEMA neon";
+    info!("create neon extension with query: {}", query);
+    client.simple_query(query)?;
 
-        let mut db_client = conf.connect(NoTls)?;
+    query = "ALTER EXTENSION neon SET SCHEMA neon";
+    info!("alter neon extension schema with query: {}", query);
+    client.simple_query(query)?;
 
-        // this will be a no-op if extension is already up to date,
-        // which may happen in two cases:
-        // - extension was just installed
-        // - extension was already installed and is up to date
-        let create_extension_neon_query = "CREATE EXTENSION IF NOT EXISTS neon";
-        info!(
-            "create extension neon query for db {} : {}",
-            &db.name, &create_extension_neon_query
-        );
-        db_client.simple_query(create_extension_neon_query)?;
-
-        let alter_extension_neon_query = "ALTER EXTENSION neon UPDATE";
-        info!(
-            "alter extension neon query for db {} : {}",
-            &db.name, &alter_extension_neon_query
-        );
-        db_client.simple_query(alter_extension_neon_query)?;
-    }
+    // this will be a no-op if extension is already up to date,
+    // which may happen in two cases:
+    // - extension was just installed
+    // - extension was already installed and is up to date
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension schema with query: {}", query);
+    client.simple_query(query)?;
 
     Ok(())
 }
