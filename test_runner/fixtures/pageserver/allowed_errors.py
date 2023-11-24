@@ -1,4 +1,6 @@
+import argparse
 import re
+import sys
 from typing import Iterable, List, Tuple
 
 
@@ -79,16 +81,14 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
 )
 
 
-def check_allowed_errors():
-    import sys
-
+def check_allowed_errors(input):
     allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     # add any test specifics here; cli parsing is not provided for the
     # difficulty of copypasting regexes as arguments without any quoting
     # errors.
 
-    errors = scan_pageserver_log_for_errors(sys.stdin, allowed_errors)
+    errors = scan_pageserver_log_for_errors(input, allowed_errors)
 
     for lineno, error in errors:
         print(f"-:{lineno}: {error.strip()}", file=sys.stderr)
@@ -101,11 +101,15 @@ def check_allowed_errors():
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(
-        description="check stdin against pageserver global allowed_errors"
+        description="check input against pageserver global allowed_errors"
     )
-    parser.set_defaults(func=check_allowed_errors)
+    parser.add_argument(
+        "-i",
+        "--input",
+        type=argparse.FileType("r"),
+        default=sys.stdin,
+        help="Pageserver logs file. Reads from stdin if no file is provided.",
+    )
     args = parser.parse_args()
-    args.func()
+    check_allowed_errors(args.input)
