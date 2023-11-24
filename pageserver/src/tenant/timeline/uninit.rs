@@ -168,7 +168,7 @@ impl TimelineUninitMark {
             .write(true)
             .open(&uninit_mark_path)
             .context("create uninit mark file")?;
-        crashsafe::fsync_file_and_parent(&common_parent).context("fsync uninit mark file")?;
+        crashsafe::fsync_file_and_parent(common_parent).context("fsync uninit mark file")?;
 
         Ok(Self {
             uninit_mark_deleted: false,
