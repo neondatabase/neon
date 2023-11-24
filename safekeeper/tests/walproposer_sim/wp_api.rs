@@ -172,6 +172,10 @@ impl ApiImpl for SimulationApi {
     ) -> walproposer::bindings::PGAsyncReadResult {
         debug!("conn_async_read");
         let conn = self.get_conn(sk);
+        if conn.socket.is_none() {
+            // socket is already closed
+            return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_FAIL;
+        }
         let peeked = self.os.epoll_peek(0);
         match peeked {
             Some(NodeEvent::Message((_, tcp))) => {
@@ -469,5 +473,9 @@ impl ApiImpl for SimulationApi {
             // connection is already closed
         }
         conn.socket = None;
+    }
+
+    fn conn_error_message(&self, _sk: &mut walproposer::bindings::Safekeeper) -> String {
+        "connection is closed, probably".into()
     }
 }
