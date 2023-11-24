@@ -25,6 +25,7 @@ def scan_pageserver_log_for_errors(
                 errors.append((lineno, line))
     return errors
 
+
 DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # All tests print these, when starting up or shutting down
     ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
@@ -77,6 +78,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*DeleteObjects.*We encountered an internal error. Please try again.*",
 )
 
+
 def check_allowed_errors():
     import sys
 
@@ -96,6 +98,7 @@ def check_allowed_errors():
     if len(errors) > 0:
         sys.exit(1)
     sys.exit(0)
+
 
 if __name__ == "__main__":
     import argparse
