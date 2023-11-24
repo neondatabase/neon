@@ -8,11 +8,10 @@ enum Args {
     GetPageLatestLsn(getpage_latest_lsn::Args),
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let args = Args::parse();
     match args {
-        Args::GetPageLatestLsn(args) => getpage_latest_lsn::main(args).await,
+        Args::GetPageLatestLsn(args) => getpage_latest_lsn::main(args),
     }
     .unwrap()
 }
