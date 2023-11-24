@@ -47,7 +47,7 @@ impl<'t> UninitializedTimeline<'t> {
 
         if self.raw_timeline.is_none() {
             return Err(anyhow::anyhow!(
-                "No timeline for initalization found for {tenant_id}/{timeline_id}"
+                "No timeline for initialization found for {tenant_id}/{timeline_id}"
             ));
         }
 
@@ -70,7 +70,7 @@ impl<'t> UninitializedTimeline<'t> {
                 "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
-                // after taking there should be no fallible operations, because the dropguard will not
+                // after taking here should be no fallible operations, because the drop guard will not
                 // cleanup after and would block for example the tenant deletion
                 let (new_timeline, uninit_mark) =
                     self.raw_timeline.take().expect("already checked");
