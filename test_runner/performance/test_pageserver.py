@@ -97,7 +97,7 @@ def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neon
 
     # run the benchmark
     cmd = [
-        str(env.neon_binpath / "getpage_bench_libpq"),
+        str(env.neon_binpath / "pagebench"),
         "--mgmt-api-endpoint", ps_http.base_url,
         "--page-service-connstring", env.pageserver.connstr(password=None),
         "--num-tasks", "1",
