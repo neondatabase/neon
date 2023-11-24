@@ -26,6 +26,7 @@ pub mod walrecord;
 pub mod walredo;
 
 pub mod failpoint_support;
+pub mod client;
 
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;

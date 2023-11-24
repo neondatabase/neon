@@ -154,7 +154,7 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
-    use crate::repository::Key;
+    use crate::key::Key;
 
     #[test]
     fn display_fromstr_bijection() {
