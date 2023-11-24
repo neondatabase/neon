@@ -842,15 +842,18 @@ local_cache_pages(PG_FUNCTION_ARGS)
 
 		fctx->tupdesc = BlessTupleDesc(tupledesc);
 
-		LWLockAcquire(lfc_lock, LW_SHARED);
-
-		if (LFC_ENABLED())
+		if (lfc_ctl)
 		{
-			hash_seq_init(&status, lfc_hash);
-			while ((entry = hash_seq_search(&status)) != NULL)
+			LWLockAcquire(lfc_lock, LW_SHARED);
+
+			if (LFC_ENABLED())
 			{
-				for (int i = 0; i < BLOCKS_PER_CHUNK/32; i++)
-					n_pages += pg_popcount32(entry->bitmap[i]);
+				hash_seq_init(&status, lfc_hash);
+				while ((entry = hash_seq_search(&status)) != NULL)
+				{
+					for (int i = 0; i < BLOCKS_PER_CHUNK/32; i++)
+						n_pages += pg_popcount32(entry->bitmap[i]);
+				}
 			}
 		}
 		fctx->record = (LocalCachePagesRec *)
@@ -891,7 +894,8 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			}
 			Assert(n_pages == n);
 		}
-		LWLockRelease(lfc_lock);
+		if (lfc_ctl)
+			LWLockRelease(lfc_lock);
 	}
 
 	funcctx = SRF_PERCALL_SETUP();
