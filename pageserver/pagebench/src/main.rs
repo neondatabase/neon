@@ -22,8 +22,6 @@ struct Args {
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
     page_service_connstring: String,
-    // tenant_id: String,
-    // timeline_id: String,
     #[clap(long)]
     num_tasks: usize,
     #[clap(long)]

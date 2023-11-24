@@ -5,6 +5,7 @@ members = [
     "control_plane",
     "pageserver",
     "pageserver/ctl",
+    "pageserver/pagebench",
     "proxy",
     "safekeeper",
     "storage_broker",
