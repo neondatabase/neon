@@ -1,3 +1,5 @@
+#! /usr/bin/env python3
+
 import argparse
 import re
 import sys
@@ -81,7 +83,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
 )
 
 
-def check_allowed_errors(input):
+def _check_allowed_errors(input):
     allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     # add any test specifics here; cli parsing is not provided for the
@@ -95,9 +97,7 @@ def check_allowed_errors(input):
 
     print(f"\n{len(errors)} not allowed errors", file=sys.stderr)
 
-    if len(errors) > 0:
-        sys.exit(1)
-    sys.exit(0)
+    return errors
 
 
 if __name__ == "__main__":
@@ -112,4 +112,6 @@ if __name__ == "__main__":
         help="Pageserver logs file. Reads from stdin if no file is provided.",
     )
     args = parser.parse_args()
-    check_allowed_errors(args.input)
+    errors = _check_allowed_errors(args.input)
+
+    sys.exit(len(errors) > 0)
