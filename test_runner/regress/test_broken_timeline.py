@@ -234,6 +234,11 @@ def test_long_timeline_create_then_tenant_delete(neon_env_builder: NeonEnvBuilde
     env.start()
     pageserver_http = env.pageserver.http_client()
 
+    # happens with the cancellation bailing flushing loop earlier, leaving disk_consistent_lsn at zero
+    env.pageserver.allowed_errors.append(".*Timeline got dropped without initializing, cleaning its files")
+    # the response hit_pausable_failpoint_and_later_fail
+    env.pageserver.allowed_errors.append(f".*Error processing HTTP request: InternalServerError\\(new timeline {env.initial_tenant}/{env.initial_timeline} has invalid disk_consistent_lsn")
+
     pageserver_http.tenant_create(env.initial_tenant)
 
     # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
@@ -257,16 +262,9 @@ def test_long_timeline_create_then_tenant_delete(neon_env_builder: NeonEnvBuilde
     def deletion_has_started_waiting_for_timelines():
         assert env.pageserver.log_contains("Waiting for timelines...") is not None
 
-    def tenant_is_broken():
-        assert (
-            env.pageserver.log_contains(
-                "Marking Stopping tenant as Broken state, reason: timelines dir not empty"
-            )
-            is not None
-        )
-
-        status = pageserver_http.tenant_status(env.initial_tenant)
-        assert status["state"]["slug"] == "Broken"
+    def tenant_is_deleted():
+        with pytest.raises(PageserverApiException, match=f"NotFound: tenant {env.initial_tenant}"):
+            pageserver_http.tenant_status(env.initial_tenant)
 
     from threading import Thread
 
@@ -287,8 +285,10 @@ def test_long_timeline_create_then_tenant_delete(neon_env_builder: NeonEnvBuilde
 
         pageserver_http.configure_failpoints((failpoint, "off"))
 
-        # this is the reproduction; there are also unallowed errors
-        wait_until(10, 1, tenant_is_broken)
+        creation.join()
+        deletion.join()
+
+        wait_until(10, 1, tenant_is_deleted)
     finally:
         creation.join()
         if deletion is not None:
