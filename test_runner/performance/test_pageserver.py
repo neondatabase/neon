@@ -1,4 +1,3 @@
-
 import json
 from pathlib import Path
 import shutil
@@ -11,7 +10,10 @@ from fixtures.types import TenantId
 from fixtures.log_helper import log
 from fixtures.benchmark_fixture import NeonBenchmarker
 
-def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, pg_bin: PgBin):
+
+def test_getpage_throughput(
+    neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, pg_bin: PgBin
+):
     neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
@@ -26,15 +28,15 @@ def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neon
 
     # create our template tenant
     tenant_config_mgmt_api = {
-        "gc_period" : '0s',
-        "checkpoint_timeout" : '3650 day',
-        "compaction_period" : '20 s',
-        "compaction_threshold" : 10,
-        "compaction_target_size" : 134217728,
-        "checkpoint_distance" : 268435456,
-        "image_creation_threshold" : 3,
+        "gc_period": "0s",
+        "checkpoint_timeout": "3650 day",
+        "compaction_period": "20 s",
+        "compaction_threshold": 10,
+        "compaction_target_size": 134217728,
+        "checkpoint_distance": 268435456,
+        "image_creation_threshold": 3,
     }
-    tenant_config_cli = { k: str(v) for k, v in tenant_config_mgmt_api.items() }
+    tenant_config_cli = {k: str(v) for k, v in tenant_config_mgmt_api.items()}
 
     template_tenant, template_timeline = env.neon_cli.create_tenant(conf=tenant_config_cli)
     template_tenant_gen = int(ps_http.tenant_status(template_tenant)["generation"])
@@ -46,17 +48,14 @@ def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neon
     # stop PS just for good measure
     env.pageserver.stop()
 
-    # duplicate the tenant in remote stora
+    # duplicate the tenant in remote storage
     src_timelines_dir: Path = remote_storage.tenant_path(template_tenant) / "timelines"
     assert src_timelines_dir.is_dir(), f"{src_timelines_dir} is not a directory"
-
     tenants = [template_tenant]
-
     for i in range(0, 10):
         new_tenant = TenantId.generate()
         tenants.append(new_tenant)
         log.info("Duplicating tenant #%s: %s", i, new_tenant)
-
 
         dst_timelines_dir: Path = remote_storage.tenant_path(new_tenant) / "timelines"
         dst_timelines_dir.parent.mkdir(parents=False, exist_ok=False)
@@ -86,7 +85,9 @@ def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neon
     env.pageserver.start()
     assert ps_http.tenant_list() == []
     for tenant in tenants:
-        ps_http.tenant_attach(tenant, config=tenant_config_mgmt_api, generation=template_tenant_gen+1)
+        ps_http.tenant_attach(
+            tenant, config=tenant_config_mgmt_api, generation=template_tenant_gen + 1
+        )
     for tenant in tenants:
         wait_until_tenant_active(ps_http, tenant)
 
@@ -95,20 +96,23 @@ def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neon
     for tenant in tenants:
         ps_http.download_all_layers(tenant, template_timeline)
 
-    # run the benchmark
+    # run the benchmark with one client per timeline, each doing 10k requests to random keys.
     cmd = [
         str(env.neon_binpath / "pagebench"),
-        "--mgmt-api-endpoint", ps_http.base_url,
-        "--page-service-connstring", env.pageserver.connstr(password=None),
-        "--num-tasks", "1",
-        "--num-requests", "10000",
+        "get-page-latest-lsn",
+        "--mgmt-api-endpoint",
+        ps_http.base_url,
+        "--page-service-connstring",
+        env.pageserver.connstr(password=None),
+        "--num-tasks",
+        "1",
+        "--num-requests",
+        "10000",
         *[str(tenant) for tenant in tenants],
     ]
     basepath = pg_bin.run_capture(cmd)
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
-    with open(results_path, 'r') as f:
+    with open(results_path, "r") as f:
         results = json.load(f)
-
-

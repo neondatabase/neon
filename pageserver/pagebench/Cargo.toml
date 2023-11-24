@@ -8,7 +8,12 @@ edition = "2021"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+hdrhistogram.workspace = true
+humantime.workspace = true
+humantime-serde.workspace = true
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 
