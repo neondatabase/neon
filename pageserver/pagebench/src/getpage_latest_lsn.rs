@@ -46,10 +46,10 @@ struct Output {
     total: PerTaskOutput,
 }
 
-const LATENCY_PERCENTILES: [f64; 3] = [95.0, 99.00, 99.90, 99.99];
+const LATENCY_PERCENTILES: [f64; 4] = [95.0, 99.00, 99.90, 99.99];
 
 struct LatencyPercentiles {
-    latency_percentiles: [Duration; 3],
+    latency_percentiles: [Duration; 4],
 }
 
 impl serde::Serialize for LatencyPercentiles {
