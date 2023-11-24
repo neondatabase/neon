@@ -441,8 +441,12 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
         assert env.pageserver.log_contains("Waiting for timelines...") is not None
 
     def tenant_is_deleted():
-        with pytest.raises(PageserverApiException, match=f"NotFound: tenant {env.initial_tenant}"):
+        try:
             pageserver_http.tenant_status(env.initial_tenant)
+        except PageserverApiException as e:
+            assert e.status_code == 404
+        else:
+            raise RuntimeError("tenant was still accessible")
 
     creation = Thread(target=hit_pausable_failpoint_and_later_fail)
     creation.start()
