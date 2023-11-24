@@ -1,4 +1,5 @@
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -104,4 +105,10 @@ def test_getpage_throughput(neon_env_builder: NeonEnvBuilder, zenbenchmark: Neon
         *[str(tenant) for tenant in tenants],
     ]
     basepath = pg_bin.run_capture(cmd)
-    log.info("Benchmark results: %s", basepath + ".stdout")
+    results_path = Path(basepath + ".stdout")
+    log.info(f"Benchmark results at: {results_path}")
+
+    with open(results_path, 'r') as f:
+        results = json.load(f)
+
+
