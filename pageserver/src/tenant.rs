@@ -2935,12 +2935,13 @@ impl Tenant {
             let Some(storage) = &self.remote_storage else {
                 bail!("No storage configured but load_existing_initdb set to {existing_initdb_timeline_id}.");
             };
-            self::remote_timeline_client::download_initdb_tar_zst(
+            let initdb_tar_zst = self::remote_timeline_client::download_initdb_tar_zst(
                 storage,
                 &self.tenant_id,
                 &existing_initdb_timeline_id,
             )
             .await?;
+            import_datadir::extract_tar_zst(&pgdata_path, &initdb_tar_zst).await?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
             run_initdb(self.conf, &pgdata_path, pg_version)?;
