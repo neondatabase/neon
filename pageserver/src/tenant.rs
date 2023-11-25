@@ -1508,6 +1508,7 @@ impl Tenant {
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
