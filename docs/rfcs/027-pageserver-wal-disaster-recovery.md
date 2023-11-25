@@ -13,9 +13,9 @@ The feature is outside of the user-visible backup and history story, and only
 serves as a second-level backup for the case that there is a bug in the
 pageservers that corrupted the served pages.
 
-The RFC proposes an API endpoint for the pageserver that can be triggered
-to create a new copy of a timeline, applying the WAL of a different
-timeline, either from the start, right after initdb, or from a historic point.
+The RFC proposes the addition of two new features:
+* recover a broken branch from WAL (downtime is allowed)
+* a test recovery system to recover random branches to make sure recovery works
 
 ## Motivation
 
@@ -23,8 +23,8 @@ The historic WAL is currently stored in S3 even after it has been replayed by
 the pageserver and thus been integrated into the pageserver's storage system.
 This is done to defend from data corruption failures inside the pageservers.
 
-However, application of this WAL is currently very manual and we want to
-automate this to make it easier.
+However, application of this WAL in the disaster recovery setting is currently
+very manual and we want to automate this to make it easier.
 
 ### Use cases
 
@@ -59,62 +59,69 @@ inevitable if the original had been subject to the corruption. Ideally, the
 two code paths would share code, so the solution would be designed for not
 requiring downtimes.
 
-### API endpoints
+### API endpoint changes
 
-The proposed design of the new pageserver API endpoint is:
+This RFC proposes two API endpoint changes in the safekeeper and the
+pageserver.
+
+Remember, the pageserver timeline API creation endpoint is to this URL:
 
 ```
-/v1/tenant/:tenant_id/timeline/:timeline_id/recover?from_lsn=<from_lsn>&to_lsn=<lsn>&target=<target_timeline_id>
+/v1/tenant/{tenant_id}/timeline/
 ```
 
-The `recover` endpoint answers to `POST` requests and issues a WAL recovery
-process. It takes the WAL of the specified timeline, and writes its results
-into a *different* timeline, the target timeline. This two timeline scheme
-ensures that we can stil serve requests and preserves immutability guarantees
-assumed by the [generation numbers RFC], as in corruption situations we might
-indeed end up with different content than the original timeline we are storing
-data from.
+Where `{tenant_id}` is the ID of the tenant the timeline is created for,
+and specified as part of the URL. The timeline ID is passed via the POST
+request body as the only required parameter `new_timeline_id`.
 
-Where the parameters are:
+This proposal adds one optional parameter called
+`existing_initdb_timeline_id` to the request's json body. If the parameter
+is not specified, behaviour should be as existing, so the pageserver runs
+initdb.
+If the parameter is specified, it is expected to point to a timeline ID.
+In fact that ID might match `new_timeline_id`, what's important is that
+S3 storage contains a matching initdb under the URL matching the given
+tenant and timeline.
 
-* `:tenant_id`: the id of the tenant to recover
-* `:timeline_id`: the id of the timeline to recover
-* `from_lsn`: The lsn at the start of our recovery process.
-  Optional, if not specified the recovery process is fully WAL based.
-  If specified, the recovery process starts from data at the *main* timeline
-  at the specific lsn (maybe we still trust that lsn). In any case, the target
-  timeline must be less advanced than `from_lsn`.
-* `to_lsn`: the end of the lsn range we want to recover. As usual, it's an
-  exclusive limit. This allows playing back the WAL to a specific moment in the
-  past, if this is wanted/needed. E.g. there might be a data-corrupting
-  pageserver crash at lsn 1234 and we don't want that so we play back until
-  1233.
-* `target`: the timeline id we are writing into. The parameter is optional;
-  if no target timeline is provided, a new timeline is created.
-  One specifies either both `from_lsn` and `target`, or neither.
-  Writing into the same timeline is forbidden.
+Having both `ancestor_timeline_id` and `existing_initdb_timeline_id`
+specified is illegal and will yield in an HTTP error. This feature is
+only meant for the "main" branch that doesn't have any ancestors
+of its own, as only here initdb is relevant.
 
-The API call returns immediately after creation of the new timeline, and
-doesn't wait for the timeline's WAL replay to finish. The API call returns
-the id of the newly created timeline. The new timeline will appear in the
-usual listings and its lsn will increase until WAL replay has finished.
-As the caller knows the targeted lsn goal, this allows them to be informed
-about progress. There is no push notification for when the process has
-finished, any followup actions need to first poll for completion.
+For the safekeeper, we propose the addition of the following copy endpoint:
 
-[generation numbers RFC]: ./025-generation-numbers.md
+```
+/v1/tenant/{tenant_id}/timeline/{source_timeline_id}/copy
+```
+it is meant for POST requests with json, and the two URL parameters
+`tenant_id` and `source_timeline_id`. The json request body contains
+the two required parameters `target_timeline_id` and `until_lsn`.
+
+After invoking, the copy endpoint starts a copy process of the WAL from
+the source ID to the target ID. The lsn is updated according to the
+progress of the API call.
 
 ### Higher level features
 
-The API endpoint described above allows for a large set of higher level
-features to be implemented.
+We want the API changes to support the following higher level features:
 
-* recovery not just one timeline, but of multiple timelines. Oncluding, if
-  wanted, all timelines of the tenant.
-* recovery just until a specific moment in time, even if pageserver history is
-  completely turned off.
-* a repeated job to *detect* errors/corruption, both to verify that the backup
-  works and to verify that the backed up original is not corrupted.
+* recovery-after-corruption DR of the main timeline of a tenant. This
+  feature allows for downtime.
+* test DR of the main timeline into a special copy timeline. this feature
+  is meant to run against selected production tenants in the background,
+  without the user noticing, so it does not allow for downtime.
+
+The recovery-after-corruption DR only needs the pageserver changes.
+It works as follows:
+
+* delete the timeline from the pageservers via timeline deletion API
+* re-create it via timeline creation API (same ID as before) and set
+  `existing_initdb_timeline_id` to the same timeline ID
+
+The test DR requires also the copy primitive and works as follows:
+
+* copy the WAL of the timeline to a new place
+* create a new timeline for the tenant
 
 ## Non Goals
 
