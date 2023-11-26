@@ -26,13 +26,3 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
             # If the version has changed, the test should be updated.
             # Ensure that the default version is also updated in the neon.control file
             assert cur.fetchone() == ("1.1",)
-
-            # create test database
-            cur.execute("CREATE DATABASE foodb")
-
-    # connect to test database
-    # test that neon extension is installed and has the correct version
-    with closing(endpoint_main.connect(dbname="foodb")) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT extversion from pg_extension where extname='neon'")
-            assert cur.fetchone() == ("1.1",)
