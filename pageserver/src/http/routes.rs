@@ -420,7 +420,7 @@ async fn reload_auth_validation_keys_handler(
 
 async fn timeline_create_handler(
     mut request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
@@ -440,6 +440,7 @@ async fn timeline_create_handler(
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
             state.broker_client.clone(),
+            &cancel,
             &ctx,
         )
         .await {

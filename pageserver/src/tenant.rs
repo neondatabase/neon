@@ -1514,6 +1514,7 @@ impl Tenant {
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -1521,6 +1522,7 @@ impl Tenant {
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
         broker_client: storage_broker::BrokerClientChannel,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         if !self.is_active() {
@@ -1594,7 +1596,7 @@ impl Tenant {
                     .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, ctx)
+                self.bootstrap_timeline(new_timeline_id, pg_version, cancel, ctx)
                     .await?
             }
         };
@@ -2906,6 +2908,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
@@ -2929,7 +2932,7 @@ impl Tenant {
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &initdb_path, pg_version).await?;
+        run_initdb(self.conf, &initdb_path, pg_version, cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&initdb_path) {
@@ -3398,6 +3401,7 @@ async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
     let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
@@ -3408,31 +3412,40 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let initdb_output = tokio::process::Command::new(&initdb_bin_path)
+    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
         .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
         .arg("--no-instructions")
-        // This is only used for a temporary installation that is deleted shortly after,
-        // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
         .stdout(Stdio::null())
-        .output()
-        .await
+        .spawn()
         .with_context(|| {
             format!(
                 "failed to execute {} at target dir {}",
                 initdb_bin_path, initdb_target_dir,
             )
         })?;
-    if !initdb_output.status.success() {
-        bail!(
-            "initdb failed: '{}'",
-            String::from_utf8_lossy(&initdb_output.stderr)
-        );
+
+    let child_id = initdb_command.id();
+
+    tokio::select! {
+        initdb_output = initdb_command.wait_with_output() => {
+            let initdb_output = initdb_output?;
+            if !initdb_output.status.success() {
+                bail!(
+                    "initdb failed: '{}'",
+                    String::from_utf8_lossy(&initdb_output.stderr)
+                );
+            }
+        }
+        _ = cancel.cancelled() => {
+            tokio::process::Command::new("kill").arg("-9").arg(child_id.unwrap().to_string()).output().await?;
+            bail!("initdb was cancelled");
+        }
     }
 
     Ok(())
