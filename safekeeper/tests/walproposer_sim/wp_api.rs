@@ -108,13 +108,12 @@ impl SimulationApi {
     }
 
     /// Find existing connection by TCP object.
-    fn find_conn(&self, tcp: TCP) -> RefMut<'_, SafekeeperConn> {
+    fn find_conn(&self, tcp: TCP) -> Option<RefMut<'_, SafekeeperConn>> {
         let state = self.safekeepers.borrow_mut();
-        RefMut::map(state, |v| {
+        RefMut::filter_map(state, |v| {
             v.iter_mut()
                 .find(|conn| conn.socket.as_ref().is_some_and(|s| s.id() == tcp.id()))
-                .expect("safekeeper conn not found by tcp")
-        })
+        }).ok()
     }
 }
 
@@ -129,7 +128,11 @@ impl ApiImpl for SimulationApi {
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerConnStatusType {
         debug!("conn_status");
-        walproposer::bindings::WalProposerConnStatusType_WP_CONNECTION_OK
+        if self.os.random(100) < 10 {
+            walproposer::bindings::WalProposerConnStatusType_WP_CONNECTION_BAD
+        } else {
+            walproposer::bindings::WalProposerConnStatusType_WP_CONNECTION_OK
+        }
     }
 
     fn conn_connect_start(&self, sk: &mut walproposer::bindings::Safekeeper) {
@@ -318,9 +321,17 @@ impl ApiImpl for SimulationApi {
                 let ev2 = self.os.epoll_recv(0);
                 assert!(ev2.is_some());
                 let mut sk = self.find_conn(tcp);
-                // TODO: ???
-                sk.socket = None;
-                walproposer::walproposer::WaitResult::Network(sk.raw_ptr, WL_SOCKET_READABLE)
+                if let Some(sk) = sk.as_mut() {
+                    sk.socket = None;
+                    walproposer::walproposer::WaitResult::Network(
+                        sk.raw_ptr,
+                        WL_SOCKET_READABLE,
+                    )
+                } else {
+                    // connection is already closed
+                    // TODO!
+                    walproposer::walproposer::WaitResult::Latch
+                }
             }
             slowsim::world::NodeEvent::Message((msg, tcp)) => {
                 let _ = match msg {
@@ -329,7 +340,7 @@ impl ApiImpl for SimulationApi {
                 };
                 // walproposer must read the message
                 walproposer::walproposer::WaitResult::Network(
-                    self.find_conn(tcp).raw_ptr,
+                    self.find_conn(tcp).unwrap().raw_ptr,
                     WL_SOCKET_READABLE,
                 )
             }
