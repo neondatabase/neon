@@ -31,26 +31,6 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 
-use std::cmp::min;
-use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt::Debug;
-use std::fmt::Display;
-use std::fs;
-use std::fs::File;
-use std::io;
-use std::ops::Bound::Included;
-use std::process::Command;
-use std::process::Stdio;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::MutexGuard;
-use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant};
-
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
 use self::config::LocationConf;
@@ -84,14 +64,35 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
+use std::cmp::min;
+use std::collections::hash_map::Entry;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::ops::Bound::Included;
+use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::MutexGuard;
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
+use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
+use tokio::sync::Semaphore;
 
+static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use toml_edit;
 use utils::{
     crashsafe,
@@ -2928,7 +2929,7 @@ impl Tenant {
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &initdb_path, pg_version)?;
+        run_initdb(self.conf, &initdb_path, pg_version).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&initdb_path) {
@@ -3393,7 +3394,7 @@ fn rebase_directory(
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
 /// to get bootstrap data for timeline initialization.
-fn run_initdb(
+async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
@@ -3405,7 +3406,9 @@ fn run_initdb(
         initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
-    let initdb_output = Command::new(&initdb_bin_path)
+    let _permit = INIT_DB_SEMAPHORE.acquire().await;
+
+    let initdb_output = tokio::process::Command::new(&initdb_bin_path)
         .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
@@ -3418,6 +3421,7 @@ fn run_initdb(
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
         .stdout(Stdio::null())
         .output()
+        .await
         .with_context(|| {
             format!(
                 "failed to execute {} at target dir {}",
