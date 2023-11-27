@@ -266,6 +266,15 @@ pub struct LocationConfig {
     #[serde(default)]
     pub secondary_conf: Option<LocationConfigSecondary>,
 
+    // Shard parameters: if shard_count is nonzero, then other shard_* fields
+    // must be set accurately.
+    #[serde(default)]
+    pub shard_number: u8,
+    #[serde(default)]
+    pub shard_count: u8,
+    #[serde(default)]
+    pub shard_stripe_size: u32,
+
     // If requesting mode `Secondary`, configuration for that.
     // Custom storage configuration for the tenant, if any
     pub tenant_conf: TenantConfig,
