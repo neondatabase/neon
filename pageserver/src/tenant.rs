@@ -733,7 +733,7 @@ impl Tenant {
     ///
     async fn attach(
         self: &Arc<Tenant>,
-        mut init_order: Option<InitializationOrder>,
+        init_order: Option<InitializationOrder>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -749,11 +749,6 @@ impl Tenant {
                 return self.load_local(init_order, ctx).await;
             }
         };
-
-        // Signal that we have completed remote phase
-        init_order
-            .as_mut()
-            .and_then(|x| x.initial_tenant_load_remote.take());
 
         let mut timelines_to_resume_deletions = vec![];
 
