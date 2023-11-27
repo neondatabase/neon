@@ -1252,6 +1252,18 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_process_launch_duration",
+        "Histogram of the duration of successful WalRedoProcess::launch calls",
+        // We'd expect `::launch()` to be significantly slower than an individual redo.
+        // But, they contribute to the same latency metric (walredo latency), so, use
+        // the same histogram for now.
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
