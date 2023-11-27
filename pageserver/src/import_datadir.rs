@@ -3,16 +3,16 @@
 //! a neon Timeline.
 //!
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{self, Poll};
 
 use anyhow::{bail, ensure, Context, Result};
 use async_compression::{tokio::write::ZstdEncoder, zstd::CParameter, Level};
 use bytes::Bytes;
 use camino::Utf8Path;
+use camino_tempfile::tempfile;
 use futures::StreamExt;
 use nix::NixPath;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_tar::Archive;
 use tokio_tar::Builder;
 use tokio_tar::HeaderMode;
@@ -628,70 +628,7 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     Ok(Bytes::from(buf))
 }
 
-/// An in-memory buffer implementing `AsyncWrite`, inserting yields every now and then
-///
-/// The number of yields is bounded by above by the number of times poll_write is called,
-/// so calling it with 8 KB chunks and 8 MB chunks gives the same number of yields in total.
-/// This is an explicit choice as the `YieldingVec` is meant to give the async executor
-/// breathing room between units of CPU intensive preparation of buffers to be written.
-/// Once a write call is issued, the whole buffer has been prepared already, so there is no
-/// gain in splitting up the memcopy further.
-struct YieldingVec {
-    yield_budget: usize,
-    // the buffer written into
-    buf: Vec<u8>,
-}
-
-impl YieldingVec {
-    fn new() -> Self {
-        Self {
-            yield_budget: 0,
-            buf: Vec::new(),
-        }
-    }
-    // Whether we should yield for a read operation of given size
-    fn should_yield(&mut self, add_buf_len: usize) -> bool {
-        // Set this limit to a small value so that we are a
-        // good async citizen and yield repeatedly (but not
-        // too often for many small writes to cause many yields)
-        const YIELD_DIST: usize = 1024;
-
-        let target_buf_len = self.buf.len() + add_buf_len;
-        let ret = self.yield_budget / YIELD_DIST < target_buf_len / YIELD_DIST;
-        if self.yield_budget < target_buf_len {
-            self.yield_budget += add_buf_len;
-        }
-        ret
-    }
-}
-
-impl AsyncWrite for YieldingVec {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        if self.should_yield(buf.len()) {
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        self.get_mut().buf.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut task::Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut task::Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
+pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<(File, u64)> {
     let mut paths = Vec::new();
     for entry in WalkDir::new(pgdata_path) {
         let entry = entry?;
@@ -705,8 +642,9 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     }
     // Do a sort to get a more consistent listing
     paths.sort_unstable();
+    let tempfile = File::from_std(tempfile()?);
     let zstd = ZstdEncoder::with_quality_and_params(
-        YieldingVec::new(),
+        tempfile,
         Level::Default,
         &[CParameter::enable_long_distance_matching(true)],
     );
@@ -725,10 +663,10 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     let mut zstd = builder.into_inner().await?;
     zstd.shutdown().await?;
     let compressed = zstd.into_inner();
-    let compressed_len = compressed.buf.len();
-    const INITDB_TAR_ZST_WARN_LIMIT: usize = 2_000_000;
+    let compressed_len = compressed.metadata().await?.len();
+    const INITDB_TAR_ZST_WARN_LIMIT: u64 = 2_000_000;
     if compressed_len > INITDB_TAR_ZST_WARN_LIMIT {
         warn!("compressed {INITDB_PATH} size of {compressed_len} is above limit {INITDB_TAR_ZST_WARN_LIMIT}.");
     }
-    Ok(compressed.buf)
+    Ok((compressed, compressed_len))
 }

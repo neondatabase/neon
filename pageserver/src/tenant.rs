@@ -12,7 +12,6 @@
 //!
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use futures::FutureExt;
@@ -2935,15 +2934,15 @@ impl Tenant {
 
         // Upload the created data dir to S3
         if let Some(storage) = &self.remote_storage {
-            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
-            let pgdata_zstd = Bytes::from(pgdata_zstd);
+            let (pgdata_zstd, tar_zst_size) = import_datadir::create_tar_zst(&pgdata_path).await?;
             backoff::retry(
                 || async {
                     self::remote_timeline_client::upload_initdb_dir(
                         storage,
                         &self.tenant_id,
                         &timeline_id,
-                        pgdata_zstd.clone(),
+                        pgdata_zstd.try_clone().await?,
+                        tar_zst_size,
                     )
                     .await
                 },
