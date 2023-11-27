@@ -54,58 +54,6 @@ impl Deref for DiskStateStorage {
     }
 }
 
-pub struct DummyWalStore {
-    lsn: Lsn,
-}
-
-impl DummyWalStore {
-    pub fn new() -> Self {
-        DummyWalStore { lsn: Lsn::INVALID }
-    }
-}
-
-#[async_trait::async_trait]
-impl wal_storage::Storage for DummyWalStore {
-    /// LSN of last durably stored WAL record.
-    fn flush_lsn(&self) -> Lsn {
-        self.lsn
-    }
-
-    /// Write piece of WAL from buf to disk, but not necessarily sync it.
-    async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
-        self.lsn = startpos + buf.len() as u64;
-        Ok(())
-    }
-
-    /// Truncate WAL at specified LSN, which must be the end of WAL record.
-    async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
-        self.lsn = end_pos;
-        Ok(())
-    }
-
-    /// Durably store WAL on disk, up to the last written WAL record.
-    async fn flush_wal(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Remove all segments <= given segno. Returns function doing that as we
-    /// want to perform it without timeline lock.
-    fn remove_up_to(&self, _segno_up_to: XLogSegNo) -> BoxFuture<'static, anyhow::Result<()>> {
-        Box::pin(async move { Ok(()) })
-    }
-
-    /// Release resources associated with the storage -- technically, close FDs.
-    /// Currently we don't remove timelines until restart (#3146), so need to
-    /// spare descriptors. This would be useful for temporary tli detach as
-    /// well.
-    fn close(&mut self) {}
-
-    /// Get metrics for this timeline.
-    fn get_metrics(&self) -> WalStorageMetrics {
-        WalStorageMetrics::default()
-    }
-}
-
 pub struct DiskWALStorage {
     /// Written to disk, but possibly still in the cache and not fully persisted.
     /// Also can be ahead of record_lsn, if happen to be in the middle of a WAL record.

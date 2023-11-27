@@ -13,6 +13,12 @@ struct ChanState<T> {
     condvar: Condvar,
 }
 
+impl<T: Clone> Default for Chan<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Clone> Chan<T> {
     pub fn new() -> Chan<T> {
         Chan {

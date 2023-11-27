@@ -350,7 +350,7 @@ extern "C" fn after_election(wp: *mut WalProposer) {
     }
 }
 
-#[derive(Debug,PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Level {
     Debug5,
     Debug4,

@@ -19,7 +19,7 @@ impl Disk {
     pub fn put_state(&self, ttid: &TenantTimelineId, state: SafeKeeperState) -> Arc<TimelineDisk> {
         self.timelines
             .lock()
-            .entry(ttid.clone())
+            .entry(*ttid)
             .and_modify(|e| {
                 let mut mu = e.state.lock();
                 *mu = state.clone();

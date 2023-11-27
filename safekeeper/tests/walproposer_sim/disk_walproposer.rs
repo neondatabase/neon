@@ -1,10 +1,25 @@
-use std::{ffi::{CStr, CString}, sync::Arc};
+use std::{ffi::CString, sync::Arc};
 
-use byteorder::{WriteBytesExt, BigEndian, LittleEndian};
+use byteorder::{LittleEndian, WriteBytesExt};
 use crc32c::crc32c_append;
 use parking_lot::{Mutex, MutexGuard};
+use postgres_ffi::{
+    pg_constants::{
+        RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE, XLP_LONG_HEADER, XLR_BLOCK_ID_DATA_LONG,
+        XLR_BLOCK_ID_DATA_SHORT,
+    },
+    v16::{
+        wal_craft_test_export::{XLogLongPageHeaderData, XLogPageHeaderData, XLOG_PAGE_MAGIC},
+        xlog_utils::{
+            XLogSegNoOffsetToRecPtr, XlLogicalMessage, XLOG_RECORD_CRC_OFFS,
+            XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+            XLP_FIRST_IS_CONTRECORD,
+        },
+        XLogRecord,
+    },
+    WAL_SEGMENT_SIZE, XLOG_BLCKSZ,
+};
 use utils::lsn::Lsn;
-use postgres_ffi::{v16::{xlog_utils::{XlLogicalMessage, XLOG_SIZE_OF_XLOG_RECORD, XLOG_RECORD_CRC_OFFS, XLOG_SIZE_OF_XLOG_SHORT_PHD, XLogSegNoOffsetToRecPtr, XLOG_SIZE_OF_XLOG_LONG_PHD, XLP_FIRST_IS_CONTRECORD}, XLogRecord, wal_craft_test_export::{XLogPageHeaderData, XLOG_PAGE_MAGIC, XLogLongPageHeaderData}}, pg_constants::{RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE, XLR_BLOCK_ID_DATA_LONG, XLR_BLOCK_ID_DATA_SHORT, XLP_LONG_HEADER}, XLOG_BLCKSZ, WAL_SEGMENT_SIZE};
 
 use super::disk::BlockStorage;
 
@@ -68,17 +83,18 @@ impl State {
 
         let record_bytes = lm.encode();
 
-        let mut rdatas: Vec<&[u8]> = Vec::new();
-        rdatas.push(&record_bytes);
-        rdatas.push(prefix_bytes);
-        rdatas.push(msg);
+        let rdatas: Vec<&[u8]> = vec![&record_bytes, prefix_bytes, msg];
 
         insert_wal_record(self, rdatas, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE)
     }
 }
 
-
-fn insert_wal_record(state: &mut State, rdatas: Vec<&[u8]>, rmid: u8, info: u8) -> anyhow::Result<()> {
+fn insert_wal_record(
+    state: &mut State,
+    rdatas: Vec<&[u8]>,
+    rmid: u8,
+    info: u8,
+) -> anyhow::Result<()> {
     // bytes right after the header, in the same rdata block
     let mut scratch = Vec::new();
     let mainrdata_len: usize = rdatas.iter().map(|rdata| rdata.len()).sum();
@@ -143,7 +159,13 @@ fn insert_wal_record(state: &mut State, rdatas: Vec<&[u8]>, rmid: u8, info: u8) 
     Ok(())
 }
 
-fn write_walrecord_to_disk(state: &mut State, total_len: u64, rdatas: Vec<&[u8]>, start: Lsn, end: Lsn) -> anyhow::Result<()> {
+fn write_walrecord_to_disk(
+    state: &mut State,
+    total_len: u64,
+    rdatas: Vec<&[u8]>,
+    start: Lsn,
+    end: Lsn,
+) -> anyhow::Result<()> {
     let mut curr_ptr = start;
     let mut freespace = insert_freespace(curr_ptr);
     let mut written: usize = 0;
@@ -152,8 +174,11 @@ fn write_walrecord_to_disk(state: &mut State, total_len: u64, rdatas: Vec<&[u8]>
 
     for mut rdata in rdatas {
         while rdata.len() >= freespace {
-            assert!(curr_ptr.segment_offset(WAL_SEGMENT_SIZE) >= XLOG_SIZE_OF_XLOG_SHORT_PHD || freespace == 0);
-            
+            assert!(
+                curr_ptr.segment_offset(WAL_SEGMENT_SIZE) >= XLOG_SIZE_OF_XLOG_SHORT_PHD
+                    || freespace == 0
+            );
+
             state.write(curr_ptr.0, &rdata[..freespace]);
             rdata = &rdata[freespace..];
             written += freespace;
@@ -192,7 +217,10 @@ fn write_walrecord_to_disk(state: &mut State, total_len: u64, rdatas: Vec<&[u8]>
             freespace = insert_freespace(curr_ptr);
         }
 
-        assert!(curr_ptr.segment_offset(WAL_SEGMENT_SIZE) >= XLOG_SIZE_OF_XLOG_SHORT_PHD || rdata.len() == 0);
+        assert!(
+            curr_ptr.segment_offset(WAL_SEGMENT_SIZE) >= XLOG_SIZE_OF_XLOG_SHORT_PHD
+                || rdata.is_empty()
+        );
         state.write(curr_ptr.0, rdata);
         curr_ptr = Lsn(curr_ptr.0 + rdata.len() as u64);
         written += rdata.len();
@@ -200,8 +228,8 @@ fn write_walrecord_to_disk(state: &mut State, total_len: u64, rdatas: Vec<&[u8]>
     }
 
     // Assert(written == write_len);
-	// CurrPos = MAXALIGN64(CurrPos);
-	// Assert(CurrPos == EndPos);
+    // CurrPos = MAXALIGN64(CurrPos);
+    // Assert(CurrPos == EndPos);
     assert!(written == total_len as usize);
     curr_ptr.0 = maxalign(curr_ptr.0);
     assert!(curr_ptr == end);
@@ -210,7 +238,10 @@ fn write_walrecord_to_disk(state: &mut State, total_len: u64, rdatas: Vec<&[u8]>
 
 fn maxalign<T>(size: T) -> T
 where
-    T: std::ops::BitAnd<Output = T> + std::ops::Add<Output = T> + std::ops::Not<Output = T> + From<u8>,
+    T: std::ops::BitAnd<Output = T>
+        + std::ops::Add<Output = T>
+        + std::ops::Not<Output = T>
+        + From<u8>,
 {
     (size + T::from(7)) & !T::from(7)
 }
@@ -225,7 +256,9 @@ fn insert_freespace(ptr: Lsn) -> usize {
 
 const XLP_BKP_REMOVABLE: u16 = 0x0004;
 const USABLE_BYTES_IN_PAGE: u64 = (XLOG_BLCKSZ - XLOG_SIZE_OF_XLOG_SHORT_PHD) as u64;
-const USABLE_BYTES_IN_SEGMENT: u64 = ((WAL_SEGMENT_SIZE / XLOG_BLCKSZ) as u64 * USABLE_BYTES_IN_PAGE) - (XLOG_SIZE_OF_XLOG_RECORD - XLOG_SIZE_OF_XLOG_SHORT_PHD) as u64;
+const USABLE_BYTES_IN_SEGMENT: u64 = ((WAL_SEGMENT_SIZE / XLOG_BLCKSZ) as u64
+    * USABLE_BYTES_IN_PAGE)
+    - (XLOG_SIZE_OF_XLOG_RECORD - XLOG_SIZE_OF_XLOG_SHORT_PHD) as u64;
 
 fn bytepos_to_recptr(bytepos: u64) -> Lsn {
     let fullsegs = bytepos / USABLE_BYTES_IN_SEGMENT;
@@ -238,12 +271,19 @@ fn bytepos_to_recptr(bytepos: u64) -> Lsn {
         // account for the first page on segment with long header
         bytesleft -= (XLOG_BLCKSZ - XLOG_SIZE_OF_XLOG_SHORT_PHD) as u64;
         let fullpages = bytesleft / USABLE_BYTES_IN_PAGE;
-        bytesleft = bytesleft % USABLE_BYTES_IN_PAGE;
+        bytesleft %= USABLE_BYTES_IN_PAGE;
 
-        XLOG_BLCKSZ as u64 + fullpages * XLOG_BLCKSZ as u64 + bytesleft + XLOG_SIZE_OF_XLOG_SHORT_PHD as u64
+        XLOG_BLCKSZ as u64
+            + fullpages * XLOG_BLCKSZ as u64
+            + bytesleft
+            + XLOG_SIZE_OF_XLOG_SHORT_PHD as u64
     };
 
-    Lsn(XLogSegNoOffsetToRecPtr(fullsegs, seg_offset as u32, WAL_SEGMENT_SIZE))
+    Lsn(XLogSegNoOffsetToRecPtr(
+        fullsegs,
+        seg_offset as u32,
+        WAL_SEGMENT_SIZE,
+    ))
 }
 
 fn recptr_to_bytepos(ptr: Lsn) -> u64 {
@@ -254,18 +294,22 @@ fn recptr_to_bytepos(ptr: Lsn) -> u64 {
     let offset = offset % XLOG_BLCKSZ as u64;
 
     if fullpages == 0 {
-        fullsegs * USABLE_BYTES_IN_SEGMENT + if offset > 0 {
-            assert!(offset >= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64);
-            offset - XLOG_SIZE_OF_XLOG_SHORT_PHD as u64
-        } else {
-            0
-        }
+        fullsegs * USABLE_BYTES_IN_SEGMENT
+            + if offset > 0 {
+                assert!(offset >= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64);
+                offset - XLOG_SIZE_OF_XLOG_SHORT_PHD as u64
+            } else {
+                0
+            }
     } else {
-        fullsegs * USABLE_BYTES_IN_SEGMENT + (XLOG_BLCKSZ - XLOG_SIZE_OF_XLOG_SHORT_PHD) as u64 + (fullpages - 1) * USABLE_BYTES_IN_PAGE + if offset > 0 {
-            assert!(offset >= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64);
-            offset - XLOG_SIZE_OF_XLOG_SHORT_PHD as u64
-        } else {
-            0
-        }
+        fullsegs * USABLE_BYTES_IN_SEGMENT
+            + (XLOG_BLCKSZ - XLOG_SIZE_OF_XLOG_SHORT_PHD) as u64
+            + (fullpages - 1) * USABLE_BYTES_IN_PAGE
+            + if offset > 0 {
+                assert!(offset >= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64);
+                offset - XLOG_SIZE_OF_XLOG_SHORT_PHD as u64
+            } else {
+                0
+            }
     }
 }

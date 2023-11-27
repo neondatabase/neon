@@ -1,15 +1,21 @@
 use std::{
     cell::{RefCell, RefMut, UnsafeCell},
-    ffi::CStr, sync::Arc,
+    ffi::CStr,
+    sync::Arc,
 };
 
 use bytes::Bytes;
-use slowsim::{network::TCP, node_os::NodeOs, world::{NodeId, NodeEvent}, proto::AnyMessage};
+use slowsim::{
+    network::TCP,
+    node_os::NodeOs,
+    proto::AnyMessage,
+    world::{NodeEvent, NodeId},
+};
 use tracing::debug;
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
-    bindings::{WL_SOCKET_CLOSED, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE, PageserverFeedback, pg_atomic_uint64, WalProposerPoll},
+    bindings::{pg_atomic_uint64, PageserverFeedback, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE},
     walproposer::{ApiImpl, Config},
 };
 
@@ -62,7 +68,8 @@ pub struct Args {
 impl SimulationApi {
     pub fn new(args: Args) -> Self {
         // initialize connection state for each safekeeper
-        let sk_conns = args.config
+        let sk_conns = args
+            .config
             .safekeepers_list
             .iter()
             .map(|s| {
@@ -88,9 +95,7 @@ impl SimulationApi {
                     replytime: 0,
                 },
                 mineLastElectedTerm: 0,
-                backpressureThrottlingTime: pg_atomic_uint64 {
-                    value: 0,
-                }
+                backpressureThrottlingTime: pg_atomic_uint64 { value: 0 },
             }),
             config: args.config,
         }
@@ -98,7 +103,7 @@ impl SimulationApi {
 
     /// Get SafekeeperConn for the given Safekeeper.
     fn get_conn(&self, sk: &mut walproposer::bindings::Safekeeper) -> RefMut<'_, SafekeeperConn> {
-        let sk_port = unsafe { CStr::from_ptr((*sk).port).to_str().unwrap() };
+        let sk_port = unsafe { CStr::from_ptr(sk.port).to_str().unwrap() };
         let state = self.safekeepers.borrow_mut();
         RefMut::map(state, |v| {
             v.iter_mut()
@@ -113,7 +118,8 @@ impl SimulationApi {
         RefMut::filter_map(state, |v| {
             v.iter_mut()
                 .find(|conn| conn.socket.as_ref().is_some_and(|s| s.id() == tcp.id()))
-        }).ok()
+        })
+        .ok()
     }
 }
 
@@ -186,9 +192,7 @@ impl ApiImpl for SimulationApi {
                     return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN;
                 }
             }
-            _ => {
-                return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN
-            }
+            _ => return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN,
         }
 
         let event = self
@@ -323,10 +327,7 @@ impl ApiImpl for SimulationApi {
                 let mut sk = self.find_conn(tcp);
                 if let Some(sk) = sk.as_mut() {
                     sk.socket = None;
-                    walproposer::walproposer::WaitResult::Network(
-                        sk.raw_ptr,
-                        WL_SOCKET_READABLE,
-                    )
+                    walproposer::walproposer::WaitResult::Network(sk.raw_ptr, WL_SOCKET_READABLE)
                 } else {
                     // connection is already closed
                     // TODO!
@@ -369,7 +370,8 @@ impl ApiImpl for SimulationApi {
     fn finish_sync_safekeepers(&self, lsn: u64) {
         debug!("finish_sync_safekeepers, lsn={}", lsn);
         self.os.set_result(0, Lsn(lsn).to_string());
-        self.os.exit(format!("sync safekeepers finished at lsn={}", lsn));
+        self.os
+            .exit(format!("sync safekeepers finished at lsn={}", lsn));
     }
 
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
@@ -383,7 +385,8 @@ impl ApiImpl for SimulationApi {
                 // collected quorum with lower term, then got rejected by next connected safekeeper
                 self.os.exit(msg.to_owned());
             }
-            if msg.contains("collected propEpochStartLsn") && msg.contains(", but basebackup LSN ") {
+            if msg.contains("collected propEpochStartLsn") && msg.contains(", but basebackup LSN ")
+            {
                 // sync-safekeepers collected wrong quorum, walproposer collected another quorum
                 self.os.exit(msg.to_owned());
             }
@@ -408,8 +411,11 @@ impl ApiImpl for SimulationApi {
             }
         }
 
-        let msg = format!("prop_elected;{};{};{};{}", prop_lsn, prop_term, prev_lsn, prev_term);
-        
+        let msg = format!(
+            "prop_elected;{};{};{};{}",
+            prop_lsn, prop_term, prev_lsn, prev_term
+        );
+
         debug!(msg);
         self.os.log_event(msg);
     }
@@ -423,7 +429,11 @@ impl ApiImpl for SimulationApi {
         self.shmem.get()
     }
 
-    fn start_streaming(&self, startpos: u64, callback: &walproposer::walproposer::StreamingCallback) {
+    fn start_streaming(
+        &self,
+        startpos: u64,
+        callback: &walproposer::walproposer::StreamingCallback,
+    ) {
         let disk = &self.disk;
         let disk_lsn = disk.lock().flush_rec_ptr().0;
         debug!("start_streaming at {} (disk_lsn={})", startpos, disk_lsn);
@@ -442,7 +452,11 @@ impl ApiImpl for SimulationApi {
         }
     }
 
-    fn process_safekeeper_feedback(&self, wp: &mut walproposer::bindings::WalProposer, commit_lsn: u64) {
+    fn process_safekeeper_feedback(
+        &self,
+        wp: &mut walproposer::bindings::WalProposer,
+        commit_lsn: u64,
+    ) {
         debug!("process_safekeeper_feedback, commit_lsn={}", commit_lsn);
         if commit_lsn > wp.lastSentCommitLsn {
             self.os.log_event(format!("commit_lsn;{}", commit_lsn));
@@ -459,16 +473,21 @@ impl ApiImpl for SimulationApi {
         debug!("confirm_wal_streamed: {}", Lsn(lsn))
     }
 
-    fn recovery_download(&self, sk: &mut walproposer::bindings::Safekeeper, mut startpos: u64, endpos: u64) -> bool {
+    fn recovery_download(
+        &self,
+        sk: &mut walproposer::bindings::Safekeeper,
+        mut startpos: u64,
+        endpos: u64,
+    ) -> bool {
         let replication_prompt = format!(
             "START_REPLICATION {} {} {} {}",
-            self.config.ttid.tenant_id,
-            self.config.ttid.timeline_id,
-            startpos,
-            endpos,
+            self.config.ttid.tenant_id, self.config.ttid.timeline_id, startpos, endpos,
         );
         let async_conn = self.get_conn(sk);
-        debug!("recovery_download from {} to {}, sk={}", startpos, endpos, async_conn.node_id);
+        debug!(
+            "recovery_download from {} to {}, sk={}",
+            startpos, endpos, async_conn.node_id
+        );
 
         let conn = self.os.open_tcp_nopoll(async_conn.node_id);
         conn.send(slowsim::proto::AnyMessage::Bytes(replication_prompt.into()));

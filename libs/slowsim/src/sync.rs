@@ -16,6 +16,12 @@ struct CondvarState {
     waiters: Vec<Arc<Park>>,
 }
 
+impl Default for Condvar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Condvar {
     pub fn new() -> Condvar {
         Condvar {
@@ -26,7 +32,7 @@ impl Condvar {
     }
 
     /// Blocks the current thread until this condition variable receives a notification.
-    pub fn wait<'a, T>(&self, guard: &mut parking_lot::MutexGuard<'a, T>) {
+    pub fn wait<T>(&self, guard: &mut parking_lot::MutexGuard<'_, T>) {
         let park = Park::new(false);
 
         // add the waiter to the list

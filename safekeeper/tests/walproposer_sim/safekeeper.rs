@@ -10,8 +10,7 @@ use camino::Utf8PathBuf;
 use hyper::Uri;
 use safekeeper::{
     safekeeper::{
-        ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo,
-        UNKNOWN_SERVER_VERSION,
+        ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo, UNKNOWN_SERVER_VERSION,
     },
     timeline::TimelineError,
     wal_storage::Storage,
@@ -81,7 +80,7 @@ impl GlobalMap {
 
             let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
             timelines.insert(
-                ttid.clone(),
+                ttid,
                 SharedState {
                     sk,
                     disk: disk.clone(),
@@ -132,7 +131,7 @@ impl GlobalMap {
         let sk = SafeKeeper::new(control_store, wal_store, self.conf.my_id)?;
 
         self.timelines.insert(
-            ttid.clone(),
+            ttid,
             SharedState {
                 sk,
                 disk: disk_timeline,
@@ -252,7 +251,7 @@ impl ConnState {
 
             let msg = ProposerAcceptorMessage::parse(copy_data)?;
             debug!("got msg: {:?}", msg);
-            return self.process(msg, global);
+            self.process(msg, global)
         } else {
             bail!("unexpected message, expected AnyMessage::Bytes");
         }
@@ -304,7 +303,11 @@ impl ConnState {
 
             match msg {
                 ProposerAcceptorMessage::Greeting(ref greeting) => {
-                    tracing::info!("start handshake with walproposer {:?} {:?}", self.tcp, greeting);
+                    tracing::info!(
+                        "start handshake with walproposer {:?} {:?}",
+                        self.tcp,
+                        greeting
+                    );
                     let server_info = ServerInfo {
                         pg_version: greeting.pg_version,
                         system_id: greeting.system_id,

@@ -1,13 +1,15 @@
-
-
-
 use std::sync::Arc;
 
 use rand::Rng;
 use tracing::{info, warn};
 use utils::lsn::Lsn;
 
-use crate::walproposer_sim::{log::init_logger, util::{TestConfig, Schedule, TestAction, generate_network_opts, generate_schedule, validate_events}};
+use crate::walproposer_sim::{
+    log::init_logger,
+    util::{
+        generate_network_opts, generate_schedule, validate_events, Schedule, TestAction, TestConfig,
+    },
+};
 
 mod walproposer_sim;
 
@@ -29,7 +31,7 @@ fn sync_empty_safekeepers() {
 #[test]
 fn run_walproposer_generate_wal() {
     let clock = init_logger();
-    let mut config = TestConfig::new(Some(clock));
+    let config = TestConfig::new(Some(clock));
     // config.network.timeout = Some(250);
     let test = config.start(1337);
 
@@ -50,7 +52,7 @@ fn run_walproposer_generate_wal() {
 #[test]
 fn crash_safekeeper() {
     let clock = init_logger();
-    let mut config = TestConfig::new(Some(clock));
+    let config = TestConfig::new(Some(clock));
     // config.network.timeout = Some(250);
     let test = config.start(1337);
 
@@ -73,7 +75,7 @@ fn crash_safekeeper() {
 #[test]
 fn test_simple_restart() {
     let clock = init_logger();
-    let mut config = TestConfig::new(Some(clock));
+    let config = TestConfig::new(Some(clock));
     // config.network.timeout = Some(250);
     let test = config.start(1337);
 
@@ -130,7 +132,7 @@ fn test_simple_schedule() -> anyhow::Result<()> {
 #[test]
 fn test_many_tx() -> anyhow::Result<()> {
     let clock = init_logger();
-    let mut config = TestConfig::new(Some(clock));
+    let config = TestConfig::new(Some(clock));
     let test = config.start(1337);
 
     let mut schedule: Schedule = vec![];
@@ -168,7 +170,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
 
-    for i in 0..2000 {
+    for _ in 0..2000 {
         let seed: u64 = rand::thread_rng().gen();
         config.network = generate_network_opts(seed);
 
@@ -189,16 +191,6 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // enable_debug();
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
-    config.network.keepalive_timeout = Some(100);
-
-    // let seed = 6762900106769428342;
-    // let test = config.start(seed);
-    // warn!("Running test with seed {}", seed);
-
-    // let schedule = generate_schedule(seed);
-    // info!("schedule: {:?}", schedule);
-    // test.run_schedule(&schedule)?;
-    // test.world.deallocate();
 
     let seed = 10318430968140584404;
     config.network = generate_network_opts(seed);

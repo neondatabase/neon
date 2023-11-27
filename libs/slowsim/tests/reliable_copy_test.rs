@@ -77,18 +77,15 @@ mod reliable_copy_test {
             let event = epoll.recv();
             info!("got event: {:?}", event);
             match event {
-                NodeEvent::Message((msg, tcp)) => match msg {
-                    AnyMessage::ReplCell(cell) => {
-                        if cell.seqno != storage.flush_pos() {
-                            info!("got out of order data: {:?}", cell);
-                            continue;
-                        }
-                        storage.write(cell.value);
-                        storage.flush().unwrap();
-                        tcp.send(AnyMessage::Just32(storage.flush_pos()));
+                NodeEvent::Message((AnyMessage::ReplCell(cell), tcp)) => {
+                    if cell.seqno != storage.flush_pos() {
+                        info!("got out of order data: {:?}", cell);
+                        continue;
                     }
-                    _ => {}
-                },
+                    storage.write(cell.value);
+                    storage.flush().unwrap();
+                    tcp.send(AnyMessage::Just32(storage.flush_pos()));
+                }
                 NodeEvent::Accept(tcp) => {
                     tcp.send(AnyMessage::Just32(storage.flush_pos()));
                 }
@@ -209,7 +206,7 @@ mod reliable_copy_test {
 
     pub fn u32_to_cells(data: &[u32], client_id: u32) -> Vec<ReplCell> {
         let mut res = Vec::new();
-        for i in 0..data.len() {
+        for (i, _) in data.iter().enumerate() {
             res.push(ReplCell {
                 client_id,
                 seqno: i as u32,

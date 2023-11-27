@@ -11,6 +11,12 @@ pub struct Timing {
     nonce: u32,
 }
 
+impl Default for Timing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Timing {
     pub fn new() -> Timing {
         Timing {
@@ -81,7 +87,7 @@ impl Pending {
 // to get that.
 impl PartialOrd for Pending {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (other.time, other.nonce).partial_cmp(&(self.time, self.nonce))
+        Some(self.cmp(other))
     }
 }
 

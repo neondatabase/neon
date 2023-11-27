@@ -9,11 +9,11 @@ use slowsim::{
     world::World,
     world::{Node, NodeEvent, SEvent},
 };
-use tracing::{debug, warn, info_span};
+use tracing::{debug, info_span, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 use walproposer::walproposer::{Config, Wrapper};
 
-use super::{disk::Disk, log::SimClock, disk_walproposer::DiskWalProposer, wp_api};
+use super::{disk::Disk, disk_walproposer::DiskWalProposer, log::SimClock, wp_api};
 
 pub struct SkNode {
     pub node: Arc<Node>,
@@ -123,10 +123,10 @@ impl Test {
 
         // start the client thread
         let guc = self.safekeepers_guc.clone();
-        let ttid = self.ttid.clone();
+        let ttid = self.ttid;
         let disk = DiskWalProposer::new();
         client_node.launch(move |os| {
-            let _enter = info_span!("sync", started=os.now()).entered();
+            let _enter = info_span!("sync", started = os.now()).entered();
 
             os.log_event("started;walproposer;1".to_owned());
             let config = Config {
@@ -186,10 +186,10 @@ impl Test {
 
         // start the client thread
         let guc = self.safekeepers_guc.clone();
-        let ttid = self.ttid.clone();
+        let ttid = self.ttid;
         let wp_disk = disk.clone();
         client_node.launch(move |os| {
-            let _enter = info_span!("walproposer", started=os.now()).entered();
+            let _enter = info_span!("walproposer", started = os.now()).entered();
 
             os.log_event("started;walproposer;0".to_owned());
             let config = Config {
@@ -212,7 +212,10 @@ impl Test {
 
         self.world.await_all();
 
-        WalProposer { node: client_node, disk }
+        WalProposer {
+            node: client_node,
+            disk,
+        }
     }
 
     pub fn poll_for_duration(&self, duration: u64) {
@@ -283,7 +286,7 @@ impl Test {
                     }
                     TestAction::RestartSafekeeper(id) => {
                         debug!("restarting safekeeper {}", id);
-                        self.servers[*id as usize].restart();
+                        self.servers[*id].restart();
                     }
                     TestAction::RestartWalProposer => {
                         debug!("restarting walproposer");
@@ -329,13 +332,17 @@ impl WalProposer {
         let start_lsn = self.disk.lock().flush_rec_ptr();
 
         for _ in 0..cnt {
-            self.disk.lock().insert_logical_message("prefix", b"message").expect("failed to generate logical message");
+            self.disk
+                .lock()
+                .insert_logical_message("prefix", b"message")
+                .expect("failed to generate logical message");
         }
 
         let end_lsn = self.disk.lock().flush_rec_ptr();
 
         // log event
-        self.node.log_event(format!("write_wal;{};{};{}", start_lsn.0, end_lsn.0, cnt));
+        self.node
+            .log_event(format!("write_wal;{};{};{}", start_lsn.0, end_lsn.0, cnt));
 
         // now we need to set "Latch" in walproposer
         self.node

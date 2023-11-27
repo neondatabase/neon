@@ -3,9 +3,12 @@ use std::{
     cell::RefCell,
     ops::DerefMut,
     panic::AssertUnwindSafe,
-    sync::{atomic::{AtomicU64, AtomicBool}, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc,
+    },
 };
-use tracing::{debug, trace, error};
+use tracing::{debug, error, trace};
 
 use super::{
     chan::Chan,
@@ -411,7 +414,8 @@ impl Node {
                         error!("Node {} finished with panic: {:?}", node.id, e);
                         std::process::exit(1);
                     } else {
-                        node.crash_token.store(false, std::sync::atomic::Ordering::SeqCst);
+                        node.crash_token
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     debug!("Node {} finished with panic: {:?}", node.id, e);
                 }
@@ -501,9 +505,9 @@ impl Node {
 
         let park = self.world.find_parked_node(self);
 
-        let park = if park.is_some() {
+        let park = if let Some(park) = park {
             assert!(status == NodeStatus::Parked);
-            park.unwrap()
+            park
         } else {
             assert!(status == NodeStatus::Waiting);
             self.waiting_park.lock().clone()
@@ -527,7 +531,9 @@ impl Node {
     }
 
     pub fn set_crash_token(&self) {
-        let prev = self.crash_token.swap(true, std::sync::atomic::Ordering::SeqCst);
+        let prev = self
+            .crash_token
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
         assert!(!prev, "crash_token should be set only once");
     }
 

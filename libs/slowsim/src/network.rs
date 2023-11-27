@@ -164,8 +164,8 @@ impl VirtualConnection {
             }
             drop(state);
 
-            for node_idx in 0..2 {
-                if to_close[node_idx] {
+            for (node_idx, should_close) in to_close.iter().enumerate() {
+                if *should_close {
                     self.close(node_idx);
                 }
             }
@@ -275,7 +275,7 @@ impl VirtualConnection {
     fn internal_recv(self: &Arc<Self>, node_idx: usize) -> NodeEvent {
         // Only src node can receive messages.
         assert!(node_idx == 0);
-        return self.dst_sockets[node_idx].recv();
+        self.dst_sockets[node_idx].recv()
     }
 
     /// Close the connection. Only one side of the connection will be closed,

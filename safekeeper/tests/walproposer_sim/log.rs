@@ -3,7 +3,6 @@ use std::{fmt, sync::Arc};
 use slowsim::{sync::Mutex, world::World};
 use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
 
-
 #[derive(Clone)]
 pub struct SimClock {
     world_ptr: Arc<Mutex<Option<Arc<World>>>>,
@@ -53,7 +52,7 @@ pub fn init_logger() -> SimClock {
     base_logger.init();
 
     // logging::replace_panic_hook_with_tracing_panic_hook().forget();
-    
+
     if !debug_enabled {
         std::panic::set_hook(Box::new(|_| {}));
     }
