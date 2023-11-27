@@ -867,10 +867,15 @@ impl RemoteTimelineClient {
 
     /// Wait for all previously scheduled operations to complete, and then stop.
     ///
-    /// Not cancellation safe: On cancellation the queue is left in ackward state of refusing new
-    /// operations but proper stop is yet to be called. On cancel the original or some later task
-    /// must call `stop` or `shutdown`.
+    /// Not cancellation safe
     pub(crate) async fn shutdown(self: &Arc<Self>) -> Result<(), StopError> {
+        // On cancellation the queue is left in ackward state of refusing new operations but
+        // proper stop is yet to be called. On cancel the original or some later task must call
+        // `stop` or `shutdown`.
+        let sg = scopeguard::guard((), |_| {
+            tracing::error!("RemoteTimelineClient::shutdown was cancelled; this should not happen, do not make this into an allowed_error")
+        });
+
         let fut = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
@@ -895,10 +900,6 @@ impl RemoteTimelineClient {
 
             upload_queue.shutdown_ready.clone().acquire_owned()
         };
-
-        let sg = scopeguard::guard((), |_| {
-            tracing::error!("RemoteTimelineClient::shutdown was cancelled")
-        });
 
         let res = fut.await;
 
