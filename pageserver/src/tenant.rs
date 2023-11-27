@@ -19,6 +19,7 @@ use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -402,6 +403,36 @@ pub enum CreateTimelineError {
     ShuttingDown,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+enum InitdbError {
+    Other(anyhow::Error),
+    Cancelled,
+    Spawn(std::io::Result<()>),
+    Failed(std::process::ExitStatus, Vec<u8>),
+}
+
+impl fmt::Display for InitdbError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            InitdbError::Cancelled => write!(f, "Operation was cancelled"),
+            InitdbError::Spawn(e) => write!(f, "Spawn error: {:?}", e),
+            InitdbError::Failed(status, stderr) => write!(
+                f,
+                "Command failed with status {:?}: {}",
+                status,
+                String::from_utf8_lossy(stderr)
+            ),
+            InitdbError::Other(e) => write!(f, "Error: {:?}", e),
+        }
+    }
+}
+
+impl From<std::io::Error> for InitdbError {
+    fn from(error: std::io::Error) -> Self {
+        InitdbError::Spawn(Err(error))
+    }
 }
 
 struct TenantDirectoryScan {
@@ -3402,9 +3433,12 @@ async fn run_initdb(
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
     cancel: &CancellationToken,
-) -> anyhow::Result<()> {
-    let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
-    let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
+) -> Result<(), InitdbError> {
+    let initdb_bin_path = conf
+        .pg_bin_dir(pg_version)
+        .map_err(InitdbError::Other)?
+        .join("initdb");
+    let initdb_lib_dir = conf.pg_lib_dir(pg_version).map_err(InitdbError::Other)?;
     info!(
         "running {} in {}, libdir: {}",
         initdb_bin_path, initdb_target_dir, initdb_lib_dir,
@@ -3424,26 +3458,17 @@ async fn run_initdb(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to execute {} at target dir {}",
-                initdb_bin_path, initdb_target_dir,
-            )
-        })?;
+        .spawn()?;
 
     tokio::select! {
         initdb_output = initdb_command.wait_with_output() => {
             let initdb_output = initdb_output?;
             if !initdb_output.status.success() {
-                bail!(
-                    "initdb failed: '{}'",
-                    String::from_utf8_lossy(&initdb_output.stderr)
-                );
+                return Err(InitdbError::Failed(initdb_output.status, initdb_output.stderr));
             }
         }
         _ = cancel.cancelled() => {
-            bail!("initdb was cancelled");
+            return Err(InitdbError::Cancelled);
         }
     }
 
