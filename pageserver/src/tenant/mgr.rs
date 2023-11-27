@@ -136,12 +136,26 @@ impl TenantsMap {
         }
     }
 
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<TenantSlot> {
+    /// Only for use from DeleteTenantFlow
+    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<utils::completion::Barrier> {
+        use std::collections::btree_map::Entry;
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 let key = exactly_one_or_none(m, tenant_id).map(|(k, _)| *k);
-                key.and_then(|key| m.remove(&key))
+                match key {
+                    Some(key) => match m.entry(key) {
+                        Entry::Occupied(entry) => match entry.get() {
+                            TenantSlot::InProgress(barrier) => Some(barrier.clone()),
+                            _ => {
+                                entry.remove();
+                                None
+                            }
+                        },
+                        Entry::Vacant(_entry) => None,
+                    },
+                    None => None,
+                }
             }
         }
     }
