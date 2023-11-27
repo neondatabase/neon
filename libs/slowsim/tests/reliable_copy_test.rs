@@ -141,6 +141,7 @@ mod reliable_copy_test {
         utils::logging::init(
             utils::logging::LogFormat::Test,
             utils::logging::TracingErrorLayerEnablement::Disabled,
+            utils::logging::Output::Stdout,
         )
         .expect("logging init failed");
 
