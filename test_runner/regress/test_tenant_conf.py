@@ -336,10 +336,12 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
 ):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start(initial_tenant_conf={
-        # disable compaction so that it will not download the layer for repartitioning
-        "compaction_period": "0s"
-    })
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # disable compaction so that it will not download the layer for repartitioning
+            "compaction_period": "0s"
+        }
+    )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     (tenant_id, timeline_id) = env.initial_tenant, env.initial_timeline
