@@ -1,3 +1,4 @@
+import concurrent.futures
 import enum
 import os
 import shutil
@@ -474,4 +475,95 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
             deletion.join()
 
 
-# TODO test concurrent deletions with "hang" failpoint
+def test_tenant_delete_concurrent(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    """
+    Validate that concurrent delete requests to the same tenant behave correctly:
+    exactly one should succeed.
+
+    This is a reproducer for https://github.com/neondatabase/neon/issues/5936
+    """
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    ps_http = env.pageserver.http_client()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Populate some data
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+
+    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
+
+    env.pageserver.allowed_errors.extend(
+        [
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+            # Errors logged from our 4xx requests
+            f".*{CONFLICT_MESSAGE}.*",
+        ]
+    )
+
+    BEFORE_REMOVE_FAILPOINT = "tenant-delete-before-map-remove"
+    BEFORE_RUN_FAILPOINT = "tenant-delete-before-run"
+
+    # We will let the initial delete run until right before it would remove
+    # the tenant's TenantSlot.  This pauses it in a state where the tenant
+    # is visible in Stopping state, and concurrent requests should fail with 4xx.
+    ps_http.configure_failpoints((BEFORE_REMOVE_FAILPOINT, "pause"))
+
+    def delete_tenant():
+        return ps_http.tenant_delete(tenant_id)
+
+    def hit_remove_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
+
+    def hit_run_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        background_200_req = executor.submit(delete_tenant)
+        assert background_200_req.result(timeout=10).status_code == 202
+
+        # Wait until the first request completes its work and is blocked on removing
+        # the TenantSlot from tenant manager.
+        wait_until(100, 0.1, hit_remove_failpoint)
+
+        # Start another request: this should fail when it sees a tenant in Stopping state
+        with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
+            ps_http.tenant_delete(tenant_id)
+
+        # Start another background request, which will pause after acquiring a TenantSlotGuard
+        # but before completing.
+        ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "pause"))
+        background_4xx_req = executor.submit(delete_tenant)
+        wait_until(100, 0.1, hit_run_failpoint)
+
+        # The TenantSlot is still present while the original request is hung before
+        # final removal
+        assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+
+        # Permit the original request to run to success
+        ps_http.configure_failpoints((BEFORE_REMOVE_FAILPOINT, "off"))
+
+        # Permit the duplicate background request to run to completion and fail.
+        ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "off"))
+        with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
+            background_4xx_req.result(timeout=10)
+
+    # Physical deletion should have happened
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Zero tenants remain (we deleted the default tenant)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0

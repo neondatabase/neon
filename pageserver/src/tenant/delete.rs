@@ -287,6 +287,8 @@ impl DeleteTenantFlow {
     ) -> Result<(), DeleteTenantError> {
         span::debug_assert_current_span_has_tenant_id();
 
+        pausable_failpoint!("tenant-delete-before-run");
+
         let mut guard = Self::prepare(&tenant).await?;
 
         if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
@@ -538,6 +540,7 @@ impl DeleteTenantFlow {
             .context("cleanup_remaining_fs_traces")?;
 
         {
+            pausable_failpoint!("tenant-delete-before-map-remove");
             let mut locked = tenants.write().unwrap();
             if locked.remove(&tenant.tenant_id).is_none() {
                 warn!("Tenant got removed from tenants map during deletion");
