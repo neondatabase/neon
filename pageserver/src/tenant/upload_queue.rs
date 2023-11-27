@@ -91,7 +91,7 @@ pub(crate) struct UploadQueueInitialized {
     #[cfg(feature = "testing")]
     pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
 
-    /// Set to true when we have inserted the first `UploadOp::Shutdown` into the `inprogress_tasks`.
+    /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
     pub(crate) shutting_down: bool,
 
     /// Permitless semaphore on which any number of `RemoteTimelineClient::shutdown` futures can
