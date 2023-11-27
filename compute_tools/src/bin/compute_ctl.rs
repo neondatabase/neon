@@ -31,7 +31,7 @@
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres \
-//!             -r {"bucket": "neon-dev-extensions-eu-central-1", "region": "eu-central-1"}
+//!             -r http://pg-ext-s3-gateway
 //! ```
 //!
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::{get_pg_version, init_remote_storage};
+use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -60,7 +60,7 @@ use compute_tools::spec::*;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "5670669815";
+const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -74,10 +74,18 @@ fn main() -> Result<()> {
     let pgbin_default = String::from("postgres");
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
-    let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(x).expect("cannot initialize remote extension storage from config")
-    });
+    let ext_remote_storage = matches
+        .get_one::<String>("remote-ext-config")
+        // Compatibility hack: if the control plane specified any remote-ext-config
+        // use the default value for extension storage proxy gateway.
+        // Remove this once the control plane is updated to pass the gateway URL
+        .map(|conf| {
+            if conf.starts_with("http") {
+                conf.trim_end_matches('/')
+            } else {
+                "http://pg-ext-s3-gateway"
+            }
+        });
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -198,7 +206,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        ext_remote_storage,
+        ext_remote_storage: ext_remote_storage.map(|s| s.to_string()),
         ext_download_progress: RwLock::new(HashMap::new()),
         build_tag,
     };

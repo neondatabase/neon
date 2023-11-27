@@ -134,10 +134,11 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
         res = endpoint_main.safe_psql(
             """
             SELECT
-                pg_size_pretty(pg_cluster_size()),
+                pg_size_pretty(neon.pg_cluster_size()),
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
-            FROM backpressure_lsns();
-            """
+            FROM neon.backpressure_lsns();
+            """,
+            dbname="postgres",
         )[0]
         log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
         received_lsn_lag = res[1]
@@ -214,7 +215,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
             wait_for_pageserver_catchup(endpoint_main)
 
-            cur.execute("SELECT * from pg_size_pretty(pg_cluster_size())")
+            cur.execute("SELECT * from pg_size_pretty(neon.pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
             log.info(f"pg_cluster_size = {pg_cluster_size}")
 
