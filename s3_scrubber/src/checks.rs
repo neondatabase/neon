@@ -141,10 +141,6 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             gen < &index_part_generation)
                         .collect();
 
-                    // unlinked files at the current generation are not considered to be deleted,
-                    // because a pageserver could still have those in its deletion queue or even as
-                    // layers which are being read.
-
                     if !orphan_layers.is_empty() {
                         result.garbage_keys.extend(orphan_layers.iter().map(
                             |(layer_name, layer_gen)| {
