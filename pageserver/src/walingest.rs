@@ -2095,7 +2095,7 @@ mod tests {
         // it doesn't create a real checkpoint, and Walingest::new tries to parse
         // the garbage data.
         let pg_version = 15;
-        let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_ingest_real_wal")?.load().await;
         let tline = tenant
             .bootstrap_timeline(TIMELINE_ID, pg_version, &ctx)
             .await?;
