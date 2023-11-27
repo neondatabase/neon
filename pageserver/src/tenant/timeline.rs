@@ -10,6 +10,7 @@ mod walreceiver;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::models::{
@@ -437,6 +438,11 @@ pub enum LogicalSizeCalculationCause {
     TenantSizeHandler,
 }
 
+#[derive(enumset::EnumSetType)]
+pub(crate) enum CompactFlags {
+    ForceRepartition,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -694,6 +700,7 @@ impl Timeline {
     pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
+        flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
         // this wait probably never needs any "long time spent" logging, because we already nag if
@@ -766,6 +773,7 @@ impl Timeline {
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
+                flags,
                 ctx,
             )
             .await
@@ -1711,6 +1719,30 @@ impl Timeline {
         if let Some(rtc) = self.remote_client.as_ref() {
             rtc.schedule_layer_file_deletion(&needs_cleanup)?;
             rtc.schedule_index_upload_for_file_changes()?;
+            // This barrier orders above DELETEs before any later operations.
+            // This is critical because code executing after the barrier might
+            // create again objects with the same key that we just scheduled for deletion.
+            // For example, if we just scheduled deletion of an image layer "from the future",
+            // later compaction might run again and re-create the same image layer.
+            // "from the future" here means an image layer whose LSN is > IndexPart::disk_consistent_lsn.
+            // "same" here means same key range and LSN.
+            //
+            // Without a barrier between above DELETEs and the re-creation's PUTs,
+            // the upload queue may execute the PUT first, then the DELETE.
+            // In our example, we will end up with an IndexPart referencing a non-existent object.
+            //
+            // 1. a future image layer is created and uploaded
+            // 2. ps restart
+            // 3. the future layer from (1) is deleted during load layer map
+            // 4. image layer is re-created and uploaded
+            // 5. deletion queue would like to delete (1) but actually deletes (4)
+            // 6. delete by name works as expected, but it now deletes the wrong (later) version
+            //
+            // See https://github.com/neondatabase/neon/issues/5878
+            //
+            // NB: generation numbers naturally protect against this because they disambiguate
+            //     (1) and (4)
+            rtc.schedule_barrier()?;
             // Tenant::create_timeline will wait for these uploads to happen before returning, or
             // on retry.
         }
@@ -2525,7 +2557,12 @@ impl Timeline {
                 // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
                 // require downloading anything during initial import.
                 let (partitioning, _lsn) = self
-                    .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
+                    .repartition(
+                        self.initdb_lsn,
+                        self.get_compaction_target_size(),
+                        EnumSet::empty(),
+                        ctx,
+                    )
                     .await?;
 
                 if self.cancel.is_cancelled() {
@@ -2562,6 +2599,8 @@ impl Timeline {
                     Some(layer),
                 )
             };
+
+        pausable_failpoint!("flush-layer-cancel-after-writing-layer-out-pausable");
 
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
@@ -2744,12 +2783,16 @@ impl Timeline {
         &self,
         lsn: Lsn,
         partition_size: u64,
+        flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         {
             let partitioning_guard = self.partitioning.lock().unwrap();
             let distance = lsn.0 - partitioning_guard.1 .0;
-            if partitioning_guard.1 != Lsn(0) && distance <= self.repartition_threshold {
+            if partitioning_guard.1 != Lsn(0)
+                && distance <= self.repartition_threshold
+                && !flags.contains(CompactFlags::ForceRepartition)
+            {
                 debug!(
                     distance,
                     threshold = self.repartition_threshold,
@@ -3497,21 +3540,22 @@ impl Timeline {
             }
 
             // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
-            let mut layer_paths: Vec<Utf8PathBuf> = new_layers
+            let layer_paths: Vec<Utf8PathBuf> = new_layers
                 .iter()
                 .map(|l| l.local_path().to_owned())
                 .collect();
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            //
-            // FIXME: spawn_blocking above for this
-            par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
+            par_fsync::par_fsync_async(&layer_paths)
+                .await
+                .context("fsync all new layers")?;
 
-            par_fsync::par_fsync(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
+            let timeline_dir = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+
+            par_fsync::par_fsync_async(&[timeline_dir])
+                .await
                 .context("fsync of timeline dir")?;
-
-            layer_paths.pop().unwrap();
         }
 
         stats.write_layer_files_micros = stats.read_lock_drop_micros.till_now();
@@ -3684,6 +3728,7 @@ impl Timeline {
         retain_lsns: Vec<Lsn>,
         cutoff_horizon: Lsn,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
@@ -3697,7 +3742,10 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self.find_lsn_for_timestamp(pitr_timestamp, ctx).await? {
+                match self
+                    .find_lsn_for_timestamp(pitr_timestamp, cancel, ctx)
+                    .await?
+                {
                     LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
                         // The timestamp is in the future. That sounds impossible,

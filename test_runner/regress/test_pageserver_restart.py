@@ -144,7 +144,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
 # Test that repeatedly kills and restarts the page server, while the
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
-def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
+def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, build_type: str):
+    if build_type == "debug":
+        pytest.skip("times out in debug builds")
+
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 

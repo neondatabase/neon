@@ -168,9 +168,18 @@ async fn task_main(
                     .instrument(tracing::info_span!("handle_client", ?session_id))
                 );
             }
-            Some(Err(e)) = connections.join_next(), if !connections.is_empty() => {
-                if !e.is_panic() && !e.is_cancelled() {
-                    warn!("unexpected error from joined connection task: {e:?}");
+            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
+            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
+            // This only counts for this loop and it will be enabled again on next `select!`.
+            //
+            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
+            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
+            // not get called again, even if there are more connections to remove.
+            Some(res) = connections.join_next() => {
+                if let Err(e) = res {
+                    if !e.is_panic() && !e.is_cancelled() {
+                        warn!("unexpected error from joined connection task: {e:?}");
+                    }
                 }
             }
             _ = cancellation_token.cancelled() => {

@@ -190,6 +190,7 @@ use chrono::{NaiveDateTime, Utc};
 
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
+pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -248,6 +249,8 @@ pub(crate) const FAILED_REMOTE_OP_RETRIES: u32 = 10;
 // Similarly log failed uploads and deletions at WARN level, after this many
 // retries. Uploads and deletions are retried forever, though.
 pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+
+pub(crate) const INITDB_PATH: &str = "initdb.tar.zst";
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -816,7 +819,7 @@ impl RemoteTimelineClient {
         let mut receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
-            self.schedule_barrier(upload_queue)
+            self.schedule_barrier0(upload_queue)
         };
 
         if receiver.changed().await.is_err() {
@@ -825,7 +828,14 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    fn schedule_barrier(
+    pub(crate) fn schedule_barrier(self: &Arc<Self>) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        self.schedule_barrier0(upload_queue);
+        Ok(())
+    }
+
+    fn schedule_barrier0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
     ) -> tokio::sync::watch::Receiver<()> {
@@ -1229,16 +1239,18 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(delete) => self
-                    .deletion_queue_client
-                    .push_layers(
-                        self.tenant_id,
-                        self.timeline_id,
-                        self.generation,
-                        delete.layers.clone(),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e)),
+                UploadOp::Delete(delete) => {
+                    pausable_failpoint!("before-delete-layer-pausable");
+                    self.deletion_queue_client
+                        .push_layers(
+                            self.tenant_id,
+                            self.timeline_id,
+                            self.generation,
+                            delete.layers.clone(),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))
+                }
                 UploadOp::Barrier(_) => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
@@ -1526,6 +1538,13 @@ pub fn remote_layer_path(
     );
 
     RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
+    RemotePath::from_string(&format!(
+        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{INITDB_PATH}"
+    ))
+    .expect("Failed to construct path")
 }
 
 pub fn remote_index_path(

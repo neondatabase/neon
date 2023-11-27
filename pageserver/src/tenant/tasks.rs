@@ -185,11 +185,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                         MAX_BACKOFF_SECS,
                     );
                     error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
                     error!(
-                        "Compaction failed {error_run_count} times, retrying in {:?}: {e:?}",
-                        wait_duration
+                        "Compaction failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
                     );
-                    Duration::from_secs_f64(wait_duration)
+                    wait_duration
                 } else {
                     error_run_count = 0;
                     period
@@ -261,7 +261,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             } else {
                 // Run gc
                 let res = tenant
-                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx)
+                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
                     .await;
                 if let Err(e) = res {
                     let wait_duration = backoff::exponential_backoff_duration_seconds(
@@ -270,11 +270,11 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                         MAX_BACKOFF_SECS,
                     );
                     error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
                     error!(
-                        "Gc failed {error_run_count} times, retrying in {:?}: {e:?}",
-                        wait_duration
+                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
                     );
-                    Duration::from_secs_f64(wait_duration)
+                    wait_duration
                 } else {
                     error_run_count = 0;
                     period

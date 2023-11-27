@@ -103,7 +103,11 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
-    logging::init(conf.log_format, tracing_error_layer_enablement)?;
+    logging::init(
+        conf.log_format,
+        tracing_error_layer_enablement,
+        logging::Output::Stdout,
+    )?;
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
@@ -621,6 +625,7 @@ fn start_pageserver(
                     conf.synthetic_size_calculation_interval,
                     conf.id,
                     local_disk_storage,
+                    cancel,
                     metrics_ctx,
                 )
                 .instrument(info_span!("metrics_collection"))

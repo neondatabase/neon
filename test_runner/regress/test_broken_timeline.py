@@ -114,6 +114,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
         [
             ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
             ".*Timeline got dropped without initializing, cleaning its files.*",
+            ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )
 
@@ -141,6 +142,58 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     assert (
         timeline_dirs == initial_timeline_dirs
     ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+
+def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
+            ".*Timeline got dropped without initializing, cleaning its files.*",
+            ".*Failed to load index_part from remote storage, failed creation?.*",
+        ]
+    )
+
+    tenant_id = env.initial_tenant
+
+    timelines_dir = env.pageserver.timeline_dir(tenant_id)
+    old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
+
+    # Some fixed timeline ID (like control plane does)
+    timeline_id = TimelineId("1080243c1f76fe3c5147266663c9860b")
+
+    # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
+    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "return"))
+    with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
+        _ = env.neon_cli.create_timeline(
+            "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
+        )
+
+    # Restart the page server
+    env.pageserver.restart(immediate=True)
+
+    # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
+    new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    assert (
+        new_tenant_timelines == old_tenant_timelines
+    ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+
+    timeline_dirs = [d for d in timelines_dir.iterdir()]
+    assert (
+        timeline_dirs == initial_timeline_dirs
+    ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+    # Disable the failpoint again
+    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "off"))
+    # creating the branch should have worked now
+    new_timeline_id = env.neon_cli.create_timeline(
+        "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
+    )
+
+    assert timeline_id == new_timeline_id
 
 
 def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilder):

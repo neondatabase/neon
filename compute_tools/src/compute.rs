@@ -698,6 +698,7 @@ impl ComputeNode {
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, &mut client, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
+        handle_extension_neon(&mut client)?;
         create_availability_check_data(&mut client)?;
 
         // 'Close' connection
@@ -742,6 +743,7 @@ impl ComputeNode {
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
             handle_grants(&spec, &mut client, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
+            handle_extension_neon(&mut client)?;
         }
 
         // 'Close' connection
