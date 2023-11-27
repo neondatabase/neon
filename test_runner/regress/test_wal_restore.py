@@ -131,11 +131,7 @@ def test_wal_restore_initdb(
 
 def test_wal_restore_http(
     neon_env_builder: NeonEnvBuilder,
-    pg_bin: PgBin,
     test_output_dir: Path,
-    port_distributor: PortDistributor,
-    base_dir: Path,
-    pg_distrib_dir: Path,
 ):
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
