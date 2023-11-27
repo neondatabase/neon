@@ -3422,6 +3422,8 @@ async fn run_initdb(
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
         .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .with_context(|| {
             format!(
@@ -3429,8 +3431,6 @@ async fn run_initdb(
                 initdb_bin_path, initdb_target_dir,
             )
         })?;
-
-    let child_id = initdb_command.id();
 
     tokio::select! {
         initdb_output = initdb_command.wait_with_output() => {
@@ -3443,7 +3443,6 @@ async fn run_initdb(
             }
         }
         _ = cancel.cancelled() => {
-            tokio::process::Command::new("kill").arg("-9").arg(child_id.unwrap().to_string()).output().await?;
             bail!("initdb was cancelled");
         }
     }
