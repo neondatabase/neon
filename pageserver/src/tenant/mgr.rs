@@ -1542,7 +1542,8 @@ pub(crate) enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
+pub(crate) async fn list_tenants(
+) -> Result<Vec<(TenantId, TenantState, Generation)>, TenantMapListError> {
     let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1550,12 +1551,12 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, Tenan
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((id, tenant.current_state())),
+            TenantSlot::Attached(tenant) => Some((id, tenant.current_state(), tenant.generation())),
             TenantSlot::Secondary => None,
             TenantSlot::InProgress(_) => None,
         })
         // TODO(sharding): make callers of this function shard-aware
-        .map(|(k, v)| (k.tenant_id, v))
+        .map(|(a, b, c)| (a.tenant_id, b, c))
         .collect())
 }
 
