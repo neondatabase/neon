@@ -282,7 +282,7 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
 
     # Now advance the generation in the control plane: subsequent validations
     # from the running pageserver will fail.  No more deletions should happen.
-    env.attachment_service.attach_hook(env.initial_tenant, some_other_pageserver)
+    env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
     generate_uploads_and_deletions(env, init=False)
 
     assert_deletion_queue(ps_http, lambda n: n > 0)
@@ -397,7 +397,7 @@ def test_deletion_queue_recovery(
     if keep_attachment == KeepAttachment.LOSE:
         some_other_pageserver = 101010
         assert env.attachment_service is not None
-        env.attachment_service.attach_hook(env.initial_tenant, some_other_pageserver)
+        env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
 
     env.pageserver.start()
 
