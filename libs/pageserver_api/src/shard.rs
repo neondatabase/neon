@@ -150,6 +150,12 @@ pub struct ShardIndex {
 }
 
 impl ShardIndex {
+    pub fn new(number: ShardNumber, count: ShardCount) -> Self {
+        Self {
+            shard_number: number,
+            shard_count: count,
+        }
+    }
     pub fn unsharded() -> Self {
         Self {
             shard_number: ShardNumber(0),
@@ -159,6 +165,19 @@ impl ShardIndex {
 
     pub fn is_unsharded(&self) -> bool {
         self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+    }
+
+    /// For use in constructing remote storage paths: concatenate this with a TenantId
+    /// to get a fully qualified TenantShardId.
+    ///
+    /// Backward compat: this function returns an empty string if Self::is_unsharded, such
+    /// that the legacy pre-sharding remote key format is preserved.
+    pub fn get_suffix(&self) -> String {
+        if self.is_unsharded() {
+            "".to_string()
+        } else {
+            format!("-{:02x}{:02x}", self.shard_number.0, self.shard_count.0)
+        }
     }
 }
 

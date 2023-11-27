@@ -4369,6 +4369,7 @@ impl Timeline {
     }
 
     pub(crate) fn get_shard_index(&self) -> ShardIndex {
+        // TODO: carry this on the struct
         ShardIndex::unsharded()
     }
 }

@@ -3596,7 +3596,7 @@ pub(crate) mod harness {
                 tenant_conf,
                 tenant_id,
                 generation: Generation::new(0xdeadbeef),
-                shard: ShardIndex::from([0x01, 0x02]),
+                shard: ShardIndex::unsharded(),
                 remote_storage,
                 remote_fs_dir,
                 deletion_queue,

@@ -470,9 +470,9 @@ impl Drop for LayerInner {
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
-        let gen = self.generation;
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
+        let meta = self.metadata();
 
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
             let _g = span.entered();
@@ -500,7 +500,7 @@ impl Drop for LayerInner {
                     timeline.metrics.resident_physical_size_sub(file_size);
                 }
                 if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, gen)]);
+                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
                     if let Err(e) = res {
                         // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
