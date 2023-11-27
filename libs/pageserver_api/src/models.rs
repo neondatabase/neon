@@ -515,6 +515,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        remote_path: Option<String>,
     },
     Image {
         layer_file_name: String,
@@ -523,6 +525,8 @@ pub enum HistoricLayerInfo {
         lsn_start: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        remote_path: Option<String>,
     },
 }
 
