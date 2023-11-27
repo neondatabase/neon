@@ -209,6 +209,69 @@ impl<'de> Deserialize<'de> for TenantShardId {
     }
 }
 
+/// Stripe size in number of pages
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardStripeSize(pub u32);
+
+/// Layout version: for future upgrades where we might change how the key->shard mapping works
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardLayout(u8);
+
+const LAYOUT_V1: ShardLayout = ShardLayout(1);
+
+/// Default stripe size in pages: 256MiB divided by 8kiB page size.
+const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+
+/// The ShardIdentity contains the information needed for one member of map
+/// to resolve a key to a shard, and then check whether that shard is ==self.
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardIdentity {
+    pub layout: ShardLayout,
+    pub number: ShardNumber,
+    pub count: ShardCount,
+    pub stripe_size: ShardStripeSize,
+}
+
+impl ShardIdentity {
+    /// An identity with number=0 count=0 is a "none" identity, which represents legacy
+    /// tenants.  Modern single-shard tenants should not use this: they should
+    /// have number=0 count=1.
+    pub fn unsharded() -> Self {
+        Self {
+            number: ShardNumber(0),
+            count: ShardCount(0),
+            layout: LAYOUT_V1,
+            stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.number == ShardNumber(0) && self.count == ShardCount(0)
+    }
+
+    pub fn new(number: ShardNumber, count: ShardCount, stripe_size: ShardStripeSize) -> Self {
+        Self {
+            number,
+            count,
+            layout: LAYOUT_V1,
+            stripe_size,
+        }
+    }
+}
+
+impl Default for ShardIdentity {
+    /// The default identity is to be the only shard for a tenant, i.e. the legacy
+    /// pre-sharding case.
+    fn default() -> Self {
+        ShardIdentity {
+            layout: LAYOUT_V1,
+            number: ShardNumber(0),
+            count: ShardCount(1),
+            stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
