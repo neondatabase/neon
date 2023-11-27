@@ -434,8 +434,6 @@ class NeonEnvBuilder:
 
         # Pageserver remote storage
         self.pageserver_remote_storage = pageserver_remote_storage
-        # Extensions remote storage
-        self.ext_remote_storage: Optional[S3Storage] = None
         # Safekeepers remote storage
         self.sk_remote_storage: Optional[RemoteStorage] = None
 
@@ -534,24 +532,6 @@ class NeonEnvBuilder:
         )
         self.pageserver_remote_storage = ret
 
-    def enable_extensions_remote_storage(self, kind: RemoteStorageKind):
-        assert self.ext_remote_storage is None, "already configured extensions remote storage"
-
-        # there is an assumption that REAL_S3 for extensions is never
-        # cleaned up these are also special in that they have a hardcoded
-        # bucket and region, which is most likely the same as our normal
-        ext = self._configure_and_create_remote_storage(
-            kind,
-            RemoteStorageUser.EXTENSIONS,
-            bucket_name="neon-dev-extensions-eu-central-1",
-            bucket_region="eu-central-1",
-        )
-        assert isinstance(
-            ext, S3Storage
-        ), "unsure why, but only MOCK_S3 and REAL_S3 are currently supported for extensions"
-        ext.cleanup = False
-        self.ext_remote_storage = ext
-
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
         assert self.sk_remote_storage is None, "sk_remote_storage already configured"
 
@@ -608,8 +588,7 @@ class NeonEnvBuilder:
                 directory_to_clean.rmdir()
 
     def cleanup_remote_storage(self):
-        # extensions are currently not cleaned up, disabled when creating
-        for x in [self.pageserver_remote_storage, self.ext_remote_storage, self.sk_remote_storage]:
+        for x in [self.pageserver_remote_storage, self.sk_remote_storage]:
             if isinstance(x, S3Storage):
                 x.do_cleanup()
 
@@ -713,7 +692,6 @@ class NeonEnv:
         self.pageservers: List[NeonPageserver] = []
         self.broker = config.broker
         self.pageserver_remote_storage = config.pageserver_remote_storage
-        self.ext_remote_storage = config.ext_remote_storage
         self.safekeepers_remote_storage = config.sk_remote_storage
         self.pg_version = config.pg_version
         # Binary path for pageserver, safekeeper, etc
@@ -1469,12 +1447,7 @@ class NeonCli(AbstractNeonCli):
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
 
-        storage = self.env.ext_remote_storage
-        s3_env_vars = None
-        if isinstance(storage, S3Storage):
-            s3_env_vars = storage.access_env_vars()
-
-        res = self.raw_cli(args, extra_env_vars=s3_env_vars)
+        res = self.raw_cli(args)
         res.check_returncode()
         return res
 
@@ -2581,6 +2554,17 @@ class Endpoint(PgProtocol):
         # Write it back updated
         with open(config_path, "w") as file:
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    # Mock the extension part of spec passed from control plane for local testing
+    # endpooint.rs adds content of this file as a part of the spec.json
+    def create_remote_extension_spec(self, spec: dict[str, Any]):
+        """Create a remote extension spec file for the endpoint."""
+        remote_extensions_spec_path = os.path.join(
+            self.endpoint_path(), "remote_extensions_spec.json"
+        )
+
+        with open(remote_extensions_spec_path, "w") as file:
+            json.dump(spec, file, indent=4)
 
     def stop(self) -> "Endpoint":
         """
