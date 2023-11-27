@@ -1256,9 +1256,6 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
     register_histogram!(
         "pageserver_wal_redo_process_launch_duration",
         "Histogram of the duration of successful WalRedoProcess::launch calls",
-        // We'd expect `::launch()` to be significantly slower than an individual redo.
-        // But, they contribute to the same latency metric (walredo latency), so, use
-        // the same histogram for now.
         redo_histogram_time_buckets!(),
     )
     .expect("failed to define a metric")
