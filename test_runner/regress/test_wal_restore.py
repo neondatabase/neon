@@ -138,7 +138,6 @@ def test_wal_restore_http(
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     ps_client = env.pageserver.http_client()
 
