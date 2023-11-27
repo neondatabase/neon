@@ -1511,6 +1511,8 @@ impl RemoteTimelineClient {
 
     /// Close the upload queue for new operations and cancel queued operations.
     ///
+    /// Use [`RemoteTimelineClient::shutdown`] for graceful stop.
+    ///
     /// In-progress operations will still be running after this function returns.
     /// Use `task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id))`
     /// to wait for them to complete, after calling this function.
