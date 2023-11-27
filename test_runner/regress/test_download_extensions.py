@@ -1,7 +1,8 @@
 import os
+import shutil
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pytest
 from fixtures.log_helper import log
@@ -14,62 +15,33 @@ from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
 
-# Check that the extension is not already in the share_dir_path_ext
-# if it is, skip the test
-#
-# After the test is done, cleanup the control file and the extension directory
+# use neon_env_builder_local fixture to override the default neon_env_builder fixture
+# and use a test-specific pg_install instead of shared one
 @pytest.fixture(scope="function")
-def ext_file_cleanup(pg_bin):
-    out = pg_bin.run_capture("pg_config --sharedir".split())
-    share_dir_path = Path(f"{out}.stdout").read_text().strip()
-    log.info(f"share_dir_path: {share_dir_path}")
-    share_dir_path_ext = os.path.join(share_dir_path, "extension")
+def neon_env_builder_local(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_distrib_dir: Path,
+    pg_version: PgVersion,
+) -> NeonEnvBuilder:
+    test_local_pginstall = test_output_dir / "pg_install"
+    log.info(f"copy {pg_distrib_dir} to {test_local_pginstall}")
+    shutil.copytree(
+        pg_distrib_dir / pg_version.v_prefixed, test_local_pginstall / pg_version.v_prefixed
+    )
 
-    log.info(f"share_dir_path_ext: {share_dir_path_ext}")
+    neon_env_builder.pg_distrib_dir = test_local_pginstall
+    log.info(f"local neon_env_builder.pg_distrib_dir: {neon_env_builder.pg_distrib_dir}")
 
-    # if file is already in the share_dir_path_ext, skip the test
-    if os.path.isfile(os.path.join(share_dir_path_ext, "anon.control")):
-        log.info("anon.control is already in the share_dir_path_ext, skipping the test")
-        yield False
-        return
-    else:
-        yield True
-
-        # cleanup the control file
-        if os.path.isfile(os.path.join(share_dir_path_ext, "anon.control")):
-            os.unlink(os.path.join(share_dir_path_ext, "anon.control"))
-            log.info("anon.control was removed from the share_dir_path_ext")
-
-        # remove the extension directory recursively
-        if os.path.isdir(os.path.join(share_dir_path_ext, "anon")):
-            directories_to_clean: List[Path] = []
-            for f in Path(os.path.join(share_dir_path_ext, "anon")).iterdir():
-                if f.is_file():
-                    log.info(f"Removing file {f}")
-                    f.unlink()
-                elif f.is_dir():
-                    directories_to_clean.append(f)
-
-            for directory_to_clean in reversed(directories_to_clean):
-                if not os.listdir(directory_to_clean):
-                    log.info(f"Removing empty directory {directory_to_clean}")
-                    directory_to_clean.rmdir()
-
-            os.rmdir(os.path.join(share_dir_path_ext, "anon"))
-            log.info("anon directory was removed from the share_dir_path_ext")
+    return neon_env_builder
 
 
 def test_remote_extensions(
     httpserver: HTTPServer,
-    neon_env_builder: NeonEnvBuilder,
+    neon_env_builder_local: NeonEnvBuilder,
     httpserver_listen_address,
     pg_version,
-    ext_file_cleanup,
 ):
-    if ext_file_cleanup is False:
-        log.info("test_remote_extensions skipped")
-        return
-
     if pg_version == PgVersion.V16:
         pytest.skip("TODO: PG16 extension building")
 
@@ -79,7 +51,8 @@ def test_remote_extensions(
     (host, port) = httpserver_listen_address
     extensions_endpoint = f"http://{host}:{port}/pg-ext-s3-gateway"
 
-    archive_path = f"latest/v{pg_version}/extensions/anon.tar.zst"
+    build_tag = os.environ.get("BUILD_TAG", "latest")
+    archive_path = f"{build_tag}/v{pg_version}/extensions/anon.tar.zst"
 
     def endpoint_handler_build_tag(request: Request) -> Response:
         log.info(f"request: {request}")
@@ -88,6 +61,7 @@ def test_remote_extensions(
         file_path = f"test_runner/regress/data/extension_test/5670669815/v{pg_version}/extensions/anon.tar.zst"
         file_size = os.path.getsize(file_path)
         fh = open(file_path, "rb")
+
         return Response(
             fh,
             mimetype="application/octet-stream",
@@ -104,12 +78,10 @@ def test_remote_extensions(
 
     # Start a compute node with remote_extension spec
     # and check that it can download the extensions and use them to CREATE EXTENSION.
-    env = neon_env_builder.init_start()
-    tenant_id, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_remote_extensions", tenant_id=tenant_id)
+    env = neon_env_builder_local.init_start()
+    env.neon_cli.create_branch("test_remote_extensions")
     endpoint = env.endpoints.create(
         "test_remote_extensions",
-        tenant_id=tenant_id,
         config_lines=["log_min_messages=debug3"],
     )
 
