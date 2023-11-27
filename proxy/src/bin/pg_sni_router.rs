@@ -6,6 +6,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use futures::future::Either;
+use itertools::Itertools;
+use proxy::config::TlsServerEndPoint;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -65,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
 
     // Configure TLS
-    let tls_config: Arc<rustls::ServerConfig> = match (
+    let (tls_config, tls_server_end_point): (Arc<rustls::ServerConfig>, TlsServerEndPoint) = match (
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
@@ -89,16 +91,22 @@ async fn main() -> anyhow::Result<()> {
                     ))?
                     .into_iter()
                     .map(rustls::Certificate)
-                    .collect()
+                    .collect_vec()
             };
 
-            rustls::ServerConfig::builder()
+            // needed for channel bindings
+            let first_cert = cert_chain.first().context("missing certificate")?;
+            let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+
+            let tls_config = rustls::ServerConfig::builder()
                 .with_safe_default_cipher_suites()
                 .with_safe_default_kx_groups()
                 .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
                 .with_no_client_auth()
                 .with_single_cert(cert_chain, key)?
-                .into()
+                .into();
+
+            (tls_config, tls_server_end_point)
         }
         _ => bail!("tls-key and tls-cert must be specified"),
     };
@@ -113,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
     let main = tokio::spawn(task_main(
         Arc::new(destination),
         tls_config,
+        tls_server_end_point,
         proxy_listener,
         cancellation_token.clone(),
     ));
@@ -134,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
 async fn task_main(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
+    tls_server_end_point: TlsServerEndPoint,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -159,7 +169,7 @@ async fn task_main(
                             .context("failed to set socket option")?;
 
                         info!(%peer_addr, "serving");
-                        handle_client(dest_suffix, tls_config, socket).await
+                        handle_client(dest_suffix, tls_config, tls_server_end_point, socket).await
                     }
                     .unwrap_or_else(|e| {
                         // Acknowledge that the task has finished with an error.
@@ -207,6 +217,7 @@ const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmod
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
+    tls_server_end_point: TlsServerEndPoint,
 ) -> anyhow::Result<Stream<S>> {
     let mut stream = PqStream::new(Stream::from_raw(raw_stream));
 
@@ -231,7 +242,11 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             if !read_buf.is_empty() {
                 bail!("data is sent before server replied with EncryptionResponse");
             }
-            Ok(raw.upgrade(tls_config).await?)
+
+            Ok(Stream::Tls {
+                tls: Box::new(raw.upgrade(tls_config).await?),
+                tls_server_end_point,
+            })
         }
         unexpected => {
             info!(
@@ -246,9 +261,10 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 async fn handle_client(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
+    tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let tls_stream = ssl_handshake(stream, tls_config).await?;
+    let tls_stream = ssl_handshake(stream, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
