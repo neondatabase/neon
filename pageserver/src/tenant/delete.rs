@@ -361,25 +361,17 @@ impl DeleteTenantFlow {
         conf: &'static PageServerConf,
         remote_mark_exists: bool,
         tenant: &Tenant,
-    ) -> Result<Option<DeletionGuard>, DeleteTenantError> {
-        let acquire = |t: &Tenant| {
+    ) -> Option<DeletionGuard> {
+        let tenant_id = tenant.tenant_id;
+
+        if remote_mark_exists || conf.tenant_deleted_mark_file_path(&tenant_id).exists() {
             Some(
-                Arc::clone(&t.delete_progress)
+                Arc::clone(&tenant.delete_progress)
                     .try_lock_owned()
                     .expect("we're the only owner during init"),
             )
-        };
-
-        if remote_mark_exists {
-            return Ok(acquire(tenant));
-        }
-
-        let tenant_id = tenant.tenant_id;
-        // Check local mark first, if its there there is no need to go to s3 to check whether remote one exists.
-        if conf.tenant_deleted_mark_file_path(&tenant_id).exists() {
-            Ok(acquire(tenant))
         } else {
-            Ok(None)
+            None
         }
     }
 

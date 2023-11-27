@@ -618,21 +618,12 @@ impl Tenant {
                 // Remote preload is complete.
                 drop(remote_load_completion);
 
-                let pending_deletion = {
-                    match DeleteTenantFlow::should_resume_deletion(
-                        conf,
-                        preload.as_ref().map(|p| p.deleting).unwrap_or(false),
-                        &tenant_clone,
-                    )
-                    .await
-                    {
-                        Ok(should_resume_deletion) => should_resume_deletion,
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err));
-                            return Ok(());
-                        }
-                    }
-                };
+                let pending_deletion = DeleteTenantFlow::should_resume_deletion(
+                    conf,
+                    preload.as_ref().map(|p| p.deleting).unwrap_or(false),
+                    &tenant_clone,
+                )
+                .await;
 
                 info!("pending_deletion {}", pending_deletion.is_some());
 
