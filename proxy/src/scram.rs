@@ -22,9 +22,12 @@ pub use secret::ServerSecret;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
+const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
+const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
+
 /// A list of supported SCRAM methods.
-pub const METHODS_PLUS: &[&str] = &["SCRAM-SHA-256-PLUS", "SCRAM-SHA-256"];
-pub const METHODS: &[&str] = &["SCRAM-SHA-256"];
+pub const METHODS: &[&str] = &[SCRAM_SHA_256_PLUS, SCRAM_SHA_256];
+pub const METHODS_WITHOUT_PLUS: &[&str] = &[SCRAM_SHA_256];
 
 /// Decode base64 into array without any heap allocations
 fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N]> {

@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tracing::{error, info};
 use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
@@ -128,6 +129,7 @@ pub enum TlsServerEndPoint {
 impl TlsServerEndPoint {
     pub fn new(cert: &Certificate) -> anyhow::Result<Self> {
         let sha256_oids = [
+            // I'm explicitly not adding MD5 or SHA1 here... They're bad.
             oid_registry::OID_SIG_ECDSA_WITH_SHA256,
             oid_registry::OID_PKCS1_SHA256WITHRSA,
         ];
@@ -136,11 +138,18 @@ impl TlsServerEndPoint {
             .context("Failed to parse PEM object from cerficiate")?
             .1;
 
-        if sha256_oids.contains(pem.signature_algorithm.oid()) {
-            Ok(Self::Sha256(
-                Sha256::new().chain_update(&cert.0).finalize().into(),
-            ))
+        info!(subject = %pem.subject, "parsing TLS certificate");
+
+        let reg = oid_registry::OidRegistry::default().with_all_crypto();
+        let oid = pem.signature_algorithm.oid();
+        let alg = reg.get(oid);
+        if sha256_oids.contains(oid) {
+            let tls_server_end_point: [u8; 32] =
+                Sha256::new().chain_update(&cert.0).finalize().into();
+            info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
+            Ok(Self::Sha256(tls_server_end_point))
         } else {
+            error!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), "unknown channel binding");
             Ok(Self::Undefined)
         }
     }

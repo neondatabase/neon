@@ -28,9 +28,9 @@ impl AuthMethod for Scram<'_> {
     #[inline(always)]
     fn first_message(&self, channel_binding: bool) -> BeMessage<'_> {
         if channel_binding {
-            Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS_PLUS))
-        } else {
             Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
+        } else {
+            Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS_WITHOUT_PLUS))
         }
     }
 }
@@ -135,7 +135,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
             .ok_or(AuthErrorImpl::MalformedPassword("bad sasl message"))?;
 
         // Currently, the only supported SASL method is SCRAM.
-        if !scram::METHODS_PLUS.contains(&sasl.method) {
+        if !scram::METHODS.contains(&sasl.method) {
             return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
