@@ -1923,6 +1923,10 @@ impl Tenant {
         self.current_state() == TenantState::Active
     }
 
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
     /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
