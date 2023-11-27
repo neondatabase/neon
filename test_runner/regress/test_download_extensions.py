@@ -51,7 +51,8 @@ def test_remote_extensions(
     (host, port) = httpserver_listen_address
     extensions_endpoint = f"http://{host}:{port}/pg-ext-s3-gateway"
 
-    archive_path = f"latest/v{pg_version}/extensions/anon.tar.zst"
+    build_tag = os.environ.get("BUILD_TAG", "latest")
+    archive_path = f"{build_tag}/v{pg_version}/extensions/anon.tar.zst"
 
     def endpoint_handler_build_tag(request: Request) -> Response:
         log.info(f"request: {request}")
