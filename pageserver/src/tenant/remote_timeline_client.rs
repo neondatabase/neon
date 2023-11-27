@@ -896,7 +896,15 @@ impl RemoteTimelineClient {
             upload_queue.shutdown_ready.clone().acquire_owned()
         };
 
-        match fut.await {
+        let sg = scopeguard::guard((), |_| {
+            tracing::error!("RemoteTimelineClient::shutdown was cancelled")
+        });
+
+        let res = fut.await;
+
+        scopeguard::ScopeGuard::into_inner(sg);
+
+        match res {
             Ok(_permit) => unreachable!("shutdown_ready should not have been added permits"),
             Err(_closed) => {
                 // expected
