@@ -20,6 +20,7 @@ use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
+use tokio::io::BufReader;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -2943,7 +2944,8 @@ impl Tenant {
             )
             .await
             .context("download initdb tar")?;
-            import_datadir::extract_tar_zst(&pgdata_path, &initdb_tar_zst)
+            let buf_read = BufReader::new(initdb_tar_zst);
+            import_datadir::extract_tar_zst(&pgdata_path, Box::pin(buf_read))
                 .await
                 .context("extract initdb tar")?;
         } else {

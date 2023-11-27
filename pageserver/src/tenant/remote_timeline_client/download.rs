@@ -7,9 +7,10 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context, Error};
 use camino::Utf8Path;
-use tokio::fs;
+use camino_tempfile::tempfile;
+use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use utils::{backoff, crashsafe};
@@ -363,21 +364,25 @@ pub(crate) async fn download_initdb_tar_zst(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-) -> Result<Vec<u8>, DownloadError> {
+) -> Result<File, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
 
     download_retry(
         || async {
+            let mut file =
+                File::from_std(tempfile().map_err(|e| {
+                    DownloadError::Other(Error::new(e).context("tempfile creation"))
+                })?);
+
             let mut download = storage.download(&remote_path).await?;
 
-            let mut buffer = Vec::new();
-            tokio::io::copy(&mut download.download_stream, &mut buffer)
+            tokio::io::copy(&mut download.download_stream, &mut file)
                 .await
                 .with_context(|| format!("download initdb.tar.zst at {remote_path:?}"))
                 .map_err(DownloadError::Other)?;
-            Ok(buffer)
+            Ok(file)
         },
         &format!("download {remote_path}"),
     )

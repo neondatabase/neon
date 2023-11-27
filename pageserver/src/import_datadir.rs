@@ -13,7 +13,7 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use futures::StreamExt;
 use nix::NixPath;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_tar::Archive;
 use tokio_tar::Builder;
 use tokio_tar::HeaderMode;
@@ -734,8 +734,11 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     Ok(compressed.buf)
 }
 
-pub async fn extract_tar_zst(pgdata_path: &Utf8Path, tar_zst: &[u8]) -> Result<()> {
-    let tar = ZstdDecoder::new(tar_zst);
+pub async fn extract_tar_zst(
+    pgdata_path: &Utf8Path,
+    tar_zst: impl AsyncBufRead + Unpin,
+) -> Result<()> {
+    let tar = Box::pin(ZstdDecoder::new(tar_zst));
     let mut archive = Archive::new(tar);
     archive.unpack(pgdata_path).await?;
     Ok(())
