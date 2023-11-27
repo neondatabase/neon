@@ -1,4 +1,3 @@
-import shutil
 import sys
 import tarfile
 import tempfile
@@ -151,14 +150,9 @@ def test_wal_restore_http(
     initdb_zst_path = (
         env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst"
     )
-    # Create a copy of the initdb
-    shutil.copy2(initdb_zst_path, initdb_backup_location)
 
     ps_client.timeline_delete(tenant_id, timeline_id)
     time.sleep(2)
-
-    # Move from the backup to the old location
-    shutil.copy2(initdb_backup_location, initdb_zst_path)
 
     # verify that it is indeed deleted
     # TODO
