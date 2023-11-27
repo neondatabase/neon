@@ -280,7 +280,6 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
         use crate::tenant::delete::DeleteTenantError::*;
         match value {
             Get(g) => ApiError::from(g),
-            e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
             Timeline(t) => ApiError::from(t),
             NotAttached => ApiError::NotFound(anyhow::anyhow!("Tenant is not attached").into()),
             SlotError(e) => e.into(),

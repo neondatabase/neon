@@ -257,8 +257,6 @@ pub struct Tenant {
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 
-    pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
-
     // Cancellation token fires when we have entered shutdown().  This is a parent of
     // Timelines' cancellation token.
     pub(crate) cancel: CancellationToken,
@@ -634,9 +632,9 @@ impl Tenant {
                     }
                 };
 
-                info!("pending_deletion {}", pending_deletion.is_some());
+                info!("pending_deletion {}", pending_deletion);
 
-                if let Some(deletion) = pending_deletion {
+                if pending_deletion {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
@@ -653,7 +651,6 @@ impl Tenant {
                     }
 
                     match DeleteTenantFlow::resume_from_attach(
-                        deletion,
                         &tenant_clone,
                         preload,
                         tenants,
@@ -2372,7 +2369,6 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
-            delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::new(format!("Tenant<{tenant_id}>")),
         }

@@ -4,7 +4,6 @@ use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::TenantState;
 use remote_storage::{GenericRemoteStorage, RemotePath};
-use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, warn, Instrument, Span};
 
@@ -39,9 +38,6 @@ pub(crate) enum DeleteTenantError {
     #[error("Invalid state {0}. Expected Active or Broken")]
     InvalidState(TenantState),
 
-    #[error("Tenant deletion is already in progress")]
-    AlreadyInProgress,
-
     #[error("Tenant map slot error {0}")]
     SlotError(#[from] TenantSlotError),
 
@@ -54,8 +50,6 @@ pub(crate) enum DeleteTenantError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
-
-type DeletionGuard = tokio::sync::OwnedMutexGuard<DeleteTenantFlow>;
 
 fn remote_tenant_delete_mark_path(
     conf: &PageServerConf,
@@ -287,14 +281,14 @@ impl DeleteTenantFlow {
     ) -> Result<(), DeleteTenantError> {
         span::debug_assert_current_span_has_tenant_id();
 
-        let mut guard = Self::prepare(&tenant).await?;
+        Self::prepare(&tenant).await?;
 
-        if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
+        if let Err(e) = Self::run_inner(conf, remote_storage.as_ref(), &tenant).await {
             tenant.set_broken(format!("{e:#}")).await;
             return Err(e);
         }
 
-        Self::schedule_background(guard, conf, remote_storage, tenants, tenant);
+        Self::schedule_background(conf, remote_storage, tenants, tenant);
 
         Ok(())
     }
@@ -304,13 +298,10 @@ impl DeleteTenantFlow {
     // will result in an error, but here we need to be able to retry shutdown when tenant deletion is retried.
     // So the solution is to set tenant state to broken.
     async fn run_inner(
-        guard: &mut OwnedMutexGuard<Self>,
         conf: &'static PageServerConf,
         remote_storage: Option<&GenericRemoteStorage>,
         tenant: &Tenant,
     ) -> Result<(), DeleteTenantError> {
-        guard.mark_in_progress()?;
-
         fail::fail_point!("tenant-delete-before-create-remote-mark", |_| {
             Err(anyhow::anyhow!(
                 "failpoint: tenant-delete-before-create-remote-mark"
@@ -345,46 +336,25 @@ impl DeleteTenantFlow {
         Ok(())
     }
 
-    fn mark_in_progress(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Finished => anyhow::bail!("Bug. Is in finished state"),
-            Self::InProgress { .. } => { /* We're in a retry */ }
-            Self::NotStarted => { /* Fresh start */ }
-        }
-
-        *self = Self::InProgress;
-
-        Ok(())
-    }
-
     pub(crate) async fn should_resume_deletion(
         conf: &'static PageServerConf,
         remote_mark_exists: bool,
         tenant: &Tenant,
-    ) -> Result<Option<DeletionGuard>, DeleteTenantError> {
-        let acquire = |t: &Tenant| {
-            Some(
-                Arc::clone(&t.delete_progress)
-                    .try_lock_owned()
-                    .expect("we're the only owner during init"),
-            )
-        };
-
+    ) -> Result<bool, DeleteTenantError> {
         if remote_mark_exists {
-            return Ok(acquire(tenant));
+            return Ok(true);
         }
 
         let tenant_id = tenant.tenant_id;
         // Check local mark first, if its there there is no need to go to s3 to check whether remote one exists.
         if conf.tenant_deleted_mark_file_path(&tenant_id).exists() {
-            Ok(acquire(tenant))
+            Ok(true)
         } else {
-            Ok(None)
+            Ok(false)
         }
     }
 
     pub(crate) async fn resume_from_attach(
-        guard: DeletionGuard,
         tenant: &Arc<Tenant>,
         preload: Option<TenantPreload>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
@@ -403,19 +373,10 @@ impl DeleteTenantFlow {
             .await
             .context("attach")?;
 
-        Self::background(
-            guard,
-            tenant.conf,
-            tenant.remote_storage.clone(),
-            tenants,
-            tenant,
-        )
-        .await
+        Self::background(tenant.conf, tenant.remote_storage.clone(), tenants, tenant).await
     }
 
-    async fn prepare(
-        tenant: &Arc<Tenant>,
-    ) -> Result<tokio::sync::OwnedMutexGuard<Self>, DeleteTenantError> {
+    async fn prepare(tenant: &Arc<Tenant>) -> Result<(), DeleteTenantError> {
         // FIXME: unsure about active only. Our init jobs may not be cancellable properly,
         // so at least for now allow deletions only for active tenants. TODO recheck
         // Broken and Stopping is needed for retries.
@@ -425,10 +386,6 @@ impl DeleteTenantFlow {
         ) {
             return Err(DeleteTenantError::InvalidState(tenant.current_state()));
         }
-
-        let guard = Arc::clone(&tenant.delete_progress)
-            .try_lock_owned()
-            .map_err(|_| DeleteTenantError::AlreadyInProgress)?;
 
         fail::fail_point!("tenant-delete-before-shutdown", |_| {
             Err(anyhow::anyhow!("failpoint: tenant-delete-before-shutdown"))?
@@ -449,11 +406,10 @@ impl DeleteTenantFlow {
             )));
         }
 
-        Ok(guard)
+        Ok(())
     }
 
     fn schedule_background(
-        guard: OwnedMutexGuard<Self>,
         conf: &'static PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
@@ -469,9 +425,7 @@ impl DeleteTenantFlow {
             "tenant_delete",
             false,
             async move {
-                if let Err(err) =
-                    Self::background(guard, conf, remote_storage, tenants, &tenant).await
-                {
+                if let Err(err) = Self::background(conf, remote_storage, tenants, &tenant).await {
                     error!("Error: {err:#}");
                     tenant.set_broken(format!("{err:#}")).await;
                 };
@@ -486,7 +440,6 @@ impl DeleteTenantFlow {
     }
 
     async fn background(
-        mut guard: OwnedMutexGuard<Self>,
         conf: &PageServerConf,
         remote_storage: Option<GenericRemoteStorage>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
@@ -549,8 +502,6 @@ impl DeleteTenantFlow {
                 .tenant_slots
                 .set(locked.len() as u64);
         }
-
-        *guard = Self::Finished;
 
         Ok(())
     }
