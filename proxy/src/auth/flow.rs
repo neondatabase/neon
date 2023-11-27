@@ -30,7 +30,9 @@ impl AuthMethod for Scram<'_> {
         if channel_binding {
             Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
         } else {
-            Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS_WITHOUT_PLUS))
+            Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(
+                scram::METHODS_WITHOUT_PLUS,
+            ))
         }
     }
 }
