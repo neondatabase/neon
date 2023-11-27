@@ -391,8 +391,27 @@ impl ApiImpl for SimulationApi {
         }
     }
 
-    fn after_election(&self, _wp: &mut walproposer::bindings::WalProposer) {
-        debug!("after_election");
+    fn after_election(&self, wp: &mut walproposer::bindings::WalProposer) {
+        let prop_lsn = wp.propEpochStartLsn;
+        let prop_term = wp.propTerm;
+
+        let mut prev_lsn: u64 = 0;
+        let mut prev_term: u64 = 0;
+
+        unsafe {
+            let history = wp.propTermHistory.entries;
+            let len = wp.propTermHistory.n_entries as usize;
+            if len > 1 {
+                let entry = *history.wrapping_add(len - 2);
+                prev_lsn = entry.lsn;
+                prev_term = entry.term;
+            }
+        }
+
+        let msg = format!("prop_elected;{};{};{};{}", prop_lsn, prop_term, prev_lsn, prev_term);
+        
+        debug!(msg);
+        self.os.log_event(msg);
     }
 
     fn get_redo_start_lsn(&self) -> u64 {
@@ -423,8 +442,11 @@ impl ApiImpl for SimulationApi {
         }
     }
 
-    fn process_safekeeper_feedback(&self, _wp: &mut walproposer::bindings::WalProposer, commit_lsn: u64) {
+    fn process_safekeeper_feedback(&self, wp: &mut walproposer::bindings::WalProposer, commit_lsn: u64) {
         debug!("process_safekeeper_feedback, commit_lsn={}", commit_lsn);
+        if commit_lsn > wp.lastSentCommitLsn {
+            self.os.log_event(format!("commit_lsn;{}", commit_lsn));
+        }
     }
 
     fn get_flush_rec_ptr(&self) -> u64 {

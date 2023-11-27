@@ -530,6 +530,10 @@ impl Node {
         let prev = self.crash_token.swap(true, std::sync::atomic::Ordering::SeqCst);
         assert!(!prev, "crash_token should be set only once");
     }
+
+    pub fn log_event(&self, data: String) {
+        self.world.add_event(self.id, data)
+    }
 }
 
 /// Network events and timers.

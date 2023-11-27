@@ -7,7 +7,7 @@ use rand::Rng;
 use tracing::{info, warn};
 use utils::lsn::Lsn;
 
-use crate::walproposer_sim::{log::init_logger, util::{TestConfig, Schedule, TestAction, generate_network_opts, generate_schedule}};
+use crate::walproposer_sim::{log::init_logger, util::{TestConfig, Schedule, TestAction, generate_network_opts, generate_schedule, validate_events}};
 
 mod walproposer_sim;
 
@@ -167,7 +167,6 @@ fn test_many_tx() -> anyhow::Result<()> {
 fn test_random_schedules() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
-    config.network.keepalive_timeout = Some(100);
 
     for i in 0..2000 {
         let seed: u64 = rand::thread_rng().gen();
@@ -178,7 +177,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
 
         let schedule = generate_schedule(seed);
         test.run_schedule(&schedule).unwrap();
-        // validate_events(test.world.take_events());
+        validate_events(test.world.take_events());
         test.world.deallocate();
     }
 
@@ -201,7 +200,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     // test.run_schedule(&schedule)?;
     // test.world.deallocate();
 
-    let seed = 10222712361296392815;
+    let seed = 10318430968140584404;
     config.network = generate_network_opts(seed);
     info!("network: {:?}", config.network);
     let test = config.start(seed);
@@ -210,7 +209,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     let schedule = generate_schedule(seed);
     info!("schedule: {:?}", schedule);
     test.run_schedule(&schedule).unwrap();
-    // validate_events(test.world.take_events());
+    validate_events(test.world.take_events());
     test.world.deallocate();
 
     Ok(())
