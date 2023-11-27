@@ -1778,6 +1778,7 @@ mod tests {
         println!("remote_timeline_dir: {remote_timeline_dir}");
 
         let generation = harness.generation;
+        let shard = harness.shard;
 
         // Create a couple of dummy files,  schedule upload for them
 
@@ -1794,7 +1795,7 @@ mod tests {
                 harness.conf,
                 &timeline,
                 name,
-                LayerFileMetadata::new(contents.len() as u64, generation),
+                LayerFileMetadata::new(contents.len() as u64, generation, shard),
             )
         }).collect::<Vec<_>>();
 
@@ -1943,7 +1944,7 @@ mod tests {
             harness.conf,
             &timeline,
             layer_file_name_1.clone(),
-            LayerFileMetadata::new(content_1.len() as u64, harness.generation),
+            LayerFileMetadata::new(content_1.len() as u64, harness.generation, harness.shard),
         );
 
         #[derive(Debug, PartialEq, Clone, Copy)]

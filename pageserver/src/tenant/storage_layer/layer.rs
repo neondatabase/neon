@@ -3,6 +3,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use pageserver_api::shard::ShardIndex;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -96,6 +97,7 @@ impl Layer {
             desc,
             None,
             metadata.generation,
+            metadata.shard,
         )));
 
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_some());
@@ -136,6 +138,7 @@ impl Layer {
                 desc,
                 Some(inner),
                 metadata.generation,
+                metadata.shard,
             )
         }));
 
@@ -179,6 +182,7 @@ impl Layer {
                 desc,
                 Some(inner),
                 timeline.generation,
+                timeline.get_shard_index(),
             )
         }));
 
@@ -426,6 +430,13 @@ struct LayerInner {
     /// For loaded layers (resident or evicted) this comes from [`LayerFileMetadata::generation`],
     /// for created layers from [`Timeline::generation`].
     generation: Generation,
+
+    /// The shard of this Layer
+    ///
+    /// For created layers, this is always the shard of the parent creating [`crate::tenant::Tenant`] object.  For
+    /// loaded layers, this may be some other shard, if the tenant has undergone a shard split
+    /// since the layer was originally written.
+    shard: ShardIndex,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -523,6 +534,7 @@ impl LayerInner {
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
+        shard: ShardIndex,
     ) -> Self {
         let path = conf
             .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
@@ -550,6 +562,7 @@ impl LayerInner {
             status: tokio::sync::broadcast::channel(1).0,
             consecutive_failures: AtomicUsize::new(0),
             generation,
+            shard,
         }
     }
 
@@ -1077,7 +1090,7 @@ impl LayerInner {
     }
 
     fn metadata(&self) -> LayerFileMetadata {
-        LayerFileMetadata::new(self.desc.file_size, self.generation)
+        LayerFileMetadata::new(self.desc.file_size, self.generation, self.shard)
     }
 }
 
