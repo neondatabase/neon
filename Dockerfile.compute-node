@@ -722,6 +722,7 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.3.tar.gz -
 #########################################################################################
 
 FROM build-deps AS wal2json-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.gz && \
