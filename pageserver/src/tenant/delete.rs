@@ -17,6 +17,7 @@ use crate::{
     config::PageServerConf,
     context::RequestContext,
     task_mgr::{self, TaskKind},
+    tenant::mgr::{TenantSlot, TenantsMapRemoveResult},
     InitializationOrder,
 };
 
@@ -561,11 +562,40 @@ impl DeleteTenantFlow {
                         .set(locked.len() as u64);
 
                     match removed {
-                        None => {
-                            // Normal case: we do not need to wait
+                        TenantsMapRemoveResult::Occupied(slot) => {
+                            match slot {
+                                TenantSlot::Secondary => {
+                                    // This is unexpected: this secondary tenants should not have been created, and we
+                                    // are not in a position to shut it down from here.
+                                    tracing::warn!(
+                                        "Tenant transitioned to secondary mode while deleting!"
+                                    );
+                                }
+                                TenantSlot::Attached(tenant) => match tenant.current_state() {
+                                    TenantState::Stopping { .. } | TenantState::Broken { .. } => {
+                                        // Expected: we put the tenant into stopping state before we start deleting it
+                                    }
+                                    state => {
+                                        // Unexpected state
+                                        tracing::warn!(
+                                            "Tenant in unexpected state {state} after deletion"
+                                        );
+                                    }
+                                },
+                                TenantSlot::InProgress(_) => {
+                                    // TenantsMap::remove handles InProgress separately, should never return it here
+                                    unreachable!();
+                                }
+                            };
                             break;
                         }
-                        Some(barrier) => {
+                        TenantsMapRemoveResult::Vacant => {
+                            tracing::warn!(
+                                "Tenant removed from TenantsMap before deletion completed"
+                            );
+                            break;
+                        }
+                        TenantsMapRemoveResult::InProgress(barrier) => {
                             // An InProgress entry was found, we must wait on its barrier
                             barrier
                         }
