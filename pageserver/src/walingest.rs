@@ -2127,7 +2127,9 @@ mod tests {
             buffer
         };
 
-        // TODO start a profiler too
+        // Start profiling
+        let profiler_guard = crate::profiling::init_profiler();
+        let prof_guard = crate::profiling::profpoint_start();
         let started_at = std::time::Instant::now();
 
         // Initialize walingest
@@ -2152,7 +2154,11 @@ mod tests {
             }
         }
 
+        drop(prof_guard);
+
         let duration = started_at.elapsed();
         println!("done in {:?}", duration);
+
+        crate::profiling::exit_profiler(&profiler_guard);
     }
 }

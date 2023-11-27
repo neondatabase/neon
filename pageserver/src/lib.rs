@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
+pub mod profiling;
 pub mod repository;
 pub(crate) mod statvfs;
 pub mod task_mgr;
