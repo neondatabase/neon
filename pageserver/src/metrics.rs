@@ -1973,6 +1973,7 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
+        &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
     ]
     .into_iter()
     .for_each(|h| {
