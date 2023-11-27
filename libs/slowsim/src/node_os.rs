@@ -31,7 +31,7 @@ impl NodeOs {
     }
 
     /// Returns a writable pipe. All incoming messages should be polled
-    /// with [`network_epoll`]. Always successful.
+    /// with [`Self::epoll`]. Always successful.
     pub fn open_tcp(&self, dst: NodeId) -> TCP {
         self.world.open_tcp(&self.internal, dst)
     }

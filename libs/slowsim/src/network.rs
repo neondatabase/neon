@@ -354,10 +354,10 @@ impl NetworkBuffer {
 
 /// Simplistic simulation of a bidirectional network stream without reordering (TCP).
 /// There are almost no errors, writes are always successful (but may end up in void).
-/// Reads are implemented as a messages in a shared queue, refer to [`NodeOs::network_epoll`]
+/// Reads are implemented as a messages in a shared queue, refer to [`super::node_os::NodeOs::epoll`]
 /// for details.
 ///
-/// TCP struct is just a one side of a connection. To create a connection, use [`NodeOs::open_tcp`].
+/// TCP struct is just a one side of a connection. To create a connection, use [`super::node_os::NodeOs::open_tcp`].
 #[derive(Clone)]
 pub struct TCP {
     conn: Arc<VirtualConnection>,
@@ -388,7 +388,7 @@ impl TCP {
     }
 
     /// Receive a message. Blocks until a message is available. Can be used only
-    /// with sockets opened with [`NodeOs::open_tcp_nopoll`].
+    /// with sockets opened with [`super::node_os::NodeOs::open_tcp_nopoll`].
     pub fn recv(&self) -> NodeEvent {
         // TODO: handle closed connection
         self.conn.internal_recv(self.dir as usize)

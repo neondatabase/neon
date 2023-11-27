@@ -39,27 +39,29 @@ impl FormatTime for SimClock {
 static LOGGING_DONE: OnceCell<SimClock> = OnceCell::new();
 
 fn init_tracing_logger(debug_enabled: bool) -> SimClock {
-    LOGGING_DONE.get_or_init(|| {
-        let clock = SimClock::default();
-        let base_logger = tracing_subscriber::fmt()
-            .with_target(false)
-            .with_timer(clock.clone())
-            // .with_ansi(true) TODO
-            .with_max_level(match debug_enabled {
-                true => tracing::Level::DEBUG,
-                false => tracing::Level::WARN,
-            })
-            .with_writer(std::io::stdout);
-        base_logger.init();
+    LOGGING_DONE
+        .get_or_init(|| {
+            let clock = SimClock::default();
+            let base_logger = tracing_subscriber::fmt()
+                .with_target(false)
+                .with_timer(clock.clone())
+                // .with_ansi(true) TODO
+                .with_max_level(match debug_enabled {
+                    true => tracing::Level::DEBUG,
+                    false => tracing::Level::WARN,
+                })
+                .with_writer(std::io::stdout);
+            base_logger.init();
 
-        // logging::replace_panic_hook_with_tracing_panic_hook().forget();
+            // logging::replace_panic_hook_with_tracing_panic_hook().forget();
 
-        if !debug_enabled {
-            std::panic::set_hook(Box::new(|_| {}));
-        }
+            if !debug_enabled {
+                std::panic::set_hook(Box::new(|_| {}));
+            }
 
-        clock
-    }).clone()
+            clock
+        })
+        .clone()
 }
 
 pub fn init_logger() -> SimClock {
