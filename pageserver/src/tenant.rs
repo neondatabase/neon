@@ -2941,8 +2941,11 @@ impl Tenant {
                 &self.tenant_id,
                 &existing_initdb_timeline_id,
             )
-            .await.context("download initdb tar")?;
-            import_datadir::extract_tar_zst(&pgdata_path, &initdb_tar_zst).await.context("extract initdb tar")?;
+            .await
+            .context("download initdb tar")?;
+            import_datadir::extract_tar_zst(&pgdata_path, &initdb_tar_zst)
+                .await
+                .context("extract initdb tar")?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
             run_initdb(self.conf, &pgdata_path, pg_version)?;
