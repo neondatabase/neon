@@ -79,11 +79,9 @@ def test_remote_extensions(
     # Start a compute node with remote_extension spec
     # and check that it can download the extensions and use them to CREATE EXTENSION.
     env = neon_env_builder_local.init_start()
-    tenant_id, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_remote_extensions", tenant_id=tenant_id)
+    env.neon_cli.create_branch("test_remote_extensions")
     endpoint = env.endpoints.create(
         "test_remote_extensions",
-        tenant_id=tenant_id,
         config_lines=["log_min_messages=debug3"],
     )
 
