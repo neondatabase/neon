@@ -21,7 +21,7 @@
 #include "storage/buf_internals.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
-#include "storage/shmem.h"
+#include "storage/pg_shmem.h"
 #include "c.h"
 #include "postmaster/interrupt.h"
 
