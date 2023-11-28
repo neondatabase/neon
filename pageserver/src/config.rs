@@ -1322,12 +1322,11 @@ trace_read_requests = {trace_read_requests}"#,
 
     #[test]
     fn parse_incorrect_tenant_config() -> anyhow::Result<()> {
-        let config_string = format!(
-            r#"
+        let config_string = r#"
             [tenant_config]
             checkpoint_distance = -1 # supposed to be an u64
         "#
-        );
+        .to_string();
 
         let toml: Document = config_string.parse()?;
         let item = toml.get("tenant_config").unwrap();
