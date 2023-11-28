@@ -7,6 +7,7 @@ use metrics::{
     HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
@@ -1571,9 +1572,9 @@ pub struct RemoteTimelineClientMetrics {
 }
 
 impl RemoteTimelineClientMetrics {
-    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+    pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         RemoteTimelineClientMetrics {
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_shard_id.tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),

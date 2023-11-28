@@ -41,6 +41,9 @@ use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 #[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "testing")]
+use pageserver_api::shard::TenantShardId;
+
 use crate::config::PageServerConf;
 use crate::metrics::{
     WalRedoKillCause, WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTERS,
@@ -991,7 +994,11 @@ impl WalRedoProcess {
         // these files will be collected to an allure report
         let filename = format!("walredo-{millis}-{}-{seq}.walredo", writebuf.len());
 
-        let path = self.conf.tenant_path(&self.tenant_id).join(&filename);
+        // TODO(sharding): update this call when WalRedoProcess gets a TenantShardId.
+        let path = self
+            .conf
+            .tenant_path(&TenantShardId::unsharded(self.tenant_id))
+            .join(&filename);
 
         let res = std::fs::OpenOptions::new()
             .write(true)

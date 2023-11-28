@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 
-use pageserver_api::control_api::{
-    ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
+use pageserver_api::{
+    control_api::{
+        ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
+    },
+    shard::TenantShardId,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{
-    backoff,
-    generation::Generation,
-    id::{NodeId, TenantId},
-};
+use utils::{backoff, generation::Generation, id::NodeId};
 
 use crate::config::PageServerConf;
 
@@ -31,11 +30,11 @@ pub enum RetryForeverError {
 
 #[async_trait::async_trait]
 pub trait ControlPlaneGenerationsApi {
-    async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError>;
+    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError>;
     async fn validate(
         &self,
-        tenants: Vec<(TenantId, Generation)>,
-    ) -> Result<HashMap<TenantId, bool>, RetryForeverError>;
+        tenants: Vec<(TenantShardId, Generation)>,
+    ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError>;
 }
 
 impl ControlPlaneClient {
@@ -127,7 +126,7 @@ impl ControlPlaneClient {
 #[async_trait::async_trait]
 impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response, or error out if we are shut down
-    async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError> {
+    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
@@ -154,8 +153,8 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response, or error out if we are shut down
     async fn validate(
         &self,
-        tenants: Vec<(TenantId, Generation)>,
-    ) -> Result<HashMap<TenantId, bool>, RetryForeverError> {
+        tenants: Vec<(TenantShardId, Generation)>,
+    ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("validate")
