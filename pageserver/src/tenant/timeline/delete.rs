@@ -122,6 +122,7 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
 ///
 /// No timeout here, GC & Compaction should be responsive to the
 /// `TimelineState::Stopping` change.
+// pub(super): documentation link
 pub(super) async fn delete_local_layer_files(
     conf: &PageServerConf,
     tenant_id: TenantId,
