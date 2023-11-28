@@ -1257,6 +1257,14 @@ HandleActiveState(Safekeeper *sk, uint32 events)
 		if (!RecvAppendResponses(sk))
 			return;
 
+	if (events & WL_SOCKET_CLOSED)
+	{
+		walprop_log(WARNING, "connection to %s:%s in active state failed, got WL_SOCKET_CLOSED on neon_walreader socket",
+					sk->host, sk->port);
+		ShutdownConnection(sk);
+		return;
+	}
+
 	/* configures event set for yield whatever is the substate */
 	wp->api.active_state_update_event_set(sk);
 }
@@ -1312,7 +1320,7 @@ SendAppendRequests(Safekeeper *sk)
 			req = &sk->appendRequest;
 			PrepareAppendRequest(sk->wp, &sk->appendRequest, sk->streamingAt, endLsn);
 
-			walprop_log(DEBUG2, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
+			walprop_log(LOG, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
 						req->endLsn - req->beginLsn,
 						LSN_FORMAT_ARGS(req->beginLsn),
 						LSN_FORMAT_ARGS(req->endLsn),
@@ -2109,6 +2117,9 @@ SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_even
 					 */
 				case SS_ACTIVE_SEND:
 					*sk_events = WL_SOCKET_READABLE;
+					if (NeonWALReaderEvents(sk->xlogreader))
+						*nwr_events = WL_SOCKET_CLOSED; /* c.f.
+														 * walprop_pg_active_state_update_event_set */
 					return;
 
 					/*
@@ -2126,6 +2137,9 @@ SafekeeperStateDesiredEvents(Safekeeper *sk, uint32 *sk_events, uint32 *nwr_even
 					 */
 				case SS_ACTIVE_FLUSH:
 					*sk_events = WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE;
+					if (NeonWALReaderEvents(sk->xlogreader))
+						*nwr_events = WL_SOCKET_CLOSED; /* c.f.
+														 * walprop_pg_active_state_update_event_set */
 					return;
 			}
 			return;

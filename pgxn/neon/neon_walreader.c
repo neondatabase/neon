@@ -1,22 +1,24 @@
 /*
- * Like WALRead, but returns error instead of throwing ERROR when segment is
- * missing + doesn't attempt to read WAL before specified horizon -- basebackup
- * LSN. Missing WAL should be fetched by peer recovery, or, alternatively, on
- * demand WAL fetching from safekeepers should be implemented in NeonWALReader.
+ * Like WALRead, but when WAL segment doesn't exist locally instead of throwing
+ * ERROR asynchronously tries to fetch it from the most advanced safekeeper.
  *
  * We can't use libpqwalreceiver as it blocks during connection establishment
  * (and waiting for PQExec result), so use libpqwalproposer instead.
  *
  * TODO: keepalives are currently never sent, so the other side can close the
  * connection prematurely.
+ *
+ * TODO: close conn if reading takes too long to prevent stuck connections.
  */
 #include "postgres.h"
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "access/xlog_internal.h"
 #include "access/xlogdefs.h"
 #include "access/xlogreader.h"
+#include "libpq/pqformat.h"
 #include "storage/fd.h"
 #include "utils/wait_event.h"
 
@@ -25,13 +27,16 @@
 #include "neon_walreader.h"
 #include "walproposer.h"
 
-#define NEON_WALREADER_ERR_MSG_LEN	   256
+#define NEON_WALREADER_ERR_MSG_LEN 512
 
 static NeonWALReadResult NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
+static NeonWALReadResult NeonWALReaderReadMsg(NeonWALReader *state);
 static void NeonWALReaderResetRemote(NeonWALReader *state);
 static bool NeonWALReadLocal(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
 static bool neon_wal_segment_open(NeonWALReader *state, XLogSegNo nextSegNo, TimeLineID *tli_p);
 static void neon_wal_segment_close(NeonWALReader *state);
+static bool is_wal_segment_exists(XLogSegNo segno, int segsize,
+								  TimeLineID tli);
 
 /*
  * State of connection to donor safekeeper.
@@ -79,10 +84,11 @@ struct NeonWALReader
 	WalProposerConn *wp_conn;
 
 	/*
-	 * position in recvbuf from which we'll copy WAL next time, or NULL if
-	 * there is no unprocessed message
+	 * position in wp_conn recvbuf from which we'll copy WAL next time, or
+	 * NULL if there is no unprocessed message
 	 */
 	char	   *wal_ptr;
+	Size		wal_rem_len;	/* how many unprocessed bytes left in recvbuf */
 
 	/*
 	 * LSN of wal_ptr position according to walsender to cross check against
@@ -111,6 +117,8 @@ NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, WalPropose
 
 	reader->wp = wp;
 
+	reader->rem_state = RS_NONE;
+
 	return reader;
 }
 
@@ -119,6 +127,9 @@ NeonWALReaderFree(NeonWALReader *state)
 {
 	if (state->seg.ws_file != -1)
 		neon_wal_segment_close(state);
+	if (state->wp_conn)
+		libpqwp_disconnect(state->wp_conn);
+	Assert(false);
 	pfree(state);
 }
 
@@ -167,7 +178,8 @@ NeonWALRead(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, Ti
 	}
 	else if (state->wre_errno == ENOENT)
 	{
-		elog(LOG, "local read failed with segment doesn't exist, attempting remote");
+		elog(LOG, "local read failed as segment at %X/%X doesn't exist, attempting remote",
+			 LSN_FORMAT_ARGS(startptr));
 		return NeonWALReadRemote(state, buf, startptr, count, tli);
 	}
 	else
@@ -176,6 +188,7 @@ NeonWALRead(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, Ti
 	}
 }
 
+/* Do the read from remote safekeeper. */
 static NeonWALReadResult
 NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli)
 {
@@ -292,11 +305,208 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			NeonWALReaderResetRemote(state);
 			return NEON_WALREAD_ERROR;
 		}
-		elog(LOG, "moving ptr by %zu bytes restoring progress, req_lsn = %X/%X", state->req_progress, LSN_FORMAT_ARGS(startptr));
+		elog(LOG, "continuing remote read at req_lsn=%X/%X len=%zu, req_progress=%zu",
+			 LSN_FORMAT_ARGS(startptr),
+			 count,
+			 state->req_progress);
 		buf += state->req_progress;
+	}
+	else
+	{
+		state->req_lsn = startptr;
+		state->req_len = count;
+		state->req_progress = 0;
+		elog(LOG, "starting remote read req_lsn=%X/%X len=%zu",
+			 LSN_FORMAT_ARGS(startptr),
+			 count);
+	}
+
+	while (true)
+	{
+		Size		to_copy;
+
+		/*
+		 * If we have no ready data, receive new message.
+		 */
+		if (state->wal_rem_len == 0 &&
+
+		/*
+		 * check for the sake of 0 length reads; walproposer does these for
+		 * heartbeats, though generally they shouldn't hit remote source.
+		 */
+			state->req_len - state->req_progress > 0)
+		{
+			NeonWALReadResult read_msg_res = NeonWALReaderReadMsg(state);
+
+			if (read_msg_res != NEON_WALREAD_SUCCESS)
+				return read_msg_res;
+		}
+
+		if (state->req_lsn + state->req_progress != state->rem_lsn)
+		{
+			snprintf(state->err_msg, sizeof(state->err_msg),
+					 "expected remote WAL at %X/%X but got %X/%X. Non monotonic read requests could have caused this. req_lsn=%X/%X len=%zu",
+					 LSN_FORMAT_ARGS(state->req_lsn + state->req_progress),
+					 LSN_FORMAT_ARGS(state->rem_lsn),
+					 LSN_FORMAT_ARGS(state->req_lsn),
+					 state->req_len);
+			NeonWALReaderResetRemote(state);
+			return NEON_WALREAD_ERROR;
+		}
+
+		/* We can copy min of (available, requested) bytes. */
+		to_copy =
+			Min(state->req_len - state->req_progress, state->wal_rem_len);
+		memcpy(buf, state->wal_ptr, to_copy);
+		state->wal_ptr += to_copy;
+		state->wal_rem_len -= to_copy;
+		state->rem_lsn += to_copy;
+		if (state->wal_rem_len == 0)
+			state->wal_ptr = NULL;	/* freed by libpqwalproposer */
+		state->req_progress += to_copy;
+		if (state->req_progress == state->req_len)
+		{
+			/*
+			 * Request completed. If there is a chance of serving next one
+			 * locally, close the connection.
+			 */
+			if (state->req_lsn < state->available_lsn &&
+				state->rem_lsn >= state->available_lsn)
+			{
+				elog(LOG, "closing remote connection as available_lsn %X/%X crossed and next read is likely to be served locally",
+					 LSN_FORMAT_ARGS(state->available_lsn));
+				NeonWALReaderResetRemote(state);
+			}
+			else if (XLogSegmentOffset(state->rem_lsn, wal_segment_size) == 0)
+			{
+				XLogSegNo	segno;
+
+				XLByteToSeg(state->rem_lsn, segno, state->segcxt.ws_segsize);
+				if (is_wal_segment_exists(segno, state->segcxt.ws_segsize, tli))
+				{
+					elog(LOG, "closing remote connection as WAL file at next lsn %X/%X exists",
+						 LSN_FORMAT_ARGS(state->rem_lsn));
+					NeonWALReaderResetRemote(state);
+				}
+			}
+			state->req_lsn = InvalidXLogRecPtr;
+			state->req_len = 0;
+			state->req_progress = 0;
+			return NEON_WALREAD_SUCCESS;
+		}
 	}
 
 	snprintf(state->err_msg, sizeof(state->err_msg), "remote read failed: not implemented");
+	return NEON_WALREAD_ERROR;
+}
+
+/*
+ * Read one WAL message from the stream, sets state->wal_ptr in case of success.
+ * Resets remote state in case of failure.
+ */
+static NeonWALReadResult
+NeonWALReaderReadMsg(NeonWALReader *state)
+{
+	while (true)				/* loop until we get 'w' */
+	{
+		char	   *copydata_ptr;
+		int			copydata_size;
+		StringInfoData s;
+		char		msg_type;
+		int			hdrlen;
+
+		Assert(state->rem_state == RS_ESTABLISHED);
+		Assert(state->wal_ptr == NULL && state->wal_rem_len == 0);
+
+		switch (libpqwp_async_read(state->wp_conn,
+								   &copydata_ptr,
+								   &copydata_size))
+		{
+			case PG_ASYNC_READ_SUCCESS:
+				break;
+			case PG_ASYNC_READ_TRY_AGAIN:
+				return NEON_WALREAD_WOULDBLOCK;
+			case PG_ASYNC_READ_FAIL:
+				snprintf(state->err_msg,
+						 sizeof(state->err_msg),
+						 "req_lsn=%X/%X, req_len=%zu, req_progress=%zu, get copydata failed: %s",
+						 LSN_FORMAT_ARGS(state->req_lsn),
+						 state->req_len,
+						 state->req_progress,
+						 PQerrorMessage(state->wp_conn->pg_conn));
+				goto err;
+		}
+
+		/* put data on StringInfo to parse */
+		s.data = copydata_ptr;
+		s.len = copydata_size;
+		s.cursor = 0;
+		s.maxlen = -1;
+
+		if (copydata_size == 0)
+		{
+			snprintf(state->err_msg,
+					 sizeof(state->err_msg),
+					 "zero length copydata received");
+			goto err;
+		}
+		msg_type = pq_getmsgbyte(&s);
+		switch (msg_type)
+		{
+			case 'w':
+				{
+					XLogRecPtr	start_lsn;
+
+					hdrlen = sizeof(int64) + sizeof(int64) + sizeof(int64);
+					if (s.len - s.cursor < hdrlen)
+					{
+						snprintf(state->err_msg,
+								 sizeof(state->err_msg),
+								 "invalid WAL message received from primary");
+						goto err;
+					}
+
+					start_lsn = pq_getmsgint64(&s);
+					pq_getmsgint64(&s); /* XLogRecPtr	end_lsn; */
+					pq_getmsgint64(&s); /* TimestampTz send_time */
+
+					state->rem_lsn = start_lsn;
+					state->wal_rem_len = (Size) (s.len - s.cursor);
+					state->wal_ptr = (char *) pq_getmsgbytes(&s, s.len - s.cursor);
+					elog(LOG, "received WAL msg at %X/%X len %zu",
+						 LSN_FORMAT_ARGS(state->rem_lsn), state->wal_rem_len);
+
+					return NEON_WALREAD_SUCCESS;
+				}
+			case 'k':
+				{
+					XLogRecPtr	end_lsn;
+					bool		reply_requested;
+
+					hdrlen = sizeof(int64) + sizeof(int64) + sizeof(char);
+					if (s.len - s.cursor < hdrlen)
+					{
+						snprintf(state->err_msg, sizeof(state->err_msg),
+								 "invalid keepalive message received from primary");
+						goto err;
+					}
+
+					end_lsn = pq_getmsgint64(&s);
+					pq_getmsgint64(&s); /* TimestampTz timestamp; */
+					reply_requested = pq_getmsgbyte(&s);
+					elog(DEBUG5, "received keepalive end_lsn=%X/%X reply_requested=%d",
+						 LSN_FORMAT_ARGS(end_lsn),
+						 reply_requested);
+					continue;
+					/* todo: send replies */
+				}
+			default:
+				elog(WARNING, "invalid replication message type %d", msg_type);
+				continue;
+		}
+	}
+err:
+	NeonWALReaderResetRemote(state);
 	return NEON_WALREAD_ERROR;
 }
 
@@ -315,6 +525,7 @@ NeonWALReaderResetRemote(NeonWALReader *state)
 	}
 	state->donor_name[0] = '\0';
 	state->wal_ptr = NULL;
+	state->wal_rem_len = 0;
 	state->rem_lsn = InvalidXLogRecPtr;
 }
 
@@ -474,6 +685,16 @@ neon_wal_segment_open(NeonWALReader *state, XLogSegNo nextSegNo,
 		return true;
 
 	return false;
+}
+
+static bool
+is_wal_segment_exists(XLogSegNo segno, int segsize, TimeLineID tli)
+{
+	struct stat stat_buffer;
+	char		path[MAXPGPATH];
+
+	XLogFilePath(path, tli, segno, segsize);
+	return stat(path, &stat_buffer) == 0;
 }
 
 /* copy of vanilla wal_segment_close with NeonWALReader */

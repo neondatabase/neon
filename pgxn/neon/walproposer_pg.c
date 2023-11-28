@@ -812,6 +812,7 @@ walprop_flush(Safekeeper *sk)
 	return (PQflush(sk->conn->pg_conn));
 }
 
+/* Like libpqrcv_receive. *buf is valid until the next call. */
 PGAsyncReadResult
 libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount)
 {
@@ -1568,7 +1569,15 @@ walprop_pg_active_state_update_event_set(Safekeeper *sk)
 	}
 	else
 	{
-		update_nwr_event_set(sk, 0);
+		/*
+		 * Hack: we should always set 0 here, but for random reasons
+		 * WaitEventSet (WaitEventAdjustEpoll) asserts that there is at least
+		 * some event. Since there is also no way to remove socket except
+		 * reconstructing the whole set, SafekeeperStateDesiredEvents instead
+		 * gives WL_SOCKET_CLOSED if socket exists.
+		 */
+		Assert(nwr_events == WL_SOCKET_CLOSED || nwr_events == 0);
+		update_nwr_event_set(sk, WL_SOCKET_CLOSED);
 	}
 	walprop_pg_update_event_set(sk, sk_events);
 }
