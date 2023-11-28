@@ -2107,23 +2107,24 @@ mod tests {
         // Get test data. Steps to reconstruct it, if needed:
         // 1. Run the pgbench python test
         // 2. Take the first wal segment file from safekeeper
-        // 3. Compress it using `gzip -c input_file > output_file.gz`
+        // 3. Compress it using `zstd --long input_file`
         // 4. Grep sk logs for "restart decoder" to get startpoint
         // 5. Run just the decoder from this test to get the endpoint.
         //    It's the last LSN the decoder will output.
-        let path = "test_data/sk_wal_segment_from_pgbench.gz";
+        let path = "test_data/sk_wal_segment_from_pgbench.zst";
         let startpoint = Lsn::from_hex("14AEC08").unwrap();
         let endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
         // We fully read and decompress this into memory before decoding
         // to get a more accurate perf profile of the decoder.
         let bytes = {
-            use std::io::Read;
-            let file_reader = std::fs::File::open(path).unwrap();
-            let buffered_reader = std::io::BufReader::new(file_reader);
-            let mut decoder = flate2::read::GzDecoder::new(buffered_reader);
-            let mut buffer: Vec<u8> = vec![];
-            decoder.read_to_end(&mut buffer).unwrap();
+            use async_compression::tokio::bufread::ZstdDecoder;
+            let file = tokio::fs::File::open(path).await.unwrap();
+            let reader = tokio::io::BufReader::new(file);
+            let decoder = ZstdDecoder::new(reader);
+            let mut reader = tokio::io::BufReader::new(decoder);
+            let mut buffer = Vec::new();
+            tokio::io::copy_buf(&mut reader, &mut buffer).await.unwrap();
             buffer
         };
 
