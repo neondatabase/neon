@@ -333,7 +333,7 @@ pub(super) async fn download_index_part(
     }
 
     // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
-    // objects, and select the highest one with a generation <= my_generation.  Constructing the previx is equivalent
+    // objects, and select the highest one with a generation <= my_generation.  Constructing the prefix is equivalent
     // to constructing a full index path with no generation, because the generation is a suffix.
     let index_prefix = remote_index_path(tenant_id, timeline_id, shard, Generation::none());
     let indices = backoff::retry(
