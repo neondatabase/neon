@@ -76,3 +76,4 @@ tokio-util.workspace = true
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
+postgres-protocol.workspace = true

@@ -765,7 +765,7 @@ impl Tenant {
     ///
     async fn attach(
         self: &Arc<Tenant>,
-        mut init_order: Option<InitializationOrder>,
+        init_order: Option<InitializationOrder>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -781,11 +781,6 @@ impl Tenant {
                 return self.load_local(init_order, ctx).await;
             }
         };
-
-        // Signal that we have completed remote phase
-        init_order
-            .as_mut()
-            .and_then(|x| x.initial_tenant_load_remote.take());
 
         let mut timelines_to_resume_deletions = vec![];
 
@@ -2948,7 +2943,7 @@ impl Tenant {
         };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
-        let initdb_path = path_with_suffix_extension(
+        let pgdata_path = path_with_suffix_extension(
             self.conf
                 .timelines_path(&self.tenant_id)
                 .join(format!("basebackup-{timeline_id}")),
@@ -2957,26 +2952,25 @@ impl Tenant {
 
         // an uninit mark was placed before, nothing else can access this timeline files
         // current initdb was not run yet, so remove whatever was left from the previous runs
-        if initdb_path.exists() {
-            fs::remove_dir_all(&initdb_path).with_context(|| {
-                format!("Failed to remove already existing initdb directory: {initdb_path}")
+        if pgdata_path.exists() {
+            fs::remove_dir_all(&pgdata_path).with_context(|| {
+                format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &initdb_path, pg_version, cancel).await?;
+        run_initdb(self.conf, &pgdata_path, pg_version, cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&initdb_path) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{initdb_path}': {e}");
+                error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
         }
-        let pgdata_path = &initdb_path;
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
         // Upload the created data dir to S3
         if let Some(storage) = &self.remote_storage {
-            let pgdata_zstd = import_datadir::create_tar_zst(pgdata_path).await?;
+            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
             let pgdata_zstd = Bytes::from(pgdata_zstd);
             backoff::retry(
                 || async {
@@ -3026,7 +3020,7 @@ impl Tenant {
 
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
-            pgdata_path,
+            &pgdata_path,
             pgdata_lsn,
             ctx,
         )

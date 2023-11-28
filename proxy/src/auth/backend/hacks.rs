@@ -2,7 +2,7 @@ use super::{AuthSuccess, ComputeCredentials};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     proxy::LatencyTimer,
-    stream,
+    stream::{self, Stream},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -12,7 +12,7 @@ use tracing::{info, warn};
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
 pub async fn cleartext_hack(
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("cleartext auth flow override is enabled, proceeding");
@@ -37,7 +37,7 @@ pub async fn cleartext_hack(
 /// Very similar to [`cleartext_hack`], but there's a specific password format.
 pub async fn password_hack(
     creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("project not specified, resorting to the password hack auth flow");

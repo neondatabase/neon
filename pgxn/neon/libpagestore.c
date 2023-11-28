@@ -21,6 +21,7 @@
 #include "storage/buf_internals.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
+#include "storage/pg_shmem.h"
 #include "c.h"
 #include "postmaster/interrupt.h"
 
@@ -88,6 +89,12 @@ static bool pageserver_flush(void);
 static void pageserver_disconnect(void);
 
 static bool
+PagestoreShmemIsValid()
+{
+    return pagestore_shared && UsedShmemSegAddr;
+}
+
+static bool
 CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 {
     return strlen(*newval) < MAX_PAGESERVER_CONNSTRING_SIZE;
@@ -96,7 +103,7 @@ CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
-    if(!pagestore_shared)
+    if(!PagestoreShmemIsValid())
         return;
     LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
     strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
@@ -107,7 +114,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 static bool
 CheckConnstringUpdated()
 {
-    if(!pagestore_shared)
+    if(!PagestoreShmemIsValid())
         return false;
     return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
 }
@@ -115,7 +122,7 @@ CheckConnstringUpdated()
 static void
 ReloadConnstring()
 {
-    if(!pagestore_shared)
+    if(!PagestoreShmemIsValid())
         return;
     LWLockAcquire(pagestore_shared->lock, LW_SHARED);
     strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));

@@ -411,7 +411,6 @@ def check_neon_works(
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
     config.remote_storage = None
-    config.ext_remote_storage = None
     config.sk_remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes

@@ -1252,7 +1252,7 @@ fn cli() -> Command {
     let remote_ext_config_args = Arg::new("remote-ext-config")
         .long("remote-ext-config")
         .num_args(1)
-        .help("Configure the S3 bucket that we search for extensions in.")
+        .help("Configure the remote extensions storage proxy gateway to request for extensions.")
         .required(false);
 
     let lsn_arg = Arg::new("lsn")
