@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::Context;
 use camino::Utf8Path;
+use pageserver_api::shard::ShardIndex;
 use std::{collections::HashMap, str::FromStr};
 use utils::lsn::Lsn;
 
@@ -107,6 +108,7 @@ pub(super) fn reconcile(
     index_part: Option<&IndexPart>,
     disk_consistent_lsn: Lsn,
     generation: Generation,
+    shard: ShardIndex,
 ) -> Vec<(LayerFileName, Result<Decision, DismissedLayer>)> {
     use Decision::*;
 
@@ -118,10 +120,13 @@ pub(super) fn reconcile(
         .map(|(name, file_size)| {
             (
                 name,
-                // The generation here will be corrected to match IndexPart in the merge below, unless
+                // The generation and shard here will be corrected to match IndexPart in the merge below, unless
                 // it is not in IndexPart, in which case using our current generation makes sense
                 // because it will be uploaded in this generation.
-                (Some(LayerFileMetadata::new(file_size, generation)), None),
+                (
+                    Some(LayerFileMetadata::new(file_size, generation, shard)),
+                    None,
+                ),
             )
         })
         .collect::<Collected>();

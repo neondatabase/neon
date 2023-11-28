@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
+use pageserver_api::shard::ShardIndex;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +54,7 @@ pub async fn download_layer_file<'a>(
     let remote_path = remote_layer_path(
         &tenant_id,
         &timeline_id,
+        layer_metadata.shard,
         layer_file_name,
         layer_metadata.generation,
     );
@@ -213,10 +215,11 @@ async fn do_download_index_part(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    shard: ShardIndex,
     index_generation: Generation,
     cancel: CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
-    let remote_path = remote_index_path(tenant_id, timeline_id, index_generation);
+    let remote_path = remote_index_path(tenant_id, timeline_id, shard, index_generation);
 
     let index_part_bytes = download_retry_forever(
         || async {
@@ -254,6 +257,7 @@ pub(super) async fn download_index_part(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    shard: ShardIndex,
     my_generation: Generation,
     cancel: CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
@@ -261,8 +265,15 @@ pub(super) async fn download_index_part(
 
     if my_generation.is_none() {
         // Operating without generations: just fetch the generation-less path
-        return do_download_index_part(storage, tenant_id, timeline_id, my_generation, cancel)
-            .await;
+        return do_download_index_part(
+            storage,
+            tenant_id,
+            timeline_id,
+            shard,
+            my_generation,
+            cancel,
+        )
+        .await;
     }
 
     // Stale case: If we were intentionally attached in a stale generation, there may already be a remote
@@ -273,6 +284,7 @@ pub(super) async fn download_index_part(
         storage,
         tenant_id,
         timeline_id,
+        shard,
         my_generation,
         cancel.clone(),
     )
@@ -300,6 +312,7 @@ pub(super) async fn download_index_part(
         storage,
         tenant_id,
         timeline_id,
+        shard,
         my_generation.previous(),
         cancel.clone(),
     )
@@ -320,8 +333,9 @@ pub(super) async fn download_index_part(
     }
 
     // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
-    // objects, and select the highest one with a generation <= my_generation.
-    let index_prefix = remote_index_path(tenant_id, timeline_id, Generation::none());
+    // objects, and select the highest one with a generation <= my_generation.  Constructing the prefix is equivalent
+    // to constructing a full index path with no generation, because the generation is a suffix.
+    let index_prefix = remote_index_path(tenant_id, timeline_id, shard, Generation::none());
     let indices = backoff::retry(
         || async { storage.list_files(Some(&index_prefix)).await },
         |_| false,
@@ -347,14 +361,21 @@ pub(super) async fn download_index_part(
     match max_previous_generation {
         Some(g) => {
             tracing::debug!("Found index_part in generation {g:?}");
-            do_download_index_part(storage, tenant_id, timeline_id, g, cancel).await
+            do_download_index_part(storage, tenant_id, timeline_id, shard, g, cancel).await
         }
         None => {
             // Migration from legacy pre-generation state: we have a generation but no prior
             // attached pageservers did.  Try to load from a no-generation path.
             tracing::info!("No index_part.json* found");
-            do_download_index_part(storage, tenant_id, timeline_id, Generation::none(), cancel)
-                .await
+            do_download_index_part(
+                storage,
+                tenant_id,
+                timeline_id,
+                shard,
+                Generation::none(),
+                cancel,
+            )
+            .await
         }
     }
 }
