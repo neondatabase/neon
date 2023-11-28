@@ -45,12 +45,20 @@ impl<'t> UninitializedTimeline<'t> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
 
-        let (new_timeline, uninit_mark) = self.raw_timeline.take().with_context(|| {
-            format!("No timeline for initalization found for {tenant_id}/{timeline_id}")
-        })?;
+        if self.raw_timeline.is_none() {
+            return Err(anyhow::anyhow!(
+                "No timeline for initialization found for {tenant_id}/{timeline_id}"
+            ));
+        }
 
         // Check that the caller initialized disk_consistent_lsn
-        let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
+        let new_disk_consistent_lsn = self
+            .raw_timeline
+            .as_ref()
+            .expect("checked above")
+            .0
+            .get_disk_consistent_lsn();
+
         anyhow::ensure!(
             new_disk_consistent_lsn.is_valid(),
             "new timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
@@ -62,6 +70,13 @@ impl<'t> UninitializedTimeline<'t> {
                 "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
+                // after taking here should be no fallible operations, because the drop guard will not
+                // cleanup after and would block for example the tenant deletion
+                let (new_timeline, uninit_mark) =
+                    self.raw_timeline.take().expect("already checked");
+
+                // this is the mutual exclusion between different retries to create the timeline;
+                // this should be an assertion.
                 uninit_mark.remove_uninit_mark().with_context(|| {
                     format!(
                         "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
@@ -70,10 +85,10 @@ impl<'t> UninitializedTimeline<'t> {
                 v.insert(Arc::clone(&new_timeline));
 
                 new_timeline.maybe_spawn_flush_loop();
+
+                Ok(new_timeline)
             }
         }
-
-        Ok(new_timeline)
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.

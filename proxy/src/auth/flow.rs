@@ -1,16 +1,21 @@
 //! Main authentication flow.
 
 use super::{AuthErrorImpl, PasswordHackPayload};
-use crate::{sasl, scram, stream::PqStream};
+use crate::{
+    config::TlsServerEndPoint,
+    sasl, scram,
+    stream::{PqStream, Stream},
+};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::info;
 
 /// Every authentication selector is supposed to implement this trait.
 pub trait AuthMethod {
     /// Any authentication selector should provide initial backend message
     /// containing auth method name and parameters, e.g. md5 salt.
-    fn first_message(&self) -> BeMessage<'_>;
+    fn first_message(&self, channel_binding: bool) -> BeMessage<'_>;
 }
 
 /// Initial state of [`AuthFlow`].
@@ -21,8 +26,14 @@ pub struct Scram<'a>(pub &'a scram::ServerSecret);
 
 impl AuthMethod for Scram<'_> {
     #[inline(always)]
-    fn first_message(&self) -> BeMessage<'_> {
-        Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
+    fn first_message(&self, channel_binding: bool) -> BeMessage<'_> {
+        if channel_binding {
+            Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(scram::METHODS))
+        } else {
+            Be::AuthenticationSasl(BeAuthenticationSaslMessage::Methods(
+                scram::METHODS_WITHOUT_PLUS,
+            ))
+        }
     }
 }
 
@@ -32,7 +43,7 @@ pub struct PasswordHack;
 
 impl AuthMethod for PasswordHack {
     #[inline(always)]
-    fn first_message(&self) -> BeMessage<'_> {
+    fn first_message(&self, _channel_binding: bool) -> BeMessage<'_> {
         Be::AuthenticationCleartextPassword
     }
 }
@@ -43,37 +54,44 @@ pub struct CleartextPassword;
 
 impl AuthMethod for CleartextPassword {
     #[inline(always)]
-    fn first_message(&self) -> BeMessage<'_> {
+    fn first_message(&self, _channel_binding: bool) -> BeMessage<'_> {
         Be::AuthenticationCleartextPassword
     }
 }
 
 /// This wrapper for [`PqStream`] performs client authentication.
 #[must_use]
-pub struct AuthFlow<'a, Stream, State> {
+pub struct AuthFlow<'a, S, State> {
     /// The underlying stream which implements libpq's protocol.
-    stream: &'a mut PqStream<Stream>,
+    stream: &'a mut PqStream<Stream<S>>,
     /// State might contain ancillary data (see [`Self::begin`]).
     state: State,
+    tls_server_end_point: TlsServerEndPoint,
 }
 
 /// Initial state of the stream wrapper.
-impl<'a, S: AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
+impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     /// Create a new wrapper for client authentication.
-    pub fn new(stream: &'a mut PqStream<S>) -> Self {
+    pub fn new(stream: &'a mut PqStream<Stream<S>>) -> Self {
+        let tls_server_end_point = stream.get_ref().tls_server_end_point();
+
         Self {
             stream,
             state: Begin,
+            tls_server_end_point,
         }
     }
 
     /// Move to the next step by sending auth method's name & params to client.
     pub async fn begin<M: AuthMethod>(self, method: M) -> io::Result<AuthFlow<'a, S, M>> {
-        self.stream.write_message(&method.first_message()).await?;
+        self.stream
+            .write_message(&method.first_message(self.tls_server_end_point.supported()))
+            .await?;
 
         Ok(AuthFlow {
             stream: self.stream,
             state: method,
+            tls_server_end_point: self.tls_server_end_point,
         })
     }
 }
@@ -123,9 +141,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
             return Err(super::AuthError::bad_auth_method(sasl.method));
         }
 
+        info!("client chooses {}", sasl.method);
+
         let secret = self.state.0;
         let outcome = sasl::SaslStream::new(self.stream, sasl.message)
-            .authenticate(scram::Exchange::new(secret, rand::random, None))
+            .authenticate(scram::Exchange::new(
+                secret,
+                rand::random,
+                self.tls_server_end_point,
+            ))
             .await?;
 
         Ok(outcome)

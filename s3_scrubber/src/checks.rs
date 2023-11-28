@@ -94,11 +94,10 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         != index_part.get_disk_consistent_lsn()
                     {
                         result.errors.push(format!(
-                                    "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
-                                    index_part.metadata.disk_consistent_lsn(),
-                                    index_part.get_disk_consistent_lsn(),
-
-                                ))
+                            "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
+                            index_part.metadata.disk_consistent_lsn(),
+                            index_part.get_disk_consistent_lsn(),
+                        ))
                     }
 
                     if index_part.layer_metadata.is_empty() {
@@ -109,8 +108,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                     for (layer, metadata) in index_part.layer_metadata {
                         if metadata.file_size == 0 {
                             result.errors.push(format!(
-                                            "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
-                                        ))
+                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
+                            ))
                         }
 
                         let layer_map_key = (layer, metadata.generation);
@@ -136,7 +135,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             // a new generation that didn't upload an index yet.
                             //
                             // Even so, a layer that is not referenced by the index could just
-                            // be something enqueued for deletion, so while this check is valid 
+                            // be something enqueued for deletion, so while this check is valid
                             // for indicating that a layer is garbage, it is not an indicator
                             // of a problem.
                             gen < &index_part_generation)
