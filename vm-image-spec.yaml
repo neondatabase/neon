@@ -95,7 +95,7 @@ files:
         key_labels:
         values: [lfc_misses]
         query: |
-          select lfc_value as lfc_misses from neon_lfc_stats where lfc_key='file_cache_misses';
+          select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses';
 
       - metric_name: lfc_used
         type: gauge
@@ -103,7 +103,7 @@ files:
         key_labels:
         values: [lfc_used]
         query: |
-          select lfc_value as lfc_used from neon_lfc_stats where lfc_key='file_cache_used';
+          select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used';
 
       - metric_name: lfc_hits
         type: gauge
@@ -111,7 +111,7 @@ files:
         key_labels:
         values: [lfc_hits]
         query: |
-          select lfc_value as lfc_hits from neon_lfc_stats where lfc_key='file_cache_hits';
+          select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits';
 
       - metric_name: lfc_writes
         type: gauge
@@ -119,7 +119,7 @@ files:
         key_labels:
         values: [lfc_writes]
         query: |
-          select lfc_value as lfc_writes from neon_lfc_stats where lfc_key='file_cache_writes';
+          select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
 
 build: |
   # Build cgroup-tools
