@@ -6,11 +6,15 @@ def test_build_info_metric(neon_env_builder: NeonEnvBuilder, link_proxy: NeonPro
     neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start()
 
+    env.neon_cli.create_branch("test_build_info_metric")
+    endpoint = env.endpoints.create_start("test_build_info_metric")
+
     parsed_metrics = {}
 
     parsed_metrics["pageserver"] = parse_metrics(env.pageserver.http_client().get_metrics_str())
     parsed_metrics["safekeeper"] = parse_metrics(env.safekeepers[0].http_client().get_metrics_str())
     parsed_metrics["proxy"] = parse_metrics(link_proxy.get_metrics())
+    parsed_metrics["compute_ctl"] = parse_metrics(endpoint.get_metrics_str())
 
     for _component, metrics in parsed_metrics.items():
         sample = metrics.query_one("libmetrics_build_info")

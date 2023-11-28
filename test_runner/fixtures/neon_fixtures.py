@@ -2640,6 +2640,11 @@ class Endpoint(PgProtocol):
 
         return self
 
+    def get_metrics_str(self) -> str:
+        request_result = requests.get(f"http://localhost:{self.http_port}/metrics")
+        request_result.raise_for_status()
+        return request_result.text
+
     def __enter__(self) -> "Endpoint":
         return self
 

@@ -11,7 +11,8 @@ use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIErr
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use hyper::{header::CONTENT_TYPE, Body, Method, Request, Response, Server, StatusCode};
+use metrics::{Encoder, TextEncoder};
 use num_cpus;
 use serde_json;
 use tokio::task;
@@ -49,6 +50,20 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let state = compute.state.lock().unwrap();
             let status_response = status_response_from_state(&state);
             Response::new(Body::from(serde_json::to_string(&status_response).unwrap()))
+        }
+
+        // prometheus metrics
+        (&Method::GET, "/metrics") => {
+            let mut buffer = vec![];
+            let metrics = metrics::gather();
+            let encoder = TextEncoder::new();
+            encoder.encode(&metrics, &mut buffer).unwrap();
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, encoder.format_type())
+                .body(Body::from(buffer))
+                .unwrap()
         }
 
         // Startup metrics in JSON format. Keep /metrics reserved for a possible

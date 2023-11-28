@@ -12,8 +12,10 @@ cfg-if.workspace = true
 clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
+git-version.workspace = true
 hyper = { workspace = true, features = ["full"] }
 notify.workspace = true
+metrics.workspace = true
 num_cpus.workspace = true
 opentelemetry.workspace = true
 postgres.workspace = true

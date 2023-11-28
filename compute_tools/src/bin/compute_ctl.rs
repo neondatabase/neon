@@ -57,10 +57,15 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
+use metrics::set_build_info_metric;
+use utils::{project_build_tag, project_git_version};
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
+
+project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -68,7 +73,11 @@ fn main() -> Result<()> {
     let build_tag = option_env!("BUILD_TAG")
         .unwrap_or(BUILD_TAG_DEFAULT)
         .to_string();
-    info!("build_tag: {build_tag}");
+
+    info!("Version: {GIT_VERSION}");
+    info!("Build_tag: {BUILD_TAG}");
+
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     let matches = cli().get_matches();
     let pgbin_default = String::from("postgres");
