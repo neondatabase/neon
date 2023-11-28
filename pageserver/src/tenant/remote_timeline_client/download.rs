@@ -392,9 +392,18 @@ pub(crate) async fn download_initdb_tar_zst(
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
 
-    let temp_path = conf
-        .timeline_path(tenant_id, timeline_id)
-        .join(format!("{INITDB_PATH}.{TEMP_FILE_SUFFIX}"));
+    let timeline_path = conf.timelines_path(tenant_id);
+
+    if !timeline_path.exists() {
+        tokio::fs::create_dir_all(&timeline_path)
+            .await
+            .map_err(|e| {
+                DownloadError::Other(
+                    Error::new(e).context(format!("timeline dir creation {timeline_path}")),
+                )
+            })?;
+    }
+    let temp_path = timeline_path.join(format!("{INITDB_PATH}-{timeline_id}.{TEMP_FILE_SUFFIX}"));
 
     let file = download_retry(
         || async {
@@ -405,7 +414,11 @@ pub(crate) async fn download_initdb_tar_zst(
                 .write(true)
                 .open(&temp_path)
                 .await
-                .map_err(|e| DownloadError::Other(Error::new(e).context("tempfile creation")))?;
+                .map_err(|e| {
+                    DownloadError::Other(
+                        Error::new(e).context(format!("tempfile creation {temp_path}")),
+                    )
+                })?;
 
             let mut download = storage.download(&remote_path).await?;
 
