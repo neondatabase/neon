@@ -10,6 +10,7 @@
 //!
 use anyhow::Context;
 use pageserver_api::models;
+use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -88,6 +89,14 @@ pub(crate) struct LocationConf {
     /// The location-specific part of the configuration, describes the operating
     /// mode of this pageserver for this tenant.
     pub(crate) mode: LocationMode,
+
+    /// The detailed shard identity.  This structure is already scoped within
+    /// a TenantShardId, but we need the full ShardIdentity to enable calculating
+    /// key->shard mappings.
+    #[serde(default = "ShardIdentity::unsharded")]
+    #[serde(skip_serializing_if = "ShardIdentity::is_unsharded")]
+    pub(crate) shard: ShardIdentity,
+
     /// The pan-cluster tenant configuration, the same on all locations
     pub(crate) tenant_conf: TenantConfOpt,
 }
@@ -160,6 +169,8 @@ impl LocationConf {
                 generation,
                 attach_mode: AttachmentMode::Single,
             }),
+            // Legacy configuration loads are always from tenants created before sharding existed.
+            shard: ShardIdentity::unsharded(),
             tenant_conf,
         }
     }
@@ -187,6 +198,7 @@ impl LocationConf {
 
         fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
             conf.generation
+                .map(Generation::new)
                 .ok_or_else(|| anyhow::anyhow!("Generation must be set when attaching"))
         }
 
@@ -226,7 +238,21 @@ impl LocationConf {
             }
         };
 
-        Ok(Self { mode, tenant_conf })
+        let shard = if conf.shard_count == 0 {
+            ShardIdentity::unsharded()
+        } else {
+            ShardIdentity::new(
+                ShardNumber(conf.shard_number),
+                ShardCount(conf.shard_count),
+                ShardStripeSize(conf.shard_stripe_size),
+            )?
+        };
+
+        Ok(Self {
+            shard,
+            mode,
+            tenant_conf,
+        })
     }
 }
 
@@ -241,6 +267,7 @@ impl Default for LocationConf {
                 attach_mode: AttachmentMode::Single,
             }),
             tenant_conf: TenantConfOpt::default(),
+            shard: ShardIdentity::unsharded(),
         }
     }
 }

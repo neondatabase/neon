@@ -763,9 +763,7 @@ def test_compaction_waits_for_upload(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    Compaction waits for outstanding uploads to complete, so that it avoids deleting layers
-    files that have not yet been uploaded.  This test forces a race between upload and
-    compaction.
+    This test forces a race between upload and compaction.
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
@@ -784,6 +782,16 @@ def test_compaction_waits_for_upload(
     timeline_id = env.initial_timeline
 
     client = env.pageserver.http_client()
+    layers_at_creation = client.layer_map_info(tenant_id, timeline_id)
+    deltas_at_creation = len(layers_at_creation.delta_layers())
+    assert (
+        deltas_at_creation == 1
+    ), "are you fixing #5863? make sure we end up with 2 deltas at the end of endpoint lifecycle"
+
+    # Make new layer uploads get stuck.
+    # Note that timeline creation waits for the initial layers to reach remote storage.
+    # So at this point, the `layers_at_creation` are in remote storage.
+    client.configure_failpoints(("before-upload-layer-pausable", "pause"))
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         # Build two tables with some data inside
@@ -791,85 +799,71 @@ def test_compaction_waits_for_upload(
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
         client.timeline_checkpoint(tenant_id, timeline_id)
+        deltas_at_first = len(client.layer_map_info(tenant_id, timeline_id).delta_layers())
+        assert (
+            deltas_at_first == 2
+        ), "are you fixing #5863? just add one more checkpoint after 'CREATE TABLE bar ...' statement."
 
         endpoint.safe_psql("CREATE TABLE bar AS SELECT x FROM generate_series(1, 10000) g(x)")
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-
-        # Now make the flushing hang and update one small piece of data
-        client.configure_failpoints(("before-upload-layer-pausable", "pause"))
-
         endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
-
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    checkpoint_result: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
-    compact_result: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
-    compact_barrier = threading.Barrier(2)
+    layers_before_last_checkpoint = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
+    upload_stuck_layers = layers_before_last_checkpoint - layers_at_creation.historic_by_name()
 
-    def checkpoint_in_background():
-        try:
-            log.info("Checkpoint starting")
-            client.timeline_checkpoint(tenant_id, timeline_id)
-            log.info("Checkpoint complete")
-            checkpoint_result.put(None)
-        except PageserverApiException as e:
-            log.info("Checkpoint errored: {e}")
-            checkpoint_result.put(e)
+    assert len(upload_stuck_layers) > 0
 
-    def compact_in_background():
-        compact_barrier.wait()
-        try:
-            log.info("Compaction starting")
-            client.timeline_compact(tenant_id, timeline_id)
-            log.info("Compaction complete")
-            compact_result.put(None)
-        except PageserverApiException as e:
-            log.info("Compaction errored: {e}")
-            compact_result.put(e)
+    for name in upload_stuck_layers:
+        path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
+        assert path.exists(), "while uploads are stuck the layers should be present on disk"
 
-    checkpoint_thread = threading.Thread(target=checkpoint_in_background)
-    checkpoint_thread.start()
+    # now this will do the L0 => L1 compaction and want to remove
+    # upload_stuck_layers and the original initdb L0
+    client.timeline_checkpoint(tenant_id, timeline_id)
 
-    compact_thread = threading.Thread(target=compact_in_background)
-    compact_thread.start()
+    # as uploads are paused, the the upload_stuck_layers should still be with us
+    for name in upload_stuck_layers:
+        path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
+        assert path.exists(), "uploads are stuck still over compaction"
 
-    try:
-        # Start the checkpoint, see that it blocks
-        log.info("Waiting to see checkpoint hang...")
-        time.sleep(5)
-        assert checkpoint_result.empty()
+    compacted_layers = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
+    overlap = compacted_layers.intersection(upload_stuck_layers)
+    assert len(overlap) == 0, "none of the L0's should remain after L0 => L1 compaction"
+    assert (
+        len(compacted_layers) == 1
+    ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
 
-        # Start the compaction, see that it finds work to do but blocks
-        compact_barrier.wait()
-        log.info("Waiting to see compaction hang...")
-        time.sleep(5)
-        assert compact_result.empty()
+    def layer_deletes_completed():
+        m = client.get_metric_value("pageserver_layer_gcs_count_total", {"state": "completed"})
+        if m is None:
+            return 0
+        return int(m)
 
-        # This is logged once compaction is started, but before we wait for operations to complete
-        assert env.pageserver.log_contains("compact_level0_phase1 stats available.")
+    # if initdb created an initial delta layer, it might already be gc'd
+    # because it was uploaded before the failpoint was enabled. however, the
+    # deletion is not guaranteed to be complete.
+    assert layer_deletes_completed() <= 1
 
-        # Once we unblock uploads the compaction should complete successfully
-        log.info("Disabling failpoint")
-        client.configure_failpoints(("before-upload-layer-pausable", "off"))
-        log.info("Awaiting compaction result")
-        assert compact_result.get(timeout=10) is None
-        log.info("Awaiting checkpoint result")
-        assert checkpoint_result.get(timeout=10) is None
-
-    except Exception:
-        # Log the actual failure's backtrace here, before we proceed to join threads
-        log.exception("Failure, cleaning up...")
-        raise
-    finally:
-        compact_barrier.abort()
-
-        checkpoint_thread.join()
-        compact_thread.join()
+    client.configure_failpoints(("before-upload-layer-pausable", "off"))
 
     # Ensure that this actually terminates
     wait_upload_queue_empty(client, tenant_id, timeline_id)
 
-    # We should not have hit the error handling path in uploads where the remote file is gone
+    def until_layer_deletes_completed():
+        deletes = layer_deletes_completed()
+        log.info(f"layer_deletes: {deletes}")
+        # ensure that initdb delta layer AND the previously stuck are now deleted
+        assert deletes >= len(upload_stuck_layers) + 1
+
+    wait_until(10, 1, until_layer_deletes_completed)
+
+    for name in upload_stuck_layers:
+        path = env.pageserver.timeline_dir(tenant_id, timeline_id) / name
+        assert (
+            not path.exists()
+        ), "l0 should now be removed because of L0 => L1 compaction and completed uploads"
+
+    # We should not have hit the error handling path in uploads where a uploaded file is gone
     assert not env.pageserver.log_contains(
         "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
     )
