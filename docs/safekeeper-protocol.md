@@ -65,7 +65,7 @@ S3(1): R1(a),R2(b),R3(c),R4(d)  - offline
 ```
 
 Proposer choose quorum (S1,S2). VCL for them is 2. We download S2 to proposer and schedule its write to S1.
-After receiving record R5 the picture can be:
+After receiving record R3 the picture can be:
 
 ```
 S1(2): R1(a),R2(b),R3(e)
@@ -108,7 +108,7 @@ S2(1): R1(a),R2(b)
 S3(1): R1(a),R2(b),R3(c),R4(d)  - offline
 ```
 
-and then crash happens. During voting we choose quorum (S3,S3).
+and then crash happens. During voting we choose quorum (S1,S3) or (S2,S3).
 Now them belong to the same epoch and S3 is most advanced among them.
 So VCL is set to 4 and we recover S1 and S2 from S3:
 
