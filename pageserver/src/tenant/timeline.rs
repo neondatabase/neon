@@ -62,6 +62,7 @@ use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
 use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
 use pageserver_api::reltag::RelTag;
+use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
@@ -1597,6 +1598,7 @@ impl Timeline {
 
         // Copy to move into the task we're about to spawn
         let generation = self.generation;
+        let shard = self.get_shard_index();
         let this = self.myself.upgrade().expect("&self method holds the arc");
 
         let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
@@ -1645,6 +1647,7 @@ impl Timeline {
                     index_part.as_ref(),
                     disk_consistent_lsn,
                     generation,
+                    shard,
                 );
 
                 let mut loaded_layers = Vec::new();
@@ -4363,6 +4366,11 @@ impl Timeline {
             max_layer_size,
             resident_layers,
         }
+    }
+
+    pub(crate) fn get_shard_index(&self) -> ShardIndex {
+        // TODO: carry this on the struct
+        ShardIndex::unsharded()
     }
 }
 

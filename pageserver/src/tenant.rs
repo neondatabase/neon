@@ -3489,6 +3489,7 @@ pub async fn dump_layerfile_from_path(
 pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::OnceCell;
+    use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;
     use utils::logging;
@@ -3555,6 +3556,7 @@ pub(crate) mod harness {
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
         pub generation: Generation,
+        pub shard: ShardIndex,
         pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: Utf8PathBuf,
         pub deletion_queue: MockDeletionQueue,
@@ -3614,6 +3616,7 @@ pub(crate) mod harness {
                 tenant_conf,
                 tenant_id,
                 generation: Generation::new(0xdeadbeef),
+                shard: ShardIndex::unsharded(),
                 remote_storage,
                 remote_fs_dir,
                 deletion_queue,
