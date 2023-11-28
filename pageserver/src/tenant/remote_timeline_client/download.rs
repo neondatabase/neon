@@ -7,11 +7,11 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::{anyhow, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::ShardIndex;
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use utils::{backoff, crashsafe};
@@ -397,11 +397,8 @@ pub(crate) async fn download_initdb_tar_zst(
     if !timeline_path.exists() {
         tokio::fs::create_dir_all(&timeline_path)
             .await
-            .map_err(|e| {
-                DownloadError::Other(
-                    Error::new(e).context(format!("timeline dir creation {timeline_path}")),
-                )
-            })?;
+            .with_context(|| format!("timeline dir creation {timeline_path}"))
+            .map_err(DownloadError::Other)?;
     }
     let temp_path = timeline_path.join(format!("{INITDB_PATH}-{timeline_id}.{TEMP_FILE_SUFFIX}"));
 
@@ -414,11 +411,8 @@ pub(crate) async fn download_initdb_tar_zst(
                 .write(true)
                 .open(&temp_path)
                 .await
-                .map_err(|e| {
-                    DownloadError::Other(
-                        Error::new(e).context(format!("tempfile creation {temp_path}")),
-                    )
-                })?;
+                .with_context(|| format!("tempfile creation {temp_path}"))
+                .map_err(DownloadError::Other)?;
 
             let mut download = storage.download(&remote_path).await?;
 
@@ -426,6 +420,12 @@ pub(crate) async fn download_initdb_tar_zst(
                 .await
                 .with_context(|| format!("download initdb.tar.zst at {remote_path:?}"))
                 .map_err(DownloadError::Other)?;
+
+            file.seek(std::io::SeekFrom::Start(0))
+                .await
+                .with_context(|| format!("rewinding initdb.tar.zst at: {remote_path:?}"))
+                .map_err(DownloadError::Other)?;
+
             Ok(file)
         },
         &format!("download {remote_path}"),
