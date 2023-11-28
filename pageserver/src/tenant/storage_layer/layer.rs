@@ -81,12 +81,7 @@ impl Layer {
         file_name: LayerFileName,
         metadata: LayerFileMetadata,
     ) -> Self {
-        let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_shard_id,
-            timeline.timeline_id,
-            file_name,
-            metadata.file_size(),
-        );
+        let desc = PersistentLayerDesc::from_filename(file_name, metadata.file_size());
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
 
@@ -112,12 +107,7 @@ impl Layer {
         file_name: LayerFileName,
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
-        let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_shard_id,
-            timeline.timeline_id,
-            file_name,
-            metadata.file_size(),
-        );
+        let desc = PersistentLayerDesc::from_filename(file_name, metadata.file_size());
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
 
@@ -490,7 +480,10 @@ impl Drop for LayerInner {
             return;
         }
 
-        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
+        // If timeline is alive, we can construct a span with IDs for this function.
+        let span = self.timeline.upgrade().map(|timeline| {
+            tracing::info_span!(parent: None, "layer_gc", tenant_id = %timeline.tenant_shard_id.tenant_id, shard_id=%timeline.tenant_shard_id.shard_slug(), timeline_id = %timeline.timeline_id)
+        });
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
@@ -500,7 +493,7 @@ impl Drop for LayerInner {
         let status = self.status.clone();
 
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
-            let _g = span.entered();
+            let _g = span.map(|s| s.entered());
 
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
@@ -836,8 +829,8 @@ impl LayerInner {
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id.tenant_id),
-            Some(self.desc.timeline_id),
+            Some(timeline.tenant_shard_id.tenant_id),
+            Some(timeline.timeline_id),
             &task_name,
             false,
             async move {
@@ -1001,7 +994,10 @@ impl LayerInner {
         if gc {
             // do nothing now, only in LayerInner::drop
         } else if can_evict && evict {
-            let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
+            // If timeline is alive, we can construct a span with IDs for this function.
+            let span = self.timeline.upgrade().map(|timeline| {
+                tracing::info_span!(parent: None, "layer_evict", tenant_id = %timeline.tenant_shard_id.tenant_id, shard_id=%timeline.tenant_shard_id.shard_slug(), timeline_id = %timeline.timeline_id)
+            });
 
             // downgrade for queueing, in case there's a tear down already ongoing we should not
             // hold it alive.
@@ -1012,7 +1008,7 @@ impl LayerInner {
             // drop while the `self.inner` is being locked, leading to a deadlock.
 
             crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
-                let _g = span.entered();
+                let _g = span.map(|s| s.entered());
 
                 // if LayerInner is already dropped here, do nothing because the garbage collection
                 // has already ran while we were in queue
@@ -1224,6 +1220,11 @@ impl DownloadedLayer {
         owner: &Arc<LayerInner>,
         ctx: &RequestContext,
     ) -> anyhow::Result<&'a LayerKind> {
+        let timeline = owner
+            .timeline
+            .upgrade()
+            .ok_or(DownloadError::TimelineShutdown)?;
+
         let init = || async {
             assert_eq!(
                 Weak::as_ptr(&self.owner),
@@ -1233,8 +1234,8 @@ impl DownloadedLayer {
 
             let res = if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
-                    owner.desc.tenant_shard_id.tenant_id,
-                    owner.desc.timeline_id,
+                    timeline.tenant_shard_id.tenant_id,
+                    timeline.timeline_id,
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
                 ));
@@ -1244,8 +1245,8 @@ impl DownloadedLayer {
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
-                    owner.desc.tenant_shard_id.tenant_id,
-                    owner.desc.timeline_id,
+                    timeline.tenant_shard_id.tenant_id,
+                    timeline.timeline_id,
                     owner.desc.key_range.clone(),
                     lsn,
                 ));

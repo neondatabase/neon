@@ -85,17 +85,6 @@ pub struct Summary {
     // the 'values' part starts after the summary header, on block 1.
 }
 
-impl From<&ImageLayer> for Summary {
-    fn from(layer: &ImageLayer) -> Self {
-        Self::expected(
-            layer.desc.tenant_shard_id.tenant_id,
-            layer.desc.timeline_id,
-            layer.desc.key_range.clone(),
-            layer.lsn,
-        )
-    }
-}
-
 impl Summary {
     pub(super) fn expected(
         tenant_id: TenantId,
@@ -278,19 +267,9 @@ impl ImageLayer {
             .metadata()
             .context("get file metadata to determine size")?;
 
-        // TODO(sharding): we should get TenantShardId from path.
-        // OR, not at all: any layer we load from disk should also get reconciled with remote IndexPart.
-        let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
-
         Ok(ImageLayer {
             path: path.to_path_buf(),
-            desc: PersistentLayerDesc::new_img(
-                tenant_shard_id,
-                summary.timeline_id,
-                summary.key_range,
-                summary.lsn,
-                metadata.len(),
-            ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
+            desc: PersistentLayerDesc::new_img(summary.key_range, summary.lsn, metadata.len()), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: OnceCell::new(),
@@ -581,13 +560,7 @@ impl ImageLayerWriterInner {
             .await
             .context("get metadata to determine file size")?;
 
-        let desc = PersistentLayerDesc::new_img(
-            self.tenant_shard_id,
-            self.timeline_id,
-            self.key_range.clone(),
-            self.lsn,
-            metadata.len(),
-        );
+        let desc = PersistentLayerDesc::new_img(self.key_range.clone(), self.lsn, metadata.len());
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't

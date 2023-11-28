@@ -84,17 +84,6 @@ pub struct Summary {
     pub index_root_blk: u32,
 }
 
-impl From<&DeltaLayer> for Summary {
-    fn from(layer: &DeltaLayer) -> Self {
-        Self::expected(
-            layer.desc.tenant_shard_id.tenant_id,
-            layer.desc.timeline_id,
-            layer.desc.key_range.clone(),
-            layer.desc.lsn_range.clone(),
-        )
-    }
-}
-
 impl Summary {
     pub(super) fn expected(
         tenant_id: TenantId,
@@ -320,15 +309,9 @@ impl DeltaLayer {
             .metadata()
             .context("get file metadata to determine size")?;
 
-        // TODO(sharding): we must get the TenantShardId from the path instead of reading the Summary.
-        // we should also validate the path against the Summary, as both should contain the same tenant, timeline, key, lsn.
-        let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
-
         Ok(DeltaLayer {
             path: path.to_path_buf(),
             desc: PersistentLayerDesc::new_delta(
-                tenant_shard_id,
-                summary.timeline_id,
                 summary.key_range,
                 summary.lsn_range,
                 metadata.len(),
@@ -505,8 +488,6 @@ impl DeltaLayerWriterInner {
         // set inner.file here. The first read will have to re-open it.
 
         let desc = PersistentLayerDesc::new_delta(
-            self.tenant_shard_id,
-            self.timeline_id,
             self.key_start..key_end,
             self.lsn_range.clone(),
             metadata.len(),
