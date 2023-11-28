@@ -15,7 +15,6 @@ use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use hex::FromHex;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -164,7 +163,6 @@ pub struct DeletionQueueClient {
 struct TenantDeletionList {
     /// For each Timeline, a list of key fragments to append to the timeline remote path
     /// when reconstructing a full key
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
     timelines: HashMap<TimelineId, Vec<String>>,
 
     /// The generation in which this deletion was emitted: note that this may not be the
@@ -177,38 +175,6 @@ impl TenantDeletionList {
     pub(crate) fn len(&self) -> usize {
         self.timelines.values().map(|v| v.len()).sum()
     }
-}
-
-/// For HashMaps using a `hex` compatible key, where we would like to encode the key as a string
-fn to_hex_map<S, V, I>(input: &HashMap<I, V>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    V: Serialize,
-    I: AsRef<[u8]>,
-{
-    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v));
-
-    transformed
-        .collect::<HashMap<String, &V>>()
-        .serialize(serializer)
-}
-
-/// For HashMaps using a FromHex key, where we would like to decode the key
-fn from_hex_map<'de, D, V, I>(deserializer: D) -> Result<HashMap<I, V>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-    V: Deserialize<'de>,
-    I: FromHex + std::hash::Hash + Eq,
-{
-    let hex_map = HashMap::<String, V>::deserialize(deserializer)?;
-    hex_map
-        .into_iter()
-        .map(|(k, v)| {
-            I::from_hex(k)
-                .map(|k| (k, v))
-                .map_err(|_| serde::de::Error::custom("Invalid hex ID"))
-        })
-        .collect()
 }
 
 /// Files ending with this suffix will be ignored and erased
@@ -227,7 +193,6 @@ struct DeletionList {
     /// nested HashMaps by TenantTimelineID.  Each Tenant only appears once
     /// with one unique generation ID: if someone tries to push a second generation
     /// ID for the same tenant, we will start a new DeletionList.
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
     tenants: HashMap<TenantId, TenantDeletionList>,
 
     /// Avoid having to walk `tenants` to calculate the number of keys in
