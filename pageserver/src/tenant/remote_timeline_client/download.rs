@@ -8,12 +8,12 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Error};
-use camino::Utf8Path;
-use camino_tempfile::tempfile;
+use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::ShardIndex;
-use tokio::fs::{self, File};
+use tokio::fs::{self, File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
@@ -21,6 +21,7 @@ use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
+use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
@@ -28,7 +29,7 @@ use utils::id::{TenantId, TimelineId};
 use super::index::{IndexPart, LayerFileMetadata};
 use super::{
     parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
 
 static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
@@ -382,20 +383,29 @@ pub(super) async fn download_index_part(
 }
 
 pub(crate) async fn download_initdb_tar_zst(
+    conf: &'static PageServerConf,
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-) -> Result<File, DownloadError> {
+) -> Result<(Utf8PathBuf, File), DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
 
-    download_retry(
+    let temp_path = conf
+        .timeline_path(tenant_id, timeline_id)
+        .join(format!("{INITDB_PATH}.{TEMP_FILE_SUFFIX}"));
+
+    let file = download_retry(
         || async {
-            let mut file =
-                File::from_std(tempfile().map_err(|e| {
-                    DownloadError::Other(Error::new(e).context("tempfile creation"))
-                })?);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(&temp_path)
+                .await
+                .map_err(|e| DownloadError::Other(Error::new(e).context("tempfile creation")))?;
 
             let mut download = storage.download(&remote_path).await?;
 
@@ -408,6 +418,18 @@ pub(crate) async fn download_initdb_tar_zst(
         &format!("download {remote_path}"),
     )
     .await
+    .map_err(|e| {
+        if temp_path.exists() {
+            // Do a best-effort attempt at deleting the temporary file upon encountering an error.
+            // We don't have async here nor do we want to pile on any extra errors.
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                warn!("error deleting temporary file {temp_path}: {e}");
+            }
+        }
+        e
+    })?;
+
+    Ok((temp_path, file))
 }
 
 /// Helper function to handle retries for a download operation.

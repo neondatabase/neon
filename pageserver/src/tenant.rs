@@ -2937,17 +2937,25 @@ impl Tenant {
             let Some(storage) = &self.remote_storage else {
                 bail!("no storage configured but load_existing_initdb set to {existing_initdb_timeline_id}");
             };
-            let initdb_tar_zst = self::remote_timeline_client::download_initdb_tar_zst(
-                storage,
-                &self.tenant_id,
-                &existing_initdb_timeline_id,
-            )
-            .await
-            .context("download initdb tar")?;
-            let buf_read = BufReader::new(initdb_tar_zst);
-            import_datadir::extract_tar_zst(&pgdata_path, Box::pin(buf_read))
+            let (initdb_tar_zst_path, initdb_tar_zst) =
+                self::remote_timeline_client::download_initdb_tar_zst(
+                    self.conf,
+                    storage,
+                    &self.tenant_id,
+                    &existing_initdb_timeline_id,
+                )
+                .await
+                .context("download initdb tar")?;
+            let buf_read = Box::pin(BufReader::new(initdb_tar_zst));
+            import_datadir::extract_tar_zst(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
+
+            if initdb_tar_zst_path.exists() {
+                tokio::fs::remove_file(&initdb_tar_zst_path)
+                    .await
+                    .context("tempfile removal")?;
+            }
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
             run_initdb(self.conf, &pgdata_path, pg_version)?;
