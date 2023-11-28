@@ -1822,6 +1822,29 @@ impl Timeline {
                 // delay will be terminated by a timeout regardless.
                 let _completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
 
+                // In prod, initial logical size calucalation is spawned either by
+                // WalReceiverConnectionHandler if the timeline is active according to storage broker,
+                // or by the first consumption metrics worker (MetricsCollection).
+                // The latter runs every `metric_collection_interval` and checkpoints to disk, i.e.,
+                // if pageserver gets restarted, the consumption metrics worker will resume waiting
+                // for the correct remaining time, as if the pageserver had not been restarted.
+                //
+                // FIXME: with the current code, walreceiver requests would also hit this semaphore
+                // and get queued behind other background operations. That's bad because walreceiver_connection
+                // will push the not-precise value as `current_timeline_size` in the `PageserverFeedback`
+                // while this calculation is stuck.
+                // We need some way to priority-boost the initial size calculation if walreceiver is asking.
+                // Or, should we maybe revisit the use of logical size in `PageserverFeedback`?
+                // It seems broken the way it is.
+                //
+                // Example query to show different causes of initial size calculation spawning:
+                //
+                // https://neonprod.grafana.net/explore?panes=%7B%22wSx%22:%7B%22datasource%22:%22grafanacloud-logs%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22expr%22:%22sum%20by%20%28task_kind%29%20%28count_over_time%28%7Bneon_service%3D%5C%22pageserver%5C%22,%20neon_region%3D%5C%22us-west-2%5C%22%7D%20%7C%3D%20%60logical%20size%20computation%20from%20context%20of%20task%20kind%60%20%7C%20regexp%20%60logical%20size%20computation%20from%20context%20of%20task%20kind%20%28%3FP%3Ctask_kind%3E.%2A%29%60%20%5B1m%5D%29%29%22,%22queryType%22:%22range%22,%22datasource%22:%7B%22type%22:%22loki%22,%22uid%22:%22grafanacloud-logs%22%7D,%22editorMode%22:%22code%22,%22step%22:%221m%22%7D%5D,%22range%22:%7B%22from%22:%221700637500615%22,%22to%22:%221700639648743%22%7D%7D%7D&schemaVersion=1&orgId=1
+                let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(BackgroundLoopKind::InitialLogicalSizeCalculation,&background_ctx, &cancel).await {
+                    Ok(permit) => permit,
+                    Err(RateLimitError::Cancelled) => return Ok(()),
+                };
+
                 let calculated_size = match self_clone
                     .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx)
                     .await
