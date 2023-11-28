@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::RemoteExtSpec;
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -476,6 +477,18 @@ impl Endpoint {
             }
         }
 
+        // check for file remote_extensions_spec.json
+        // if it is present, read it and pass to compute_ctl
+        let remote_extensions_spec_path = self.endpoint_path().join("remote_extensions_spec.json");
+        let remote_extensions_spec = std::fs::File::open(remote_extensions_spec_path);
+        let remote_extensions: Option<RemoteExtSpec>;
+
+        if let Ok(spec_file) = remote_extensions_spec {
+            remote_extensions = serde_json::from_reader(spec_file).ok();
+        } else {
+            remote_extensions = None;
+        };
+
         // Create spec file
         let spec = ComputeSpec {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
@@ -497,7 +510,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            remote_extensions: None,
+            remote_extensions,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

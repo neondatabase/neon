@@ -188,6 +188,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
+use pageserver_api::shard::ShardIndex;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 pub(crate) use upload::upload_initdb_dir;
@@ -402,6 +403,11 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    pub(crate) fn get_shard_index(&self) -> ShardIndex {
+        // TODO: carry this on the struct
+        ShardIndex::unsharded()
+    }
+
     pub fn remote_consistent_lsn_projected(&self) -> Option<Lsn> {
         match &mut *self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
@@ -465,6 +471,7 @@ impl RemoteTimelineClient {
             &self.storage_impl,
             &self.tenant_id,
             &self.timeline_id,
+            self.get_shard_index(),
             self.generation,
             cancel,
         )
@@ -657,10 +664,10 @@ impl RemoteTimelineClient {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
-        let with_generations =
+        let with_metadata =
             self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names.iter().cloned());
 
-        self.schedule_deletion_of_unlinked0(upload_queue, with_generations);
+        self.schedule_deletion_of_unlinked0(upload_queue, with_metadata);
 
         // Launch the tasks immediately, if possible
         self.launch_queued_tasks(upload_queue);
@@ -695,7 +702,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> Vec<(LayerFileName, Generation)>
+    ) -> Vec<(LayerFileName, LayerFileMetadata)>
     where
         I: IntoIterator<Item = LayerFileName>,
     {
@@ -703,16 +710,17 @@ impl RemoteTimelineClient {
         // so we don't need update it. Just serialize it.
         let metadata = upload_queue.latest_metadata.clone();
 
-        // Decorate our list of names with each name's generation, dropping
-        // names that are unexpectedly missing from our metadata.
-        let with_generations: Vec<_> = names
+        // Decorate our list of names with each name's metadata, dropping
+        // names that are unexpectedly missing from our metadata.  This metadata
+        // is later used when physically deleting layers, to construct key paths.
+        let with_metadata: Vec<_> = names
             .into_iter()
             .filter_map(|name| {
                 let meta = upload_queue.latest_files.remove(&name);
 
                 if let Some(meta) = meta {
                     upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                    Some((name, meta.generation))
+                    Some((name, meta))
                 } else {
                     // This can only happen if we forgot to to schedule the file upload
                     // before scheduling the delete. Log it because it is a rare/strange
@@ -725,9 +733,10 @@ impl RemoteTimelineClient {
             .collect();
 
         #[cfg(feature = "testing")]
-        for (name, gen) in &with_generations {
-            if let Some(unexpected) = upload_queue.dangling_files.insert(name.to_owned(), *gen) {
-                if &unexpected == gen {
+        for (name, metadata) in &with_metadata {
+            let gen = metadata.generation;
+            if let Some(unexpected) = upload_queue.dangling_files.insert(name.to_owned(), gen) {
+                if unexpected == gen {
                     tracing::error!("{name} was unlinked twice with same generation");
                 } else {
                     tracing::error!("{name} was unlinked twice with different generations {gen:?} and {unexpected:?}");
@@ -742,14 +751,14 @@ impl RemoteTimelineClient {
             self.schedule_index_upload(upload_queue, metadata);
         }
 
-        with_generations
+        with_metadata
     }
 
     /// Schedules deletion for layer files which have previously been unlinked from the
     /// `index_part.json` with [`Self::schedule_gc_update`] or [`Self::schedule_compaction_update`].
     pub(crate) fn schedule_deletion_of_unlinked(
         self: &Arc<Self>,
-        layers: Vec<(LayerFileName, Generation)>,
+        layers: Vec<(LayerFileName, LayerFileMetadata)>,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
@@ -762,16 +771,22 @@ impl RemoteTimelineClient {
     fn schedule_deletion_of_unlinked0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        with_generations: Vec<(LayerFileName, Generation)>,
+        with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
     ) {
-        for (name, gen) in &with_generations {
-            info!("scheduling deletion of layer {}{}", name, gen.get_suffix());
+        for (name, meta) in &with_metadata {
+            info!(
+                "scheduling deletion of layer {}{} (shard {})",
+                name,
+                meta.generation.get_suffix(),
+                meta.shard
+            );
         }
 
         #[cfg(feature = "testing")]
-        for (name, gen) in &with_generations {
+        for (name, meta) in &with_metadata {
+            let gen = meta.generation;
             match upload_queue.dangling_files.remove(name) {
-                Some(same) if &same == gen => { /* expected */ }
+                Some(same) if same == gen => { /* expected */ }
                 Some(other) => {
                     tracing::error!("{name} was unlinked with {other:?} but deleted with {gen:?}");
                 }
@@ -783,7 +798,7 @@ impl RemoteTimelineClient {
 
         // schedule the actual deletions
         let op = UploadOp::Delete(Delete {
-            layers: with_generations,
+            layers: with_metadata,
         });
         self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);
@@ -904,6 +919,7 @@ impl RemoteTimelineClient {
                     &self.storage_impl,
                     &self.tenant_id,
                     &self.timeline_id,
+                    self.get_shard_index(),
                     self.generation,
                     &index_part_with_deleted_at,
                 )
@@ -962,6 +978,7 @@ impl RemoteTimelineClient {
                     remote_layer_path(
                         &self.tenant_id,
                         &self.timeline_id,
+                        meta.shard,
                         &file_name,
                         meta.generation,
                     )
@@ -1010,7 +1027,12 @@ impl RemoteTimelineClient {
             .unwrap_or(
                 // No generation-suffixed indices, assume we are dealing with
                 // a legacy index.
-                remote_index_path(&self.tenant_id, &self.timeline_id, Generation::none()),
+                remote_index_path(
+                    &self.tenant_id,
+                    &self.timeline_id,
+                    self.get_shard_index(),
+                    Generation::none(),
+                ),
             );
 
         let remaining_layers: Vec<RemotePath> = remaining
@@ -1219,6 +1241,7 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         &self.tenant_id,
                         &self.timeline_id,
+                        self.get_shard_index(),
                         self.generation,
                         index_part,
                     )
@@ -1527,12 +1550,14 @@ pub fn remote_timeline_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> R
 pub fn remote_layer_path(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    shard: ShardIndex,
     layer_file_name: &LayerFileName,
     generation: Generation,
 ) -> RemotePath {
     // Generation-aware key format
     let path = format!(
-        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        "tenants/{tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{1}{2}",
+        shard.get_suffix(),
         layer_file_name.file_name(),
         generation.get_suffix()
     );
@@ -1550,10 +1575,12 @@ pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId
 pub fn remote_index_path(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    shard: ShardIndex,
     generation: Generation,
 ) -> RemotePath {
     RemotePath::from_string(&format!(
-        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
+        "tenants/{tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{1}{2}",
+        shard.get_suffix(),
         IndexPart::FILE_NAME,
         generation.get_suffix()
     ))
@@ -1778,6 +1805,7 @@ mod tests {
         println!("remote_timeline_dir: {remote_timeline_dir}");
 
         let generation = harness.generation;
+        let shard = harness.shard;
 
         // Create a couple of dummy files,  schedule upload for them
 
@@ -1794,7 +1822,7 @@ mod tests {
                 harness.conf,
                 &timeline,
                 name,
-                LayerFileMetadata::new(contents.len() as u64, generation),
+                LayerFileMetadata::new(contents.len() as u64, generation, shard),
             )
         }).collect::<Vec<_>>();
 
@@ -1943,7 +1971,7 @@ mod tests {
             harness.conf,
             &timeline,
             layer_file_name_1.clone(),
-            LayerFileMetadata::new(content_1.len() as u64, harness.generation),
+            LayerFileMetadata::new(content_1.len() as u64, harness.generation, harness.shard),
         );
 
         #[derive(Debug, PartialEq, Clone, Copy)]
@@ -2008,7 +2036,11 @@ mod tests {
         assert_eq!(actual_c, expected_c);
     }
 
-    async fn inject_index_part(test_state: &TestSetup, generation: Generation) -> IndexPart {
+    async fn inject_index_part(
+        test_state: &TestSetup,
+        generation: Generation,
+        shard: ShardIndex,
+    ) -> IndexPart {
         // An empty IndexPart, just sufficient to ensure deserialization will succeed
         let example_metadata = TimelineMetadata::example();
         let example_index_part = IndexPart::new(
@@ -2029,7 +2061,13 @@ mod tests {
         std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
 
         let index_path = test_state.harness.remote_fs_dir.join(
-            remote_index_path(&test_state.harness.tenant_id, &TIMELINE_ID, generation).get_path(),
+            remote_index_path(
+                &test_state.harness.tenant_id,
+                &TIMELINE_ID,
+                shard,
+                generation,
+            )
+            .get_path(),
         );
         eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();
@@ -2066,7 +2104,12 @@ mod tests {
 
         // Simple case: we are in generation N, load the index from generation N - 1
         let generation_n = 5;
-        let injected = inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
+        let injected = inject_index_part(
+            &test_state,
+            Generation::new(generation_n - 1),
+            ShardIndex::unsharded(),
+        )
+        .await;
 
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected).await;
 
@@ -2084,22 +2127,34 @@ mod tests {
 
         // A generation-less IndexPart exists in the bucket, we should find it
         let generation_n = 5;
-        let injected_none = inject_index_part(&test_state, Generation::none()).await;
+        let injected_none =
+            inject_index_part(&test_state, Generation::none(), ShardIndex::unsharded()).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_none).await;
 
         // If a more recent-than-none generation exists, we should prefer to load that
-        let injected_1 = inject_index_part(&test_state, Generation::new(1)).await;
+        let injected_1 =
+            inject_index_part(&test_state, Generation::new(1), ShardIndex::unsharded()).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
         // If a more-recent-than-me generation exists, we should ignore it.
-        let _injected_10 = inject_index_part(&test_state, Generation::new(10)).await;
+        let _injected_10 =
+            inject_index_part(&test_state, Generation::new(10), ShardIndex::unsharded()).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
         // If a directly previous generation exists, _and_ an index exists in my own
         // generation, I should prefer my own generation.
-        let _injected_prev =
-            inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
-        let injected_current = inject_index_part(&test_state, Generation::new(generation_n)).await;
+        let _injected_prev = inject_index_part(
+            &test_state,
+            Generation::new(generation_n - 1),
+            ShardIndex::unsharded(),
+        )
+        .await;
+        let injected_current = inject_index_part(
+            &test_state,
+            Generation::new(generation_n),
+            ShardIndex::unsharded(),
+        )
+        .await;
         assert_got_index_part(
             &test_state,
             Generation::new(generation_n),

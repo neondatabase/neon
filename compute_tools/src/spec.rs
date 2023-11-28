@@ -687,6 +687,9 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     info!("create neon extension with query: {}", query);
     client.simple_query(query)?;
 
+    query = "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'";
+    client.simple_query(query)?;
+
     query = "ALTER EXTENSION neon SET SCHEMA neon";
     info!("alter neon extension schema with query: {}", query);
     client.simple_query(query)?;

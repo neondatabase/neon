@@ -1,6 +1,5 @@
 use super::storage_layer::LayerFileName;
 use super::storage_layer::ResidentLayer;
-use super::Generation;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -14,6 +13,9 @@ use utils::lsn::AtomicLsn;
 
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
+
+#[cfg(feature = "testing")]
+use utils::generation::Generation;
 
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
 // memory for Uninitialized variants. Doesn't matter in practice, there are not
@@ -232,7 +234,7 @@ pub(crate) struct UploadTask {
 /// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) layers: Vec<(LayerFileName, Generation)>,
+    pub(crate) layers: Vec<(LayerFileName, LayerFileMetadata)>,
 }
 
 #[derive(Debug)]
