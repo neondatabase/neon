@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use tracing::Instrument;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
+use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
 
 use crate::config::PageServerConf;
@@ -486,6 +487,14 @@ impl Drop for LayerInner {
         let timeline = match self.timeline.upgrade() {
             Some(t) => t,
             None => return,
+        };
+
+        // We will only do I/O during drop if our Timeline's layer_gate is open: this avoids
+        // the risk that we would race with Timeline::shutdown and end up doing I/O to a timeline
+        // path for which the Timeline object has been torn down already.
+        let _gate_guard = match timeline.layer_gate.enter() {
+            Ok(g) => g,
+            Err(GateError::GateClosed) => return,
         };
 
         // If timeline is alive, we can construct a span with IDs for this function.

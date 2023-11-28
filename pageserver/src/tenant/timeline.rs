@@ -313,6 +313,10 @@ pub struct Timeline {
     /// Gate to prevent shutdown completing while I/O is still happening to this timeline's data
     pub(crate) gate: Gate,
 
+    /// Gate to prevent shutdown completing until all Layers for this Timeline have finished
+    /// doing any background I/O such as deleting files on drop.
+    pub(crate) layer_gate: Gate,
+
     /// Cancellation token scoped to this timeline: anything doing long-running work relating
     /// to the timeline should drop out when this token fires.
     pub(crate) cancel: CancellationToken,
@@ -1002,8 +1006,15 @@ impl Timeline {
         )
         .await;
 
-        // Finally wait until any gate-holders are complete
+        // Wait until any normal gate-holders such as page_service requests are complete
         self.gate.close().await;
+
+        // Drop our references to layers: this should permit all layers to be dropped, and any I/O
+        // in their drop() method to complete.
+        self.layers.write().await.clear();
+
+        // Wait until any Layer gate holders such as LayerInner::drop are complete
+        self.layer_gate.close().await;
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -1445,6 +1456,7 @@ impl Timeline {
 
                 cancel,
                 gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
+                layer_gate: Gate::new(format!("TimelineLayers<{tenant_shard_id}/{timeline_id}>")),
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),

@@ -33,6 +33,11 @@ impl LayerManager {
         }
     }
 
+    pub(crate) fn clear(&mut self) {
+        std::mem::take(&mut self.layer_map);
+        self.layer_fmgr.clear();
+    }
+
     pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
@@ -269,6 +274,10 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
         }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
     }
 
     pub(crate) fn contains(&self, layer: &T) -> bool {
