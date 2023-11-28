@@ -1182,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn short_v14_redo() {
-        let expected = std::fs::read("fixtures/short_v14_redo.page").unwrap();
+        let expected = std::fs::read("test_data/short_v14_redo.page").unwrap();
 
         let h = RedoHarness::new().unwrap();
 

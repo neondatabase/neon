@@ -2926,7 +2926,7 @@ impl Tenant {
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn bootstrap_timeline(
+    pub(crate) async fn bootstrap_timeline(
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
