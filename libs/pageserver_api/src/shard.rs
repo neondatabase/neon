@@ -2,6 +2,7 @@ use std::{ops::RangeInclusive, str::FromStr};
 
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
+use thiserror;
 use utils::id::TenantId;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug)]
@@ -292,6 +293,80 @@ impl<'de> Deserialize<'de> for TenantShardId {
     }
 }
 
+/// Stripe size in number of pages
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardStripeSize(pub u32);
+
+/// Layout version: for future upgrades where we might change how the key->shard mapping works
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardLayout(u8);
+
+const LAYOUT_V1: ShardLayout = ShardLayout(1);
+
+/// Default stripe size in pages: 256MiB divided by 8kiB page size.
+const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+
+/// The ShardIdentity contains the information needed for one member of map
+/// to resolve a key to a shard, and then check whether that shard is ==self.
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardIdentity {
+    pub layout: ShardLayout,
+    pub number: ShardNumber,
+    pub count: ShardCount,
+    pub stripe_size: ShardStripeSize,
+}
+
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum ShardConfigError {
+    #[error("Invalid shard count")]
+    InvalidCount,
+    #[error("Invalid shard number")]
+    InvalidNumber,
+    #[error("Invalid stripe size")]
+    InvalidStripeSize,
+}
+
+impl ShardIdentity {
+    /// An identity with number=0 count=0 is a "none" identity, which represents legacy
+    /// tenants.  Modern single-shard tenants should not use this: they should
+    /// have number=0 count=1.
+    pub fn unsharded() -> Self {
+        Self {
+            number: ShardNumber(0),
+            count: ShardCount(0),
+            layout: LAYOUT_V1,
+            stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.number == ShardNumber(0) && self.count == ShardCount(0)
+    }
+
+    /// Count must be nonzero, and number must be < count. To construct
+    /// the legacy case (count==0), use Self::unsharded instead.
+    pub fn new(
+        number: ShardNumber,
+        count: ShardCount,
+        stripe_size: ShardStripeSize,
+    ) -> Result<Self, ShardConfigError> {
+        if count.0 == 0 {
+            Err(ShardConfigError::InvalidCount)
+        } else if number.0 > count.0 - 1 {
+            Err(ShardConfigError::InvalidNumber)
+        } else if stripe_size.0 == 0 {
+            Err(ShardConfigError::InvalidStripeSize)
+        } else {
+            Ok(Self {
+                number,
+                count,
+                layout: LAYOUT_V1,
+                stripe_size,
+            })
+        }
+    }
+}
+
 impl Serialize for ShardIndex {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -469,6 +544,37 @@ mod tests {
 
         let decoded = bincode::deserialize::<TenantShardId>(&encoded).unwrap();
         assert_eq!(example, decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn shard_identity_validation() -> Result<(), ShardConfigError> {
+        // Happy cases
+        ShardIdentity::new(ShardNumber(0), ShardCount(1), DEFAULT_STRIPE_SIZE)?;
+        ShardIdentity::new(ShardNumber(0), ShardCount(1), ShardStripeSize(1))?;
+        ShardIdentity::new(ShardNumber(254), ShardCount(255), ShardStripeSize(1))?;
+
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(0), ShardCount(0), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidCount)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(10), ShardCount(10), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(11), ShardCount(10), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(255), ShardCount(255), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(0), ShardCount(1), ShardStripeSize(0)),
+            Err(ShardConfigError::InvalidStripeSize)
+        );
 
         Ok(())
     }
