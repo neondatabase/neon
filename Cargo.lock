@@ -3010,6 +3010,7 @@ dependencies = [
  "serde_with",
  "strum",
  "strum_macros",
+ "thiserror",
  "utils",
  "workspace_hack",
 ]

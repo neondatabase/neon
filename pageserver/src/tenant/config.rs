@@ -245,7 +245,7 @@ impl LocationConf {
                 ShardNumber(conf.shard_number),
                 ShardCount(conf.shard_count),
                 ShardStripeSize(conf.shard_stripe_size),
-            )
+            )?
         };
 
         Ok(Self {

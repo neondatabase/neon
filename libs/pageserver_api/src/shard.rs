@@ -2,6 +2,7 @@ use std::{ops::RangeInclusive, str::FromStr};
 
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
+use thiserror;
 use utils::id::TenantId;
 
 #[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug)]
@@ -232,6 +233,16 @@ pub struct ShardIdentity {
     pub stripe_size: ShardStripeSize,
 }
 
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum ShardConfigError {
+    #[error("Invalid shard count")]
+    InvalidCount,
+    #[error("Invalid shard number")]
+    InvalidNumber,
+    #[error("Invalid stripe size")]
+    InvalidStripeSize,
+}
+
 impl ShardIdentity {
     /// An identity with number=0 count=0 is a "none" identity, which represents legacy
     /// tenants.  Modern single-shard tenants should not use this: they should
@@ -249,12 +260,26 @@ impl ShardIdentity {
         self.number == ShardNumber(0) && self.count == ShardCount(0)
     }
 
-    pub fn new(number: ShardNumber, count: ShardCount, stripe_size: ShardStripeSize) -> Self {
-        Self {
-            number,
-            count,
-            layout: LAYOUT_V1,
-            stripe_size,
+    /// Count must be nonzero, and number must be < count. To construct
+    /// the legacy case (count==0), use Self::unsharded instead.
+    pub fn new(
+        number: ShardNumber,
+        count: ShardCount,
+        stripe_size: ShardStripeSize,
+    ) -> Result<Self, ShardConfigError> {
+        if count.0 == 0 {
+            Err(ShardConfigError::InvalidCount)
+        } else if number.0 > count.0 - 1 {
+            Err(ShardConfigError::InvalidNumber)
+        } else if stripe_size.0 == 0 {
+            Err(ShardConfigError::InvalidStripeSize)
+        } else {
+            Ok(Self {
+                number,
+                count,
+                layout: LAYOUT_V1,
+                stripe_size,
+            })
         }
     }
 }
@@ -365,6 +390,37 @@ mod tests {
 
         let decoded = bincode::deserialize::<TenantShardId>(&encoded).unwrap();
         assert_eq!(example, decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn shard_identity_validation() -> Result<(), ShardConfigError> {
+        // Happy cases
+        ShardIdentity::new(ShardNumber(0), ShardCount(1), DEFAULT_STRIPE_SIZE)?;
+        ShardIdentity::new(ShardNumber(0), ShardCount(1), ShardStripeSize(1))?;
+        ShardIdentity::new(ShardNumber(254), ShardCount(255), ShardStripeSize(1))?;
+
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(0), ShardCount(0), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidCount)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(10), ShardCount(10), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(11), ShardCount(10), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(255), ShardCount(255), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(0), ShardCount(1), ShardStripeSize(0)),
+            Err(ShardConfigError::InvalidStripeSize)
+        );
 
         Ok(())
     }
