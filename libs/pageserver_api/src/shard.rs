@@ -300,6 +300,9 @@ impl Serialize for ShardIndex {
         if serializer.is_human_readable() {
             serializer.collect_str(self)
         } else {
+            // Binary encoding is not used in index_part.json, but is included in anticipation of
+            // switching various structures (e.g. inter-process communication, remote metadata) to more
+            // compact binary encodings in future.
             let mut packed: [u8; 2] = [0; 2];
             packed[0] = self.shard_number.0;
             packed[1] = self.shard_count.0;
