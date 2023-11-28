@@ -65,7 +65,7 @@ S3(1): R1(a),R2(b),R3(c),R4(d)  - offline
 ```
 
 Proposer choose quorum (S1,S2). VCL for them is 2. We download S2 to proposer and schedule its write to S1.
-After receiving record R3 the picture can be:
+After receiving record R3(e) the picture can be:
 
 ```
 S1(2): R1(a),R2(b),R3(e)
