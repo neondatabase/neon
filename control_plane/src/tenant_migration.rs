@@ -14,7 +14,6 @@ use pageserver_api::models::{
 use std::collections::HashMap;
 use std::time::Duration;
 use utils::{
-    generation::Generation,
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
@@ -95,7 +94,7 @@ pub fn migrate_tenant(
 
     fn build_location_config(
         mode: LocationConfigMode,
-        generation: Option<Generation>,
+        generation: Option<u32>,
         secondary_conf: Option<LocationConfigSecondary>,
     ) -> LocationConfig {
         LocationConfig {
@@ -117,11 +116,7 @@ pub fn migrate_tenant(
         if origin_ps_id == &dest_ps.conf.id {
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
             let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
-            let dest_conf = build_location_config(
-                LocationConfigMode::AttachedSingle,
-                gen.map(Generation::new),
-                None,
-            );
+            let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
             dest_ps.location_config(tenant_id, dest_conf)?;
             println!("✅ Migration complete");
             return Ok(());
@@ -129,22 +124,15 @@ pub fn migrate_tenant(
 
         println!("🔁 Switching origin pageserver {origin_ps_id} to stale mode");
 
-        let stale_conf = build_location_config(
-            LocationConfigMode::AttachedStale,
-            Some(Generation::new(*generation)),
-            None,
-        );
+        let stale_conf =
+            build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
         origin_ps.location_config(tenant_id, stale_conf)?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps)?);
     }
 
     let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
-    let dest_conf = build_location_config(
-        LocationConfigMode::AttachedMulti,
-        gen.map(Generation::new),
-        None,
-    );
+    let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
     dest_ps.location_config(tenant_id, dest_conf)?;
@@ -200,11 +188,7 @@ pub fn migrate_tenant(
         "🔁 Switching to AttachedSingle mode on pageserver {}",
         dest_ps.conf.id
     );
-    let dest_conf = build_location_config(
-        LocationConfigMode::AttachedSingle,
-        gen.map(Generation::new),
-        None,
-    );
+    let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
     dest_ps.location_config(tenant_id, dest_conf)?;
 
     println!("✅ Migration complete");

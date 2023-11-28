@@ -198,6 +198,7 @@ impl LocationConf {
 
         fn get_generation(conf: &'_ models::LocationConfig) -> Result<Generation, anyhow::Error> {
             conf.generation
+                .map(Generation::new)
                 .ok_or_else(|| anyhow::anyhow!("Generation must be set when attaching"))
         }
 

@@ -10,7 +10,6 @@ use serde_with::serde_as;
 use strum_macros;
 use utils::{
     completion,
-    generation::Generation,
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
@@ -262,7 +261,7 @@ pub struct LocationConfig {
     pub mode: LocationConfigMode,
     /// If attaching, in what generation?
     #[serde(default)]
-    pub generation: Option<Generation>,
+    pub generation: Option<u32>,
     #[serde(default)]
     pub secondary_conf: Option<LocationConfigSecondary>,
 
