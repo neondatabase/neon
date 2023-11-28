@@ -2118,7 +2118,7 @@ mod tests {
             .load()
             .await;
         let tline = tenant
-            .bootstrap_timeline(TIMELINE_ID, pg_version, &ctx)
+            .bootstrap_timeline(TIMELINE_ID, pg_version, None, &ctx)
             .await
             .unwrap();
 
