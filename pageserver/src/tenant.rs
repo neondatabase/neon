@@ -3448,6 +3448,12 @@ async fn run_initdb(
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // If the `select!` below doesn't finish the `wait_with_output`,
+        // let the task get `wait()`ed for asynchronously by tokio.
+        // This means there is a slim chance we can go over the INIT_DB_SEMAPHORE.
+        // TODO: fix for this is non-trivial, see
+        // https://github.com/neondatabase/neon/pull/5921#pullrequestreview-1750858021
+        //
         .kill_on_drop(true)
         .spawn()?;
 
