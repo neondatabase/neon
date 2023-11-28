@@ -86,8 +86,8 @@ files:
       collector_files:
         - "neon_collector.yml"
   - filename: neon_collector.yml
-  collector_name: neon_collector
     content: |
+      collector_name: neon_collector
       metrics:
       - metric_name: lfc_misses
         type: gauge
