@@ -1,6 +1,7 @@
 import enum
 import os
 import shutil
+from threading import Thread
 
 import pytest
 from fixtures.log_helper import log
@@ -27,7 +28,7 @@ from fixtures.remote_storage import (
     available_s3_storages,
 )
 from fixtures.types import TenantId
-from fixtures.utils import run_pg_bench_small
+from fixtures.utils import run_pg_bench_small, wait_until
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
@@ -397,6 +398,80 @@ def test_tenant_delete_is_resumed_on_attach(
                 )
             ),
         )
+
+
+def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonEnvBuilder):
+    """Reproduction of 2023-11-23 stuck tenants investigation"""
+
+    # do not use default tenant/timeline creation because it would output the failpoint log message too early
+    env = neon_env_builder.init_configs()
+    env.start()
+    pageserver_http = env.pageserver.http_client()
+
+    # happens with the cancellation bailing flushing loop earlier, leaving disk_consistent_lsn at zero
+    env.pageserver.allowed_errors.append(
+        ".*Timeline got dropped without initializing, cleaning its files"
+    )
+    # the response hit_pausable_failpoint_and_later_fail
+    env.pageserver.allowed_errors.append(
+        f".*Error processing HTTP request: InternalServerError\\(new timeline {env.initial_tenant}/{env.initial_timeline} has invalid disk_consistent_lsn"
+    )
+
+    pageserver_http.tenant_create(env.initial_tenant)
+
+    failpoint = "flush-layer-cancel-after-writing-layer-out-pausable"
+    pageserver_http.configure_failpoints((failpoint, "pause"))
+
+    def hit_pausable_failpoint_and_later_fail():
+        with pytest.raises(
+            PageserverApiException, match="new timeline \\S+ has invalid disk_consistent_lsn"
+        ):
+            pageserver_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline
+            )
+
+    def start_deletion():
+        pageserver_http.tenant_delete(env.initial_tenant)
+
+    def has_hit_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {failpoint}") is not None
+
+    def deletion_has_started_waiting_for_timelines():
+        assert env.pageserver.log_contains("Waiting for timelines...") is not None
+
+    def tenant_is_deleted():
+        try:
+            pageserver_http.tenant_status(env.initial_tenant)
+        except PageserverApiException as e:
+            assert e.status_code == 404
+        else:
+            raise RuntimeError("tenant was still accessible")
+
+    creation = Thread(target=hit_pausable_failpoint_and_later_fail)
+    creation.start()
+
+    deletion = None
+
+    try:
+        wait_until(10, 1, has_hit_failpoint)
+
+        # it should start ok, sync up with the stuck creation, then fail because disk_consistent_lsn was not updated
+        # then deletion should fail and set the tenant broken
+        deletion = Thread(target=start_deletion)
+        deletion.start()
+
+        wait_until(10, 1, deletion_has_started_waiting_for_timelines)
+
+        pageserver_http.configure_failpoints((failpoint, "off"))
+
+        creation.join()
+        deletion.join()
+
+        wait_until(10, 1, tenant_is_deleted)
+    finally:
+        creation.join()
+        if deletion is not None:
+            deletion.join()
 
 
 # TODO test concurrent deletions with "hang" failpoint

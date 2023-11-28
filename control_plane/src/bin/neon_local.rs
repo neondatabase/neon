@@ -487,8 +487,15 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info =
-                pageserver.timeline_create(tenant_id, None, None, None, Some(pg_version))?;
+            let new_timeline_id_opt = parse_timeline_id(create_match)?;
+
+            let timeline_info = pageserver.timeline_create(
+                tenant_id,
+                new_timeline_id_opt,
+                None,
+                None,
+                Some(pg_version),
+            )?;
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -1245,7 +1252,7 @@ fn cli() -> Command {
     let remote_ext_config_args = Arg::new("remote-ext-config")
         .long("remote-ext-config")
         .num_args(1)
-        .help("Configure the S3 bucket that we search for extensions in.")
+        .help("Configure the remote extensions storage proxy gateway to request for extensions.")
         .required(false);
 
     let lsn_arg = Arg::new("lsn")
@@ -1308,6 +1315,7 @@ fn cli() -> Command {
             .subcommand(Command::new("create")
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone())
                 .arg(branch_name_arg.clone())
                 .arg(pg_version_arg.clone())
             )

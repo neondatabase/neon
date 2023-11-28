@@ -674,3 +674,33 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
 
     Ok(())
 }
+
+/// Run CREATE and ALTER EXTENSION neon UPDATE for postgres database
+#[instrument(skip_all)]
+pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
+    info!("handle extension neon");
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon";
+    client.simple_query(query)?;
+
+    query = "CREATE EXTENSION IF NOT EXISTS neon WITH SCHEMA neon";
+    info!("create neon extension with query: {}", query);
+    client.simple_query(query)?;
+
+    query = "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'";
+    client.simple_query(query)?;
+
+    query = "ALTER EXTENSION neon SET SCHEMA neon";
+    info!("alter neon extension schema with query: {}", query);
+    client.simple_query(query)?;
+
+    // this will be a no-op if extension is already up to date,
+    // which may happen in two cases:
+    // - extension was just installed
+    // - extension was already installed and is up to date
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension schema with query: {}", query);
+    client.simple_query(query)?;
+
+    Ok(())
+}

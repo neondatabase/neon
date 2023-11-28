@@ -6,6 +6,7 @@ pub use link::LinkAuthError;
 use tokio_postgres::config::AuthKeys;
 
 use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
+use crate::stream::Stream;
 use crate::{
     auth::{self, ClientCredentials},
     config::AuthenticationConfig,
@@ -131,7 +132,7 @@ async fn auth_quirks_creds(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
@@ -165,7 +166,7 @@ async fn auth_quirks(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
@@ -241,7 +242,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
     pub async fn authenticate(
         &mut self,
         extra: &ConsoleReqExtra<'_>,
-        client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         latency_timer: &mut LatencyTimer,

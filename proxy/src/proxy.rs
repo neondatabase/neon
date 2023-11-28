@@ -294,9 +294,18 @@ pub async fn task_main(
                     }),
                 );
             }
-            Some(Err(e)) = connections.join_next(), if !connections.is_empty() => {
-                if !e.is_panic() && !e.is_cancelled() {
-                    warn!("unexpected error from joined connection task: {e:?}");
+            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
+            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
+            // This only counts for this loop and it will be enabled again on next `select!`.
+            //
+            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
+            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
+            // not get called again, even if there are more connections to remove.
+            Some(res) = connections.join_next() => {
+                if let Err(e) = res {
+                    if !e.is_panic() && !e.is_cancelled() {
+                        warn!("unexpected error from joined connection task: {e:?}");
+                    }
                 }
             }
             _ = cancellation_token.cancelled() => {
@@ -461,7 +470,17 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         if !read_buf.is_empty() {
                             bail!("data is sent before server replied with EncryptionResponse");
                         }
-                        stream = PqStream::new(raw.upgrade(tls.to_server_config()).await?);
+                        let tls_stream = raw.upgrade(tls.to_server_config()).await?;
+
+                        let (_, tls_server_end_point) = tls
+                            .cert_resolver
+                            .resolve(tls_stream.get_ref().1.server_name())
+                            .context("missing certificate")?;
+
+                        stream = PqStream::new(Stream::Tls {
+                            tls: Box::new(tls_stream),
+                            tls_server_end_point,
+                        });
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -866,7 +885,7 @@ pub async fn proxy_pass(
 /// Thin connection context.
 struct Client<'a, S> {
     /// The underlying libpq protocol stream.
-    stream: PqStream<S>,
+    stream: PqStream<Stream<S>>,
     /// Client credentials that we care about.
     creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
     /// KV-dictionary with PostgreSQL connection params.
@@ -880,7 +899,7 @@ struct Client<'a, S> {
 impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
-        stream: PqStream<S>,
+        stream: PqStream<Stream<S>>,
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,

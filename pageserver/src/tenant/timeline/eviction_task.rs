@@ -351,7 +351,7 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_synthetic_size_calculation_worker(&tenant, ctx, cancel)
+                self.imitate_synthetic_size_calculation_worker(&tenant, cancel, ctx)
                     .await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now());
             }
@@ -417,8 +417,8 @@ impl Timeline {
     async fn imitate_synthetic_size_calculation_worker(
         &self,
         tenant: &Arc<Tenant>,
-        ctx: &RequestContext,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) {
         if self.conf.metric_collection_endpoint.is_none() {
             // We don't start the consumption metrics task if this is not set in the config.
@@ -457,6 +457,7 @@ impl Timeline {
             None,
             &mut throwaway_cache,
             LogicalSizeCalculationCause::EvictionTaskImitation,
+            cancel,
             ctx,
         )
         .instrument(info_span!("gather_inputs"));

@@ -1944,6 +1944,7 @@ pub(crate) async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
+    cancel: CancellationToken,
     ctx: &RequestContext,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
     let guard = TENANTS.read().unwrap();
@@ -1970,7 +1971,7 @@ pub(crate) async fn immediate_gc(
         async move {
             fail::fail_point!("immediate_gc_task_pre");
             let result = tenant
-                .gc_iteration(Some(timeline_id), gc_horizon, pitr, &ctx)
+                .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
                 .instrument(info_span!("manual_gc", %tenant_id, %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it

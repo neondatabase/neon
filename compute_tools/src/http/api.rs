@@ -123,7 +123,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        // download extension files from S3 on demand
+        // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
             info!("req.uri {:?}", req.uri());
