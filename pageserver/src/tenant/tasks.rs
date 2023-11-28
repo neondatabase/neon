@@ -44,7 +44,6 @@ pub(crate) enum BackgroundLoopKind {
     Eviction,
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
-    InitialLogicalSizeCalculation,
 }
 
 impl BackgroundLoopKind {
