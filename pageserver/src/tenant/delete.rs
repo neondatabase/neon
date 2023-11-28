@@ -583,8 +583,7 @@ impl DeleteTenantFlow {
                                     }
                                 },
                                 TenantSlot::InProgress(_) => {
-                                    // TenantsMap::remove handles InProgress separately, should never return it here
-                                    unreachable!();
+                                    unreachable!("TenantsMap::remove handles InProgress separately, should never return it here");
                                 }
                             };
                             break;
