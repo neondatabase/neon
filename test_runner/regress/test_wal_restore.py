@@ -145,9 +145,9 @@ def test_wal_restore_http(
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    initdb_backup_location = test_output_dir / "initdb.tar.zst"
+    test_output_dir / "initdb.tar.zst"
 
-    initdb_zst_path = (
+    (
         env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst"
     )
 
