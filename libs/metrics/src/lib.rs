@@ -2,6 +2,7 @@
 //! make sure that we use the same dep version everywhere.
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
+#![deny(clippy::undocumented_unsafe_blocks)]
 use once_cell::sync::Lazy;
 use prometheus::core::{AtomicU64, Collector, GenericGauge, GenericGaugeVec};
 pub use prometheus::opts;

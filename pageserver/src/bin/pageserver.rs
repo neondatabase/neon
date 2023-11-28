@@ -34,8 +34,11 @@ use postgres_backend::AuthType;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
-    auth::JwtAuth, logging, project_build_tag, project_git_version, sentry_init::init_sentry,
-    signals::Signal, tcp_listener,
+    auth::{JwtAuth, SwappableJwtAuth},
+    logging, project_build_tag, project_git_version,
+    sentry_init::init_sentry,
+    signals::Signal,
+    tcp_listener,
 };
 
 project_git_version!(GIT_VERSION);
@@ -100,7 +103,11 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
-    logging::init(conf.log_format, tracing_error_layer_enablement)?;
+    logging::init(
+        conf.log_format,
+        tracing_error_layer_enablement,
+        logging::Output::Stdout,
+    )?;
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
@@ -321,13 +328,12 @@ fn start_pageserver(
     let http_auth;
     let pg_auth;
     if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
-        // unwrap is ok because check is performed when creating config, so path is set and file exists
+        // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
-        info!(
-            "Loading public key for verifying JWT tokens from {:#?}",
-            key_path
-        );
-        let auth: Arc<JwtAuth> = Arc::new(JwtAuth::from_key_path(key_path)?);
+        info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
+
+        let jwt_auth = JwtAuth::from_key_path(key_path)?;
+        let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
         http_auth = match &conf.http_auth_type {
             AuthType::Trust => None,
@@ -410,7 +416,7 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
-    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         TenantSharedResources {
             broker_client: broker_client.clone(),
@@ -420,6 +426,7 @@ fn start_pageserver(
         order,
         shutdown_pageserver.clone(),
     ))?;
+    let tenant_manager = Arc::new(tenant_manager);
 
     BACKGROUND_RUNTIME.spawn({
         let init_done_rx = init_done_rx;
@@ -548,6 +555,7 @@ fn start_pageserver(
         let router_state = Arc::new(
             http::routes::State::new(
                 conf,
+                tenant_manager,
                 http_auth.clone(),
                 remote_storage.clone(),
                 broker_client.clone(),
@@ -617,6 +625,7 @@ fn start_pageserver(
                     conf.synthetic_size_calculation_interval,
                     conf.id,
                     local_disk_storage,
+                    cancel,
                     metrics_ctx,
                 )
                 .instrument(info_span!("metrics_collection"))

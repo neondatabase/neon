@@ -434,6 +434,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::init(
         LogFormat::from_config(&args.log_format)?,
         logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     // initialize sentry if SENTRY_DSN is provided

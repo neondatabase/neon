@@ -411,7 +411,6 @@ def check_neon_works(
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
     config.remote_storage = None
-    config.ext_remote_storage = None
     config.sk_remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
@@ -449,7 +448,7 @@ def check_neon_works(
     )
 
     # Check that project can be recovered from WAL
-    # loosely based on https://github.com/neondatabase/cloud/wiki/Recovery-from-WAL
+    # loosely based on https://www.notion.so/neondatabase/Storage-Recovery-from-WAL-d92c0aac0ebf40df892b938045d7d720
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
     pageserver_port = snapshot_config["pageservers"][0]["listen_http_addr"].split(":")[-1]

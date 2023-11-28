@@ -1,5 +1,6 @@
 import time
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -15,7 +16,11 @@ from fixtures.utils import query_scalar
 # and then download them back.
 def test_basic_eviction(
     neon_env_builder: NeonEnvBuilder,
+    build_type: str,
 ):
+    if build_type == "debug":
+        pytest.skip("times out in debug builds")
+
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start(

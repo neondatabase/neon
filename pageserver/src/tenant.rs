@@ -12,41 +12,25 @@
 //!
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+use enumset::EnumSet;
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
-
-use std::cmp::min;
-use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt::Debug;
-use std::fmt::Display;
-use std::fs;
-use std::fs::File;
-use std::io;
-use std::ops::Bound::Included;
-use std::process::Command;
-use std::process::Stdio;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::MutexGuard;
-use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant};
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -81,14 +65,35 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
+use std::cmp::min;
+use std::collections::hash_map::Entry;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::ops::Bound::Included;
+use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::MutexGuard;
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
+use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
+use tokio::sync::Semaphore;
 
+static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use toml_edit;
 use utils::{
     crashsafe,
@@ -291,6 +296,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
+        match self {
+            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub async fn request_redo(
         &self,
         key: crate::repository::Key,
@@ -388,6 +403,36 @@ pub enum CreateTimelineError {
     ShuttingDown,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+enum InitdbError {
+    Other(anyhow::Error),
+    Cancelled,
+    Spawn(std::io::Result<()>),
+    Failed(std::process::ExitStatus, Vec<u8>),
+}
+
+impl fmt::Display for InitdbError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            InitdbError::Cancelled => write!(f, "Operation was cancelled"),
+            InitdbError::Spawn(e) => write!(f, "Spawn error: {:?}", e),
+            InitdbError::Failed(status, stderr) => write!(
+                f,
+                "Command failed with status {:?}: {}",
+                status,
+                String::from_utf8_lossy(stderr)
+            ),
+            InitdbError::Other(e) => write!(f, "Error: {:?}", e),
+        }
+    }
+}
+
+impl From<std::io::Error> for InitdbError {
+    fn from(error: std::io::Error) -> Self {
+        InitdbError::Spawn(Err(error))
+    }
 }
 
 struct TenantDirectoryScan {
@@ -720,7 +765,7 @@ impl Tenant {
     ///
     async fn attach(
         self: &Arc<Tenant>,
-        mut init_order: Option<InitializationOrder>,
+        init_order: Option<InitializationOrder>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -736,11 +781,6 @@ impl Tenant {
                 return self.load_local(init_order, ctx).await;
             }
         };
-
-        // Signal that we have completed remote phase
-        init_order
-            .as_mut()
-            .and_then(|x| x.initial_tenant_load_remote.take());
 
         let mut timelines_to_resume_deletions = vec![];
 
@@ -1619,6 +1659,7 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         // Don't start doing work during shutdown
@@ -1641,7 +1682,7 @@ impl Tenant {
             }
         }
 
-        self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+        self.gc_iteration_internal(target_timeline_id, horizon, pitr, cancel, ctx)
             .await
     }
 
@@ -1649,21 +1690,15 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
-    pub async fn compaction_iteration(
+    async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Don't start doing work during shutdown
-        if let TenantState::Stopping { .. } = self.current_state() {
+    ) -> anyhow::Result<(), timeline::CompactionError> {
+        // Don't start doing work during shutdown, or when broken, we do not need those in the logs
+        if !self.is_active() {
             return Ok(());
         }
-
-        // We should only be called once the tenant has activated.
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run compaction iteration on inactive tenant"
-        );
 
         {
             let conf = self.tenant_conf.read().unwrap();
@@ -1695,7 +1730,7 @@ impl Tenant {
 
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
-                .compact(cancel, ctx)
+                .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await?;
         }
@@ -1841,9 +1876,16 @@ impl Tenant {
             timelines.values().for_each(|timeline| {
                 let timeline = Arc::clone(timeline);
                 let span = Span::current();
-                js.spawn(async move { timeline.shutdown(freeze_and_flush).instrument(span).await });
+                js.spawn(async move {
+                    if freeze_and_flush {
+                        timeline.flush_and_shutdown().instrument(span).await
+                    } else {
+                        timeline.shutdown().instrument(span).await
+                    }
+                });
             })
         };
+        // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
         while let Some(res) = js.join_next().await {
             match res {
@@ -2556,14 +2598,30 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        let gc_timelines = self
-            .refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
-            .await?;
+        let gc_timelines = match self
+            .refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                if let Some(PageReconstructError::Cancelled) =
+                    e.downcast_ref::<PageReconstructError>()
+                {
+                    // Handle cancellation
+                    totals.elapsed = now.elapsed();
+                    return Ok(totals);
+                } else {
+                    // Propagate other errors
+                    return Err(e);
+                }
+            }
+        };
 
         crate::failpoint_support::sleep_millis_async!(
             "gc_iteration_internal_after_getting_gc_timelines"
@@ -2587,7 +2645,7 @@ impl Tenant {
         // See comments in [`Tenant::branch_timeline`] for more information
         // about why branch creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
-            if task_mgr::is_shutdown_requested() {
+            if task_mgr::is_shutdown_requested() || cancel.is_cancelled() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;
@@ -2607,6 +2665,7 @@ impl Tenant {
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
     pub async fn refresh_gc_info(
         &self,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // since this method can now be called at different rates than the configured gc loop, it
@@ -2618,7 +2677,7 @@ impl Tenant {
         // refresh all timelines
         let target_timeline_id = None;
 
-        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr, ctx)
+        self.refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
             .await
     }
 
@@ -2627,6 +2686,7 @@ impl Tenant {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Arc<Timeline>>> {
         // grab mutex to prevent new timelines from being created here.
@@ -2700,7 +2760,7 @@ impl Tenant {
                     .map(|&x| x.1)
                     .collect();
                 timeline
-                    .update_gc_info(branchpoints, cutoff, pitr, ctx)
+                    .update_gc_info(branchpoints, cutoff, pitr, cancel, ctx)
                     .await?;
 
                 gc_timelines.push(timeline);
@@ -2863,7 +2923,7 @@ impl Tenant {
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
-    /// - after initialization complete, remove the temp dir.
+    /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
@@ -2878,7 +2938,7 @@ impl Tenant {
         };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
-        let initdb_path = path_with_suffix_extension(
+        let pgdata_path = path_with_suffix_extension(
             self.conf
                 .timelines_path(&self.tenant_id)
                 .join(format!("basebackup-{timeline_id}")),
@@ -2887,22 +2947,45 @@ impl Tenant {
 
         // an uninit mark was placed before, nothing else can access this timeline files
         // current initdb was not run yet, so remove whatever was left from the previous runs
-        if initdb_path.exists() {
-            fs::remove_dir_all(&initdb_path).with_context(|| {
-                format!("Failed to remove already existing initdb directory: {initdb_path}")
+        if pgdata_path.exists() {
+            fs::remove_dir_all(&pgdata_path).with_context(|| {
+                format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &initdb_path, pg_version)?;
+        run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&initdb_path) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{initdb_path}': {e}");
+                error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
         }
-        let pgdata_path = &initdb_path;
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+
+        // Upload the created data dir to S3
+        if let Some(storage) = &self.remote_storage {
+            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
+            let pgdata_zstd = Bytes::from(pgdata_zstd);
+            backoff::retry(
+                || async {
+                    self::remote_timeline_client::upload_initdb_dir(
+                        storage,
+                        &self.tenant_id,
+                        &timeline_id,
+                        pgdata_zstd.clone(),
+                    )
+                    .await
+                },
+                |_| false,
+                3,
+                u32::MAX,
+                "persist_initdb_tar_zst",
+                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            )
+            .await?;
+        }
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
@@ -2932,7 +3015,7 @@ impl Tenant {
 
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
-            pgdata_path,
+            &pgdata_path,
             pgdata_lsn,
             ctx,
         )
@@ -3113,6 +3196,7 @@ impl Tenant {
         // (only if it is shorter than the real cutoff).
         max_retention_period: Option<u64>,
         cause: LogicalSizeCalculationCause,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
@@ -3135,6 +3219,7 @@ impl Tenant {
             max_retention_period,
             &mut shared_cache,
             cause,
+            cancel,
             ctx,
         )
         .await
@@ -3147,9 +3232,10 @@ impl Tenant {
     pub async fn calculate_synthetic_size(
         &self,
         cause: LogicalSizeCalculationCause,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(None, cause, ctx).await?;
+        let inputs = self.gather_size_inputs(None, cause, cancel, ctx).await?;
 
         let size = inputs.calculate()?;
 
@@ -3331,42 +3417,54 @@ fn rebase_directory(
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
 /// to get bootstrap data for timeline initialization.
-fn run_initdb(
+async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
-) -> anyhow::Result<()> {
-    let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
-    let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
+    cancel: &CancellationToken,
+) -> Result<(), InitdbError> {
+    let initdb_bin_path = conf
+        .pg_bin_dir(pg_version)
+        .map_err(InitdbError::Other)?
+        .join("initdb");
+    let initdb_lib_dir = conf.pg_lib_dir(pg_version).map_err(InitdbError::Other)?;
     info!(
         "running {} in {}, libdir: {}",
         initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
-    let initdb_output = Command::new(&initdb_bin_path)
+    let _permit = INIT_DB_SEMAPHORE.acquire().await;
+
+    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
         .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
         .arg("--no-instructions")
-        // This is only used for a temporary installation that is deleted shortly after,
-        // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdout(Stdio::null())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute {} at target dir {}",
-                initdb_bin_path, initdb_target_dir,
-            )
-        })?;
-    if !initdb_output.status.success() {
-        bail!(
-            "initdb failed: '{}'",
-            String::from_utf8_lossy(&initdb_output.stderr)
-        );
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // If the `select!` below doesn't finish the `wait_with_output`,
+        // let the task get `wait()`ed for asynchronously by tokio.
+        // This means there is a slim chance we can go over the INIT_DB_SEMAPHORE.
+        // TODO: fix for this is non-trivial, see
+        // https://github.com/neondatabase/neon/pull/5921#pullrequestreview-1750858021
+        //
+        .kill_on_drop(true)
+        .spawn()?;
+
+    tokio::select! {
+        initdb_output = initdb_command.wait_with_output() => {
+            let initdb_output = initdb_output?;
+            if !initdb_output.status.success() {
+                return Err(InitdbError::Failed(initdb_output.status, initdb_output.stderr));
+            }
+        }
+        _ = cancel.cancelled() => {
+            return Err(InitdbError::Cancelled);
+        }
     }
 
     Ok(())
@@ -3412,6 +3510,7 @@ pub async fn dump_layerfile_from_path(
 pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::OnceCell;
+    use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;
     use utils::logging;
@@ -3478,6 +3577,7 @@ pub(crate) mod harness {
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
         pub generation: Generation,
+        pub shard: ShardIndex,
         pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: Utf8PathBuf,
         pub deletion_queue: MockDeletionQueue,
@@ -3492,6 +3592,7 @@ pub(crate) mod harness {
                 // enable it in case the tests exercise code paths that use
                 // debug_assert_current_span_has_tenant_and_timeline_id
                 logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+                logging::Output::Stdout,
             )
             .expect("Failed to init test logging")
         });
@@ -3526,10 +3627,6 @@ pub(crate) mod harness {
             let remote_fs_dir = conf.workdir.join("localfs");
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
-                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-                max_concurrent_syncs: std::num::NonZeroUsize::new(2_000_000).unwrap(),
-                // TODO: why not remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-                max_sync_errors: std::num::NonZeroU32::new(3_000_000).unwrap(),
                 storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
@@ -3540,6 +3637,7 @@ pub(crate) mod harness {
                 tenant_conf,
                 tenant_id,
                 generation: Generation::new(0xdeadbeef),
+                shard: ShardIndex::unsharded(),
                 remote_storage,
                 remote_fs_dir,
                 deletion_queue,
@@ -3924,7 +4022,13 @@ mod tests {
         // and compaction works. But it does set the 'cutoff' point so that the cross check
         // below should fail.
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
@@ -4027,7 +4131,13 @@ mod tests {
         tline.set_broken("test".to_owned());
 
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
 
         // The branchpoints should contain all timelines, even ones marked
@@ -4073,7 +4183,13 @@ mod tests {
             .expect("Should have a local timeline");
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
         assert!(newtline.get(*TEST_KEY, Lsn(0x25), &ctx).await.is_ok());
 
@@ -4101,7 +4217,13 @@ mod tests {
 
         // run gc on parent
         tenant
-            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .gc_iteration(
+                Some(TIMELINE_ID),
+                0x10,
+                Duration::ZERO,
+                &CancellationToken::new(),
+                &ctx,
+            )
             .await?;
 
         // Check that the data is still accessible on the branch.
@@ -4290,7 +4412,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4305,7 +4429,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4320,7 +4446,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         let writer = tline.writer().await;
         writer
@@ -4335,7 +4463,9 @@ mod tests {
         drop(writer);
 
         tline.freeze_and_flush().await?;
-        tline.compact(&CancellationToken::new(), &ctx).await?;
+        tline
+            .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+            .await?;
 
         assert_eq!(
             tline.get(*TEST_KEY, Lsn(0x10), &ctx).await?,
@@ -4403,10 +4533,18 @@ mod tests {
             let cutoff = tline.get_last_record_lsn();
 
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4483,10 +4621,18 @@ mod tests {
             // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4573,10 +4719,18 @@ mod tests {
             // Perform a cycle of flush, compact, and GC
             let cutoff = tline.get_last_record_lsn();
             tline
-                .update_gc_info(Vec::new(), cutoff, Duration::ZERO, &ctx)
+                .update_gc_info(
+                    Vec::new(),
+                    cutoff,
+                    Duration::ZERO,
+                    &CancellationToken::new(),
+                    &ctx,
+                )
                 .await?;
             tline.freeze_and_flush().await?;
-            tline.compact(&CancellationToken::new(), &ctx).await?;
+            tline
+                .compact(&CancellationToken::new(), EnumSet::empty(), &ctx)
+                .await?;
             tline.gc().await?;
         }
 
@@ -4729,7 +4883,7 @@ mod tests {
             // Keeps uninit mark in place
             let raw_tline = tline.raw_timeline().unwrap();
             raw_tline
-                .shutdown(false)
+                .shutdown()
                 .instrument(info_span!("test_shutdown", tenant_id=%raw_tline.tenant_id))
                 .await;
             std::mem::forget(tline);

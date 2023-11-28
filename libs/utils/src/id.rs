@@ -120,6 +120,8 @@ impl Id {
             chunk[0] = HEX[((b >> 4) & 0xf) as usize];
             chunk[1] = HEX[(b & 0xf) as usize];
         }
+
+        // SAFETY: vec constructed out of `HEX`, it can only be ascii
         unsafe { String::from_utf8_unchecked(buf) }
     }
 }

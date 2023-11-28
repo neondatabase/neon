@@ -71,18 +71,16 @@ More specifically, here is an example ext_index.json
     }
 }
 */
-use anyhow::Context;
 use anyhow::{self, Result};
+use anyhow::{bail, Context};
+use bytes::Bytes;
 use compute_api::spec::RemoteExtSpec;
 use regex::Regex;
 use remote_storage::*;
-use serde_json;
-use std::io::Read;
-use std::num::{NonZeroU32, NonZeroUsize};
+use reqwest::StatusCode;
 use std::path::Path;
 use std::str;
 use tar::Archive;
-use tokio::io::AsyncReadExt;
 use tracing::info;
 use tracing::log::warn;
 use zstd::stream::read::Decoder;
@@ -133,67 +131,36 @@ fn parse_pg_version(human_version: &str) -> &str {
     panic!("Unsuported postgres version {human_version}");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_pg_version;
-
-    #[test]
-    fn test_parse_pg_version() {
-        assert_eq!(parse_pg_version("PostgreSQL 15.4"), "v15");
-        assert_eq!(parse_pg_version("PostgreSQL 15.14"), "v15");
-        assert_eq!(
-            parse_pg_version("PostgreSQL 15.4 (Ubuntu 15.4-0ubuntu0.23.04.1)"),
-            "v15"
-        );
-
-        assert_eq!(parse_pg_version("PostgreSQL 14.15"), "v14");
-        assert_eq!(parse_pg_version("PostgreSQL 14.0"), "v14");
-        assert_eq!(
-            parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"),
-            "v14"
-        );
-
-        assert_eq!(parse_pg_version("PostgreSQL 16devel"), "v16");
-        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), "v16");
-        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), "v16");
-        assert_eq!(parse_pg_version("PostgreSQL 16extra"), "v16");
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_parse_pg_unsupported_version() {
-        parse_pg_version("PostgreSQL 13.14");
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_parse_pg_incorrect_version_format() {
-        parse_pg_version("PostgreSQL 14");
-    }
-}
-
 // download the archive for a given extension,
 // unzip it, and place files in the appropriate locations (share/lib)
 pub async fn download_extension(
     ext_name: &str,
     ext_path: &RemotePath,
-    remote_storage: &GenericRemoteStorage,
+    ext_remote_storage: &str,
     pgbin: &str,
 ) -> Result<u64> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
-    let mut download = remote_storage.download(ext_path).await?;
-    let mut download_buffer = Vec::new();
-    download
-        .download_stream
-        .read_to_end(&mut download_buffer)
-        .await?;
+
+    // TODO add retry logic
+    let download_buffer =
+        match download_extension_tar(ext_remote_storage, &ext_path.to_string()).await {
+            Ok(buffer) => buffer,
+            Err(error_message) => {
+                return Err(anyhow::anyhow!(
+                    "error downloading extension {:?}: {:?}",
+                    ext_name,
+                    error_message
+                ));
+            }
+        };
+
     let download_size = download_buffer.len() as u64;
+    info!("Download size {:?}", download_size);
     // it's unclear whether it is more performant to decompress into memory or not
     // TODO: decompressing into memory can be avoided
-    let mut decoder = Decoder::new(download_buffer.as_slice())?;
-    let mut decompress_buffer = Vec::new();
-    decoder.read_to_end(&mut decompress_buffer)?;
-    let mut archive = Archive::new(decompress_buffer.as_slice());
+    let decoder = Decoder::new(download_buffer.as_ref())?;
+    let mut archive = Archive::new(decoder);
+
     let unzip_dest = pgbin
         .strip_suffix("/bin/postgres")
         .expect("bad pgbin")
@@ -261,29 +228,69 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
     }
 }
 
-// This function initializes the necessary structs to use remote storage
-pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRemoteStorage> {
-    #[derive(Debug, serde::Deserialize)]
-    struct RemoteExtJson {
-        bucket: String,
-        region: String,
-        endpoint: Option<String>,
-        prefix: Option<String>,
-    }
-    let remote_ext_json = serde_json::from_str::<RemoteExtJson>(remote_ext_config)?;
+// Do request to extension storage proxy, i.e.
+// curl http://pg-ext-s3-gateway/latest/v15/extensions/anon.tar.zst
+// using HHTP GET
+// and return the response body as bytes
+//
+async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Result<Bytes> {
+    let uri = format!("{}/{}", ext_remote_storage, ext_path);
 
-    let config = S3Config {
-        bucket_name: remote_ext_json.bucket,
-        bucket_region: remote_ext_json.region,
-        prefix_in_bucket: remote_ext_json.prefix,
-        endpoint: remote_ext_json.endpoint,
-        concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
-        max_keys_per_list_response: None,
-    };
-    let config = RemoteStorageConfig {
-        max_concurrent_syncs: NonZeroUsize::new(100).expect("100 != 0"),
-        max_sync_errors: NonZeroU32::new(100).expect("100 != 0"),
-        storage: RemoteStorageKind::AwsS3(config),
-    };
-    GenericRemoteStorage::from_config(&config)
+    info!("Download extension {:?} from uri {:?}", ext_path, uri);
+
+    let resp = reqwest::get(uri).await?;
+
+    match resp.status() {
+        StatusCode::OK => match resp.bytes().await {
+            Ok(resp) => {
+                info!("Download extension {:?} completed successfully", ext_path);
+                Ok(resp)
+            }
+            Err(e) => bail!("could not deserialize remote extension response: {}", e),
+        },
+        StatusCode::SERVICE_UNAVAILABLE => bail!("remote extension is temporarily unavailable"),
+        _ => bail!(
+            "unexpected remote extension response status code: {}",
+            resp.status()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pg_version;
+
+    #[test]
+    fn test_parse_pg_version() {
+        assert_eq!(parse_pg_version("PostgreSQL 15.4"), "v15");
+        assert_eq!(parse_pg_version("PostgreSQL 15.14"), "v15");
+        assert_eq!(
+            parse_pg_version("PostgreSQL 15.4 (Ubuntu 15.4-0ubuntu0.23.04.1)"),
+            "v15"
+        );
+
+        assert_eq!(parse_pg_version("PostgreSQL 14.15"), "v14");
+        assert_eq!(parse_pg_version("PostgreSQL 14.0"), "v14");
+        assert_eq!(
+            parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"),
+            "v14"
+        );
+
+        assert_eq!(parse_pg_version("PostgreSQL 16devel"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), "v16");
+        assert_eq!(parse_pg_version("PostgreSQL 16extra"), "v16");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_pg_unsupported_version() {
+        parse_pg_version("PostgreSQL 13.14");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_parse_pg_incorrect_version_format() {
+        parse_pg_version("PostgreSQL 14");
+    }
 }

@@ -5,11 +5,13 @@
 //! Separate, `metadata` subcommand allows to print and update pageserver's metadata file.
 
 mod draw_timeline_dir;
+mod index_part;
 mod layer_map_analyzer;
 mod layers;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
+use index_part::IndexPartCmd;
 use layers::LayerCmd;
 use pageserver::{
     context::{DownloadBehavior, RequestContext},
@@ -38,6 +40,8 @@ struct CliOpts {
 #[derive(Subcommand)]
 enum Commands {
     Metadata(MetadataCmd),
+    #[command(subcommand)]
+    IndexPart(IndexPartCmd),
     PrintLayerFile(PrintLayerFileCmd),
     DrawTimeline {},
     AnalyzeLayerMap(AnalyzeLayerMapCmd),
@@ -82,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Metadata(cmd) => {
             handle_metadata(&cmd)?;
+        }
+        Commands::IndexPart(cmd) => {
+            index_part::main(&cmd).await?;
         }
         Commands::DrawTimeline {} => {
             draw_timeline_dir::main()?;

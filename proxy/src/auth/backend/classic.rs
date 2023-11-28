@@ -6,7 +6,7 @@ use crate::{
     console::{self, AuthInfo, ConsoleReqExtra},
     proxy::LatencyTimer,
     sasl, scram,
-    stream::PqStream,
+    stream::{PqStream, Stream},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -15,7 +15,7 @@ pub(super) async fn authenticate(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &ClientCredentials<'_>,
-    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
 ) -> auth::Result<AuthSuccess<ComputeCredentials>> {

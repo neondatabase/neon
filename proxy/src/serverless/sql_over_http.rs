@@ -174,11 +174,23 @@ fn get_conn_info(
         }
     }
 
+    let pairs = connection_url.query_pairs();
+
+    let mut options = Option::None;
+
+    for (key, value) in pairs {
+        if key == "options" {
+            options = Some(value.to_string());
+            break;
+        }
+    }
+
     Ok(ConnInfo {
         username: username.to_owned(),
         dbname: dbname.to_owned(),
         hostname: hostname.to_owned(),
         password: password.to_owned(),
+        options,
     })
 }
 
@@ -238,7 +250,7 @@ pub async fn handle(
     Ok(response)
 }
 
-#[instrument(name = "sql-over-http", skip_all)]
+#[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
     request: Request<Body>,
     sni_hostname: Option<String>,

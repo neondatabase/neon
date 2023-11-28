@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
@@ -6,7 +7,10 @@ use tokio::runtime::Runtime;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::id::{NodeId, TenantId, TenantTimelineId};
+use utils::{
+    auth::SwappableJwtAuth,
+    id::{NodeId, TenantId, TenantTimelineId},
+};
 
 mod auth;
 pub mod broker;
@@ -69,7 +73,7 @@ pub struct SafeKeeperConf {
     pub wal_backup_enabled: bool,
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
-    pub http_auth: Option<Arc<JwtAuth>>,
+    pub http_auth: Option<Arc<SwappableJwtAuth>>,
     pub current_thread_runtime: bool,
 }
 

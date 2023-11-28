@@ -1,6 +1,10 @@
 //! User credentials used in authentication.
 
-use crate::{auth::password_hack::parse_endpoint_param, error::UserFacingError};
+use crate::{
+    auth::password_hack::parse_endpoint_param,
+    error::UserFacingError,
+    proxy::{neon_options, NUM_CONNECTION_ACCEPTED_BY_SNI},
+};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use std::collections::HashSet;
@@ -38,6 +42,8 @@ pub struct ClientCredentials<'a> {
     pub user: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<String>,
+
+    pub cache_key: String,
 }
 
 impl ClientCredentials<'_> {
@@ -53,6 +59,7 @@ impl<'a> ClientCredentials<'a> {
         ClientCredentials {
             user: "",
             project: None,
+            cache_key: "".to_string(),
         }
     }
 
@@ -119,8 +126,34 @@ impl<'a> ClientCredentials<'a> {
         .transpose()?;
 
         info!(user, project = project.as_deref(), "credentials");
+        if sni.is_some() {
+            info!("Connection with sni");
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["sni"])
+                .inc();
+        } else if project.is_some() {
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["no_sni"])
+                .inc();
+            info!("Connection without sni");
+        } else {
+            NUM_CONNECTION_ACCEPTED_BY_SNI
+                .with_label_values(&["password_hack"])
+                .inc();
+            info!("Connection with password hack");
+        }
 
-        Ok(Self { user, project })
+        let cache_key = format!(
+            "{}{}",
+            project.as_deref().unwrap_or(""),
+            neon_options(params).unwrap_or("".to_string())
+        );
+
+        Ok(Self {
+            user,
+            project,
+            cache_key,
+        })
     }
 }
 
@@ -176,6 +209,7 @@ mod tests {
         let creds = ClientCredentials::parse(&options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
+        assert_eq!(creds.cache_key, "foo");
 
         Ok(())
     }
@@ -302,5 +336,24 @@ mod tests {
             }
             _ => panic!("bad error: {err:?}"),
         }
+    }
+
+    #[test]
+    fn parse_neon_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "neon_lsn:0/2 neon_endpoint_type:read_write"),
+        ]);
+
+        let sni = Some("project.localhost");
+        let common_names = Some(["localhost".into()].into());
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("project"));
+        assert_eq!(
+            creds.cache_key,
+            "projectneon_endpoint_type:read_write neon_lsn:0/2"
+        );
+
+        Ok(())
     }
 }

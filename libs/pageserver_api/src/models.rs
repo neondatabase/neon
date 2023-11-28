@@ -10,13 +10,12 @@ use serde_with::serde_as;
 use strum_macros;
 use utils::{
     completion,
-    generation::Generation,
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
 };
 
-use crate::reltag::RelTag;
+use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -187,7 +186,7 @@ pub struct TimelineCreateRequest {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    pub new_tenant_id: TenantId,
+    pub new_tenant_id: TenantShardId,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<u32>,
@@ -262,9 +261,18 @@ pub struct LocationConfig {
     pub mode: LocationConfigMode,
     /// If attaching, in what generation?
     #[serde(default)]
-    pub generation: Option<Generation>,
+    pub generation: Option<u32>,
     #[serde(default)]
     pub secondary_conf: Option<LocationConfigSecondary>,
+
+    // Shard parameters: if shard_count is nonzero, then other shard_* fields
+    // must be set accurately.
+    #[serde(default)]
+    pub shard_number: u8,
+    #[serde(default)]
+    pub shard_count: u8,
+    #[serde(default)]
+    pub shard_stripe_size: u32,
 
     // If requesting mode `Secondary`, configuration for that.
     // Custom storage configuration for the tenant, if any

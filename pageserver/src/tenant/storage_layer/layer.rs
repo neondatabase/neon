@@ -3,6 +3,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use pageserver_api::shard::ShardIndex;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -96,6 +97,7 @@ impl Layer {
             desc,
             None,
             metadata.generation,
+            metadata.shard,
         )));
 
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_some());
@@ -136,6 +138,7 @@ impl Layer {
                 desc,
                 Some(inner),
                 metadata.generation,
+                metadata.shard,
             )
         }));
 
@@ -179,6 +182,7 @@ impl Layer {
                 desc,
                 Some(inner),
                 timeline.generation,
+                timeline.get_shard_index(),
             )
         }));
 
@@ -251,6 +255,7 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
+            .instrument(tracing::info_span!("get_value_reconstruct_data", layer=%self))
             .await
     }
 
@@ -425,6 +430,15 @@ struct LayerInner {
     /// For loaded layers (resident or evicted) this comes from [`LayerFileMetadata::generation`],
     /// for created layers from [`Timeline::generation`].
     generation: Generation,
+
+    /// The shard of this Layer.
+    ///
+    /// For layers created in this process, this will always be the [`ShardIndex`] of the
+    /// current `ShardIdentity`` (TODO: add link once it's introduced).
+    ///
+    /// For loaded layers, this may be some other value if the tenant has undergone
+    /// a shard split since the layer was originally written.
+    shard: ShardIndex,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -458,9 +472,9 @@ impl Drop for LayerInner {
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
-        let gen = self.generation;
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
+        let meta = self.metadata();
 
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
             let _g = span.entered();
@@ -488,7 +502,7 @@ impl Drop for LayerInner {
                     timeline.metrics.resident_physical_size_sub(file_size);
                 }
                 if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, gen)]);
+                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
                     if let Err(e) = res {
                         // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
@@ -522,6 +536,7 @@ impl LayerInner {
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
+        shard: ShardIndex,
     ) -> Self {
         let path = conf
             .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
@@ -549,6 +564,7 @@ impl LayerInner {
             status: tokio::sync::broadcast::channel(1).0,
             consecutive_failures: AtomicUsize::new(0),
             generation,
+            shard,
         }
     }
 
@@ -867,6 +883,9 @@ impl LayerInner {
             }
             Ok((Err(e), _permit)) => {
                 // FIXME: this should be with the spawned task and be cancellation sensitive
+                //
+                // while we should not need this, this backoff has turned out to be useful with
+                // a bug of unexpectedly deleted remote layer file (#5787).
                 let consecutive_failures =
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
@@ -1073,7 +1092,7 @@ impl LayerInner {
     }
 
     fn metadata(&self) -> LayerFileMetadata {
-        LayerFileMetadata::new(self.desc.file_size, self.generation)
+        LayerFileMetadata::new(self.desc.file_size, self.generation, self.shard)
     }
 }
 
@@ -1195,7 +1214,7 @@ impl DownloadedLayer {
                 ));
                 delta_layer::DeltaLayerInner::load(&owner.path, summary, ctx)
                     .await
-                    .map(LayerKind::Delta)
+                    .map(|res| res.map(LayerKind::Delta))
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1206,21 +1225,32 @@ impl DownloadedLayer {
                 ));
                 image_layer::ImageLayerInner::load(&owner.path, lsn, summary, ctx)
                     .await
-                    .map(LayerKind::Image)
-            }
-            // this will be a permanent failure
-            .context("load layer");
+                    .map(|res| res.map(LayerKind::Image))
+            };
 
-            if res.is_err() {
-                LAYER_IMPL_METRICS.inc_permanent_loading_failures();
+            match res {
+                Ok(Ok(layer)) => Ok(Ok(layer)),
+                Ok(Err(transient)) => Err(transient),
+                Err(permanent) => {
+                    LAYER_IMPL_METRICS.inc_permanent_loading_failures();
+                    // TODO(#5815): we are not logging all errors, so temporarily log them **once**
+                    // here as well
+                    let permanent = permanent.context("load layer");
+                    tracing::error!("layer loading failed permanently: {permanent:#}");
+                    Ok(Err(permanent))
+                }
             }
-            res
         };
-        self.kind.get_or_init(init).await.as_ref().map_err(|e| {
-            // errors are not clonabled, cannot but stringify
-            // test_broken_timeline matches this string
-            anyhow::anyhow!("layer loading failed: {e:#}")
-        })
+        self.kind
+            .get_or_try_init(init)
+            // return transient errors using `?`
+            .await?
+            .as_ref()
+            .map_err(|e| {
+                // errors are not clonabled, cannot but stringify
+                // test_broken_timeline matches this string
+                anyhow::anyhow!("layer loading failed: {e:#}")
+            })
     }
 
     async fn get_value_reconstruct_data(
@@ -1291,6 +1321,7 @@ impl ResidentLayer {
     }
 
     /// Loads all keys stored in the layer. Returns key, lsn and value size.
+    #[tracing::instrument(skip_all, fields(layer=%self))]
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,

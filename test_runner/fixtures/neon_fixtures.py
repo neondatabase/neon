@@ -41,7 +41,12 @@ from urllib3.util.retry import Retry
 
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
+from fixtures.pageserver.allowed_errors import (
+    DEFAULT_PAGESERVER_ALLOWED_ERRORS,
+    scan_pageserver_log_for_errors,
+)
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.types import IndexPartDump
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
@@ -361,7 +366,6 @@ class PgProtocol:
 
 @dataclass
 class AuthKeys:
-    pub: str
     priv: str
 
     def generate_token(self, *, scope: str, **token_data: str) -> str:
@@ -430,8 +434,6 @@ class NeonEnvBuilder:
 
         # Pageserver remote storage
         self.pageserver_remote_storage = pageserver_remote_storage
-        # Extensions remote storage
-        self.ext_remote_storage: Optional[S3Storage] = None
         # Safekeepers remote storage
         self.sk_remote_storage: Optional[RemoteStorage] = None
 
@@ -530,24 +532,6 @@ class NeonEnvBuilder:
         )
         self.pageserver_remote_storage = ret
 
-    def enable_extensions_remote_storage(self, kind: RemoteStorageKind):
-        assert self.ext_remote_storage is None, "already configured extensions remote storage"
-
-        # there is an assumption that REAL_S3 for extensions is never
-        # cleaned up these are also special in that they have a hardcoded
-        # bucket and region, which is most likely the same as our normal
-        ext = self._configure_and_create_remote_storage(
-            kind,
-            RemoteStorageUser.EXTENSIONS,
-            bucket_name="neon-dev-extensions-eu-central-1",
-            bucket_region="eu-central-1",
-        )
-        assert isinstance(
-            ext, S3Storage
-        ), "unsure why, but only MOCK_S3 and REAL_S3 are currently supported for extensions"
-        ext.cleanup = False
-        self.ext_remote_storage = ext
-
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
         assert self.sk_remote_storage is None, "sk_remote_storage already configured"
 
@@ -604,8 +588,7 @@ class NeonEnvBuilder:
                 directory_to_clean.rmdir()
 
     def cleanup_remote_storage(self):
-        # extensions are currently not cleaned up, disabled when creating
-        for x in [self.pageserver_remote_storage, self.ext_remote_storage, self.sk_remote_storage]:
+        for x in [self.pageserver_remote_storage, self.sk_remote_storage]:
             if isinstance(x, S3Storage):
                 x.do_cleanup()
 
@@ -703,12 +686,12 @@ class NeonEnv:
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
         self.neon_cli = NeonCli(env=self)
+        self.pagectl = Pagectl(env=self)
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.pageservers: List[NeonPageserver] = []
         self.broker = config.broker
         self.pageserver_remote_storage = config.pageserver_remote_storage
-        self.ext_remote_storage = config.ext_remote_storage
         self.safekeepers_remote_storage = config.sk_remote_storage
         self.pg_version = config.pg_version
         # Binary path for pageserver, safekeeper, etc
@@ -877,9 +860,31 @@ class NeonEnv:
 
     @cached_property
     def auth_keys(self) -> AuthKeys:
-        pub = (Path(self.repo_dir) / "auth_public_key.pem").read_text()
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
-        return AuthKeys(pub=pub, priv=priv)
+        return AuthKeys(priv=priv)
+
+    def regenerate_keys_at(self, privkey_path: Path, pubkey_path: Path):
+        # compare generate_auth_keys() in local_env.rs
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ed25519", "-out", privkey_path],
+            cwd=self.repo_dir,
+            check=True,
+        )
+
+        subprocess.run(
+            [
+                "openssl",
+                "pkey",
+                "-in",
+                privkey_path,
+                "-pubout",
+                "-out",
+                pubkey_path,
+            ],
+            cwd=self.repo_dir,
+            check=True,
+        )
+        del self.auth_keys
 
     def generate_endpoint_id(self) -> str:
         """
@@ -1201,6 +1206,7 @@ class NeonCli(AbstractNeonCli):
         self,
         new_branch_name: str,
         tenant_id: Optional[TenantId] = None,
+        timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
         cmd = [
             "timeline",
@@ -1212,6 +1218,9 @@ class NeonCli(AbstractNeonCli):
             "--pg-version",
             self.env.pg_version,
         ]
+
+        if timeline_id is not None:
+            cmd.extend(["--timeline-id", str(timeline_id)])
 
         res = self.raw_cli(cmd)
         res.check_returncode()
@@ -1438,12 +1447,7 @@ class NeonCli(AbstractNeonCli):
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
 
-        storage = self.env.ext_remote_storage
-        s3_env_vars = None
-        if isinstance(storage, S3Storage):
-            s3_env_vars = storage.access_env_vars()
-
-        res = self.raw_cli(args, extra_env_vars=s3_env_vars)
+        res = self.raw_cli(args)
         res.check_returncode()
         return res
 
@@ -1537,6 +1541,20 @@ class ComputeCtl(AbstractNeonCli):
     COMMAND = "compute_ctl"
 
 
+class Pagectl(AbstractNeonCli):
+    """
+    A typed wrapper around the `pagectl` utility CLI tool.
+    """
+
+    COMMAND = "pagectl"
+
+    def dump_index_part(self, path: Path) -> IndexPartDump:
+        res = self.raw_cli(["index-part", "dump", str(path)])
+        res.check_returncode()
+        parsed = json.loads(res.stdout)
+        return IndexPartDump.from_json(parsed)
+
+
 class NeonAttachmentService:
     def __init__(self, env: NeonEnv):
         self.env = env
@@ -1554,7 +1572,7 @@ class NeonAttachmentService:
             self.running = False
         return self
 
-    def attach_hook(self, tenant_id: TenantId, pageserver_id: int) -> int:
+    def attach_hook_issue(self, tenant_id: TenantId, pageserver_id: int) -> int:
         response = requests.post(
             f"{self.env.control_plane_api}/attach-hook",
             json={"tenant_id": str(tenant_id), "node_id": pageserver_id},
@@ -1563,6 +1581,13 @@ class NeonAttachmentService:
         gen = response.json()["gen"]
         assert isinstance(gen, int)
         return gen
+
+    def attach_hook_drop(self, tenant_id: TenantId):
+        response = requests.post(
+            f"{self.env.control_plane_api}/attach-hook",
+            json={"tenant_id": str(tenant_id), "node_id": None},
+        )
+        response.raise_for_status()
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -1601,57 +1626,7 @@ class NeonPageserver(PgProtocol):
         # env.pageserver.allowed_errors.append(".*could not open garage door.*")
         #
         # The entries in the list are regular experessions.
-        self.allowed_errors = [
-            # All tests print these, when starting up or shutting down
-            ".*wal receiver task finished with an error: walreceiver connection handling failure.*",
-            ".*Shutdown task error: walreceiver connection handling failure.*",
-            ".*wal_connection_manager.*tcp connect error: Connection refused.*",
-            ".*query handler for .* failed: Socket IO error: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Postgres connection error.*",
-            ".*serving compute connection task.*exited with error: Connection reset by peer.*",
-            ".*serving compute connection task.*exited with error: Postgres query error.*",
-            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
-            # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
-            ".*Connection aborted: unexpected message from server*",
-            ".*kill_and_wait_impl.*: wait successful.*",
-            ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
-            ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
-            # safekeeper connection can fail with this, in the window between timeline creation
-            # and streaming start
-            ".*Failed to process query for timeline .*: state uninitialized, no data to read.*",
-            # Tests related to authentication and authorization print these
-            ".*Error processing HTTP request: Forbidden",
-            # intentional failpoints
-            ".*failpoint ",
-            # FIXME: These need investigation
-            ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
-            ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
-            ".*Removing intermediate uninit mark file.*",
-            # Tenant::delete_timeline() can cause any of the four following errors.
-            # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
-            ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
-            ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
-            ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
-            ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
-            ".*compaction_loop.*Compaction failed.*, retrying in.*timeline or pageserver is shutting down",  # When compaction checks timeline state after acquiring layer_removal_cs
-            ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
-            ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
-            ".*task iteration took longer than the configured period.*",
-            # this is until #3501
-            ".*Compaction failed.*, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
-            # these can happen anytime we do compactions from background task and shutdown pageserver
-            r".*ERROR.*ancestor timeline \S+ is being stopped",
-            # this is expected given our collaborative shutdown approach for the UploadQueue
-            ".*Compaction failed.*, retrying in .*: queue is in state Stopped.*",
-            # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
-            ".*Error processing HTTP request: NotFound: Timeline .* was not found",
-            ".*took more than expected to complete.*",
-            # these can happen during shutdown, but it should not be a reason to fail a test
-            ".*completed, took longer than expected.*",
-            # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
-            # and it is not a failure of our code when it happens.
-            ".*DeleteObjects.*We encountered an internal error. Please try again.*",
-        ]
+        self.allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     def timeline_dir(self, tenant_id: TenantId, timeline_id: Optional[TimelineId] = None) -> Path:
         """Get a timeline directory's path based on the repo directory of the test environment"""
@@ -1761,27 +1736,9 @@ class NeonPageserver(PgProtocol):
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.workdir, "pageserver.log"), "r")
-        error_or_warn = re.compile(r"\s(ERROR|WARN)")
-        errors = []
-        while True:
-            line = logfile.readline()
-            if not line:
-                break
+        errors = scan_pageserver_log_for_errors(logfile, self.allowed_errors)
 
-            if error_or_warn.search(line):
-                # Is this a torn log line?  This happens when force-killing a process and restarting
-                # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
-                if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
-                    continue
-
-                # It's an ERROR or WARN. Is it in the allow-list?
-                for a in self.allowed_errors:
-                    if re.match(a, line):
-                        break
-                else:
-                    errors.append(line)
-
-        for error in errors:
+        for _lineno, error in errors:
             log.info(f"not allowed error: {error.strip()}")
 
         assert not errors
@@ -1831,12 +1788,19 @@ class NeonPageserver(PgProtocol):
         to call into the pageserver HTTP client.
         """
         if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         else:
             generation = None
 
         client = self.http_client()
         return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+
+    def tenant_detach(self, tenant_id: TenantId):
+        if self.env.attachment_service is not None:
+            self.env.attachment_service.attach_hook_drop(tenant_id)
+
+        client = self.http_client()
+        return client.tenant_detach(tenant_id)
 
 
 def append_pageserver_param_overrides(
@@ -1850,6 +1814,8 @@ def append_pageserver_param_overrides(
         params_to_update.append(
             f"--pageserver-config-override=remote_storage={remote_storage_toml_table}"
         )
+    else:
+        params_to_update.append('--pageserver-config-override=remote_storage=""')
 
     env_overrides = os.getenv("NEON_PAGESERVER_OVERRIDES")
     if env_overrides is not None:
@@ -2155,6 +2121,29 @@ class NeonProxy(PgProtocol):
                 *["--uri", NeonProxy.link_auth_uri],
                 *["--allow-self-signed-compute", "true"],
             ]
+
+    class Console(AuthBackend):
+        def __init__(self, endpoint: str, fixed_rate_limit: Optional[int] = None):
+            self.endpoint = endpoint
+            self.fixed_rate_limit = fixed_rate_limit
+
+        def extra_args(self) -> list[str]:
+            args = [
+                # Console auth backend params
+                *["--auth-backend", "console"],
+                *["--auth-endpoint", self.endpoint],
+            ]
+            if self.fixed_rate_limit is not None:
+                args += [
+                    *["--disable-dynamic-rate-limiter", "false"],
+                    *["--rate-limit-algorithm", "aimd"],
+                    *["--initial-limit", str(1)],
+                    *["--rate-limiter-timeout", "1s"],
+                    *["--aimd-min-limit", "0"],
+                    *["--aimd-increase-by", "1"],
+                    *["--wake-compute-cache", "size=0"],  # Disable cache to test rate limiter.
+                ]
+            return args
 
     @dataclass(frozen=True)
     class Postgres(AuthBackend):
@@ -2579,6 +2568,17 @@ class Endpoint(PgProtocol):
         # Write it back updated
         with open(config_path, "w") as file:
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    # Mock the extension part of spec passed from control plane for local testing
+    # endpooint.rs adds content of this file as a part of the spec.json
+    def create_remote_extension_spec(self, spec: dict[str, Any]):
+        """Create a remote extension spec file for the endpoint."""
+        remote_extensions_spec_path = os.path.join(
+            self.endpoint_path(), "remote_extensions_spec.json"
+        )
+
+        with open(remote_extensions_spec_path, "w") as file:
+            json.dump(spec, file, indent=4)
 
     def stop(self) -> "Endpoint":
         """
