@@ -767,7 +767,7 @@ impl PageServerConf {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
                 "tenant_config" => {
-                    t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse '{key}'"))?;
+                    t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
