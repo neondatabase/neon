@@ -259,19 +259,6 @@ impl ShardIdentity {
     }
 }
 
-impl Default for ShardIdentity {
-    /// The default identity is to be the only shard for a tenant, i.e. the legacy
-    /// pre-sharding case.
-    fn default() -> Self {
-        ShardIdentity {
-            layout: LAYOUT_V1,
-            number: ShardNumber(0),
-            count: ShardCount(1),
-            stripe_size: DEFAULT_STRIPE_SIZE,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
