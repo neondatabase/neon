@@ -498,7 +498,7 @@ impl DeltaLayerWriterInner {
 
         let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
-        trace!("created delta layer {}", layer.local_path());
+        trace!("created delta layer {}", self.path);
 
         Ok(layer)
     }

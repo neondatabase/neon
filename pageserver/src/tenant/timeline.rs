@@ -2176,7 +2176,7 @@ trait TraversalLayerExt {
 
 impl TraversalLayerExt for Layer {
     fn traversal_id(&self) -> TraversalId {
-        self.local_path().to_string()
+        self.filename().to_string()
     }
 }
 
@@ -2890,7 +2890,8 @@ impl Timeline {
                 let _g = span.entered();
                 let new_delta =
                     Handle::current().block_on(frozen_layer.write_to_disk(&self_clone, &ctx))?;
-                let new_delta_path = new_delta.local_path().to_owned();
+                let new_delta_path = new_delta
+                    .build_local_path(&self_clone.tenant_shard_id, &self_clone.timeline_id);
 
                 // Sync it to disk.
                 //
@@ -3134,7 +3135,7 @@ impl Timeline {
         // and fsync them all in parallel.
         let all_paths = image_layers
             .iter()
-            .map(|layer| layer.local_path().to_owned())
+            .map(|layer| layer.build_local_path(&self.tenant_shard_id, &self.timeline_id))
             .collect::<Vec<_>>();
 
         par_fsync::par_fsync_async(&all_paths)
@@ -3683,7 +3684,7 @@ impl Timeline {
             // FIXME: the writer already fsyncs all data, only rename needs to be fsynced here
             let layer_paths: Vec<Utf8PathBuf> = new_layers
                 .iter()
-                .map(|l| l.local_path().to_owned())
+                .map(|l| l.build_local_path(&self.tenant_shard_id, &self.timeline_id))
                 .collect();
 
             // Fsync all the layer files and directory using multiple threads to

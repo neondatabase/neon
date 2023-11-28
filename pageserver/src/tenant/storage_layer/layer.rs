@@ -3,12 +3,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 use tracing::Instrument;
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::heavier_once_cell;
 
@@ -179,7 +180,7 @@ impl Layer {
         let downloaded = resident.expect("just initialized");
 
         // if the rename works, the path is as expected
-        std::fs::rename(temp_path, owner.local_path())
+        std::fs::rename(temp_path, owner.local_path()?)
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
         Ok(ResidentLayer { downloaded, owner })
@@ -299,8 +300,12 @@ impl Layer {
         &self.0.access_stats
     }
 
-    pub(crate) fn local_path(&self) -> &Utf8Path {
-        &self.0.path
+    fn local_path(&self) -> Result<Utf8PathBuf, DownloadError> {
+        self.0.local_path()
+    }
+
+    pub(crate) fn filename(&self) -> LayerFileName {
+        self.0.desc.filename()
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
@@ -392,12 +397,8 @@ impl ResidentOrWantedEvicted {
 }
 
 struct LayerInner {
-    /// Only needed to check ondemand_download_behavior_treat_error_as_warn and creation of
-    /// [`Self::path`].
+    /// Only needed to check ondemand_download_behavior_treat_error_as_warn and in [`Self::build_local_path`]
     conf: &'static PageServerConf,
-
-    /// Full path to the file; unclear if this should exist anymore.
-    path: Utf8PathBuf,
 
     desc: PersistentLayerDesc,
 
@@ -480,12 +481,17 @@ impl Drop for LayerInner {
             return;
         }
 
-        // If timeline is alive, we can construct a span with IDs for this function.
-        let span = self.timeline.upgrade().map(|timeline| {
-            tracing::info_span!(parent: None, "layer_gc", tenant_id = %timeline.tenant_shard_id.tenant_id, shard_id=%timeline.tenant_shard_id.shard_slug(), timeline_id = %timeline.timeline_id)
-        });
+        // We will only do I/O on drop if our Timeline still exists.  Otherwise, we may safely
+        // leave garbage layers behind to be cleaned up the next time this Timeline is instantiated.
+        let timeline = match self.timeline.upgrade() {
+            Some(t) => t,
+            None => return,
+        };
 
-        let path = std::mem::take(&mut self.path);
+        // If timeline is alive, we can construct a span with IDs for this function.
+        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %timeline.tenant_shard_id.tenant_id, shard_id=%timeline.tenant_shard_id.shard_slug(), timeline_id = %timeline.timeline_id);
+        let path = self.build_local_path(&timeline.tenant_shard_id, &timeline.timeline_id);
+
         let file_name = self.layer_desc().filename();
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
@@ -493,7 +499,7 @@ impl Drop for LayerInner {
         let status = self.status.clone();
 
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
-            let _g = span.map(|s| s.entered());
+            let _g = span.entered();
 
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
@@ -557,10 +563,6 @@ impl LayerInner {
         generation: Generation,
         shard: ShardIndex,
     ) -> Self {
-        let path = conf
-            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
-            .join(desc.filename().to_string());
-
         let (inner, version) = if let Some(inner) = downloaded {
             let version = inner.version;
             let resident = ResidentOrWantedEvicted::Resident(inner);
@@ -571,7 +573,6 @@ impl LayerInner {
 
         LayerInner {
             conf,
-            path,
             desc,
             timeline: Arc::downgrade(timeline),
             have_remote_client: timeline.remote_client.is_some(),
@@ -585,6 +586,29 @@ impl LayerInner {
             generation,
             shard,
         }
+    }
+
+    /// Use our weak ref to Timeline to build a local file path: this will
+    /// fail if our parent Timeline has been destroyed: layers should not
+    /// do any I/O after this point, and therefore not require knowledge of path.
+    pub(crate) fn local_path(&self) -> Result<Utf8PathBuf, DownloadError> {
+        let timeline = self
+            .timeline
+            .upgrade()
+            .ok_or_else(|| DownloadError::TimelineShutdown)?;
+
+        Ok(self.build_local_path(&timeline.tenant_shard_id, &timeline.timeline_id))
+    }
+
+    /// Use this instead of `local_path` if you already have a Timeline to hand.
+    pub(crate) fn build_local_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.conf
+            .timeline_path(tenant_shard_id, timeline_id)
+            .join(self.desc.filename().to_string())
     }
 
     fn garbage_collect_on_drop(&self) {
@@ -923,7 +947,11 @@ impl LayerInner {
     }
 
     async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        match tokio::fs::metadata(&self.path).await {
+        let path = self
+            .local_path()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Timeline destroyed"))?;
+
+        match tokio::fs::metadata(path).await {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(NeedsDownload::NotFound)),
             Err(e) => Err(e),
@@ -931,7 +959,11 @@ impl LayerInner {
     }
 
     fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        match self.path.metadata() {
+        let path = self
+            .local_path()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Timeline destroyed"))?;
+
+        match path.metadata() {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(NeedsDownload::NotFound)),
             Err(e) => Err(e),
@@ -1068,7 +1100,11 @@ impl LayerInner {
             LayerResidenceEventReason::ResidenceChange,
         );
 
-        let res = match capture_mtime_and_remove(&self.path) {
+        let local_path = self
+            .local_path()
+            .map_err(|_| EvictionCancelled::TimelineGone)?;
+
+        let res = match capture_mtime_and_remove(&local_path) {
             Ok(local_layer_mtime) => {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
@@ -1239,7 +1275,7 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
                 ));
-                delta_layer::DeltaLayerInner::load(&owner.path, summary, ctx)
+                delta_layer::DeltaLayerInner::load(&owner.local_path()?, summary, ctx)
                     .await
                     .map(|res| res.map(LayerKind::Delta))
             } else {
@@ -1250,7 +1286,7 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     lsn,
                 ));
-                image_layer::ImageLayerInner::load(&owner.path, lsn, summary, ctx)
+                image_layer::ImageLayerInner::load(&owner.local_path()?, lsn, summary, ctx)
                     .await
                     .map(|res| res.map(LayerKind::Image))
             };
@@ -1374,8 +1410,12 @@ impl ResidentLayer {
         }
     }
 
-    pub(crate) fn local_path(&self) -> &Utf8Path {
-        &self.owner.0.path
+    pub(crate) fn build_local_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.owner.0.build_local_path(tenant_shard_id, timeline_id)
     }
 
     pub(crate) fn access_stats(&self) -> &LayerAccessStats {

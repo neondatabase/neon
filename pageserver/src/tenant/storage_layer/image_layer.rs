@@ -572,7 +572,7 @@ impl ImageLayerWriterInner {
         // FIXME: why not carry the virtualfile here, it supports renaming?
         let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
-        trace!("created image layer {}", layer.local_path());
+        trace!("created image layer {}", self.path);
 
         Ok(layer)
     }
