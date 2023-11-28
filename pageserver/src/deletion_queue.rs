@@ -160,7 +160,7 @@ pub struct DeletionQueueClient {
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct TenantDeletionList {
     /// For each Timeline, a list of key fragments to append to the timeline remote path
     /// when reconstructing a full key
@@ -215,7 +215,7 @@ where
 /// during recovery as startup.
 const TEMP_SUFFIX: &str = "tmp";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct DeletionList {
     /// Serialization version, for future use
     version: u8,
@@ -1320,5 +1320,35 @@ pub(crate) mod mock {
                 lsn_table: self.lsn_table.clone(),
             }
         }
+    }
+
+    /// Test round-trip serialization/deserialization, and test stability of the format
+    /// vs. a static expected string for the serialized version.
+    #[test]
+    fn deletion_list_serialization() -> anyhow::Result<()> {
+        let tenant_id = "ad6c1a56f5680419d3a16ff55d97ec3c"
+            .to_string()
+            .parse::<TenantId>()?;
+        let timeline_id = "be322c834ed9e709e63b5c9698691910"
+            .to_string()
+            .parse::<TimelineId>()?;
+        let generation = Generation::new(123);
+
+        let object =
+            RemotePath::from_string(&format!("tenants/{tenant_id}/timelines/{timeline_id}/foo"))?;
+        let mut objects = [object].to_vec();
+
+        let mut example = DeletionList::new(1);
+        example.push(&tenant_id, &timeline_id, generation, &mut objects);
+
+        let encoded = serde_json::to_string(&example)?;
+
+        let expected = "{\"version\":1,\"sequence\":1,\"tenants\":{\"ad6c1a56f5680419d3a16ff55d97ec3c\":{\"timelines\":{\"be322c834ed9e709e63b5c9698691910\":[\"foo\"]},\"generation\":123}},\"size\":1}".to_string();
+        assert_eq!(encoded, expected);
+
+        let decoded = serde_json::from_str::<DeletionList>(&encoded)?;
+        assert_eq!(example, decoded);
+
+        Ok(())
     }
 }
