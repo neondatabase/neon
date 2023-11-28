@@ -562,31 +562,28 @@ impl DeleteTenantFlow {
                         .set(locked.len() as u64);
 
                     match removed {
-                        TenantsMapRemoveResult::Occupied(slot) => {
-                            match slot {
-                                TenantSlot::Secondary => {
-                                    // This is unexpected: this secondary tenants should not have been created, and we
-                                    // are not in a position to shut it down from here.
+                        TenantsMapRemoveResult::Occupied(TenantSlot::Attached(tenant)) => {
+                            match tenant.current_state() {
+                                TenantState::Stopping { .. } | TenantState::Broken { .. } => {
+                                    // Expected: we put the tenant into stopping state before we start deleting it
+                                }
+                                state => {
+                                    // Unexpected state
                                     tracing::warn!(
-                                        "Tenant transitioned to secondary mode while deleting!"
+                                        "Tenant in unexpected state {state} after deletion"
                                     );
                                 }
-                                TenantSlot::Attached(tenant) => match tenant.current_state() {
-                                    TenantState::Stopping { .. } | TenantState::Broken { .. } => {
-                                        // Expected: we put the tenant into stopping state before we start deleting it
-                                    }
-                                    state => {
-                                        // Unexpected state
-                                        tracing::warn!(
-                                            "Tenant in unexpected state {state} after deletion"
-                                        );
-                                    }
-                                },
-                                TenantSlot::InProgress(_) => {
-                                    unreachable!("TenantsMap::remove handles InProgress separately, should never return it here");
-                                }
-                            };
+                            }
                             break;
+                        }
+                        TenantsMapRemoveResult::Occupied(TenantSlot::Secondary) => {
+                            // This is unexpected: this secondary tenants should not have been created, and we
+                            // are not in a position to shut it down from here.
+                            tracing::warn!("Tenant transitioned to secondary mode while deleting!");
+                            break;
+                        }
+                        TenantsMapRemoveResult::Occupied(TenantSlot::InProgress(_)) => {
+                            unreachable!("TenantsMap::remove handles InProgress separately, should never return it here");
                         }
                         TenantsMapRemoveResult::Vacant => {
                             tracing::warn!(
