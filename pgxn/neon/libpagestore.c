@@ -119,15 +119,24 @@ CheckConnstringUpdated()
     return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
 }
 
-static void
+/* Returns true if the connstring has changed and false if not */
+static bool
 ReloadConnstring()
 {
     if(!PagestoreShmemIsValid())
-        return;
+        return false;
     LWLockAcquire(pagestore_shared->lock, LW_SHARED);
+
+    if(strcmp(local_pageserver_connstring, pagestore_shared->pageserver_connstring) == 0)
+    {
+        LWLockRelease(pagestore_shared->lock);
+        return false;
+    }
+
     strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
     pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
     LWLockRelease(pagestore_shared->lock);
+    return true;
 }
 
 static bool
@@ -290,7 +299,6 @@ pageserver_disconnect(void)
 	 */
 	if (connected)
 	{
-		neon_log(LOG, "dropping connection to page server due to error");
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 		connected = false;
@@ -311,8 +319,12 @@ pageserver_send(NeonRequest * request)
 
         if(CheckConnstringUpdated())
         {
-            pageserver_disconnect();
-            ReloadConnstring();
+            bool should_disconnect = ReloadConnstring();
+            if(should_disconnect)
+            {
+                neon_log(LOG, "pageserver_send disconnect because connstring changed");
+                pageserver_disconnect();
+            }
         }
 
 	/* If the connection was lost for some reason, reconnect */

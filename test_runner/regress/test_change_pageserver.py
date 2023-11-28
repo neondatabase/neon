@@ -60,7 +60,10 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     execute("SELECT count(*) FROM foo")
     assert fetchone() == (100000,)
 
-    endpoint.reconfigure(pageserver_id=alt_pageserver_id)
+    # Reconfigure it using the same connstring just to make sure nothing breaks
+    # as we have special handling for if the connstring doesn't change
+    for i in range(5):
+        endpoint.reconfigure(pageserver_id=alt_pageserver_id)
 
     # Verify that the neon.pageserver_connstring GUC is set to the correct thing
     execute("SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'")
