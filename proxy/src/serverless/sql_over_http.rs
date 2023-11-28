@@ -13,6 +13,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use tokio_postgres::error::DbError;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -212,14 +213,33 @@ pub async fn handle(
             Ok(r) => r,
             Err(e) => {
                 let message = format!("{:?}", e);
-                let code = e.downcast_ref::<tokio_postgres::Error>().and_then(|e| {
-                    e.code()
-                        .map(|s| serde_json::to_value(s.code()).unwrap_or_default())
-                });
-                let code = match code {
-                    Some(c) => c,
-                    None => Value::Null,
-                };
+                let db_error = e
+                    .downcast_ref::<tokio_postgres::Error>()
+                    .and_then(|e| e.as_db_error());
+                fn get<'a, T: serde::Serialize>(
+                    db: Option<&'a DbError>,
+                    x: impl FnOnce(&'a DbError) -> T,
+                ) -> Value {
+                    db.map(x)
+                        .and_then(|t| serde_json::to_value(t).ok())
+                        .unwrap_or_default()
+                }
+
+                // TODO(conrad): db_error.position()
+                let code = get(db_error, |db| db.code().code());
+                let severity = get(db_error, |db| db.severity());
+                let detail = get(db_error, |db| db.detail());
+                let hint = get(db_error, |db| db.hint());
+                let where_ = get(db_error, |db| db.where_());
+                let table = get(db_error, |db| db.table());
+                let column = get(db_error, |db| db.column());
+                let schema = get(db_error, |db| db.schema());
+                let datatype = get(db_error, |db| db.datatype());
+                let constraint = get(db_error, |db| db.constraint());
+                let file = get(db_error, |db| db.file());
+                let line = get(db_error, |db| db.line());
+                let routine = get(db_error, |db| db.routine());
+
                 error!(
                     ?code,
                     "sql-over-http per-client task finished with an error: {e:#}"
@@ -227,7 +247,22 @@ pub async fn handle(
                 // TODO: this shouldn't always be bad request.
                 json_response(
                     StatusCode::BAD_REQUEST,
-                    json!({ "message": message, "code": code }),
+                    json!({
+                        "message": message,
+                        "code": code,
+                        "detail": detail,
+                        "hint": hint,
+                        "severity": severity,
+                        "where": where_,
+                        "table": table,
+                        "column": column,
+                        "schema": schema,
+                        "datatype": datatype,
+                        "constraint": constraint,
+                        "file": file,
+                        "line": line,
+                        "routine": routine,
+                    }),
                 )?
             }
         },
