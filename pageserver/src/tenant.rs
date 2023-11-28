@@ -1540,7 +1540,6 @@ impl Tenant {
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -1548,7 +1547,6 @@ impl Tenant {
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
         broker_client: storage_broker::BrokerClientChannel,
-        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         if !self.is_active() {
@@ -1622,7 +1620,7 @@ impl Tenant {
                     .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, cancel, ctx)
+                self.bootstrap_timeline(new_timeline_id, pg_version, ctx)
                     .await?
             }
         };
@@ -2934,7 +2932,6 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
-        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
@@ -2958,7 +2955,7 @@ impl Tenant {
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &pgdata_path, pg_version, cancel).await?;
+        run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&pgdata_path) {
