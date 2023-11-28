@@ -142,6 +142,17 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         .collect();
 
                     if !orphan_layers.is_empty() {
+                        result.errors.push(format!(
+                            "index_part.json does not contain layers from S3: {:?}",
+                            orphan_layers
+                                .iter()
+                                .map(|(layer_name, gen)| format!(
+                                    "{}{}",
+                                    layer_name.file_name(),
+                                    gen.get_suffix()
+                                ))
+                                .collect::<Vec<_>>(),
+                        ));
                         result.garbage_keys.extend(orphan_layers.iter().map(
                             |(layer_name, layer_gen)| {
                                 let mut key = s3_root.timeline_root(id).prefix_in_bucket;
