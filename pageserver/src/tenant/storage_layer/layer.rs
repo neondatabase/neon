@@ -431,11 +431,13 @@ struct LayerInner {
     /// for created layers from [`Timeline::generation`].
     generation: Generation,
 
-    /// The shard of this Layer
+    /// The shard of this Layer.
     ///
-    /// For created layers, this is always the shard of the parent creating [`crate::tenant::Tenant`] object.  For
-    /// loaded layers, this may be some other shard, if the tenant has undergone a shard split
-    /// since the layer was originally written.
+    /// For layers created in this process, this will always be the [`ShardIndex`] of the
+    /// current `ShardIdentity`` (TODO: add link once it's introduced).
+    ///
+    /// For loaded layers, this may be some other value if the tenant has undergone
+    /// a shard split since the layer was originally written.
     shard: ShardIndex,
 }
 
