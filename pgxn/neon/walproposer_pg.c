@@ -1460,7 +1460,10 @@ walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count)
 static void
 walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, sk->wp);
+	char log_prefix[64];
+
+	snprintf(log_prefix, sizeof(log_prefix), "sk %s:%s nwr: ", sk->host, sk->port);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, sk->wp, log_prefix);
 	if (sk->xlogreader == NULL)
 		elog(FATAL, "Failed to allocate xlog reader");
 }

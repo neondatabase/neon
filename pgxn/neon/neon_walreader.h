@@ -19,7 +19,7 @@ typedef enum
 	NEON_WALREAD_ERROR,
 } NeonWALReadResult;
 
-extern NeonWALReader *NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, WalProposer *wp);
+extern NeonWALReader *NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, WalProposer *wp, char *log_prefix);
 extern void NeonWALReaderFree(NeonWALReader *state);
 extern NeonWALReadResult NeonWALRead(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
 extern pgsocket NeonWALReaderSocket(NeonWALReader *state);
