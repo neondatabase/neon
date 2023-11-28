@@ -2638,14 +2638,12 @@ impl Tenant {
 
         // Perform GC for each timeline.
         //
-        // Note that we don't hold the GC lock here because we don't want
-        // to delay the branch creation task, which requires the GC lock.
-        // A timeline GC iteration can be slow because it may need to wait for
-        // compaction (both require `layer_removal_cs` lock),
-        // but the GC iteration can run concurrently with branch creation.
+        // Note that we don't hold the `Tenant::gc_cs` lock here because we don't want to delay the
+        // branch creation task, which requires the GC lock. A GC iteration can run concurrently
+        // with branch creation.
         //
-        // See comments in [`Tenant::branch_timeline`] for more information
-        // about why branch creation task can run concurrently with timeline's GC iteration.
+        // See comments in [`Tenant::branch_timeline`] for more information about why branch
+        // creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if task_mgr::is_shutdown_requested() || cancel.is_cancelled() {
                 // We were requested to shut down. Stop and return with the progress we

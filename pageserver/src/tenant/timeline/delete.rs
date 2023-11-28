@@ -110,11 +110,11 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
     Ok(())
 }
 
-/// Grab the layer_removal_cs lock, and actually perform the deletion.
+/// Grab the compaction and gc locks, and actually perform the deletion.
 ///
-/// This lock prevents prevents GC or compaction from running at the same time.
-/// The GC task doesn't register itself with the timeline it's operating on,
-/// so it might still be running even though we called `shutdown_tasks`.
+/// The locks prevent GC or compaction from running at the same time. The background tasks do not
+/// register themselves with the timeline it's operating on, so it might still be running even
+/// though we called `shutdown_tasks`.
 ///
 /// Note that there are still other race conditions between
 /// GC, compaction and timeline deletion. See
@@ -122,14 +122,19 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
 ///
 /// No timeout here, GC & Compaction should be responsive to the
 /// `TimelineState::Stopping` change.
-async fn delete_local_layer_files(
+// pub(super): documentation link
+pub(super) async fn delete_local_layer_files(
     conf: &PageServerConf,
     tenant_id: TenantId,
     timeline: &Timeline,
 ) -> anyhow::Result<()> {
-    info!("waiting for layer_removal_cs.lock()");
-    let layer_removal_guard = timeline.layer_removal_cs.lock().await;
-    info!("got layer_removal_cs.lock(), deleting layer files");
+    let guards = async { tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock()) };
+    let guards = crate::timed(
+        guards,
+        "acquire gc and compaction locks",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
 
     // NB: storage_sync upload tasks that reference these layers have been cancelled
     //     by the caller.
@@ -150,8 +155,8 @@ async fn delete_local_layer_files(
     // because of a previous failure/cancellation at/after
     // failpoint timeline-delete-after-rm.
     //
-    // It can also happen if we race with tenant detach, because,
-    // it doesn't grab the layer_removal_cs lock.
+    // ErrorKind::NotFound can also happen if we race with tenant detach, because,
+    // no locks are shared.
     //
     // For now, log and continue.
     // warn! level is technically not appropriate for the
@@ -219,8 +224,8 @@ async fn delete_local_layer_files(
         .with_context(|| format!("Failed to remove: {}", entry.path().display()))?;
     }
 
-    info!("finished deleting layer files, releasing layer_removal_cs.lock()");
-    drop(layer_removal_guard);
+    info!("finished deleting layer files, releasing locks");
+    drop(guards);
 
     fail::fail_point!("timeline-delete-after-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?

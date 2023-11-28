@@ -178,7 +178,14 @@ where
                 .unwrap_or(false);
 
             if valid && *validated_generation == tenant_lsn_state.generation {
-                for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
+                for (timeline_id, pending_lsn) in tenant_lsn_state.timelines {
+                    tracing::debug!(
+                        %tenant_id,
+                        %timeline_id,
+                        current = %pending_lsn.result_slot.load(),
+                        projected = %pending_lsn.projected,
+                        "advancing validated remote_consistent_lsn",
+                    );
                     pending_lsn.result_slot.store(pending_lsn.projected);
                 }
             } else {
