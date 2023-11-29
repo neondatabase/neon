@@ -122,6 +122,12 @@ fn exactly_one_or_none<'a>(
     }
 }
 
+pub(crate) enum TenantsMapRemoveResult {
+    Occupied(TenantSlot),
+    Vacant,
+    InProgress(utils::completion::Barrier),
+}
+
 impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
@@ -136,12 +142,28 @@ impl TenantsMap {
         }
     }
 
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<TenantSlot> {
+    /// Only for use from DeleteTenantFlow.  This method directly removes a TenantSlot from the map.
+    ///
+    /// The normal way to remove a tenant is using a SlotGuard, which will gracefully remove the guarded
+    /// slot if the enclosed tenant is shutdown.
+    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> TenantsMapRemoveResult {
+        use std::collections::btree_map::Entry;
         match self {
-            TenantsMap::Initializing => None,
+            TenantsMap::Initializing => TenantsMapRemoveResult::Vacant,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 let key = exactly_one_or_none(m, tenant_id).map(|(k, _)| *k);
-                key.and_then(|key| m.remove(&key))
+                match key {
+                    Some(key) => match m.entry(key) {
+                        Entry::Occupied(entry) => match entry.get() {
+                            TenantSlot::InProgress(barrier) => {
+                                TenantsMapRemoveResult::InProgress(barrier.clone())
+                            }
+                            _ => TenantsMapRemoveResult::Occupied(entry.remove()),
+                        },
+                        Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
+                    },
+                    None => TenantsMapRemoveResult::Vacant,
+                }
             }
         }
     }
