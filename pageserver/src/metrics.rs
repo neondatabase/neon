@@ -407,16 +407,14 @@ pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
 
-    use crate::task_mgr::TaskKind;
-
     pub(crate) struct StartCalculation(IntCounterVec);
     pub(crate) static START_CALCULATION: Lazy<StartCalculation> = Lazy::new(|| {
         StartCalculation(
             register_int_counter_vec!(
                 "pageserver_initial_logical_size_start_calculation",
                 "Incremented each time we start an initial logical size calculation attempt. \
-                 The `task_kind` label is for the task kind that caused this attempt.",
-                &["attempt", "task_kind"]
+                 The `circumstances` label provides some additional details.",
+                &["attempt", "circumstances"]
             )
             .unwrap(),
         )
@@ -464,19 +462,24 @@ pub(crate) mod initial_logical_size {
         inc_drop_calculation: Option<IntCounter>,
     }
 
+    #[derive(strum_macros::IntoStaticStr)]
+    pub(crate) enum StartCircumstances {
+        EmptyInitial,
+        SkippedConcurrencyLimiter,
+        AfterBackgroundTasksRateLimit,
+    }
+
     impl StartCalculation {
-        pub(crate) fn first(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
-            let task_kind_label: &'static str =
-                causing_task_kind.map(|k| k.into()).unwrap_or_default();
-            self.0.with_label_values(&["first", task_kind_label]);
+        pub(crate) fn first(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0.with_label_values(&["first", circumstances_label]);
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
             }
         }
-        pub(crate) fn retry(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
-            let task_kind_label: &'static str =
-                causing_task_kind.map(|k| k.into()).unwrap_or_default();
-            self.0.with_label_values(&["retry", task_kind_label]);
+        pub(crate) fn retry(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0.with_label_values(&["retry", circumstances_label]);
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
             }

@@ -351,7 +351,12 @@ impl TimelineSnapshot {
 
             let current_exact_logical_size = {
                 let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
-                let size = span.in_scope(|| t.get_current_logical_size(ctx));
+                let size = span.in_scope(|| {
+                    t.get_current_logical_size(
+                        crate::tenant::timeline::GetLogicalSizePriority::Background,
+                        ctx,
+                    )
+                });
                 match size {
                     // Only send timeline logical size when it is fully calculated.
                     CurrentLogicalSize::Exact(ref size) => Some(size.into()),

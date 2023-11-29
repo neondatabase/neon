@@ -680,7 +680,7 @@ impl Tenant {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
-                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
+// do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
                     let _ = init_order
                         .as_mut()
                         .and_then(|x| x.initial_logical_size_attempt.take());
@@ -697,7 +697,7 @@ impl Tenant {
                         &tenant_clone,
                         preload,
                         tenants,
-                        init_order,
+init_order,
                         &ctx,
                     )
                     .await
