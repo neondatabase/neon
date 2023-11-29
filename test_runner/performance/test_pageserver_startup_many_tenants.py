@@ -70,9 +70,10 @@ def test_pageserver_startup_many_tenants(neon_env_builder: NeonEnvBuilder, pg_bi
     # cached_metric_collection_interval: 0s
 
     # run a fake metric collection endpoint in some other terminal using
-    # python3 -m http.server 6666
+    # python3 -m http.server 6666 > /dev/null 2>&1
 
     # then start pageserver
+    ulimit -SH -n 100000
     ./target/release/neon_local start
 
 
