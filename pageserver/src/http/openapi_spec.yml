@@ -672,7 +672,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantLocationConfig"
+              $ref: "#/components/schemas/TenantLocationConfigRequest"
       responses:
         "200":
           description: Tenant is now in requested state
