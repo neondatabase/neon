@@ -434,8 +434,11 @@ def check_neon_works(
 
     pg_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
-    cli_current.endpoint_start("main", pg_port=pg_port, http_port=http_port)
-    request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
+    cli_current.endpoint_create(
+        branch_name="main", pg_port=pg_port, http_port=http_port, endpoint_id="ep-main"
+    )
+    cli_current.endpoint_start("ep-main")
+    request.addfinalizer(lambda: cli_current.endpoint_stop("ep-main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
     pg_bin.run_capture(

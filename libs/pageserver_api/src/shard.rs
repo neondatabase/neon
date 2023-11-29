@@ -2,12 +2,13 @@ use std::{ops::RangeInclusive, str::FromStr};
 
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
+use thiserror;
 use utils::id::TenantId;
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardNumber(pub u8);
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardCount(pub u8);
 
 impl ShardCount {
@@ -38,7 +39,7 @@ impl ShardNumber {
 /// Note that the binary encoding is _not_ backward compatible, because
 /// at the time sharding is introduced, there are no existing binary structures
 /// containing TenantId that we need to handle.
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
 pub struct TenantShardId {
     pub tenant_id: TenantId,
     pub shard_number: ShardNumber,
@@ -139,6 +140,89 @@ impl From<[u8; 18]> for TenantShardId {
     }
 }
 
+/// For use within the context of a particular tenant, when we need to know which
+/// shard we're dealing with, but do not need to know the full ShardIdentity (because
+/// we won't be doing any page->shard mapping), and do not need to know the fully qualified
+/// TenantShardId.
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
+pub struct ShardIndex {
+    pub shard_number: ShardNumber,
+    pub shard_count: ShardCount,
+}
+
+impl ShardIndex {
+    pub fn new(number: ShardNumber, count: ShardCount) -> Self {
+        Self {
+            shard_number: number,
+            shard_count: count,
+        }
+    }
+    pub fn unsharded() -> Self {
+        Self {
+            shard_number: ShardNumber(0),
+            shard_count: ShardCount(0),
+        }
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+    }
+
+    /// For use in constructing remote storage paths: concatenate this with a TenantId
+    /// to get a fully qualified TenantShardId.
+    ///
+    /// Backward compat: this function returns an empty string if Self::is_unsharded, such
+    /// that the legacy pre-sharding remote key format is preserved.
+    pub fn get_suffix(&self) -> String {
+        if self.is_unsharded() {
+            "".to_string()
+        } else {
+            format!("-{:02x}{:02x}", self.shard_number.0, self.shard_count.0)
+        }
+    }
+}
+
+impl std::fmt::Display for ShardIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}{:02x}", self.shard_number.0, self.shard_count.0)
+    }
+}
+
+impl std::fmt::Debug for ShardIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Debug is the same as Display: the compact hex representation
+        write!(f, "{}", self)
+    }
+}
+
+impl std::str::FromStr for ShardIndex {
+    type Err = hex::FromHexError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Expect format: 1 byte shard number, 1 byte shard count
+        if s.len() == 4 {
+            let bytes = s.as_bytes();
+            let mut shard_parts: [u8; 2] = [0u8; 2];
+            hex::decode_to_slice(bytes, &mut shard_parts)?;
+            Ok(Self {
+                shard_number: ShardNumber(shard_parts[0]),
+                shard_count: ShardCount(shard_parts[1]),
+            })
+        } else {
+            Err(hex::FromHexError::InvalidStringLength)
+        }
+    }
+}
+
+impl From<[u8; 2]> for ShardIndex {
+    fn from(b: [u8; 2]) -> Self {
+        Self {
+            shard_number: ShardNumber(b[0]),
+            shard_count: ShardCount(b[1]),
+        }
+    }
+}
+
 impl Serialize for TenantShardId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -201,6 +285,151 @@ impl<'de> Deserialize<'de> for TenantShardId {
         } else {
             deserializer.deserialize_tuple(
                 18,
+                IdVisitor {
+                    is_human_readable_deserializer: false,
+                },
+            )
+        }
+    }
+}
+
+/// Stripe size in number of pages
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardStripeSize(pub u32);
+
+/// Layout version: for future upgrades where we might change how the key->shard mapping works
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardLayout(u8);
+
+const LAYOUT_V1: ShardLayout = ShardLayout(1);
+
+/// Default stripe size in pages: 256MiB divided by 8kiB page size.
+const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+
+/// The ShardIdentity contains the information needed for one member of map
+/// to resolve a key to a shard, and then check whether that shard is ==self.
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardIdentity {
+    pub layout: ShardLayout,
+    pub number: ShardNumber,
+    pub count: ShardCount,
+    pub stripe_size: ShardStripeSize,
+}
+
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum ShardConfigError {
+    #[error("Invalid shard count")]
+    InvalidCount,
+    #[error("Invalid shard number")]
+    InvalidNumber,
+    #[error("Invalid stripe size")]
+    InvalidStripeSize,
+}
+
+impl ShardIdentity {
+    /// An identity with number=0 count=0 is a "none" identity, which represents legacy
+    /// tenants.  Modern single-shard tenants should not use this: they should
+    /// have number=0 count=1.
+    pub fn unsharded() -> Self {
+        Self {
+            number: ShardNumber(0),
+            count: ShardCount(0),
+            layout: LAYOUT_V1,
+            stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.number == ShardNumber(0) && self.count == ShardCount(0)
+    }
+
+    /// Count must be nonzero, and number must be < count. To construct
+    /// the legacy case (count==0), use Self::unsharded instead.
+    pub fn new(
+        number: ShardNumber,
+        count: ShardCount,
+        stripe_size: ShardStripeSize,
+    ) -> Result<Self, ShardConfigError> {
+        if count.0 == 0 {
+            Err(ShardConfigError::InvalidCount)
+        } else if number.0 > count.0 - 1 {
+            Err(ShardConfigError::InvalidNumber)
+        } else if stripe_size.0 == 0 {
+            Err(ShardConfigError::InvalidStripeSize)
+        } else {
+            Ok(Self {
+                number,
+                count,
+                layout: LAYOUT_V1,
+                stripe_size,
+            })
+        }
+    }
+}
+
+impl Serialize for ShardIndex {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            // Binary encoding is not used in index_part.json, but is included in anticipation of
+            // switching various structures (e.g. inter-process communication, remote metadata) to more
+            // compact binary encodings in future.
+            let mut packed: [u8; 2] = [0; 2];
+            packed[0] = self.shard_number.0;
+            packed[1] = self.shard_count.0;
+            packed.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ShardIndex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct IdVisitor {
+            is_human_readable_deserializer: bool,
+        }
+
+        impl<'de> serde::de::Visitor<'de> for IdVisitor {
+            type Value = ShardIndex;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                if self.is_human_readable_deserializer {
+                    formatter.write_str("value in form of hex string")
+                } else {
+                    formatter.write_str("value in form of integer array([u8; 2])")
+                }
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let s = serde::de::value::SeqAccessDeserializer::new(seq);
+                let id: [u8; 2] = Deserialize::deserialize(s)?;
+                Ok(ShardIndex::from(id))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                ShardIndex::from_str(v).map_err(E::custom)
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(IdVisitor {
+                is_human_readable_deserializer: true,
+            })
+        } else {
+            deserializer.deserialize_tuple(
+                2,
                 IdVisitor {
                     is_human_readable_deserializer: false,
                 },
@@ -314,6 +543,68 @@ mod tests {
         assert_eq!(Hex(&encoded), Hex(&expected));
 
         let decoded = bincode::deserialize::<TenantShardId>(&encoded).unwrap();
+        assert_eq!(example, decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn shard_identity_validation() -> Result<(), ShardConfigError> {
+        // Happy cases
+        ShardIdentity::new(ShardNumber(0), ShardCount(1), DEFAULT_STRIPE_SIZE)?;
+        ShardIdentity::new(ShardNumber(0), ShardCount(1), ShardStripeSize(1))?;
+        ShardIdentity::new(ShardNumber(254), ShardCount(255), ShardStripeSize(1))?;
+
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(0), ShardCount(0), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidCount)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(10), ShardCount(10), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(11), ShardCount(10), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(255), ShardCount(255), DEFAULT_STRIPE_SIZE),
+            Err(ShardConfigError::InvalidNumber)
+        );
+        assert_eq!(
+            ShardIdentity::new(ShardNumber(0), ShardCount(1), ShardStripeSize(0)),
+            Err(ShardConfigError::InvalidStripeSize)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn shard_index_human_encoding() -> Result<(), hex::FromHexError> {
+        let example = ShardIndex {
+            shard_number: ShardNumber(13),
+            shard_count: ShardCount(17),
+        };
+        let expected: String = "0d11".to_string();
+        let encoded = format!("{example}");
+        assert_eq!(&encoded, &expected);
+
+        let decoded = ShardIndex::from_str(&encoded)?;
+        assert_eq!(example, decoded);
+        Ok(())
+    }
+
+    #[test]
+    fn shard_index_binary_encoding() -> Result<(), hex::FromHexError> {
+        let example = ShardIndex {
+            shard_number: ShardNumber(13),
+            shard_count: ShardCount(17),
+        };
+        let expected: [u8; 2] = [0x0d, 0x11];
+
+        let encoded = bincode::serialize(&example).unwrap();
+        assert_eq!(Hex(&encoded), Hex(&expected));
+        let decoded = bincode::deserialize(&encoded).unwrap();
         assert_eq!(example, decoded);
 
         Ok(())

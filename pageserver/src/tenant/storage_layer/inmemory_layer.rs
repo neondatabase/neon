@@ -14,15 +14,11 @@ use crate::tenant::Timeline;
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
+use pageserver_api::shard::TenantShardId;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tracing::*;
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-    vec_map::VecMap,
-};
+use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
@@ -33,7 +29,7 @@ use super::{DeltaLayerWriter, ResidentLayer};
 
 pub struct InMemoryLayer {
     conf: &'static PageServerConf,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
 
     /// This layer contains all the changes from 'start_lsn'. The
@@ -226,17 +222,17 @@ impl InMemoryLayer {
     pub async fn create(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenant_id, timeline_id).await?;
+        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id).await?;
 
         Ok(InMemoryLayer {
             conf,
             timeline_id,
-            tenant_id,
+            tenant_shard_id,
             start_lsn,
             end_lsn: OnceLock::new(),
             inner: RwLock::new(InMemoryLayerInner {
@@ -335,7 +331,7 @@ impl InMemoryLayer {
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timeline_id,
-            self.tenant_id,
+            self.tenant_shard_id,
             Key::MIN,
             self.start_lsn..end_lsn,
         )

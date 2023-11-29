@@ -125,6 +125,7 @@ impl ComputeControlPlane {
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
         let pageserver =
             PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
+
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
@@ -168,6 +169,30 @@ impl ComputeControlPlane {
             .insert(ep.endpoint_id.clone(), Arc::clone(&ep));
 
         Ok(ep)
+    }
+
+    pub fn check_conflicting_endpoints(
+        &self,
+        mode: ComputeMode,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<()> {
+        if matches!(mode, ComputeMode::Primary) {
+            // this check is not complete, as you could have a concurrent attempt at
+            // creating another primary, both reading the state before checking it here,
+            // but it's better than nothing.
+            let mut duplicates = self.endpoints.iter().filter(|(_k, v)| {
+                v.tenant_id == tenant_id
+                    && v.timeline_id == timeline_id
+                    && v.mode == mode
+                    && v.status() != "stopped"
+            });
+
+            if let Some((key, _)) = duplicates.next() {
+                bail!("attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported.");
+            }
+        }
+        Ok(())
     }
 }
 

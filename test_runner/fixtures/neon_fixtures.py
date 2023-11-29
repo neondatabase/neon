@@ -1414,34 +1414,19 @@ class NeonCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
-        pg_port: int,
-        http_port: int,
         safekeepers: Optional[List[int]] = None,
-        tenant_id: Optional[TenantId] = None,
-        lsn: Optional[Lsn] = None,
-        branch_name: Optional[str] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "start",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
-            "--pg-version",
-            self.env.pg_version,
         ]
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
-        if lsn is not None:
-            args.append(f"--lsn={lsn}")
-        args.extend(["--pg-port", str(pg_port)])
-        args.extend(["--http-port", str(http_port)])
 
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
-        if branch_name is not None:
-            args.extend(["--branch-name", branch_name])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if pageserver_id is not None:
@@ -1468,15 +1453,12 @@ class NeonCli(AbstractNeonCli):
     def endpoint_stop(
         self,
         endpoint_id: str,
-        tenant_id: Optional[TenantId] = None,
         destroy=False,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "stop",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
         ]
         if destroy:
             args.append("--destroy")
@@ -1572,7 +1554,7 @@ class NeonAttachmentService:
             self.running = False
         return self
 
-    def attach_hook(self, tenant_id: TenantId, pageserver_id: int) -> int:
+    def attach_hook_issue(self, tenant_id: TenantId, pageserver_id: int) -> int:
         response = requests.post(
             f"{self.env.control_plane_api}/attach-hook",
             json={"tenant_id": str(tenant_id), "node_id": pageserver_id},
@@ -1581,6 +1563,13 @@ class NeonAttachmentService:
         gen = response.json()["gen"]
         assert isinstance(gen, int)
         return gen
+
+    def attach_hook_drop(self, tenant_id: TenantId):
+        response = requests.post(
+            f"{self.env.control_plane_api}/attach-hook",
+            json={"tenant_id": str(tenant_id), "node_id": None},
+        )
+        response.raise_for_status()
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -1781,12 +1770,19 @@ class NeonPageserver(PgProtocol):
         to call into the pageserver HTTP client.
         """
         if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         else:
             generation = None
 
         client = self.http_client()
         return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+
+    def tenant_detach(self, tenant_id: TenantId):
+        if self.env.attachment_service is not None:
+            self.env.attachment_service.attach_hook_drop(tenant_id)
+
+        client = self.http_client()
+        return client.tenant_detach(tenant_id)
 
 
 def append_pageserver_param_overrides(
@@ -2493,9 +2489,6 @@ class Endpoint(PgProtocol):
 
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
-            pg_port=self.pg_port,
-            http_port=self.http_port,
-            tenant_id=self.tenant_id,
             safekeepers=self.active_safekeepers,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
@@ -2575,7 +2568,7 @@ class Endpoint(PgProtocol):
         if self.running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, self.tenant_id, check_return_code=self.check_stop_result
+                self.endpoint_id, check_return_code=self.check_stop_result
             )
             self.running = False
 
@@ -2589,7 +2582,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, self.tenant_id, True, check_return_code=self.check_stop_result
+            self.endpoint_id, True, check_return_code=self.check_stop_result
         )
         self.endpoint_id = None
         self.running = False

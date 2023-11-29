@@ -88,11 +88,12 @@ build: |
   RUN set -e \
       && apt-get update \
       && apt-get install -y \
-          curl \
           build-essential \
-          pkg-config \
+          curl \
           libevent-dev \
-          libssl-dev
+          libssl-dev \
+          patchutils \
+          pkg-config
 
   ENV PGBOUNCER_VERSION 1.21.0
   ENV PGBOUNCER_GITPATH 1_21_0
@@ -100,6 +101,7 @@ build: |
       && curl -sfSL https://github.com/pgbouncer/pgbouncer/releases/download/pgbouncer_${PGBOUNCER_GITPATH}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz -o pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
       && tar xzvf pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
       && cd pgbouncer-${PGBOUNCER_VERSION} \
+      && curl https://github.com/pgbouncer/pgbouncer/commit/a7b3c0a5f4caa9dbe92743d04cf1e28c4c05806c.patch | filterdiff --include a/src/server.c | patch -p1 \
       && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
       && make -j $(nproc) \
       && make install
