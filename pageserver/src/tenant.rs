@@ -3235,7 +3235,7 @@ impl Tenant {
     ///
     /// This function can take a long time: callers should wrap it in a timeout if calling
     /// from an external API handler.
-    pub async fn flush_remote(&self) -> anyhow::Result<()> {
+    pub(crate) async fn flush_remote(&self) -> anyhow::Result<()> {
         let timelines = self.timelines.lock().unwrap().clone();
 
         for (timeline_id, timeline) in timelines {
