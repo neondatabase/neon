@@ -98,10 +98,10 @@ impl<'a> WalIngest<'a> {
             self.checkpoint_modified = true;
         }
 
-        // Heap AM records need some special handling, because they modify VM pages
-        // without registering them with the standard mechanism.
         match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
+                // Heap AM records need some special handling, because they modify VM pages
+                // without registering them with the standard mechanism.
                 self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
                     .await?;
             }
