@@ -5,6 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde::de::IntoDeserializer;
 use std::env;
@@ -25,7 +26,7 @@ use toml_edit::{Document, Item};
 use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
 use utils::{
-    id::{NodeId, TenantId, TimelineId},
+    id::{NodeId, TimelineId},
     logging::LogFormat,
 };
 
@@ -628,12 +629,13 @@ impl PageServerConf {
         self.deletion_prefix().join(format!("header-{VERSION:02x}"))
     }
 
-    pub fn tenant_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenants_path().join(tenant_id.to_string())
+    pub fn tenant_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenants_path().join(tenant_shard_id.to_string())
     }
 
-    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id).join(IGNORED_TENANT_FILE_NAME)
+    pub fn tenant_ignore_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
@@ -641,47 +643,53 @@ impl PageServerConf {
     ///
     /// Legacy: superseded by tenant_location_config_path.  Eventually
     /// remove this function.
-    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
+    pub fn tenant_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id).join(TENANT_CONFIG_NAME)
     }
 
-    pub fn tenant_location_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id)
+    pub fn tenant_location_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
             .join(TENANT_LOCATION_CONFIG_NAME)
     }
 
-    pub fn timelines_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
+    pub fn timelines_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> Utf8PathBuf {
-        self.timelines_path(tenant_id).join(timeline_id.to_string())
+    pub fn timeline_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.timelines_path(tenant_shard_id)
+            .join(timeline_id.to_string())
     }
 
     pub fn timeline_uninit_mark_file_path(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Utf8PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&tenant_id, &timeline_id),
+            self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
         )
     }
 
     pub fn timeline_delete_mark_file_path(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Utf8PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&tenant_id, &timeline_id),
+            self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
     }
 
-    pub fn tenant_deleted_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id)
+    pub fn tenant_deleted_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
             .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
 
@@ -691,20 +699,24 @@ impl PageServerConf {
 
     pub fn trace_path(
         &self,
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         connection_id: &ConnectionId,
     ) -> Utf8PathBuf {
         self.traces_path()
-            .join(tenant_id.to_string())
+            .join(tenant_shard_id.to_string())
             .join(timeline_id.to_string())
             .join(connection_id.to_string())
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> Utf8PathBuf {
-        self.timeline_path(tenant_id, timeline_id)
+    pub fn metadata_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.timeline_path(tenant_shard_id, timeline_id)
             .join(METADATA_FILE_NAME)
     }
 

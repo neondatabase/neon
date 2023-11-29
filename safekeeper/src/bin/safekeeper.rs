@@ -8,6 +8,7 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use remote_storage::RemoteStorageConfig;
+use sd_notify::NotifyState;
 use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinError;
@@ -433,6 +434,12 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let mut sigquit_stream = signal(SignalKind::quit())?;
     let mut sigint_stream = signal(SignalKind::interrupt())?;
     let mut sigterm_stream = signal(SignalKind::terminate())?;
+
+    // Notify systemd that we are ready. This is important as currently loading
+    // timelines takes significant time (~30s in busy regions).
+    if let Err(e) = sd_notify::notify(true, &[NotifyState::Ready]) {
+        warn!("systemd notify failed: {:?}", e);
+    }
 
     tokio::select! {
         Some((task_name, res)) = tasks_handles.next()=> {

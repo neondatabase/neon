@@ -356,7 +356,8 @@ async fn build_timeline_info_common(
     let walreceiver_status = timeline.walreceiver_status();
 
     let info = TimelineInfo {
-        tenant_id: timeline.tenant_id,
+        // TODO(sharding): add a shard_id field, or make tenant_id into a tenant_shard_id
+        tenant_id: timeline.tenant_shard_id.tenant_id,
         timeline_id: timeline.timeline_id,
         ancestor_timeline_id,
         ancestor_lsn,

@@ -263,6 +263,7 @@ class PageserverHttpClient(requests.Session):
     def tenant_delete(self, tenant_id: TenantId):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)
+        return res
 
     def tenant_load(self, tenant_id: TenantId):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
