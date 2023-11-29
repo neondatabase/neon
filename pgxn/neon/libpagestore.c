@@ -78,6 +78,7 @@ typedef struct
 static ShardMap* shard_map;
 static LWLockId  shard_map_lock;
 static size_t    shard_map_update_counter;
+static bool      config_updated;
 
 typedef struct
 {
@@ -113,7 +114,7 @@ psm_shmem_startup(void)
 	{
 		shard_map_lock = (LWLockId)GetNamedLWLockTranche("shard_map_lock");
 		shard_map->n_shards = 0;
-		shard_map->update_counter = 0;
+		shard_map->update_counter = 1; /* force update of shared map on forst access */
 	}
 	LWLockRelease(AddinShmemInitLock);
 }
@@ -150,46 +151,65 @@ static shardno_t
 load_shard_map(shardno_t shard_no, char* connstr)
 {
 	shardno_t n_shards;
-
+	bool exclusive_lock = false;
 	LWLockAcquire(shard_map_lock, LW_SHARED);
 
-	while (shard_map->n_shards == 0 || shard_map_update_counter != shard_map->update_counter)
+	if (shard_map_update_counter != shard_map->update_counter || config_updated)
 	{
-		/* Close all existed connections */
-		for (shardno_t i = 0; i < max_attached_shard_no; i++)
-		{
-			if (page_servers[i].conn)
-				pageserver_disconnect(i);
-		}
-
-		/* Request new shard map from control plane under exclusive lock */
-		LWLockRelease(shard_map_lock);
-		LWLockAcquire(shard_map_lock, LW_EXCLUSIVE);
-		if (shard_map->n_shards == 0)
+	  ParseConnString:
 		{
 			char const* shard_connstr = page_server_connstring;
 			char const* sep;
 			size_t connstr_len;
+			int i = 0;
+			bool shard_map_changed = false;
 			do
 			{
 				sep = strchr(shard_connstr, ',');
 				connstr_len = sep != NULL ? sep - shard_connstr : strlen(shard_connstr);
 				if (connstr_len == 0)
 					break; /* trailing comma */
-				if (shard_map->n_shards >= MAX_SHARDS)
+				if (i >= MAX_SHARDS)
 					elog(ERROR, "Too many shards");
 				if (connstr_len >= MAX_PS_CONNSTR_LEN)
 					elog(ERROR, "Connection  string too long");
-				memcpy(shard_map->shard_connstr[shard_map->n_shards++], shard_connstr, connstr_len+1);
+				if (i >= shard_map->n_shards ||
+					strcmp(shard_map->shard_connstr[i], shard_connstr) != 0)
+				{
+					if (!exclusive_lock)
+					{
+						/* Retry under exclsuive lock */
+						LWLockRelease(shard_map_lock);
+						LWLockAcquire(shard_map_lock, LW_EXCLUSIVE);
+						exclusive_lock = true;
+						goto ParseConnString;
+					}
+					shard_map_changed = true;
+					memcpy(shard_map->shard_connstr[i], shard_connstr, connstr_len+1);
+				}
 				shard_connstr = sep + 1;
+				i += 1;
 			} while (sep != NULL);
 
-			if (shard_map->n_shards == 0)
+			if (i == 0)
 				elog(ERROR, "No shards were speciified");
 
-			shard_map->update_counter += 1;
+			if (shard_map_changed)
+			{
+				shard_map->update_counter += 1;
+				shard_map->n_shards = i;
+			}
 		}
-		shard_map_update_counter = shard_map->update_counter;
+		if (shard_map_update_counter != shard_map->update_counter)
+		{
+			for (shardno_t i = 0; i < max_attached_shard_no; i++)
+			{
+				if (page_servers[i].conn)
+					pageserver_disconnect(i);
+			}
+			shard_map_update_counter = shard_map->update_counter;
+		}
+		config_updated = false;
 	}
 	n_shards = shard_map->n_shards;
 	if (shard_no >= n_shards)
