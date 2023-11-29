@@ -396,11 +396,12 @@ pub(super) async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let (timeline_logical_size, _) = timeline
+            let current_timeline_size = timeline
                 .get_current_logical_size(&ctx)
-                .context("Status update creation failed to get current logical size")?;
+                // FIXME: https://github.com/neondatabase/neon/issues/5963
+                .size_dont_care_about_accuracy();
             let status_update = PageserverFeedback {
-                current_timeline_size: timeline_logical_size,
+                current_timeline_size,
                 last_received_lsn,
                 disk_consistent_lsn,
                 remote_consistent_lsn,
