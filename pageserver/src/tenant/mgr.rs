@@ -2,7 +2,7 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -515,12 +515,14 @@ pub async fn init_tenant_mgr(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
+        let shard_identity = location_conf.shard;
         match tenant_spawn(
             conf,
             tenant_shard_id,
             &tenant_dir_path,
             resources.clone(),
             AttachedTenantConf::try_from(location_conf)?,
+            shard_identity,
             Some(init_order.clone()),
             &TENANTS,
             SpawnMode::Normal,
@@ -561,6 +563,7 @@ pub(crate) fn tenant_spawn(
     tenant_path: &Utf8Path,
     resources: TenantSharedResources,
     location_conf: AttachedTenantConf,
+    shard_identity: ShardIdentity,
     init_order: Option<InitializationOrder>,
     tenants: &'static std::sync::RwLock<TenantsMap>,
     mode: SpawnMode,
@@ -593,6 +596,7 @@ pub(crate) fn tenant_spawn(
         tenant_shard_id,
         resources,
         location_conf,
+        shard_identity,
         init_order,
         tenants,
         mode,
@@ -762,12 +766,14 @@ pub(crate) async fn create_tenant(
         tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
     let tenant_path = super::create_tenant_files(conf, &location_conf, &tenant_shard_id).await?;
 
+    let shard_identity = location_conf.shard;
     let created_tenant = tenant_spawn(
         conf,
         tenant_shard_id,
         &tenant_path,
         resources,
         AttachedTenantConf::try_from(location_conf)?,
+        shard_identity,
         None,
         &TENANTS,
         SpawnMode::Create,
@@ -996,12 +1002,14 @@ impl TenantManager {
                     .await
                     .map_err(SetNewTenantConfigError::Persist)?;
 
+                let shard_identity = new_location_config.shard;
                 let tenant = tenant_spawn(
                     self.conf,
                     tenant_shard_id,
                     &tenant_path,
                     self.resources.clone(),
                     AttachedTenantConf::try_from(new_location_config)?,
+                    shard_identity,
                     None,
                     self.tenants,
                     SpawnMode::Normal,
@@ -1377,12 +1385,14 @@ pub(crate) async fn load_tenant(
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
+    let shard_identity = location_conf.shard;
     let new_tenant = tenant_spawn(
         conf,
         tenant_shard_id,
         &tenant_path,
         resources,
         AttachedTenantConf::try_from(location_conf)?,
+        shard_identity,
         None,
         &TENANTS,
         SpawnMode::Normal,
@@ -1472,12 +1482,14 @@ pub(crate) async fn attach_tenant(
     // TODO: tenant directory remains on disk if we bail out from here on.
     //       See https://github.com/neondatabase/neon/issues/4233
 
+    let shard_identity = location_conf.shard;
     let attached_tenant = tenant_spawn(
         conf,
         tenant_shard_id,
         &tenant_dir,
         resources,
         AttachedTenantConf::try_from(location_conf)?,
+        shard_identity,
         None,
         &TENANTS,
         SpawnMode::Normal,
