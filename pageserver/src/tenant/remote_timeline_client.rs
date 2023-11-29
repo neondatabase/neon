@@ -1217,7 +1217,7 @@ impl RemoteTimelineClient {
                     self_rc.perform_upload_task(task).await;
                     Ok(())
                 }
-                .instrument(info_span!(parent: None, "remote_upload", %tenant_shard_id, %timeline_id, %upload_task_id)),
+                .instrument(info_span!(parent: None, "remote_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id, %upload_task_id)),
             );
 
             // Loop back to process next task
