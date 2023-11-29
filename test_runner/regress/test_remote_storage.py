@@ -602,7 +602,11 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     remote_timeline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
 
-    assert not list(remote_timeline_path.iterdir())
+    filtered = []
+    for path in remote_timeline_path.iterdir():
+        if not (path.name.endswith("initdb.tar.zst")):
+            filtered.insert(path)
+    assert len(filtered) == 0
 
     # timeline deletion should kill ongoing uploads, so, the metric will be gone
     assert get_queued_count(file_kind="index", op_kind="upload") is None

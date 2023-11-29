@@ -266,8 +266,8 @@ def assert_prefix_empty(
             )
 
     filtered_count = 0
-    for key, obj in objects:
-        if not (allowed_postfixes.contains(key)):
+    for key, _obj in objects:
+        if not (allowed_postfixes.endswith(key)):
             filtered_count += 1
 
     assert (
