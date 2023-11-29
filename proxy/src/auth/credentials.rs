@@ -161,9 +161,9 @@ pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<String>) -> 
     for ip in ip_list {
         // We expect that all ip addresses from control plane are correct.
         // However, if some of them are broken, we still can check the others.
-        match check_ip(peer_addr, ip) {
-            Ok(result) => {
-                if result {
+        match parse_ip_pattern(ip) {
+            Ok(pattern) => {
+                if check_ip(peer_addr, &pattern) {
                     return true;
                 }
             }
@@ -173,19 +173,32 @@ pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<String>) -> 
     false
 }
 
-fn check_ip(ip: &IpAddr, pattern: &str) -> anyhow::Result<bool> {
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum IpPattern {
+    Subnet(ipnet::IpNet),
+    Range(IpAddr, IpAddr),
+    Single(IpAddr),
+}
+
+fn parse_ip_pattern(pattern: &str) -> anyhow::Result<IpPattern> {
     if pattern.contains('/') {
         let subnet: ipnet::IpNet = pattern.parse()?;
-        return Ok(subnet.contains(ip));
+        return Ok(IpPattern::Subnet(subnet));
     }
     if let Some((start, end)) = pattern.split_once('-') {
-        // let range: ipnet::IpAddrRange = range.parse()?;
         let start: IpAddr = start.parse()?;
         let end: IpAddr = end.parse()?;
-        Ok(start <= *ip && *ip <= end)
-    } else {
-        let addr: IpAddr = pattern.parse()?;
-        Ok(addr.eq(ip))
+        return Ok(IpPattern::Range(start, end));
+    }
+    let addr: IpAddr = pattern.parse()?;
+    Ok(IpPattern::Single(addr))
+}
+
+fn check_ip(ip: &IpAddr, pattern: &IpPattern) -> bool {
+    match pattern {
+        IpPattern::Subnet(subnet) => subnet.contains(ip),
+        IpPattern::Range(start, end) => start <= ip && ip <= end,
+        IpPattern::Single(addr) => addr == ip,
     }
 }
 
@@ -420,29 +433,72 @@ mod tests {
             &vec!["88.8.8".into(), "127.0.0.1".into()]
         ));
     }
+    #[test]
+    fn test_parse_ip_v4() -> anyhow::Result<()> {
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        // Ok
+        assert_eq!(parse_ip_pattern("127.0.0.1")?, IpPattern::Single(peer_addr));
+        assert_eq!(
+            parse_ip_pattern("127.0.0.1/31")?,
+            IpPattern::Subnet(ipnet::IpNet::new(peer_addr, 31)?)
+        );
+        assert_eq!(
+            parse_ip_pattern("0.0.0.0-200.0.1.2")?,
+            IpPattern::Range(IpAddr::from([0, 0, 0, 0]), IpAddr::from([200, 0, 1, 2]))
+        );
+
+        // Error
+        assert!(parse_ip_pattern("300.0.1.2").is_err());
+        assert!(parse_ip_pattern("30.1.2").is_err());
+        assert!(parse_ip_pattern("127.0.0.1/33").is_err());
+        assert!(parse_ip_pattern("127.0.0.1-127.0.3").is_err());
+        assert!(parse_ip_pattern("1234.0.0.1-127.0.3.0").is_err());
+        Ok(())
+    }
 
     #[test]
     fn test_check_ipv4() -> anyhow::Result<()> {
         let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        let peer_addr_next = IpAddr::from([127, 0, 0, 2]);
+        let peer_addr_prev = IpAddr::from([127, 0, 0, 0]);
         // Success
-        assert!(check_ip(&peer_addr, "127.0.0.1")?);
-        assert!(check_ip(&peer_addr, "127.0.0.0/31")?);
-        assert!(check_ip(&peer_addr, "127.0.0.2/30")?);
-        assert!(check_ip(&peer_addr, "0.0.0.0-200.0.1.2")?);
-        assert!(check_ip(&peer_addr, "127.0.0.1-127.0.0.1")?);
+        assert!(check_ip(&peer_addr, &IpPattern::Single(peer_addr)));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Subnet(ipnet::IpNet::new(peer_addr_prev, 31)?)
+        ));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Subnet(ipnet::IpNet::new(peer_addr_next, 30)?)
+        ));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Range(IpAddr::from([0, 0, 0, 0]), IpAddr::from([200, 0, 1, 2]))
+        ));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Range(peer_addr, peer_addr)
+        ));
 
         // Not success
-        assert!(!check_ip(&peer_addr, "127.0.0.0")?);
-        assert!(!check_ip(&peer_addr, "127.0.0.2/31")?);
-        assert!(!check_ip(&peer_addr, "0.0.0.0-126.0.1.2")?);
-        assert!(!check_ip(&peer_addr, "127.0.1.2-128.1.1.1")?);
+        assert!(!check_ip(&peer_addr, &IpPattern::Single(peer_addr_prev)));
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Subnet(ipnet::IpNet::new(peer_addr_next, 31)?)
+        ));
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Range(IpAddr::from([0, 0, 0, 0]), peer_addr_prev)
+        ));
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Range(peer_addr_next, IpAddr::from([128, 0, 0, 0]))
+        ));
         // There is no check that for range start <= end. But it's fine as long as for all this cases the result is false.
-        assert!(!check_ip(&peer_addr, "127.0.0.1-127.0.0.0")?);
-
-        // Error
-        assert!(check_ip(&peer_addr, "300.0.1.2").is_err());
-        assert!(check_ip(&peer_addr, "30.1.2").is_err());
-        assert!(check_ip(&peer_addr, "127.0.0.1/33").is_err());
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Range(peer_addr, peer_addr_prev)
+        ));
         Ok(())
     }
 }

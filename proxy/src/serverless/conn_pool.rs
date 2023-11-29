@@ -22,7 +22,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth::{self, check_peer_addr_is_in_list},
-    console::{self, provider::AuthInfo},
+    console,
     proxy::{
         neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
         NUM_DB_CONNECTIONS_OPENED_COUNTER,
@@ -431,11 +431,8 @@ async fn connect_to_compute(
         application_name: Some(APP_NAME),
         options: console_options.as_deref(),
     };
-    // TODO(anna): extra call to control plane might slow down everything add caches.
-    let AuthInfo {
-        secret: _,
-        allowed_ips,
-    } = backend.get_auth_info(&extra).await?;
+    // TODO(anna): this is a bit hacky way, consider using console notification listener.
+    let allowed_ips = backend.get_allowed_ips(&extra).await?;
     if !check_peer_addr_is_in_list(&peer_addr.ip(), &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed().into());
     }

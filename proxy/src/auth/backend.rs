@@ -24,6 +24,7 @@ use crate::{
 use futures::TryFutureExt;
 use std::borrow::Cow;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
@@ -68,7 +69,7 @@ pub enum BackendType<'a, T> {
 
 pub trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
-    fn get_auth_info(&self) -> Result<AuthInfo, GetAuthInfoError>;
+    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -334,16 +335,16 @@ impl BackendType<'_, ClientCredentials<'_>> {
         Ok(res)
     }
 
-    pub async fn get_auth_info(
+    pub async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
+    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         use BackendType::*;
         match self {
-            Console(api, creds) => api.get_auth_info(extra, creds).await,
-            Postgres(api, creds) => api.get_auth_info(extra, creds).await,
-            Link(_) => Ok(AuthInfo::default()),
-            Test(x) => x.get_auth_info(),
+            Console(api, creds) => api.get_allowed_ips(extra, creds).await,
+            Postgres(api, creds) => api.get_allowed_ips(extra, creds).await,
+            Link(_) => Ok(Arc::new(vec![])),
+            Test(x) => x.get_allowed_ips(),
         }
     }
 

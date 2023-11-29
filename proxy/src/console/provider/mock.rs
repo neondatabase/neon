@@ -1,5 +1,7 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
+use std::sync::Arc;
+
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
@@ -75,7 +77,7 @@ impl Api {
             };
             let allowed_ips = match get_execute_postgres_query(
                 &client,
-                "select allowed_ips from endpoints where endpoint_id = $1",
+                "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
                 &[&creds.project.clone().unwrap_or_default().as_str()],
                 "allowed_ips",
             )
@@ -146,6 +148,14 @@ impl super::Api for Api {
         creds: &ClientCredentials,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         self.do_get_auth_info(creds).await
+    }
+
+    async fn get_allowed_ips(
+        &self,
+        _extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials,
+    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+        Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
     }
 
     #[tracing::instrument(skip_all)]

@@ -5,17 +5,19 @@ from fixtures.neon_fixtures import (
     VanillaPostgres,
 )
 
+TABLE_NAME = "neon_control_plane.endpoints"
+
 
 # Proxy uses the same logic for psql and websockets.
 @pytest.mark.asyncio
 async def test_proxy_psql_allowed_ips(static_proxy: NeonProxy, vanilla_pg: VanillaPostgres):
     # Shouldn't be able to connect to this project
     vanilla_pg.safe_psql(
-        "INSERT INTO endpoints (endpoint_id, allowed_ips) VALUES ('private-project', '8.8.8.8')"
+        f"INSERT INTO {TABLE_NAME} (endpoint_id, allowed_ips) VALUES ('private-project', '8.8.8.8')"
     )
     # Should be able to connect to this project
     vanilla_pg.safe_psql(
-        "INSERT INTO endpoints (endpoint_id, allowed_ips) VALUES ('generic-project', '::1,127.0.0.1')"
+        f"INSERT INTO {TABLE_NAME} (endpoint_id, allowed_ips) VALUES ('generic-project', '::1,127.0.0.1')"
     )
 
     def check_cannot_connect(**kwargs):
@@ -52,7 +54,7 @@ async def test_proxy_http_allowed_ips(static_proxy: NeonProxy, vanilla_pg: Vanil
 
     # Shouldn't be able to connect to this project
     vanilla_pg.safe_psql(
-        "INSERT INTO endpoints (endpoint_id, allowed_ips) VALUES ('proxy', '8.8.8.8')"
+        f"INSERT INTO {TABLE_NAME} (endpoint_id, allowed_ips) VALUES ('proxy', '8.8.8.8')"
     )
 
     def query(status: int, query: str, *args):
@@ -67,6 +69,6 @@ async def test_proxy_http_allowed_ips(static_proxy: NeonProxy, vanilla_pg: Vanil
     query(400, "select 1;")  # ip address is not allowed
     # Should be able to connect to this project
     vanilla_pg.safe_psql(
-        "UPDATE endpoints SET allowed_ips = '8.8.8.8,127.0.0.1' WHERE endpoint_id = 'proxy'"
+        f"UPDATE {TABLE_NAME} SET allowed_ips = '8.8.8.8,127.0.0.1' WHERE endpoint_id = 'proxy'"
     )
     query(200, "select 1;")  # should work now

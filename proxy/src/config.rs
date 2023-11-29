@@ -16,6 +16,7 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
+    pub allowed_ips_cache: CacheOptions,
 }
 
 #[derive(Debug)]
@@ -214,6 +215,7 @@ impl rustls::server::ResolvesServerCert for CertResolver {
 }
 
 /// Helper for cmdline cache options parsing.
+#[derive(Debug)]
 pub struct CacheOptions {
     /// Max number of entries.
     pub size: usize,

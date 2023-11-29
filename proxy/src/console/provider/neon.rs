@@ -162,6 +162,22 @@ impl super::Api for Api {
         self.do_get_auth_info(extra, creds).await
     }
 
+    async fn get_allowed_ips(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials,
+    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+        let key: &str = &creds.project().expect("impossible");
+        if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
+            return Ok(Arc::new(allowed_ips.to_vec()));
+        }
+        let allowed_ips = Arc::new(self.do_get_auth_info(extra, creds).await?.allowed_ips);
+        self.caches
+            .allowed_ips
+            .insert(key.into(), allowed_ips.clone());
+        Ok(allowed_ips)
+    }
+
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,

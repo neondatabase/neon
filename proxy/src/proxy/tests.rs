@@ -418,10 +418,9 @@ impl TestBackend for TestConnectMechanism {
             x => panic!("expecting action {:?}, wake_compute is called instead", x),
         }
     }
-    fn get_auth_info(
-        &self,
-    ) -> Result<console::provider::AuthInfo, console::errors::GetAuthInfoError> {
-        unimplemented!()
+
+    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError> {
+        unimplemented!("not used in tests")
     }
 }
 
