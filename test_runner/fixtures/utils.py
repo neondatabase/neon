@@ -49,7 +49,7 @@ def subprocess_capture(
     echo_stdout=False,
     capture_stdout=False,
     timeout=None,
-    **kwargs: Any,
+    **popen_kwargs: Any,
 ) -> Tuple[str, Optional[str], int]:
     """Run a process and bifurcate its output to files and the `log` logger
 
@@ -115,7 +115,7 @@ def subprocess_capture(
 
                 p = subprocess.Popen(
                     cmd,
-                    **kwargs,
+                    **popen_kwargs,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
