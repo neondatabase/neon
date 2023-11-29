@@ -3272,6 +3272,10 @@ impl Tenant {
             let _ = r?;
         }
 
+        // The flushes we did above were just writes, but the Tenant might have had
+        // pending deletions as well from recent compaction/gc: we want to flush those
+        // as well.  This requires flushing the global delete queue.  This is cheap
+        // because it's typically a no-op.
         match self.deletion_queue_client.flush_execute().await {
             Ok(_) => {}
             Err(DeletionQueueError::ShuttingDown) => {}
