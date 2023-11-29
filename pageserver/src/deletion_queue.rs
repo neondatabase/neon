@@ -15,7 +15,6 @@ use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use hex::FromHex;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -160,11 +159,10 @@ pub struct DeletionQueueClient {
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct TenantDeletionList {
     /// For each Timeline, a list of key fragments to append to the timeline remote path
     /// when reconstructing a full key
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
     timelines: HashMap<TimelineId, Vec<String>>,
 
     /// The generation in which this deletion was emitted: note that this may not be the
@@ -179,43 +177,11 @@ impl TenantDeletionList {
     }
 }
 
-/// For HashMaps using a `hex` compatible key, where we would like to encode the key as a string
-fn to_hex_map<S, V, I>(input: &HashMap<I, V>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    V: Serialize,
-    I: AsRef<[u8]>,
-{
-    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v));
-
-    transformed
-        .collect::<HashMap<String, &V>>()
-        .serialize(serializer)
-}
-
-/// For HashMaps using a FromHex key, where we would like to decode the key
-fn from_hex_map<'de, D, V, I>(deserializer: D) -> Result<HashMap<I, V>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-    V: Deserialize<'de>,
-    I: FromHex + std::hash::Hash + Eq,
-{
-    let hex_map = HashMap::<String, V>::deserialize(deserializer)?;
-    hex_map
-        .into_iter()
-        .map(|(k, v)| {
-            I::from_hex(k)
-                .map(|k| (k, v))
-                .map_err(|_| serde::de::Error::custom("Invalid hex ID"))
-        })
-        .collect()
-}
-
 /// Files ending with this suffix will be ignored and erased
 /// during recovery as startup.
 const TEMP_SUFFIX: &str = "tmp";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct DeletionList {
     /// Serialization version, for future use
     version: u8,
@@ -227,7 +193,6 @@ struct DeletionList {
     /// nested HashMaps by TenantTimelineID.  Each Tenant only appears once
     /// with one unique generation ID: if someone tries to push a second generation
     /// ID for the same tenant, we will start a new DeletionList.
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
     tenants: HashMap<TenantId, TenantDeletionList>,
 
     /// Avoid having to walk `tenants` to calculate the number of keys in
@@ -1320,5 +1285,35 @@ pub(crate) mod mock {
                 lsn_table: self.lsn_table.clone(),
             }
         }
+    }
+
+    /// Test round-trip serialization/deserialization, and test stability of the format
+    /// vs. a static expected string for the serialized version.
+    #[test]
+    fn deletion_list_serialization() -> anyhow::Result<()> {
+        let tenant_id = "ad6c1a56f5680419d3a16ff55d97ec3c"
+            .to_string()
+            .parse::<TenantId>()?;
+        let timeline_id = "be322c834ed9e709e63b5c9698691910"
+            .to_string()
+            .parse::<TimelineId>()?;
+        let generation = Generation::new(123);
+
+        let object =
+            RemotePath::from_string(&format!("tenants/{tenant_id}/timelines/{timeline_id}/foo"))?;
+        let mut objects = [object].to_vec();
+
+        let mut example = DeletionList::new(1);
+        example.push(&tenant_id, &timeline_id, generation, &mut objects);
+
+        let encoded = serde_json::to_string(&example)?;
+
+        let expected = "{\"version\":1,\"sequence\":1,\"tenants\":{\"ad6c1a56f5680419d3a16ff55d97ec3c\":{\"timelines\":{\"be322c834ed9e709e63b5c9698691910\":[\"foo\"]},\"generation\":123}},\"size\":1}".to_string();
+        assert_eq!(encoded, expected);
+
+        let decoded = serde_json::from_str::<DeletionList>(&encoded)?;
+        assert_eq!(example, decoded);
+
+        Ok(())
     }
 }
