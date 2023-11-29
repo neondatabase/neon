@@ -167,7 +167,7 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        let key: &str = &creds.project().expect("impossible");
+        let key: &str = creds.project().expect("impossible");
         if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
             return Ok(Arc::new(allowed_ips.to_vec()));
         }

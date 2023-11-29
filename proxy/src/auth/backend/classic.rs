@@ -5,7 +5,7 @@ use crate::{
     config::AuthenticationConfig,
     console::AuthSecret,
     proxy::LatencyTimer,
-    sasl, scram,
+    sasl,
     stream::{PqStream, Stream},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
