@@ -86,7 +86,15 @@ def subprocess_capture(
             self.captured = ""
 
         def run(self):
+            first = True
             for line in self.in_file:
+                if first:
+                    # do this only after receiving any input so that we can keep deleting empty files
+                    first = False
+                    # prefix the files with the command line so that we can later understand which file is for what command
+                    cmdline = " ".join(cmd)
+                    self.out_file.write(("# " + cmdline + "\n").encode("utf-8"))
+
                 # Only bother decoding if we are going to do something more than stream to a file
                 if self.echo or self.capture:
                     string = line.decode(encoding="utf-8", errors="replace")
