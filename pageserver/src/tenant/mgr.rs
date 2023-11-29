@@ -893,12 +893,7 @@ impl TenantManager {
             }) = &new_location_config.mode
             {
                 if let Some(flush_timeout) = flush {
-                    match tokio::time::timeout(
-                        flush_timeout,
-                        tenant.flush_remote().instrument(info_span!("flush_remote")),
-                    )
-                    .await
-                    {
+                    match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
                         Ok(r) => {
                             if let Err(e) = r {
                                 tracing::error!("Failed to flush to remote storage: {e}");

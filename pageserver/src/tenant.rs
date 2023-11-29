@@ -3239,6 +3239,7 @@ impl Tenant {
     ///
     /// Cancel-safety: cancelling this function may leave I/O running, but such I/O is
     /// still bounded by tenant/timeline shutdown.
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn flush_remote(&self) -> anyhow::Result<()> {
         let timelines = self.timelines.lock().unwrap().clone();
 
