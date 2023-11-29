@@ -19,6 +19,7 @@ use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use std::fmt;
 use storage_broker::BrokerClientChannel;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -31,26 +32,6 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
-
-use std::cmp::min;
-use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt::Debug;
-use std::fmt::Display;
-use std::fs;
-use std::fs::File;
-use std::io;
-use std::ops::Bound::Included;
-use std::process::Command;
-use std::process::Stdio;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::MutexGuard;
-use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant};
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -86,14 +67,35 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
+use std::cmp::min;
+use std::collections::hash_map::Entry;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::ops::Bound::Included;
+use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::MutexGuard;
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::tenant::timeline::delete::DeleteTimelineFlow;
 use crate::tenant::timeline::uninit::cleanup_timeline_directory;
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
 use crate::TEMP_FILE_SUFFIX;
+use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
+use tokio::sync::Semaphore;
 
+static INIT_DB_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(8));
 use toml_edit;
 use utils::{
     crashsafe,
@@ -403,6 +405,36 @@ pub enum CreateTimelineError {
     ShuttingDown,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+enum InitdbError {
+    Other(anyhow::Error),
+    Cancelled,
+    Spawn(std::io::Result<()>),
+    Failed(std::process::ExitStatus, Vec<u8>),
+}
+
+impl fmt::Display for InitdbError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            InitdbError::Cancelled => write!(f, "Operation was cancelled"),
+            InitdbError::Spawn(e) => write!(f, "Spawn error: {:?}", e),
+            InitdbError::Failed(status, stderr) => write!(
+                f,
+                "Command failed with status {:?}: {}",
+                status,
+                String::from_utf8_lossy(stderr)
+            ),
+            InitdbError::Other(e) => write!(f, "Error: {:?}", e),
+        }
+    }
+}
+
+impl From<std::io::Error> for InitdbError {
+    fn from(error: std::io::Error) -> Self {
+        InitdbError::Spawn(Err(error))
+    }
 }
 
 struct TenantDirectoryScan {
@@ -2608,14 +2640,12 @@ impl Tenant {
 
         // Perform GC for each timeline.
         //
-        // Note that we don't hold the GC lock here because we don't want
-        // to delay the branch creation task, which requires the GC lock.
-        // A timeline GC iteration can be slow because it may need to wait for
-        // compaction (both require `layer_removal_cs` lock),
-        // but the GC iteration can run concurrently with branch creation.
+        // Note that we don't hold the `Tenant::gc_cs` lock here because we don't want to delay the
+        // branch creation task, which requires the GC lock. A GC iteration can run concurrently
+        // with branch creation.
         //
-        // See comments in [`Tenant::branch_timeline`] for more information
-        // about why branch creation task can run concurrently with timeline's GC iteration.
+        // See comments in [`Tenant::branch_timeline`] for more information about why branch
+        // creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
             if task_mgr::is_shutdown_requested() || cancel.is_cancelled() {
                 // We were requested to shut down. Stop and return with the progress we
@@ -2898,7 +2928,7 @@ impl Tenant {
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn bootstrap_timeline(
+    pub(crate) async fn bootstrap_timeline(
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
@@ -2910,7 +2940,7 @@ impl Tenant {
         };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
-        let initdb_path = path_with_suffix_extension(
+        let pgdata_path = path_with_suffix_extension(
             self.conf
                 .timelines_path(&self.tenant_id)
                 .join(format!("basebackup-{timeline_id}")),
@@ -2919,26 +2949,25 @@ impl Tenant {
 
         // an uninit mark was placed before, nothing else can access this timeline files
         // current initdb was not run yet, so remove whatever was left from the previous runs
-        if initdb_path.exists() {
-            fs::remove_dir_all(&initdb_path).with_context(|| {
-                format!("Failed to remove already existing initdb directory: {initdb_path}")
+        if pgdata_path.exists() {
+            fs::remove_dir_all(&pgdata_path).with_context(|| {
+                format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &initdb_path, pg_version)?;
+        run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&initdb_path) {
+            if let Err(e) = fs::remove_dir_all(&pgdata_path) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{initdb_path}': {e}");
+                error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
         }
-        let pgdata_path = &initdb_path;
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
         // Upload the created data dir to S3
         if let Some(storage) = &self.remote_storage {
-            let pgdata_zstd = import_datadir::create_tar_zst(pgdata_path).await?;
+            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
             let pgdata_zstd = Bytes::from(pgdata_zstd);
             backoff::retry(
                 || async {
@@ -2988,7 +3017,7 @@ impl Tenant {
 
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
-            pgdata_path,
+            &pgdata_path,
             pgdata_lsn,
             ctx,
         )
@@ -3442,42 +3471,54 @@ fn rebase_directory(
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
 /// to get bootstrap data for timeline initialization.
-fn run_initdb(
+async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
-) -> anyhow::Result<()> {
-    let initdb_bin_path = conf.pg_bin_dir(pg_version)?.join("initdb");
-    let initdb_lib_dir = conf.pg_lib_dir(pg_version)?;
+    cancel: &CancellationToken,
+) -> Result<(), InitdbError> {
+    let initdb_bin_path = conf
+        .pg_bin_dir(pg_version)
+        .map_err(InitdbError::Other)?
+        .join("initdb");
+    let initdb_lib_dir = conf.pg_lib_dir(pg_version).map_err(InitdbError::Other)?;
     info!(
         "running {} in {}, libdir: {}",
         initdb_bin_path, initdb_target_dir, initdb_lib_dir,
     );
 
-    let initdb_output = Command::new(&initdb_bin_path)
+    let _permit = INIT_DB_SEMAPHORE.acquire().await;
+
+    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
         .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
         .arg("--no-instructions")
-        // This is only used for a temporary installation that is deleted shortly after,
-        // so no need to fsync it
         .arg("--no-sync")
         .env_clear()
         .env("LD_LIBRARY_PATH", &initdb_lib_dir)
         .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdout(Stdio::null())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute {} at target dir {}",
-                initdb_bin_path, initdb_target_dir,
-            )
-        })?;
-    if !initdb_output.status.success() {
-        bail!(
-            "initdb failed: '{}'",
-            String::from_utf8_lossy(&initdb_output.stderr)
-        );
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // If the `select!` below doesn't finish the `wait_with_output`,
+        // let the task get `wait()`ed for asynchronously by tokio.
+        // This means there is a slim chance we can go over the INIT_DB_SEMAPHORE.
+        // TODO: fix for this is non-trivial, see
+        // https://github.com/neondatabase/neon/pull/5921#pullrequestreview-1750858021
+        //
+        .kill_on_drop(true)
+        .spawn()?;
+
+    tokio::select! {
+        initdb_output = initdb_command.wait_with_output() => {
+            let initdb_output = initdb_output?;
+            if !initdb_output.status.success() {
+                return Err(InitdbError::Failed(initdb_output.status, initdb_output.stderr));
+            }
+        }
+        _ = cancel.cancelled() => {
+            return Err(InitdbError::Cancelled);
+        }
     }
 
     Ok(())
@@ -3523,6 +3564,7 @@ pub async fn dump_layerfile_from_path(
 pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::OnceCell;
+    use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;
     use utils::logging;
@@ -3589,6 +3631,7 @@ pub(crate) mod harness {
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
         pub generation: Generation,
+        pub shard: ShardIndex,
         pub remote_storage: GenericRemoteStorage,
         pub remote_fs_dir: Utf8PathBuf,
         pub deletion_queue: MockDeletionQueue,
@@ -3648,6 +3691,7 @@ pub(crate) mod harness {
                 tenant_conf,
                 tenant_id,
                 generation: Generation::new(0xdeadbeef),
+                shard: ShardIndex::unsharded(),
                 remote_storage,
                 remote_fs_dir,
                 deletion_queue,

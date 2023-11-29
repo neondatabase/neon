@@ -1572,7 +1572,7 @@ class NeonAttachmentService:
             self.running = False
         return self
 
-    def attach_hook(self, tenant_id: TenantId, pageserver_id: int) -> int:
+    def attach_hook_issue(self, tenant_id: TenantId, pageserver_id: int) -> int:
         response = requests.post(
             f"{self.env.control_plane_api}/attach-hook",
             json={"tenant_id": str(tenant_id), "node_id": pageserver_id},
@@ -1581,6 +1581,13 @@ class NeonAttachmentService:
         gen = response.json()["gen"]
         assert isinstance(gen, int)
         return gen
+
+    def attach_hook_drop(self, tenant_id: TenantId):
+        response = requests.post(
+            f"{self.env.control_plane_api}/attach-hook",
+            json={"tenant_id": str(tenant_id), "node_id": None},
+        )
+        response.raise_for_status()
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -1781,12 +1788,19 @@ class NeonPageserver(PgProtocol):
         to call into the pageserver HTTP client.
         """
         if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         else:
             generation = None
 
         client = self.http_client()
         return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+
+    def tenant_detach(self, tenant_id: TenantId):
+        if self.env.attachment_service is not None:
+            self.env.attachment_service.attach_hook_drop(tenant_id)
+
+        client = self.http_client()
+        return client.tenant_detach(tenant_id)
 
 
 def append_pageserver_param_overrides(

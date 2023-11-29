@@ -124,6 +124,12 @@ fn exactly_one_or_none<'a>(
     }
 }
 
+pub(crate) enum TenantsMapRemoveResult {
+    Occupied(TenantSlot),
+    Vacant,
+    InProgress(utils::completion::Barrier),
+}
+
 impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
@@ -138,12 +144,28 @@ impl TenantsMap {
         }
     }
 
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> Option<TenantSlot> {
+    /// Only for use from DeleteTenantFlow.  This method directly removes a TenantSlot from the map.
+    ///
+    /// The normal way to remove a tenant is using a SlotGuard, which will gracefully remove the guarded
+    /// slot if the enclosed tenant is shutdown.
+    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> TenantsMapRemoveResult {
+        use std::collections::btree_map::Entry;
         match self {
-            TenantsMap::Initializing => None,
+            TenantsMap::Initializing => TenantsMapRemoveResult::Vacant,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 let key = exactly_one_or_none(m, tenant_id).map(|(k, _)| *k);
-                key.and_then(|key| m.remove(&key))
+                match key {
+                    Some(key) => match m.entry(key) {
+                        Entry::Occupied(entry) => match entry.get() {
+                            TenantSlot::InProgress(barrier) => {
+                                TenantsMapRemoveResult::InProgress(barrier.clone())
+                            }
+                            _ => TenantsMapRemoveResult::Occupied(entry.remove()),
+                        },
+                        Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
+                    },
+                    None => TenantsMapRemoveResult::Vacant,
+                }
             }
         }
     }
@@ -795,8 +817,6 @@ pub(crate) async fn set_new_tenant_config(
 impl TenantManager {
     /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or is not fitting to the query.
     /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-    ///
-    /// This method is cancel-safe.
     pub(crate) fn get_attached_tenant_shard(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1994,6 +2014,7 @@ pub(crate) async fn immediate_gc(
     // Run in task_mgr to avoid race with tenant_detach operation
     let ctx = ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
     let (task_done, wait_task_done) = tokio::sync::oneshot::channel();
+    // TODO: spawning is redundant now, need to hold the gate
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
         TaskKind::GarbageCollector,
@@ -2003,12 +2024,40 @@ pub(crate) async fn immediate_gc(
         false,
         async move {
             fail::fail_point!("immediate_gc_task_pre");
-            let result = tenant
+
+            #[allow(unused_mut)]
+            let mut result = tenant
                 .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
                 .instrument(info_span!("manual_gc", %tenant_id, %timeline_id))
                 .await;
                 // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
                 // better once the types support it.
+
+            #[cfg(feature = "testing")]
+            {
+                if let Ok(result) = result.as_mut() {
+                    // why not futures unordered? it seems it needs very much the same task structure
+                    // but would only run on single task.
+                    let mut js = tokio::task::JoinSet::new();
+                    for layer in std::mem::take(&mut result.doomed_layers) {
+                        js.spawn(layer.wait_drop());
+                    }
+                    tracing::info!(total = js.len(), "starting to wait for the gc'd layers to be dropped");
+                    while let Some(res) = js.join_next().await {
+                        res.expect("wait_drop should not panic");
+                    }
+                }
+
+                let timeline = tenant.get_timeline(timeline_id, false).ok();
+                let rtc = timeline.as_ref().and_then(|x| x.remote_client.as_ref());
+
+                if let Some(rtc) = rtc {
+                    // layer drops schedule actions on remote timeline client to actually do the
+                    // deletions; don't care just exit fast about the shutdown error
+                    drop(rtc.wait_completion().await);
+                }
+            }
+
             match task_done.send(result) {
                 Ok(_) => (),
                 Err(result) => error!("failed to send gc result: {result:?}"),

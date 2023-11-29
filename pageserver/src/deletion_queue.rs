@@ -10,6 +10,7 @@ use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
@@ -509,18 +510,19 @@ impl DeletionQueueClient {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, Generation)>,
+        layers: Vec<(LayerFileName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         if current_generation.is_none() {
             debug!("Enqueuing deletions in legacy mode, skipping queue");
 
             let mut layer_paths = Vec::new();
-            for (layer, generation) in layers {
+            for (layer, meta) in layers {
                 layer_paths.push(remote_layer_path(
                     &tenant_id,
                     &timeline_id,
+                    meta.shard,
                     &layer,
-                    generation,
+                    meta.generation,
                 ));
             }
             self.push_immediate(layer_paths).await?;
@@ -540,7 +542,7 @@ impl DeletionQueueClient {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, Generation)>,
+        layers: Vec<(LayerFileName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         metrics::DELETION_QUEUE
             .keys_submitted
@@ -751,6 +753,7 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
+    use pageserver_api::shard::ShardIndex;
     use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
@@ -990,6 +993,8 @@ mod test {
         // we delete, and the generation of the running Tenant.
         let layer_generation = Generation::new(0xdeadbeef);
         let now_generation = Generation::new(0xfeedbeef);
+        let layer_metadata =
+            LayerFileMetadata::new(0xf00, layer_generation, ShardIndex::unsharded());
 
         let remote_layer_file_name_1 =
             format!("{}{}", layer_file_name_1, layer_generation.get_suffix());
@@ -1013,7 +1018,7 @@ mod test {
                 tenant_id,
                 TIMELINE_ID,
                 now_generation,
-                [(layer_file_name_1.clone(), layer_generation)].to_vec(),
+                [(layer_file_name_1.clone(), layer_metadata)].to_vec(),
             )
             .await?;
         assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
@@ -1052,6 +1057,8 @@ mod test {
         let stale_generation = latest_generation.previous();
         // Generation that our example layer file was written with
         let layer_generation = stale_generation.previous();
+        let layer_metadata =
+            LayerFileMetadata::new(0xf00, layer_generation, ShardIndex::unsharded());
 
         ctx.set_latest_generation(latest_generation);
 
@@ -1069,7 +1076,7 @@ mod test {
                 tenant_id,
                 TIMELINE_ID,
                 stale_generation,
-                [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1084,7 +1091,7 @@ mod test {
                 tenant_id,
                 TIMELINE_ID,
                 latest_generation,
-                [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1111,6 +1118,8 @@ mod test {
 
         let layer_generation = Generation::new(0xdeadbeef);
         let now_generation = Generation::new(0xfeedbeef);
+        let layer_metadata =
+            LayerFileMetadata::new(0xf00, layer_generation, ShardIndex::unsharded());
 
         // Inject a deletion in the generation before generation_now: after restart,
         // this deletion should _not_ get executed (only the immediately previous
@@ -1122,7 +1131,7 @@ mod test {
                 tenant_id,
                 TIMELINE_ID,
                 now_generation.previous(),
-                [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1136,7 +1145,7 @@ mod test {
                 tenant_id,
                 TIMELINE_ID,
                 now_generation,
-                [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1226,12 +1235,13 @@ pub(crate) mod mock {
                 match msg {
                     ListWriterQueueMessage::Delete(op) => {
                         let mut objects = op.objects;
-                        for (layer, generation) in op.layers {
+                        for (layer, meta) in op.layers {
                             objects.push(remote_layer_path(
                                 &op.tenant_id,
                                 &op.timeline_id,
+                                meta.shard,
                                 &layer,
-                                generation,
+                                meta.generation,
                             ));
                         }
 

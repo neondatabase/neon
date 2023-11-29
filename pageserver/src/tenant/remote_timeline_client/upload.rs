@@ -4,6 +4,7 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
+use pageserver_api::shard::ShardIndex;
 use std::io::ErrorKind;
 use tokio::fs;
 
@@ -26,6 +27,7 @@ pub(super) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
+    shard: ShardIndex,
     generation: Generation,
     index_part: &'a IndexPart,
 ) -> anyhow::Result<()> {
@@ -42,7 +44,7 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
+    let remote_path = remote_index_path(tenant_id, timeline_id, shard, generation);
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
