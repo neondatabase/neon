@@ -238,7 +238,7 @@ if TYPE_CHECKING:
 def assert_prefix_empty(
     neon_env_builder: "NeonEnvBuilder",
     prefix: Optional[str] = None,
-    allowed_postfixes: list[str] = [],
+    allowed_postfixes: Optional[list[str]] = None,
 ):
     response = list_prefix(neon_env_builder, prefix)
     keys = response["KeyCount"]
@@ -267,7 +267,7 @@ def assert_prefix_empty(
 
     filtered_count = 0
     for key, _obj in objects:
-        if not (allowed_postfixes.endswith(key)):
+        if allowed_postfixes is None or not (allowed_postfixes.endswith(key)):
             filtered_count += 1
 
     assert (
