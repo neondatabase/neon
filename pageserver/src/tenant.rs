@@ -30,6 +30,7 @@ use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
+use utils::sync::gate::GateGuard;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -3235,16 +3236,39 @@ impl Tenant {
     ///
     /// This function can take a long time: callers should wrap it in a timeout if calling
     /// from an external API handler.
+    ///
+    /// Cancel-safety: cancelling this function may leave I/O running, but such I/O is
+    /// still bounded by tenant/timeline shutdown.
     pub(crate) async fn flush_remote(&self) -> anyhow::Result<()> {
         let timelines = self.timelines.lock().unwrap().clone();
 
-        for (timeline_id, timeline) in timelines {
-            tracing::info!(%timeline_id, "Flushing...");
+        async fn flush_timeline(_gate: GateGuard, timeline: Arc<Timeline>) -> anyhow::Result<()> {
+            tracing::info!(timeline_id=%timeline.timeline_id, "Flushing...");
             timeline.freeze_and_flush().await?;
-            tracing::info!(%timeline_id, "Waiting for uploads...");
+            tracing::info!(timeline_id=%timeline.timeline_id, "Waiting for uploads...");
             if let Some(client) = &timeline.remote_client {
                 client.wait_completion().await?;
             }
+
+            Ok(())
+        }
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for (_timeline_id, timeline) in timelines {
+            // Run each timeline's flush in a task holding the timeline's gate: this
+            // means that if this function's future is cancelled, the Timeline shutdown
+            // will still wait for any I/O in here to complete, enforcing the safety
+            // invariant that after Timeline::shutdown nothing touches the timeline's
+            // local storage.
+            let gate = match timeline.gate.enter() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            tasks.spawn(async move { flush_timeline(gate, timeline).await });
+        }
+
+        while let Some(r) = tasks.join_next().await {
+            let _ = r?;
         }
 
         match self.deletion_queue_client.flush_execute().await {
