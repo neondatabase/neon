@@ -15,7 +15,9 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
+use futures::stream::FuturesUnordered;
 use futures::FutureExt;
+use futures::StreamExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -3283,24 +3285,28 @@ impl Tenant {
             Ok(())
         }
 
-        let mut tasks = tokio::task::JoinSet::new();
+        // We do not use a JoinSet for these tasks, because we don't want them to be
+        // aborted when this function's future is cancelled: they should stay alive
+        // holding their GateGuard until they complete, to ensure their I/Os complete
+        // before Timeline shutdown completes.
+        let mut results = FuturesUnordered::new();
+
         for (_timeline_id, timeline) in timelines {
             // Run each timeline's flush in a task holding the timeline's gate: this
             // means that if this function's future is cancelled, the Timeline shutdown
-            // will still wait for any I/O in here to complete, enforcing the safety
-            // invariant that after Timeline::shutdown nothing touches the timeline's
-            // local storage.
+            // will still wait for any I/O in here to complete.
             let gate = match timeline.gate.enter() {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            tasks.spawn(async move { flush_timeline(gate, timeline).await });
+            let jh = tokio::task::spawn(async move { flush_timeline(gate, timeline).await });
+            results.push(jh);
         }
 
-        while let Some(r) = tasks.join_next().await {
+        while let Some(r) = results.next().await {
             if let Err(e) = r {
-                if !e.is_cancel() && !e.is_panic() {
-                    tracing::error!("unexpected joinset error: {e:?}");
+                if !e.is_cancelled() && !e.is_panic() {
+                    tracing::error!("unexpected join error: {e:?}");
                 }
             }
         }
