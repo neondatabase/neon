@@ -915,7 +915,6 @@ impl TenantManager {
                 if let Some(flush_timeout) = flush {
                     match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
                         Ok(Err(e)) => {
-                            tracing::error!("Failed to flush to remote storage: {e:#}");
                             return Err(e);
                         }
                         Ok(Ok(_)) => return Ok(()),
