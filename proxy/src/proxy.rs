@@ -296,7 +296,9 @@ pub async fn task_main(
                         info!("accepted postgres client connection");
 
                         let mut socket = WithClientIp::new(socket);
+                        let mut peer_addr = peer_addr;
                         if let Some(ip) = socket.wait_for_addr().await? {
+                            peer_addr = ip;
                             tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
                         } else if config.require_client_ip {
                             bail!("missing required client IP");
