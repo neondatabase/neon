@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::time::Duration;
 
+use pageserver_api::shard::TenantShardId;
 use regex::Regex;
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
@@ -26,7 +27,6 @@ use tracing::debug;
 use tracing::info;
 use tracing::warn;
 use utils::generation::Generation;
-use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
@@ -54,7 +54,7 @@ const FRONTEND_FLUSHING_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(super) struct DeletionOp {
-    pub(super) tenant_id: TenantId,
+    pub(super) tenant_shard_id: TenantShardId,
     pub(super) timeline_id: TimelineId,
     // `layers` and `objects` are both just lists of objects.  `layers` is used if you do not
     // have a config object handy to project it to a remote key, and need the consuming worker
@@ -62,14 +62,14 @@ pub(super) struct DeletionOp {
     pub(super) layers: Vec<(LayerFileName, LayerFileMetadata)>,
     pub(super) objects: Vec<RemotePath>,
 
-    /// The _current_ generation of the Tenant attachment in which we are enqueuing
+    /// The _current_ generation of the Tenant shard attachment in which we are enqueuing
     /// this deletion.
     pub(super) generation: Generation,
 }
 
 #[derive(Debug)]
 pub(super) struct RecoverOp {
-    pub(super) attached_tenants: HashMap<TenantId, Generation>,
+    pub(super) attached_tenants: HashMap<TenantShardId, Generation>,
 }
 
 #[derive(Debug)]
@@ -206,7 +206,7 @@ impl ListWriter {
 
     async fn recover(
         &mut self,
-        attached_tenants: HashMap<TenantId, Generation>,
+        attached_tenants: HashMap<TenantShardId, Generation>,
     ) -> Result<(), anyhow::Error> {
         debug!(
             "recovering with {} attached tenants",
@@ -309,8 +309,8 @@ impl ListWriter {
                 // generation was issued to another node in the interval while we restarted,
                 // then we may treat deletion lists from the previous generation as if they
                 // belong to our currently attached generation, and proceed to validate & execute.
-                for (tenant_id, tenant_list) in &mut deletion_list.tenants {
-                    if let Some(attached_gen) = attached_tenants.get(tenant_id) {
+                for (tenant_shard_id, tenant_list) in &mut deletion_list.tenants {
+                    if let Some(attached_gen) = attached_tenants.get(tenant_shard_id) {
                         if attached_gen.previous() == tenant_list.generation {
                             tenant_list.generation = *attached_gen;
                         }
@@ -390,7 +390,7 @@ impl ListWriter {
                     let mut layer_paths = Vec::new();
                     for (layer, meta) in op.layers {
                         layer_paths.push(remote_layer_path(
-                            &op.tenant_id,
+                            &op.tenant_shard_id.tenant_id,
                             &op.timeline_id,
                             meta.shard,
                             &layer,
@@ -400,14 +400,14 @@ impl ListWriter {
                     layer_paths.extend(op.objects);
 
                     if !self.pending.push(
-                        &op.tenant_id,
+                        &op.tenant_shard_id,
                         &op.timeline_id,
                         op.generation,
                         &mut layer_paths,
                     ) {
                         self.flush().await;
                         let retry_succeeded = self.pending.push(
-                            &op.tenant_id,
+                            &op.tenant_shard_id,
                             &op.timeline_id,
                             op.generation,
                             &mut layer_paths,

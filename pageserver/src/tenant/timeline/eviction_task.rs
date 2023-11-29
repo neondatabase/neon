@@ -60,9 +60,12 @@ impl Timeline {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
-            &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
+            &format!(
+                "layer eviction for {}/{}",
+                self.tenant_shard_id, self.timeline_id
+            ),
             false,
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -77,7 +80,7 @@ impl Timeline {
         );
     }
 
-    #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
+    #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
         use crate::tenant::tasks::random_init_delay;
         {
@@ -340,7 +343,7 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_id, true) {
+        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_shard_id.tenant_id, true) {
             Ok(t) => t,
             Err(_) => {
                 return ControlFlow::Break(());

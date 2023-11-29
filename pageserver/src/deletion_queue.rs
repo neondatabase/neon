@@ -15,6 +15,7 @@ use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,7 +26,7 @@ use tracing::Instrument;
 use tracing::{self, debug, error};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::generation::Generation;
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 use utils::lsn::AtomicLsn;
 use utils::lsn::Lsn;
 
@@ -193,7 +194,7 @@ struct DeletionList {
     /// nested HashMaps by TenantTimelineID.  Each Tenant only appears once
     /// with one unique generation ID: if someone tries to push a second generation
     /// ID for the same tenant, we will start a new DeletionList.
-    tenants: HashMap<TenantId, TenantDeletionList>,
+    tenants: HashMap<TenantShardId, TenantDeletionList>,
 
     /// Avoid having to walk `tenants` to calculate the number of keys in
     /// the nested deletion lists
@@ -265,7 +266,7 @@ impl DeletionList {
     /// deletion list.
     fn push(
         &mut self,
-        tenant: &TenantId,
+        tenant: &TenantShardId,
         timeline: &TimelineId,
         generation: Generation,
         objects: &mut Vec<RemotePath>,
@@ -357,7 +358,7 @@ struct TenantLsnState {
 
 #[derive(Default)]
 struct VisibleLsnUpdates {
-    tenants: HashMap<TenantId, TenantLsnState>,
+    tenants: HashMap<TenantShardId, TenantLsnState>,
 }
 
 impl VisibleLsnUpdates {
@@ -414,7 +415,7 @@ impl DeletionQueueClient {
 
     pub(crate) fn recover(
         &self,
-        attached_tenants: HashMap<TenantId, Generation>,
+        attached_tenants: HashMap<TenantShardId, Generation>,
     ) -> Result<(), DeletionQueueError> {
         self.do_push(
             &self.tx,
@@ -431,7 +432,7 @@ impl DeletionQueueClient {
     /// backend will later wake up and notice that the tenant's generation requires validation.
     pub(crate) async fn update_remote_consistent_lsn(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
         lsn: Lsn,
@@ -442,10 +443,13 @@ impl DeletionQueueClient {
             .write()
             .expect("Lock should never be poisoned");
 
-        let tenant_entry = locked.tenants.entry(tenant_id).or_insert(TenantLsnState {
-            timelines: HashMap::new(),
-            generation: current_generation,
-        });
+        let tenant_entry = locked
+            .tenants
+            .entry(tenant_shard_id)
+            .or_insert(TenantLsnState {
+                timelines: HashMap::new(),
+                generation: current_generation,
+            });
 
         if tenant_entry.generation != current_generation {
             // Generation might have changed if we were detached and then re-attached: in this case,
@@ -472,7 +476,7 @@ impl DeletionQueueClient {
     /// generations in `layers` are the generations in which those layers were written.
     pub(crate) async fn push_layers(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
         layers: Vec<(LayerFileName, LayerFileMetadata)>,
@@ -483,7 +487,7 @@ impl DeletionQueueClient {
             let mut layer_paths = Vec::new();
             for (layer, meta) in layers {
                 layer_paths.push(remote_layer_path(
-                    &tenant_id,
+                    &tenant_shard_id.tenant_id,
                     &timeline_id,
                     meta.shard,
                     &layer,
@@ -494,7 +498,7 @@ impl DeletionQueueClient {
             return self.flush_immediate().await;
         }
 
-        self.push_layers_sync(tenant_id, timeline_id, current_generation, layers)
+        self.push_layers_sync(tenant_shard_id, timeline_id, current_generation, layers)
     }
 
     /// When a Tenant has a generation, push_layers is always synchronous because
@@ -504,7 +508,7 @@ impl DeletionQueueClient {
     /// support (`<https://github.com/neondatabase/neon/issues/5395>`)
     pub(crate) fn push_layers_sync(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
         layers: Vec<(LayerFileName, LayerFileMetadata)>,
@@ -515,7 +519,7 @@ impl DeletionQueueClient {
         self.do_push(
             &self.tx,
             ListWriterQueueMessage::Delete(DeletionOp {
-                tenant_id,
+                tenant_shard_id,
                 timeline_id,
                 layers,
                 generation: current_generation,
@@ -783,12 +787,12 @@ mod test {
         }
 
         fn set_latest_generation(&self, gen: Generation) {
-            let tenant_id = self.harness.tenant_id;
+            let tenant_shard_id = self.harness.tenant_shard_id;
             self.mock_control_plane
                 .latest_generation
                 .lock()
                 .unwrap()
-                .insert(tenant_id, gen);
+                .insert(tenant_shard_id, gen);
         }
 
         /// Returns remote layer file name, suitable for use in assert_remote_files
@@ -797,8 +801,8 @@ mod test {
             file_name: LayerFileName,
             gen: Generation,
         ) -> anyhow::Result<String> {
-            let tenant_id = self.harness.tenant_id;
-            let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+            let tenant_shard_id = self.harness.tenant_shard_id;
+            let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
             let remote_timeline_path = self.remote_fs_dir.join(relative_remote_path.get_path());
             std::fs::create_dir_all(&remote_timeline_path)?;
             let remote_layer_file_name = format!("{}{}", file_name, gen.get_suffix());
@@ -816,7 +820,7 @@ mod test {
 
     #[derive(Debug, Clone)]
     struct MockControlPlane {
-        pub latest_generation: std::sync::Arc<std::sync::Mutex<HashMap<TenantId, Generation>>>,
+        pub latest_generation: std::sync::Arc<std::sync::Mutex<HashMap<TenantShardId, Generation>>>,
     }
 
     impl MockControlPlane {
@@ -830,20 +834,20 @@ mod test {
     #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {
         #[allow(clippy::diverging_sub_expression)] // False positive via async_trait
-        async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError> {
+        async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
             unimplemented!()
         }
         async fn validate(
             &self,
-            tenants: Vec<(TenantId, Generation)>,
-        ) -> Result<HashMap<TenantId, bool>, RetryForeverError> {
+            tenants: Vec<(TenantShardId, Generation)>,
+        ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError> {
             let mut result = HashMap::new();
 
             let latest_generation = self.latest_generation.lock().unwrap();
 
-            for (tenant_id, generation) in tenants {
-                if let Some(latest) = latest_generation.get(&tenant_id) {
-                    result.insert(tenant_id, *latest == generation);
+            for (tenant_shard_id, generation) in tenants {
+                if let Some(latest) = latest_generation.get(&tenant_shard_id) {
+                    result.insert(tenant_shard_id, *latest == generation);
                 }
             }
 
@@ -947,10 +951,10 @@ mod test {
         client.recover(HashMap::new())?;
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
-        let tenant_id = ctx.harness.tenant_id;
+        let tenant_shard_id = ctx.harness.tenant_shard_id;
 
         let content: Vec<u8> = "victim1 contents".into();
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
@@ -980,7 +984,7 @@ mod test {
         info!("Pushing");
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 now_generation,
                 [(layer_file_name_1.clone(), layer_metadata)].to_vec(),
@@ -1027,8 +1031,8 @@ mod test {
 
         ctx.set_latest_generation(latest_generation);
 
-        let tenant_id = ctx.harness.tenant_id;
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let tenant_shard_id = ctx.harness.tenant_shard_id;
+        let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
 
         // Initial state: a remote layer exists
@@ -1038,7 +1042,7 @@ mod test {
         tracing::debug!("Pushing...");
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 stale_generation,
                 [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
@@ -1053,7 +1057,7 @@ mod test {
         tracing::debug!("Pushing...");
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 latest_generation,
                 [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
@@ -1075,9 +1079,9 @@ mod test {
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
-        let tenant_id = ctx.harness.tenant_id;
+        let tenant_shard_id = ctx.harness.tenant_shard_id;
 
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
@@ -1093,7 +1097,7 @@ mod test {
             ctx.write_remote_layer(EXAMPLE_LAYER_NAME, layer_generation)?;
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 now_generation.previous(),
                 [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
@@ -1107,7 +1111,7 @@ mod test {
             ctx.write_remote_layer(EXAMPLE_LAYER_NAME_ALT, layer_generation)?;
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 now_generation,
                 [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_metadata.clone())].to_vec(),
@@ -1138,7 +1142,7 @@ mod test {
         drop(client);
         ctx.restart().await;
         let client = ctx.deletion_queue.new_client();
-        client.recover(HashMap::from([(tenant_id, now_generation)]))?;
+        client.recover(HashMap::from([(tenant_shard_id, now_generation)]))?;
 
         info!("Flush-executing");
         client.flush_execute().await?;
@@ -1202,7 +1206,7 @@ pub(crate) mod mock {
                         let mut objects = op.objects;
                         for (layer, meta) in op.layers {
                             objects.push(remote_layer_path(
-                                &op.tenant_id,
+                                &op.tenant_shard_id.tenant_id,
                                 &op.timeline_id,
                                 meta.shard,
                                 &layer,
@@ -1293,7 +1297,7 @@ pub(crate) mod mock {
     fn deletion_list_serialization() -> anyhow::Result<()> {
         let tenant_id = "ad6c1a56f5680419d3a16ff55d97ec3c"
             .to_string()
-            .parse::<TenantId>()?;
+            .parse::<TenantShardId>()?;
         let timeline_id = "be322c834ed9e709e63b5c9698691910"
             .to_string()
             .parse::<TimelineId>()?;
