@@ -3298,7 +3298,11 @@ impl Tenant {
         }
 
         while let Some(r) = tasks.join_next().await {
-            let _ = r?;
+            if let Err(e) = r {
+                if !e.is_cancel() && !e.is_panic() {
+                    tracing::error!("unexpected joinset error: {e:?}");
+                }
+            }
         }
 
         // The flushes we did above were just writes, but the Tenant might have had
