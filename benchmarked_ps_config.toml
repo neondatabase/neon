@@ -15,7 +15,9 @@ control_plane_api ='http://127.0.0.1:15002/'
 #wait_lsn_timeout = '60 s'
 #wal_redo_timeout = '60 s'
 
-#max_file_descriptors = 100
+max_file_descriptors = 10000
+page_cache_size = 524288
+
 
 # initial superuser role name to use when creating a new tenant
 #initial_superuser_name = 'cloud_admin'
