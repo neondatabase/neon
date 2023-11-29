@@ -48,10 +48,13 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         "gc_period": "0s",  # disable GC (shouldn't matter for this test but still)
         "compaction_period": "0s",  # we want to control when compaction runs
         "checkpoint_timeout": "24h",  # something we won't reach
-        "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
-        "image_creation_threshold": f"{image_creation_threshold}",
-        "compaction_threshold": f"{l0_l1_threshold}",
-        "compaction_target_size": f"{128 * (1024**3)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
+        "checkpoint_distance": 50 * (1024**2),  # something we won't reach, we checkpoint manually
+        "image_creation_threshold": 1024**2,  # we want to control when image is created
+        "compaction_threshold": l0_l1_threshold,
+        "compaction_target_size": 128
+        * (
+            1024**3
+        ),  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
     }
 
     tenant_id, timeline_id = env.neon_cli.create_tenant(conf=tenant_config)
@@ -124,6 +127,9 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     ), "sanity check for what above loop is supposed to do"
 
     # create the image layer from the future
+    tenant_config["image_creation_threshold"] = image_creation_threshold
+    ps_http.set_tenant_config(tenant_id, tenant_config)
+    assert ps_http.tenant_config(tenant_id).effective_config["image_creation_threshold"] == 1
     ps_http.timeline_compact(tenant_id, timeline_id, force_repartition=True)
     assert (
         len(
