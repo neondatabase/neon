@@ -192,7 +192,7 @@ load_shard_map(shardno_t shard_no, char* connstr)
 			} while (sep != NULL);
 
 			if (i == 0)
-				elog(ERROR, "No shards were speciified");
+				elog(ERROR, "No shards were specified");
 
 			if (shard_map_changed)
 			{
