@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::RemoteExtSpec;
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -124,6 +125,7 @@ impl ComputeControlPlane {
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
         let pageserver =
             PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
+
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
@@ -167,6 +169,30 @@ impl ComputeControlPlane {
             .insert(ep.endpoint_id.clone(), Arc::clone(&ep));
 
         Ok(ep)
+    }
+
+    pub fn check_conflicting_endpoints(
+        &self,
+        mode: ComputeMode,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<()> {
+        if matches!(mode, ComputeMode::Primary) {
+            // this check is not complete, as you could have a concurrent attempt at
+            // creating another primary, both reading the state before checking it here,
+            // but it's better than nothing.
+            let mut duplicates = self.endpoints.iter().filter(|(_k, v)| {
+                v.tenant_id == tenant_id
+                    && v.timeline_id == timeline_id
+                    && v.mode == mode
+                    && v.status() != "stopped"
+            });
+
+            if let Some((key, _)) = duplicates.next() {
+                bail!("attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported.");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -476,6 +502,18 @@ impl Endpoint {
             }
         }
 
+        // check for file remote_extensions_spec.json
+        // if it is present, read it and pass to compute_ctl
+        let remote_extensions_spec_path = self.endpoint_path().join("remote_extensions_spec.json");
+        let remote_extensions_spec = std::fs::File::open(remote_extensions_spec_path);
+        let remote_extensions: Option<RemoteExtSpec>;
+
+        if let Ok(spec_file) = remote_extensions_spec {
+            remote_extensions = serde_json::from_reader(spec_file).ok();
+        } else {
+            remote_extensions = None;
+        };
+
         // Create spec file
         let spec = ComputeSpec {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
@@ -497,7 +535,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            remote_extensions: None,
+            remote_extensions,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

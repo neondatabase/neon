@@ -14,7 +14,6 @@ use pageserver_api::models::{
 use std::collections::HashMap;
 use std::time::Duration;
 use utils::{
-    generation::Generation,
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
@@ -93,6 +92,22 @@ pub fn migrate_tenant(
     // Get a new generation
     let attachment_service = AttachmentService::from_env(env);
 
+    fn build_location_config(
+        mode: LocationConfigMode,
+        generation: Option<u32>,
+        secondary_conf: Option<LocationConfigSecondary>,
+    ) -> LocationConfig {
+        LocationConfig {
+            mode,
+            generation,
+            secondary_conf,
+            tenant_conf: TenantConfig::default(),
+            shard_number: 0,
+            shard_count: 0,
+            shard_stripe_size: 0,
+        }
+    }
+
     let previous = attachment_service.inspect(tenant_id)?;
     let mut baseline_lsns = None;
     if let Some((generation, origin_ps_id)) = &previous {
@@ -101,12 +116,7 @@ pub fn migrate_tenant(
         if origin_ps_id == &dest_ps.conf.id {
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
             let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
-            let dest_conf = LocationConfig {
-                mode: LocationConfigMode::AttachedSingle,
-                generation: gen.map(Generation::new),
-                secondary_conf: None,
-                tenant_conf: TenantConfig::default(),
-            };
+            let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
             dest_ps.location_config(tenant_id, dest_conf)?;
             println!("✅ Migration complete");
             return Ok(());
@@ -114,24 +124,15 @@ pub fn migrate_tenant(
 
         println!("🔁 Switching origin pageserver {origin_ps_id} to stale mode");
 
-        let stale_conf = LocationConfig {
-            mode: LocationConfigMode::AttachedStale,
-            generation: Some(Generation::new(*generation)),
-            secondary_conf: None,
-            tenant_conf: TenantConfig::default(),
-        };
+        let stale_conf =
+            build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
         origin_ps.location_config(tenant_id, stale_conf)?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps)?);
     }
 
     let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
-    let dest_conf = LocationConfig {
-        mode: LocationConfigMode::AttachedMulti,
-        generation: gen.map(Generation::new),
-        secondary_conf: None,
-        tenant_conf: TenantConfig::default(),
-    };
+    let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
     dest_ps.location_config(tenant_id, dest_conf)?;
@@ -170,12 +171,11 @@ pub fn migrate_tenant(
         }
 
         // Downgrade to a secondary location
-        let secondary_conf = LocationConfig {
-            mode: LocationConfigMode::Secondary,
-            generation: None,
-            secondary_conf: Some(LocationConfigSecondary { warm: true }),
-            tenant_conf: TenantConfig::default(),
-        };
+        let secondary_conf = build_location_config(
+            LocationConfigMode::Secondary,
+            None,
+            Some(LocationConfigSecondary { warm: true }),
+        );
 
         println!(
             "💤 Switching to secondary mode on pageserver {}",
@@ -188,12 +188,7 @@ pub fn migrate_tenant(
         "🔁 Switching to AttachedSingle mode on pageserver {}",
         dest_ps.conf.id
     );
-    let dest_conf = LocationConfig {
-        mode: LocationConfigMode::AttachedSingle,
-        generation: gen.map(Generation::new),
-        secondary_conf: None,
-        tenant_conf: TenantConfig::default(),
-    };
+    let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
     dest_ps.location_config(tenant_id, dest_conf)?;
 
     println!("✅ Migration complete");

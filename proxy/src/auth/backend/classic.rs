@@ -5,15 +5,15 @@ use crate::{
     config::AuthenticationConfig,
     console::AuthSecret,
     proxy::LatencyTimer,
-    sasl,
-    stream::PqStream,
+    sasl, scram,
+    stream::{PqStream, Stream},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
 pub(super) async fn authenticate(
     creds: &ClientCredentials<'_>,
-    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,

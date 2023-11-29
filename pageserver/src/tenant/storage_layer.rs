@@ -24,10 +24,7 @@ use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
 use utils::rate_limit::RateLimit;
 
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::{id::TimelineId, lsn::Lsn};
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
@@ -304,12 +301,14 @@ pub trait AsLayerDesc {
 }
 
 pub mod tests {
+    use pageserver_api::shard::TenantShardId;
+
     use super::*;
 
     impl From<DeltaFileName> for PersistentLayerDesc {
         fn from(value: DeltaFileName) -> Self {
             PersistentLayerDesc::new_delta(
-                TenantId::from_array([0; 16]),
+                TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
                 value.key_range,
                 value.lsn_range,
@@ -321,7 +320,7 @@ pub mod tests {
     impl From<ImageFileName> for PersistentLayerDesc {
         fn from(value: ImageFileName) -> Self {
             PersistentLayerDesc::new_img(
-                TenantId::from_array([0; 16]),
+                TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
                 value.key_range,
                 value.lsn,

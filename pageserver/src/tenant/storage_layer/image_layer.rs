@@ -41,6 +41,7 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::models::LayerAccessKind;
+use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -87,7 +88,7 @@ pub(super) struct Summary {
 impl From<&ImageLayer> for Summary {
     fn from(layer: &ImageLayer) -> Self {
         Self::expected(
-            layer.desc.tenant_id,
+            layer.desc.tenant_shard_id.tenant_id,
             layer.desc.timeline_id,
             layer.desc.key_range.clone(),
             layer.lsn,
@@ -217,7 +218,7 @@ impl ImageLayer {
     fn temp_path_for(
         conf: &PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         fname: &ImageFileName,
     ) -> Utf8PathBuf {
         let rand_string: String = rand::thread_rng()
@@ -226,7 +227,7 @@ impl ImageLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(&tenant_id, &timeline_id)
+        conf.timeline_path(&tenant_shard_id, &timeline_id)
             .join(format!("{fname}.{rand_string}.{TEMP_FILE_SUFFIX}"))
     }
 
@@ -276,10 +277,15 @@ impl ImageLayer {
         let metadata = file
             .metadata()
             .context("get file metadata to determine size")?;
+
+        // TODO(sharding): we should get TenantShardId from path.
+        // OR, not at all: any layer we load from disk should also get reconciled with remote IndexPart.
+        let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
+
         Ok(ImageLayer {
             path: path.to_path_buf(),
             desc: PersistentLayerDesc::new_img(
-                summary.tenant_id,
+                tenant_shard_id,
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn,
@@ -400,7 +406,7 @@ struct ImageLayerWriterInner {
     conf: &'static PageServerConf,
     path: Utf8PathBuf,
     timeline_id: TimelineId,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     key_range: Range<Key>,
     lsn: Lsn,
 
@@ -415,7 +421,7 @@ impl ImageLayerWriterInner {
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<Self> {
@@ -424,7 +430,7 @@ impl ImageLayerWriterInner {
         let path = ImageLayer::temp_path_for(
             conf,
             timeline_id,
-            tenant_id,
+            tenant_shard_id,
             &ImageFileName {
                 key_range: key_range.clone(),
                 lsn,
@@ -448,7 +454,7 @@ impl ImageLayerWriterInner {
             conf,
             path,
             timeline_id,
-            tenant_id,
+            tenant_shard_id,
             key_range: key_range.clone(),
             lsn,
             tree: tree_builder,
@@ -495,7 +501,7 @@ impl ImageLayerWriterInner {
         let summary = Summary {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenant_id: self.tenant_id,
+            tenant_id: self.tenant_shard_id.tenant_id,
             timeline_id: self.timeline_id,
             key_range: self.key_range.clone(),
             lsn: self.lsn,
@@ -521,7 +527,7 @@ impl ImageLayerWriterInner {
             .context("get metadata to determine file size")?;
 
         let desc = PersistentLayerDesc::new_img(
-            self.tenant_id,
+            self.tenant_shard_id,
             self.timeline_id,
             self.key_range.clone(),
             self.lsn,
@@ -577,13 +583,14 @@ impl ImageLayerWriter {
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         key_range: &Range<Key>,
         lsn: Lsn,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(
-                ImageLayerWriterInner::new(conf, timeline_id, tenant_id, key_range, lsn).await?,
+                ImageLayerWriterInner::new(conf, timeline_id, tenant_shard_id, key_range, lsn)
+                    .await?,
             ),
         })
     }
