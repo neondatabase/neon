@@ -893,7 +893,6 @@ impl TenantManager {
             }) = &new_location_config.mode
             {
                 if let Some(flush_timeout) = flush {
-                    info!(timeout_ms = flush_timeout.as_millis(), "Flushing");
                     match tokio::time::timeout(
                         flush_timeout,
                         tenant.flush_remote().instrument(info_span!("flush_remote")),
