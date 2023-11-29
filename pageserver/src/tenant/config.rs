@@ -611,15 +611,10 @@ mod tests {
             ..TenantConfig::default()
         };
 
-        let tenant_conf_opt = TenantConfOpt::try_from(&tenant_config);
-
-        assert!(
-            tenant_conf_opt.is_ok(),
-            "Failed to convert TenantConfig to TenantConfOpt"
-        );
+        let tenant_conf_opt = TenantConfOpt::try_from(&tenant_config).unwrap();
 
         assert_eq!(
-            tenant_conf_opt.unwrap().lagging_wal_timeout,
+            tenant_conf_opt.lagging_wal_timeout,
             Some(Duration::from_secs(5))
         );
     }
