@@ -147,9 +147,7 @@ def test_wal_restore_http(
 
     test_output_dir / "initdb.tar.zst"
 
-    (
-        env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst"
-    )
+    (env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst")
 
     ps_client.timeline_delete(tenant_id, timeline_id)
     time.sleep(2)
