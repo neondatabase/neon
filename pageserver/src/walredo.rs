@@ -47,7 +47,8 @@ use pageserver_api::shard::TenantShardId;
 use crate::config::PageServerConf;
 use crate::metrics::{
     WalRedoKillCause, WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTERS,
-    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
+    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM,
+    WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
@@ -241,10 +242,13 @@ impl PostgresRedoManager {
                         let mut proc_guard = self.redo_process.write().unwrap();
                         match &*proc_guard {
                             None => {
+                                let timer =
+                                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.start_timer();
                                 let proc = Arc::new(
                                     WalRedoProcess::launch(self.conf, self.tenant_id, pg_version)
                                         .context("launch walredo process")?,
                                 );
+                                timer.observe_duration();
                                 *proc_guard = Some(Arc::clone(&proc));
                                 proc
                             }

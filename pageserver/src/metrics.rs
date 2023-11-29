@@ -1253,6 +1253,15 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_process_launch_duration",
+        "Histogram of the duration of successful WalRedoProcess::launch calls",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
@@ -1962,6 +1971,7 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
+        &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
     ]
     .into_iter()
     .for_each(|h| {
