@@ -185,7 +185,7 @@ impl ComputeControlPlane {
                 v.tenant_id == tenant_id
                     && v.timeline_id == timeline_id
                     && v.mode == mode
-                    && v.status().starts_with("running")
+                    && v.status() != "stopped"
             });
 
             if let Some((key, _)) = duplicates.next() {
