@@ -1331,6 +1331,19 @@ trace_read_requests = {trace_read_requests}"#,
     }
 
     #[test]
+    fn parse_override_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"tenant_config={ min_resident_size_override =  400 }"#.to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let conf = TenantConfOpt::try_from(item.to_owned()).unwrap();
+
+        assert_eq!(conf.min_resident_size_override, Some(400));
+
+        Ok(())
+    }
+
+    #[test]
     fn eviction_pageserver_config_parse() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;

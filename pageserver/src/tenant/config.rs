@@ -546,11 +546,9 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
     fn try_from(item: toml_edit::Item) -> Result<Self, Self::Error> {
         match item {
             toml_edit::Item::Value(value) => {
-                let mut table = toml_edit::Table::new();
-                table["value"] = toml_edit::Item::Value(value);
-                let deserializer = toml_edit::de::Deserializer::new(table.into());
-                serde_path_to_error::deserialize(deserializer)
-                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()))
+                let d = value.into_deserializer();
+                return serde_path_to_error::deserialize(d)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
             }
             toml_edit::Item::Table(table) => {
                 let deserializer = toml_edit::de::Deserializer::new(table.into());
