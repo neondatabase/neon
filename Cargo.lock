@@ -2611,6 +2611,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostarve_queue"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "rand 0.8.5",
+ "scopeguard",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "notify"
 version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,6 +2962,7 @@ dependencies = [
  "itertools",
  "metrics",
  "nix 0.26.2",
+ "nostarve_queue",
  "num-traits",
  "num_cpus",
  "once_cell",

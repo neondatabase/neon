@@ -21,7 +21,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
-use reqwest::blocking::{Client, RequestBuilder, Response};
+use reqwest::blocking::{Client, ClientBuilder, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::auth::{Claims, Scope};
@@ -99,7 +99,7 @@ impl PageServerNode {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             conf: conf.clone(),
             env: env.clone(),
-            http_client: Client::new(),
+            http_client: ClientBuilder::new().timeout(None).build().unwrap(),
             http_base_url: format!("http://{}/v1", conf.listen_http_addr),
         }
     }
