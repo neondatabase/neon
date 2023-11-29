@@ -1,0 +1,39 @@
+remote_storage ={local_path='/mnt/many_tenants/test_pageserver_startup_many_tenants/repo/local_fs_remote_storage/pageserver'}
+id =1
+pg_distrib_dir ='/home/admin/neon/pg_install'
+http_auth_type ='Trust'
+pg_auth_type ='Trust'
+listen_http_addr ='localhost:15004'
+listen_pg_addr ='localhost:15003'
+broker_endpoint ='http://127.0.0.1:15001/'
+control_plane_api ='http://127.0.0.1:15002/'
+
+# Initial configuration file created by 'pageserver --init'
+#listen_pg_addr = '127.0.0.1:64000'
+#listen_http_addr = '127.0.0.1:9898'
+
+#wait_lsn_timeout = '60 s'
+#wal_redo_timeout = '60 s'
+
+#max_file_descriptors = 100
+
+# initial superuser role name to use when creating a new tenant
+#initial_superuser_name = 'cloud_admin'
+
+#broker_endpoint = 'http://127.0.0.1:50051'
+
+#log_format = 'plain'
+
+#concurrent_tenant_size_logical_size_queries = '1'
+
+metric_collection_endpoint = "https://127.0.0.1:6666"
+#metric_collection_interval = '10 min'
+#cached_metric_collection_interval = '0s'
+#synthetic_size_calculation_interval = '10 min'
+
+#disk_usage_based_eviction = { max_usage_pct = .., min_avail_bytes = .., period = "10s"}
+
+#background_task_maximum_delay = '10s'
+
+[tenant_config]
+
