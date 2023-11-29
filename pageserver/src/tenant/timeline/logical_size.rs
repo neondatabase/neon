@@ -102,23 +102,23 @@ impl LogicalSize {
         }
     }
 
-    pub(super) fn current_size(&self) -> anyhow::Result<CurrentLogicalSize> {
+    pub(super) fn current_size(&self) -> CurrentLogicalSize {
         let size_increment: i64 = self.size_added_after_initial.load(AtomicOrdering::Acquire);
         //                  ^^^ keep this type explicit so that the casts in this function break if
         //                  we change the type.
         match self.initial_logical_size.get() {
             Some((initial_size, _)) => {
                 crate::metrics::initial_logical_size::CALLS.exact.inc();
-                initial_size.checked_add_signed(size_increment)
+                CurrentLogicalSize::Exact(initial_size.checked_add_signed(size_increment)
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                    .map(CurrentLogicalSize::Exact)
+                    .unwrap())
             }
             None => {
                 crate::metrics::initial_logical_size::CALLS
                     .approximate
                     .inc();
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
-                Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
+                CurrentLogicalSize::Approximate(non_negative_size_increment)
             }
         }
     }
