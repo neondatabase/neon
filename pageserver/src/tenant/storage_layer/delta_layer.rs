@@ -634,12 +634,13 @@ impl DeltaLayer {
     where
         F: Fn(Summary) -> Summary,
     {
-        let file = VirtualFile::open_with_options(
-            path,
-            &*std::fs::OpenOptions::new().read(true).write(true),
-        )
-        .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        let file = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options.read(true).write(true);
+            VirtualFile::open_with_options_async(path, options)
+                .await
+                .with_context(|| format!("Failed to open file '{}'", path))?
+        };
         let file = FileBlockReader::new(file);
         let summary_blk = file.read_blk(0, ctx).await?;
         let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
