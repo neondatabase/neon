@@ -10,8 +10,8 @@
 //!
 use anyhow::bail;
 use pageserver_api::models;
-use serde::de::IntoDeserializer;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU64;
@@ -544,12 +544,23 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
     type Error = anyhow::Error;
 
     fn try_from(item: toml_edit::Item) -> Result<Self, Self::Error> {
-        let toml_edit::Item::Table(table) = item else {
-            bail!("expected non-inline table but found {item}")
-        };
-        let deserializer = toml_edit::de::Deserializer::new(table.into());
-        serde_path_to_error::deserialize(deserializer)
-            .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()))
+        match item {
+            toml_edit::Item::Value(value) => {
+                let mut table = toml_edit::Table::new();
+                table["value"] = toml_edit::Item::Value(value);
+                let deserializer = toml_edit::de::Deserializer::new(table.into());
+                serde_path_to_error::deserialize(deserializer)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()))
+            }
+            toml_edit::Item::Table(table) => {
+                let deserializer = toml_edit::de::Deserializer::new(table.into());
+                return serde_path_to_error::deserialize(deserializer)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
+            }
+            _ => {
+                bail!("expected non-inline table but found {item}")
+            }
+        }
     }
 }
 
