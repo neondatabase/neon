@@ -9,6 +9,7 @@ use clap::Parser;
 use hex::FromHex;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response};
+use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
@@ -173,7 +174,8 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
         if state.pageserver == Some(reattach_req.node_id) {
             state.generation += 1;
             response.tenants.push(ReAttachResponseTenant {
-                id: *t,
+                // TODO(sharding): make this shard-aware
+                id: TenantShardId::unsharded(*t),
                 gen: state.generation,
             });
         }
@@ -196,7 +198,8 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
     };
 
     for req_tenant in validate_req.tenants {
-        if let Some(tenant_state) = locked.tenants.get(&req_tenant.id) {
+        // TODO(sharding): make this shard-aware
+        if let Some(tenant_state) = locked.tenants.get(&req_tenant.id.tenant_id) {
             let valid = tenant_state.generation == req_tenant.gen;
             response.tenants.push(ValidateResponseTenant {
                 id: req_tenant.id,

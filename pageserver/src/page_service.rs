@@ -399,6 +399,9 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
+        // TODO(sharding): enumerate local tenant shards for this tenant, and select the one
+        // that should serve this request.
+
         // Make request tracer if needed
         let tenant = mgr::get_active_tenant_with_timeout(
             tenant_id,
@@ -408,9 +411,10 @@ impl PageServerHandler {
         .await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
-            let path = tenant
-                .conf
-                .trace_path(&tenant_id, &timeline_id, &connection_id);
+            let path =
+                tenant
+                    .conf
+                    .trace_path(&tenant.tenant_shard_id(), &timeline_id, &connection_id);
             Some(Tracer::new(path))
         } else {
             None
