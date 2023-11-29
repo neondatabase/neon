@@ -47,20 +47,18 @@ use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
 
-pub struct WalIngest<'a> {
+pub struct WalIngest {
     shard: ShardIdentity,
-    timeline: &'a Timeline,
-
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
 }
 
-impl<'a> WalIngest<'a> {
+impl WalIngest {
     pub async fn new(
-        timeline: &'a Timeline,
+        timeline: &Timeline,
         startpoint: Lsn,
         ctx: &'_ RequestContext,
-    ) -> anyhow::Result<WalIngest<'a>> {
+    ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint, ctx).await?;
@@ -69,7 +67,6 @@ impl<'a> WalIngest<'a> {
 
         Ok(WalIngest {
             shard: *timeline.get_shard_identity(),
-            timeline,
             checkpoint,
             checkpoint_modified: false,
         })
@@ -92,9 +89,10 @@ impl<'a> WalIngest<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         WAL_INGEST.records_received.inc();
+        let pg_version = modification.tline.pg_version;
 
         modification.lsn = lsn;
-        decode_wal_record(recdata, decoded, self.timeline.pg_version)?;
+        decode_wal_record(recdata, decoded, pg_version)?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -131,9 +129,9 @@ impl<'a> WalIngest<'a> {
             }
             pg_constants::RM_DBASE_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-                debug!(%info, pg_version=%self.timeline.pg_version, "handle RM_DBASE_ID");
+                debug!(%info, %pg_version, "handle RM_DBASE_ID");
 
-                if self.timeline.pg_version == 14 {
+                if pg_version == 14 {
                     if info == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE {
                         let createdb = XlCreateDatabase::decode(&mut buf);
                         debug!("XLOG_DBASE_CREATE v14");
@@ -149,7 +147,7 @@ impl<'a> WalIngest<'a> {
                                 .await?;
                         }
                     }
-                } else if self.timeline.pg_version == 15 {
+                } else if pg_version == 15 {
                     if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY {
@@ -169,7 +167,7 @@ impl<'a> WalIngest<'a> {
                                 .await?;
                         }
                     }
-                } else if self.timeline.pg_version == 16 {
+                } else if pg_version == 16 {
                     if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY {
@@ -459,7 +457,7 @@ impl<'a> WalIngest<'a> {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
             // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version)?
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)?
             // do not materialize null pages because them most likely be soon replaced with real data
             && blk.bimg_len != 0
         {
@@ -512,7 +510,7 @@ impl<'a> WalIngest<'a> {
         let mut old_heap_blkno: Option<u32> = None;
         let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
-        match self.timeline.pg_version {
+        match modification.tline.pg_version {
             14 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -736,7 +734,7 @@ impl<'a> WalIngest<'a> {
             // replaying it would fail to find the previous image of the page, because
             // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
             // record if it doesn't.
-            let vm_size = self.get_relsize(vm_rel, modification.lsn, ctx).await?;
+            let vm_size = get_relsize(modification, vm_rel, ctx).await?;
             if let Some(blknum) = new_vm_blk {
                 if blknum >= vm_size {
                     new_vm_blk = None;
@@ -817,10 +815,11 @@ impl<'a> WalIngest<'a> {
         let mut new_heap_blkno: Option<u32> = None;
         let mut old_heap_blkno: Option<u32> = None;
         let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
+        let pg_version = modification.tline.pg_version;
 
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
-        match self.timeline.pg_version {
+        match pg_version {
             16 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
@@ -883,7 +882,7 @@ impl<'a> WalIngest<'a> {
             }
             _ => bail!(
                 "Neon RMGR has no known compatibility with PostgreSQL version {}",
-                self.timeline.pg_version
+                pg_version
             ),
         }
 
@@ -906,7 +905,7 @@ impl<'a> WalIngest<'a> {
             // replaying it would fail to find the previous image of the page, because
             // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
             // record if it doesn't.
-            let vm_size = self.get_relsize(vm_rel, modification.lsn, ctx).await?;
+            let vm_size = get_relsize(modification, vm_rel, ctx).await?;
             if let Some(blknum) = new_vm_blk {
                 if blknum >= vm_size {
                     new_vm_blk = None;
@@ -1104,7 +1103,7 @@ impl<'a> WalIngest<'a> {
                 modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
                 fsm_physical_page_no += 1;
             }
-            let nblocks = self.get_relsize(rel, modification.lsn, ctx).await?;
+            let nblocks = get_relsize(modification, rel, ctx).await?;
             if nblocks > fsm_physical_page_no {
                 // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
@@ -1126,7 +1125,7 @@ impl<'a> WalIngest<'a> {
                 modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
                 vm_page_no += 1;
             }
-            let nblocks = self.get_relsize(rel, modification.lsn, ctx).await?;
+            let nblocks = get_relsize(modification, rel, ctx).await?;
             if nblocks > vm_page_no {
                 // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
@@ -1199,7 +1198,7 @@ impl<'a> WalIngest<'a> {
                     dbnode: xnode.dbnode,
                     relnode: xnode.relnode,
                 };
-                let last_lsn = self.timeline.get_last_record_lsn();
+                let last_lsn = modification.tline.get_last_record_lsn();
                 if modification
                     .tline
                     .get_rel_exists(rel, last_lsn, true, ctx)
@@ -1471,20 +1470,6 @@ impl<'a> WalIngest<'a> {
         Ok(())
     }
 
-    async fn get_relsize(
-        &mut self,
-        rel: RelTag,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<BlockNumber> {
-        let nblocks = if !self.timeline.get_rel_exists(rel, lsn, true, ctx).await? {
-            0
-        } else {
-            self.timeline.get_rel_size(rel, lsn, true, ctx).await?
-        };
-        Ok(nblocks)
-    }
-
     async fn handle_rel_extend(
         &mut self,
         modification: &mut DatadirModification<'_>,
@@ -1504,22 +1489,26 @@ impl<'a> WalIngest<'a> {
         //       check the cache too. This is because eagerly checking the cache results in
         //       less work overall and 10% better performance. It's more work on cache miss
         //       but cache miss is rare.
-        let old_nblocks = if let Some(nblocks) = self.timeline.get_cached_rel_size(&rel, last_lsn) {
-            nblocks
-        } else if !self
-            .timeline
-            .get_rel_exists(rel, last_lsn, true, ctx)
-            .await?
-        {
-            // create it with 0 size initially, the logic below will extend it
-            modification
-                .put_rel_creation(rel, 0, ctx)
-                .await
-                .context("Relation Error")?;
-            0
-        } else {
-            self.timeline.get_rel_size(rel, last_lsn, true, ctx).await?
-        };
+        let old_nblocks =
+            if let Some(nblocks) = modification.tline.get_cached_rel_size(&rel, last_lsn) {
+                nblocks
+            } else if !modification
+                .tline
+                .get_rel_exists(rel, last_lsn, true, ctx)
+                .await?
+            {
+                // create it with 0 size initially, the logic below will extend it
+                modification
+                    .put_rel_creation(rel, 0, ctx)
+                    .await
+                    .context("Relation Error")?;
+                0
+            } else {
+                modification
+                    .tline
+                    .get_rel_size(rel, last_lsn, true, ctx)
+                    .await?
+            };
 
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
@@ -1571,9 +1560,9 @@ impl<'a> WalIngest<'a> {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let last_lsn = self.timeline.get_last_record_lsn();
-        let old_nblocks = if !self
-            .timeline
+        let last_lsn = modification.tline.get_last_record_lsn();
+        let old_nblocks = if !modification
+            .tline
             .get_slru_segment_exists(kind, segno, last_lsn, ctx)
             .await?
         {
@@ -1583,7 +1572,8 @@ impl<'a> WalIngest<'a> {
                 .await?;
             0
         } else {
-            self.timeline
+            modification
+                .tline
                 .get_slru_segment_size(kind, segno, last_lsn, ctx)
                 .await?
         };
@@ -1605,6 +1595,26 @@ impl<'a> WalIngest<'a> {
         }
         Ok(())
     }
+}
+
+async fn get_relsize(
+    modification: &DatadirModification<'_>,
+    rel: RelTag,
+    ctx: &RequestContext,
+) -> anyhow::Result<BlockNumber> {
+    let nblocks = if !modification
+        .tline
+        .get_rel_exists(rel, modification.lsn, true, ctx)
+        .await?
+    {
+        0
+    } else {
+        modification
+            .tline
+            .get_rel_size(rel, modification.lsn, true, ctx)
+            .await?
+    };
+    Ok(nblocks)
 }
 
 #[allow(clippy::bool_assert_comparison)]
@@ -1632,10 +1642,7 @@ mod tests {
 
     static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
 
-    async fn init_walingest_test<'a>(
-        tline: &'a Timeline,
-        ctx: &RequestContext,
-    ) -> Result<WalIngest<'a>> {
+    async fn init_walingest_test(tline: &Timeline, ctx: &RequestContext) -> Result<WalIngest> {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
