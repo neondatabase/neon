@@ -2348,6 +2348,7 @@ impl Tenant {
             new_timeline_id,
             self.tenant_shard_id,
             self.generation,
+            self.shard_identity,
             Arc::clone(&self.walredo_mgr),
             resources,
             pg_version,
