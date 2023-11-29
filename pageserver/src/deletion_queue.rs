@@ -10,11 +10,12 @@ use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use crate::virtual_file::MaybeFatalIo;
 use crate::virtual_file::VirtualFile;
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use hex::FromHex;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,7 +26,7 @@ use tracing::Instrument;
 use tracing::{self, debug, error};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::generation::Generation;
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 use utils::lsn::AtomicLsn;
 use utils::lsn::Lsn;
 
@@ -159,11 +160,10 @@ pub struct DeletionQueueClient {
     lsn_table: Arc<std::sync::RwLock<VisibleLsnUpdates>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct TenantDeletionList {
     /// For each Timeline, a list of key fragments to append to the timeline remote path
     /// when reconstructing a full key
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
     timelines: HashMap<TimelineId, Vec<String>>,
 
     /// The generation in which this deletion was emitted: note that this may not be the
@@ -178,43 +178,11 @@ impl TenantDeletionList {
     }
 }
 
-/// For HashMaps using a `hex` compatible key, where we would like to encode the key as a string
-fn to_hex_map<S, V, I>(input: &HashMap<I, V>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    V: Serialize,
-    I: AsRef<[u8]>,
-{
-    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v));
-
-    transformed
-        .collect::<HashMap<String, &V>>()
-        .serialize(serializer)
-}
-
-/// For HashMaps using a FromHex key, where we would like to decode the key
-fn from_hex_map<'de, D, V, I>(deserializer: D) -> Result<HashMap<I, V>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-    V: Deserialize<'de>,
-    I: FromHex + std::hash::Hash + Eq,
-{
-    let hex_map = HashMap::<String, V>::deserialize(deserializer)?;
-    hex_map
-        .into_iter()
-        .map(|(k, v)| {
-            I::from_hex(k)
-                .map(|k| (k, v))
-                .map_err(|_| serde::de::Error::custom("Invalid hex ID"))
-        })
-        .collect()
-}
-
 /// Files ending with this suffix will be ignored and erased
 /// during recovery as startup.
 const TEMP_SUFFIX: &str = "tmp";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct DeletionList {
     /// Serialization version, for future use
     version: u8,
@@ -226,8 +194,7 @@ struct DeletionList {
     /// nested HashMaps by TenantTimelineID.  Each Tenant only appears once
     /// with one unique generation ID: if someone tries to push a second generation
     /// ID for the same tenant, we will start a new DeletionList.
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
-    tenants: HashMap<TenantId, TenantDeletionList>,
+    tenants: HashMap<TenantShardId, TenantDeletionList>,
 
     /// Avoid having to walk `tenants` to calculate the number of keys in
     /// the nested deletion lists
@@ -299,7 +266,7 @@ impl DeletionList {
     /// deletion list.
     fn push(
         &mut self,
-        tenant: &TenantId,
+        tenant: &TenantShardId,
         timeline: &TimelineId,
         generation: Generation,
         objects: &mut Vec<RemotePath>,
@@ -391,7 +358,7 @@ struct TenantLsnState {
 
 #[derive(Default)]
 struct VisibleLsnUpdates {
-    tenants: HashMap<TenantId, TenantLsnState>,
+    tenants: HashMap<TenantShardId, TenantLsnState>,
 }
 
 impl VisibleLsnUpdates {
@@ -448,7 +415,7 @@ impl DeletionQueueClient {
 
     pub(crate) fn recover(
         &self,
-        attached_tenants: HashMap<TenantId, Generation>,
+        attached_tenants: HashMap<TenantShardId, Generation>,
     ) -> Result<(), DeletionQueueError> {
         self.do_push(
             &self.tx,
@@ -465,7 +432,7 @@ impl DeletionQueueClient {
     /// backend will later wake up and notice that the tenant's generation requires validation.
     pub(crate) async fn update_remote_consistent_lsn(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
         lsn: Lsn,
@@ -476,10 +443,13 @@ impl DeletionQueueClient {
             .write()
             .expect("Lock should never be poisoned");
 
-        let tenant_entry = locked.tenants.entry(tenant_id).or_insert(TenantLsnState {
-            timelines: HashMap::new(),
-            generation: current_generation,
-        });
+        let tenant_entry = locked
+            .tenants
+            .entry(tenant_shard_id)
+            .or_insert(TenantLsnState {
+                timelines: HashMap::new(),
+                generation: current_generation,
+            });
 
         if tenant_entry.generation != current_generation {
             // Generation might have changed if we were detached and then re-attached: in this case,
@@ -506,28 +476,29 @@ impl DeletionQueueClient {
     /// generations in `layers` are the generations in which those layers were written.
     pub(crate) async fn push_layers(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, Generation)>,
+        layers: Vec<(LayerFileName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         if current_generation.is_none() {
             debug!("Enqueuing deletions in legacy mode, skipping queue");
 
             let mut layer_paths = Vec::new();
-            for (layer, generation) in layers {
+            for (layer, meta) in layers {
                 layer_paths.push(remote_layer_path(
-                    &tenant_id,
+                    &tenant_shard_id.tenant_id,
                     &timeline_id,
+                    meta.shard,
                     &layer,
-                    generation,
+                    meta.generation,
                 ));
             }
             self.push_immediate(layer_paths).await?;
             return self.flush_immediate().await;
         }
 
-        self.push_layers_sync(tenant_id, timeline_id, current_generation, layers)
+        self.push_layers_sync(tenant_shard_id, timeline_id, current_generation, layers)
     }
 
     /// When a Tenant has a generation, push_layers is always synchronous because
@@ -537,10 +508,10 @@ impl DeletionQueueClient {
     /// support (`<https://github.com/neondatabase/neon/issues/5395>`)
     pub(crate) fn push_layers_sync(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         current_generation: Generation,
-        layers: Vec<(LayerFileName, Generation)>,
+        layers: Vec<(LayerFileName, LayerFileMetadata)>,
     ) -> Result<(), DeletionQueueError> {
         metrics::DELETION_QUEUE
             .keys_submitted
@@ -548,7 +519,7 @@ impl DeletionQueueClient {
         self.do_push(
             &self.tx,
             ListWriterQueueMessage::Delete(DeletionOp {
-                tenant_id,
+                tenant_shard_id,
                 timeline_id,
                 layers,
                 generation: current_generation,
@@ -751,6 +722,7 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
+    use pageserver_api::shard::ShardIndex;
     use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
@@ -815,12 +787,12 @@ mod test {
         }
 
         fn set_latest_generation(&self, gen: Generation) {
-            let tenant_id = self.harness.tenant_id;
+            let tenant_shard_id = self.harness.tenant_shard_id;
             self.mock_control_plane
                 .latest_generation
                 .lock()
                 .unwrap()
-                .insert(tenant_id, gen);
+                .insert(tenant_shard_id, gen);
         }
 
         /// Returns remote layer file name, suitable for use in assert_remote_files
@@ -829,8 +801,8 @@ mod test {
             file_name: LayerFileName,
             gen: Generation,
         ) -> anyhow::Result<String> {
-            let tenant_id = self.harness.tenant_id;
-            let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+            let tenant_shard_id = self.harness.tenant_shard_id;
+            let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
             let remote_timeline_path = self.remote_fs_dir.join(relative_remote_path.get_path());
             std::fs::create_dir_all(&remote_timeline_path)?;
             let remote_layer_file_name = format!("{}{}", file_name, gen.get_suffix());
@@ -848,7 +820,7 @@ mod test {
 
     #[derive(Debug, Clone)]
     struct MockControlPlane {
-        pub latest_generation: std::sync::Arc<std::sync::Mutex<HashMap<TenantId, Generation>>>,
+        pub latest_generation: std::sync::Arc<std::sync::Mutex<HashMap<TenantShardId, Generation>>>,
     }
 
     impl MockControlPlane {
@@ -862,20 +834,20 @@ mod test {
     #[async_trait::async_trait]
     impl ControlPlaneGenerationsApi for MockControlPlane {
         #[allow(clippy::diverging_sub_expression)] // False positive via async_trait
-        async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError> {
+        async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
             unimplemented!()
         }
         async fn validate(
             &self,
-            tenants: Vec<(TenantId, Generation)>,
-        ) -> Result<HashMap<TenantId, bool>, RetryForeverError> {
+            tenants: Vec<(TenantShardId, Generation)>,
+        ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError> {
             let mut result = HashMap::new();
 
             let latest_generation = self.latest_generation.lock().unwrap();
 
-            for (tenant_id, generation) in tenants {
-                if let Some(latest) = latest_generation.get(&tenant_id) {
-                    result.insert(tenant_id, *latest == generation);
+            for (tenant_shard_id, generation) in tenants {
+                if let Some(latest) = latest_generation.get(&tenant_shard_id) {
+                    result.insert(tenant_shard_id, *latest == generation);
                 }
             }
 
@@ -979,10 +951,10 @@ mod test {
         client.recover(HashMap::new())?;
 
         let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
-        let tenant_id = ctx.harness.tenant_id;
+        let tenant_shard_id = ctx.harness.tenant_shard_id;
 
         let content: Vec<u8> = "victim1 contents".into();
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
@@ -990,6 +962,8 @@ mod test {
         // we delete, and the generation of the running Tenant.
         let layer_generation = Generation::new(0xdeadbeef);
         let now_generation = Generation::new(0xfeedbeef);
+        let layer_metadata =
+            LayerFileMetadata::new(0xf00, layer_generation, ShardIndex::unsharded());
 
         let remote_layer_file_name_1 =
             format!("{}{}", layer_file_name_1, layer_generation.get_suffix());
@@ -1010,10 +984,10 @@ mod test {
         info!("Pushing");
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 now_generation,
-                [(layer_file_name_1.clone(), layer_generation)].to_vec(),
+                [(layer_file_name_1.clone(), layer_metadata)].to_vec(),
             )
             .await?;
         assert_remote_files(&[&remote_layer_file_name_1], &remote_timeline_path);
@@ -1052,11 +1026,13 @@ mod test {
         let stale_generation = latest_generation.previous();
         // Generation that our example layer file was written with
         let layer_generation = stale_generation.previous();
+        let layer_metadata =
+            LayerFileMetadata::new(0xf00, layer_generation, ShardIndex::unsharded());
 
         ctx.set_latest_generation(latest_generation);
 
-        let tenant_id = ctx.harness.tenant_id;
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let tenant_shard_id = ctx.harness.tenant_shard_id;
+        let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
 
         // Initial state: a remote layer exists
@@ -1066,10 +1042,10 @@ mod test {
         tracing::debug!("Pushing...");
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 stale_generation,
-                [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1081,10 +1057,10 @@ mod test {
         tracing::debug!("Pushing...");
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 latest_generation,
-                [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1103,14 +1079,16 @@ mod test {
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
-        let tenant_id = ctx.harness.tenant_id;
+        let tenant_shard_id = ctx.harness.tenant_shard_id;
 
-        let relative_remote_path = remote_timeline_path(&tenant_id, &TIMELINE_ID);
+        let relative_remote_path = remote_timeline_path(&tenant_shard_id, &TIMELINE_ID);
         let remote_timeline_path = ctx.remote_fs_dir.join(relative_remote_path.get_path());
         let deletion_prefix = ctx.harness.conf.deletion_prefix();
 
         let layer_generation = Generation::new(0xdeadbeef);
         let now_generation = Generation::new(0xfeedbeef);
+        let layer_metadata =
+            LayerFileMetadata::new(0xf00, layer_generation, ShardIndex::unsharded());
 
         // Inject a deletion in the generation before generation_now: after restart,
         // this deletion should _not_ get executed (only the immediately previous
@@ -1119,10 +1097,10 @@ mod test {
             ctx.write_remote_layer(EXAMPLE_LAYER_NAME, layer_generation)?;
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 now_generation.previous(),
-                [(EXAMPLE_LAYER_NAME.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1133,10 +1111,10 @@ mod test {
             ctx.write_remote_layer(EXAMPLE_LAYER_NAME_ALT, layer_generation)?;
         client
             .push_layers(
-                tenant_id,
+                tenant_shard_id,
                 TIMELINE_ID,
                 now_generation,
-                [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_generation)].to_vec(),
+                [(EXAMPLE_LAYER_NAME_ALT.clone(), layer_metadata.clone())].to_vec(),
             )
             .await?;
 
@@ -1164,7 +1142,7 @@ mod test {
         drop(client);
         ctx.restart().await;
         let client = ctx.deletion_queue.new_client();
-        client.recover(HashMap::from([(tenant_id, now_generation)]))?;
+        client.recover(HashMap::from([(tenant_shard_id, now_generation)]))?;
 
         info!("Flush-executing");
         client.flush_execute().await?;
@@ -1226,12 +1204,13 @@ pub(crate) mod mock {
                 match msg {
                     ListWriterQueueMessage::Delete(op) => {
                         let mut objects = op.objects;
-                        for (layer, generation) in op.layers {
+                        for (layer, meta) in op.layers {
                             objects.push(remote_layer_path(
-                                &op.tenant_id,
+                                &op.tenant_shard_id.tenant_id,
                                 &op.timeline_id,
+                                meta.shard,
                                 &layer,
-                                generation,
+                                meta.generation,
                             ));
                         }
 
@@ -1310,5 +1289,35 @@ pub(crate) mod mock {
                 lsn_table: self.lsn_table.clone(),
             }
         }
+    }
+
+    /// Test round-trip serialization/deserialization, and test stability of the format
+    /// vs. a static expected string for the serialized version.
+    #[test]
+    fn deletion_list_serialization() -> anyhow::Result<()> {
+        let tenant_id = "ad6c1a56f5680419d3a16ff55d97ec3c"
+            .to_string()
+            .parse::<TenantShardId>()?;
+        let timeline_id = "be322c834ed9e709e63b5c9698691910"
+            .to_string()
+            .parse::<TimelineId>()?;
+        let generation = Generation::new(123);
+
+        let object =
+            RemotePath::from_string(&format!("tenants/{tenant_id}/timelines/{timeline_id}/foo"))?;
+        let mut objects = [object].to_vec();
+
+        let mut example = DeletionList::new(1);
+        example.push(&tenant_id, &timeline_id, generation, &mut objects);
+
+        let encoded = serde_json::to_string(&example)?;
+
+        let expected = "{\"version\":1,\"sequence\":1,\"tenants\":{\"ad6c1a56f5680419d3a16ff55d97ec3c\":{\"timelines\":{\"be322c834ed9e709e63b5c9698691910\":[\"foo\"]},\"generation\":123}},\"size\":1}".to_string();
+        assert_eq!(encoded, expected);
+
+        let decoded = serde_json::from_str::<DeletionList>(&encoded)?;
+        assert_eq!(example, decoded);
+
+        Ok(())
     }
 }

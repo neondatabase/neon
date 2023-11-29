@@ -25,7 +25,7 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
 use crate::pg_helpers::*;
@@ -59,8 +59,8 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
-    ///  the S3 bucket that we search for extensions in
-    pub ext_remote_storage: Option<GenericRemoteStorage>,
+    /// the address of extension storage proxy gateway
+    pub ext_remote_storage: Option<String>,
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
@@ -957,12 +957,12 @@ LIMIT 100",
         real_ext_name: String,
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
-        let remote_storage = self
-            .ext_remote_storage
-            .as_ref()
-            .ok_or(DownloadError::BadInput(anyhow::anyhow!(
-                "Remote extensions storage is not configured",
-            )))?;
+        let ext_remote_storage =
+            self.ext_remote_storage
+                .as_ref()
+                .ok_or(DownloadError::BadInput(anyhow::anyhow!(
+                    "Remote extensions storage is not configured",
+                )))?;
 
         let ext_archive_name = ext_path.object_name().expect("bad path");
 
@@ -1018,7 +1018,7 @@ LIMIT 100",
         let download_size = extension_server::download_extension(
             &real_ext_name,
             &ext_path,
-            remote_storage,
+            ext_remote_storage,
             &self.pgbin,
         )
         .await

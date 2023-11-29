@@ -149,6 +149,9 @@ tenant 9ef87a5bf0d92544f6fafeeb3239695c successfully created on the pageserver
 Created an initial timeline 'de200bd42b49cc1814412c7e592dd6e9' at Lsn 0/16B5A50 for tenant: 9ef87a5bf0d92544f6fafeeb3239695c
 Setting tenant 9ef87a5bf0d92544f6fafeeb3239695c as a default one
 
+# create postgres compute node
+> cargo neon endpoint create main
+
 # start postgres compute node
 > cargo neon endpoint start main
 Starting new endpoint main (PostgreSQL v14) on timeline de200bd42b49cc1814412c7e592dd6e9 ...
@@ -185,8 +188,11 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 (L) main [de200bd42b49cc1814412c7e592dd6e9]
 (L) ┗━ @0/16F9A00: migration_check [b3b863fa45fa9e57e615f9f2d944e601]
 
+# create postgres on that branch
+> cargo neon endpoint create migration_check --branch-name migration_check
+
 # start postgres on that branch
-> cargo neon endpoint start migration_check --branch-name migration_check
+> cargo neon endpoint start migration_check
 Starting new endpoint migration_check (PostgreSQL v14) on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
 Starting postgres at 'postgresql://cloud_admin@127.0.0.1:55434/postgres'
 

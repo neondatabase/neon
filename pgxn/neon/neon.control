@@ -2,3 +2,4 @@
 comment = 'cloud storage for PostgreSQL'
 default_version = '1.1'
 module_pathname = '$libdir/neon'
+relocatable = true

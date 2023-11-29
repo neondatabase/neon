@@ -1,12 +1,15 @@
 use crate::auth;
 use anyhow::{bail, ensure, Context, Ok};
-use rustls::sign;
+use rustls::{sign, Certificate, PrivateKey};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
+use tracing::{error, info};
+use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -27,6 +30,7 @@ pub struct MetricCollectionConfig {
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_names: Option<HashSet<String>>,
+    pub cert_resolver: Arc<CertResolver>,
 }
 
 pub struct HttpConfig {
@@ -52,7 +56,7 @@ pub fn configure_tls(
     let mut cert_resolver = CertResolver::new();
 
     // add default certificate
-    cert_resolver.add_cert(key_path, cert_path, true)?;
+    cert_resolver.add_cert_path(key_path, cert_path, true)?;
 
     // add extra certificates
     if let Some(certs_dir) = certs_dir {
@@ -64,7 +68,7 @@ pub fn configure_tls(
                 let key_path = path.join("tls.key");
                 let cert_path = path.join("tls.crt");
                 if key_path.exists() && cert_path.exists() {
-                    cert_resolver.add_cert(
+                    cert_resolver.add_cert_path(
                         &key_path.to_string_lossy(),
                         &cert_path.to_string_lossy(),
                         false,
@@ -76,35 +80,97 @@ pub fn configure_tls(
 
     let common_names = cert_resolver.get_common_names();
 
+    let cert_resolver = Arc::new(cert_resolver);
+
     let config = rustls::ServerConfig::builder()
         .with_safe_default_cipher_suites()
         .with_safe_default_kx_groups()
         // allow TLS 1.2 to be compatible with older client libraries
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_no_client_auth()
-        .with_cert_resolver(Arc::new(cert_resolver))
+        .with_cert_resolver(cert_resolver.clone())
         .into();
 
     Ok(TlsConfig {
         config,
         common_names: Some(common_names),
+        cert_resolver,
     })
 }
 
-struct CertResolver {
-    certs: HashMap<String, Arc<rustls::sign::CertifiedKey>>,
-    default: Option<Arc<rustls::sign::CertifiedKey>>,
+/// Channel binding parameter
+///
+/// <https://www.rfc-editor.org/rfc/rfc5929#section-4>
+/// Description: The hash of the TLS server's certificate as it
+/// appears, octet for octet, in the server's Certificate message.  Note
+/// that the Certificate message contains a certificate_list, in which
+/// the first element is the server's certificate.
+///
+/// The hash function is to be selected as follows:
+///
+/// * if the certificate's signatureAlgorithm uses a single hash
+///   function, and that hash function is either MD5 or SHA-1, then use SHA-256;
+///
+/// * if the certificate's signatureAlgorithm uses a single hash
+///   function and that hash function neither MD5 nor SHA-1, then use
+///   the hash function associated with the certificate's
+///   signatureAlgorithm;
+///
+/// * if the certificate's signatureAlgorithm uses no hash functions or
+///   uses multiple hash functions, then this channel binding type's
+///   channel bindings are undefined at this time (updates to is channel
+///   binding type may occur to address this issue if it ever arises).
+#[derive(Debug, Clone, Copy)]
+pub enum TlsServerEndPoint {
+    Sha256([u8; 32]),
+    Undefined,
 }
 
-impl CertResolver {
-    fn new() -> Self {
-        Self {
-            certs: HashMap::new(),
-            default: None,
+impl TlsServerEndPoint {
+    pub fn new(cert: &Certificate) -> anyhow::Result<Self> {
+        let sha256_oids = [
+            // I'm explicitly not adding MD5 or SHA1 here... They're bad.
+            oid_registry::OID_SIG_ECDSA_WITH_SHA256,
+            oid_registry::OID_PKCS1_SHA256WITHRSA,
+        ];
+
+        let pem = x509_parser::parse_x509_certificate(&cert.0)
+            .context("Failed to parse PEM object from cerficiate")?
+            .1;
+
+        info!(subject = %pem.subject, "parsing TLS certificate");
+
+        let reg = oid_registry::OidRegistry::default().with_all_crypto();
+        let oid = pem.signature_algorithm.oid();
+        let alg = reg.get(oid);
+        if sha256_oids.contains(oid) {
+            let tls_server_end_point: [u8; 32] =
+                Sha256::new().chain_update(&cert.0).finalize().into();
+            info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
+            Ok(Self::Sha256(tls_server_end_point))
+        } else {
+            error!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), "unknown channel binding");
+            Ok(Self::Undefined)
         }
     }
 
-    fn add_cert(
+    pub fn supported(&self) -> bool {
+        !matches!(self, TlsServerEndPoint::Undefined)
+    }
+}
+
+#[derive(Default)]
+pub struct CertResolver {
+    certs: HashMap<String, (Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)>,
+    default: Option<(Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)>,
+}
+
+impl CertResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_cert_path(
         &mut self,
         key_path: &str,
         cert_path: &str,
@@ -120,57 +186,65 @@ impl CertResolver {
             keys.pop().map(rustls::PrivateKey).unwrap()
         };
 
-        let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
-
         let cert_chain_bytes = std::fs::read(cert_path)
             .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
 
         let cert_chain = {
             rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                .context(format!(
+                .with_context(|| {
+                    format!(
                     "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
-                ))?
+                )
+                })?
                 .into_iter()
                 .map(rustls::Certificate)
                 .collect()
         };
 
-        let common_name = {
-            let pem = x509_parser::pem::parse_x509_pem(&cert_chain_bytes)
-                .context(format!(
-                    "Failed to parse PEM object from bytes from file at '{cert_path}'."
-                ))?
-                .1;
-            let common_name = pem.parse_x509()?.subject().to_string();
+        self.add_cert(priv_key, cert_chain, is_default)
+    }
 
-            // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
-            // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
-            // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
-            // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
-            // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
-            // of cutting off '*.' parts.
-            if common_name.starts_with("CN=*.") {
-                common_name.strip_prefix("CN=*.").map(|s| s.to_string())
-            } else {
-                common_name.strip_prefix("CN=").map(|s| s.to_string())
-            }
+    pub fn add_cert(
+        &mut self,
+        priv_key: PrivateKey,
+        cert_chain: Vec<Certificate>,
+        is_default: bool,
+    ) -> anyhow::Result<()> {
+        let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
+
+        let first_cert = &cert_chain[0];
+        let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+        let pem = x509_parser::parse_x509_certificate(&first_cert.0)
+            .context("Failed to parse PEM object from cerficiate")?
+            .1;
+
+        let common_name = pem.subject().to_string();
+
+        // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
+        // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
+        // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
+        // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
+        // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
+        // of cutting off '*.' parts.
+        let common_name = if common_name.starts_with("CN=*.") {
+            common_name.strip_prefix("CN=*.").map(|s| s.to_string())
+        } else {
+            common_name.strip_prefix("CN=").map(|s| s.to_string())
         }
-        .context(format!(
-            "Failed to parse common name from certificate at '{cert_path}'."
-        ))?;
+        .context("Failed to parse common name from certificate")?;
 
         let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
 
         if is_default {
-            self.default = Some(cert.clone());
+            self.default = Some((cert.clone(), tls_server_end_point));
         }
 
-        self.certs.insert(common_name, cert);
+        self.certs.insert(common_name, (cert, tls_server_end_point));
 
         Ok(())
     }
 
-    fn get_common_names(&self) -> HashSet<String> {
+    pub fn get_common_names(&self) -> HashSet<String> {
         self.certs.keys().map(|s| s.to_string()).collect()
     }
 }
@@ -178,15 +252,24 @@ impl CertResolver {
 impl rustls::server::ResolvesServerCert for CertResolver {
     fn resolve(
         &self,
-        _client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        self.resolve(client_hello.server_name()).map(|x| x.0)
+    }
+}
+
+impl CertResolver {
+    pub fn resolve(
+        &self,
+        server_name: Option<&str>,
+    ) -> Option<(Arc<rustls::sign::CertifiedKey>, TlsServerEndPoint)> {
         // loop here and cut off more and more subdomains until we find
         // a match to get a proper wildcard support. OTOH, we now do not
         // use nested domains, so keep this simple for now.
         //
         // With the current coding foo.com will match *.foo.com and that
         // repeats behavior of the old code.
-        if let Some(mut sni_name) = _client_hello.server_name() {
+        if let Some(mut sni_name) = server_name {
             loop {
                 if let Some(cert) = self.certs.get(sni_name) {
                     return Some(cert.clone());

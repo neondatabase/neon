@@ -351,7 +351,7 @@ impl TimelineSnapshot {
             let last_record_lsn = t.get_last_record_lsn();
 
             let current_exact_logical_size = {
-                let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_id, timeline_id = %t.timeline_id);
+                let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
                 let res = span
                     .in_scope(|| t.get_current_logical_size(ctx))
                     .context("get_current_logical_size");

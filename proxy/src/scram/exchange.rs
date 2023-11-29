@@ -5,9 +5,11 @@ use super::messages::{
 };
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
+use crate::config;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
+#[derive(Debug)]
 struct TlsServerEndPoint;
 
 impl std::fmt::Display for TlsServerEndPoint {
@@ -43,20 +45,20 @@ pub struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
     nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
-    cert_digest: Option<&'a [u8]>,
+    tls_server_end_point: config::TlsServerEndPoint,
 }
 
 impl<'a> Exchange<'a> {
     pub fn new(
         secret: &'a ServerSecret,
         nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
-        cert_digest: Option<&'a [u8]>,
+        tls_server_end_point: config::TlsServerEndPoint,
     ) -> Self {
         Self {
             state: ExchangeState::Initial,
             secret,
             nonce,
-            cert_digest,
+            tls_server_end_point,
         }
     }
 }
@@ -70,6 +72,14 @@ impl sasl::Mechanism for Exchange<'_> {
             Initial => {
                 let client_first_message = ClientFirstMessage::parse(input)
                     .ok_or(SaslError::BadClientMessage("invalid client-first-message"))?;
+
+                // If the flag is set to "y" and the server supports channel
+                // binding, the server MUST fail authentication
+                if client_first_message.cbind_flag == ChannelBinding::NotSupportedServer
+                    && self.tls_server_end_point.supported()
+                {
+                    return Err(SaslError::ChannelBindingFailed("SCRAM-PLUS not used"));
+                }
 
                 let server_first_message = client_first_message.build_server_first_message(
                     &(self.nonce)(),
@@ -94,10 +104,11 @@ impl sasl::Mechanism for Exchange<'_> {
                 let client_final_message = ClientFinalMessage::parse(input)
                     .ok_or(SaslError::BadClientMessage("invalid client-final-message"))?;
 
-                let channel_binding = cbind_flag.encode(|_| {
-                    self.cert_digest
-                        .map(base64::encode)
-                        .ok_or(SaslError::ChannelBindingFailed("no cert digest provided"))
+                let channel_binding = cbind_flag.encode(|_| match &self.tls_server_end_point {
+                    config::TlsServerEndPoint::Sha256(x) => Ok(x),
+                    config::TlsServerEndPoint::Undefined => {
+                        Err(SaslError::ChannelBindingFailed("no cert digest provided"))
+                    }
                 })?;
 
                 // This might've been caused by a MITM attack
