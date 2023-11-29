@@ -286,7 +286,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
                     str(tenant_id),
                 )
             ),
-            allowed_postfixes=["initdb.tar.zst"],
+            allowed_postfix="initdb.tar.zst",
         )
 
 
