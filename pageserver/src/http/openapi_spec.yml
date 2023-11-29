@@ -517,7 +517,7 @@ paths:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/attach:
-      parameters:
+    parameters:
       - name: tenant_id
         in: path
         required: true
