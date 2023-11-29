@@ -6,7 +6,7 @@ use pageserver_api::models::TenantState;
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, instrument, warn, Instrument, Span};
+use tracing::{error, instrument, Instrument, Span};
 
 use utils::{
     backoff, completion, crashsafe, fs_ext,
@@ -17,6 +17,7 @@ use crate::{
     config::PageServerConf,
     context::RequestContext,
     task_mgr::{self, TaskKind},
+    tenant::mgr::{TenantSlot, TenantsMapRemoveResult},
     InitializationOrder,
 };
 
@@ -287,6 +288,8 @@ impl DeleteTenantFlow {
     ) -> Result<(), DeleteTenantError> {
         span::debug_assert_current_span_has_tenant_id();
 
+        pausable_failpoint!("tenant-delete-before-run");
+
         let mut guard = Self::prepare(&tenant).await?;
 
         if let Err(e) = Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant).await {
@@ -538,16 +541,68 @@ impl DeleteTenantFlow {
             .context("cleanup_remaining_fs_traces")?;
 
         {
-            let mut locked = tenants.write().unwrap();
-            if locked.remove(&tenant.tenant_id).is_none() {
-                warn!("Tenant got removed from tenants map during deletion");
-            };
+            pausable_failpoint!("tenant-delete-before-map-remove");
 
-            // FIXME: we should not be modifying this from outside of mgr.rs.
-            // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)
-            crate::metrics::TENANT_MANAGER
-                .tenant_slots
-                .set(locked.len() as u64);
+            // This block is simply removing the TenantSlot for this tenant.  It requires a loop because
+            // we might conflict with a TenantSlot::InProgress marker and need to wait for it.
+            //
+            // This complexity will go away when we simplify how deletion works:
+            // https://github.com/neondatabase/neon/issues/5080
+            loop {
+                // Under the TenantMap lock, try to remove the tenant.  We usually succeed, but if
+                // we encounter an InProgress marker, yield the barrier it contains and wait on it.
+                let barrier = {
+                    let mut locked = tenants.write().unwrap();
+                    let removed = locked.remove(&tenant.tenant_id);
+
+                    // FIXME: we should not be modifying this from outside of mgr.rs.
+                    // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)
+                    crate::metrics::TENANT_MANAGER
+                        .tenant_slots
+                        .set(locked.len() as u64);
+
+                    match removed {
+                        TenantsMapRemoveResult::Occupied(TenantSlot::Attached(tenant)) => {
+                            match tenant.current_state() {
+                                TenantState::Stopping { .. } | TenantState::Broken { .. } => {
+                                    // Expected: we put the tenant into stopping state before we start deleting it
+                                }
+                                state => {
+                                    // Unexpected state
+                                    tracing::warn!(
+                                        "Tenant in unexpected state {state} after deletion"
+                                    );
+                                }
+                            }
+                            break;
+                        }
+                        TenantsMapRemoveResult::Occupied(TenantSlot::Secondary) => {
+                            // This is unexpected: this secondary tenants should not have been created, and we
+                            // are not in a position to shut it down from here.
+                            tracing::warn!("Tenant transitioned to secondary mode while deleting!");
+                            break;
+                        }
+                        TenantsMapRemoveResult::Occupied(TenantSlot::InProgress(_)) => {
+                            unreachable!("TenantsMap::remove handles InProgress separately, should never return it here");
+                        }
+                        TenantsMapRemoveResult::Vacant => {
+                            tracing::warn!(
+                                "Tenant removed from TenantsMap before deletion completed"
+                            );
+                            break;
+                        }
+                        TenantsMapRemoveResult::InProgress(barrier) => {
+                            // An InProgress entry was found, we must wait on its barrier
+                            barrier
+                        }
+                    }
+                };
+
+                tracing::info!(
+                    "Waiting for competing operation to complete before deleting state for tenant"
+                );
+                barrier.wait().await;
+            }
         }
 
         *guard = Self::Finished;
