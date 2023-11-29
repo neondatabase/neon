@@ -122,6 +122,7 @@ rustls-pemfile = "1"
 rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
+sd-notify = "0.4.1"
 sentry = { version = "0.31", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
