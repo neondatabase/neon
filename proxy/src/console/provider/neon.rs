@@ -5,7 +5,12 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, http, proxy::ALLOWED_IPS_NUMBER, scram};
+use crate::{
+    auth::ClientCredentials,
+    compute, http,
+    proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
+    scram,
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -169,8 +174,14 @@ impl super::Api for Api {
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         let key: &str = creds.project().expect("impossible");
         if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
+            ALLOWED_IPS_BY_CACHE_OUTCOME
+                .with_label_values(&["hit"])
+                .inc();
             return Ok(Arc::new(allowed_ips.to_vec()));
         }
+        ALLOWED_IPS_BY_CACHE_OUTCOME
+            .with_label_values(&["miss"])
+            .inc();
         let allowed_ips = Arc::new(self.do_get_auth_info(extra, creds).await?.allowed_ips);
         self.caches
             .allowed_ips

@@ -114,11 +114,20 @@ pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "proxy_console_request_latency",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        // http/ws/tcp, true/false, true/false, success/failure
-        // 3 * 2 * 2 * 2 = 24 counters
+        // proxy_wake_compute/proxy_get_role_info
         &["request"],
         // largest bucket = 2^16 * 0.2ms = 13s
         exponential_buckets(0.2, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_BY_CACHE_OUTCOME: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_allowed_ips_cache_misses",
+        "Number of cache hits/misses for allowed ips",
+        // hit/miss
+        &["outcome"],
     )
     .unwrap()
 });
