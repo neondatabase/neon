@@ -235,7 +235,11 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None, allowed_postfixes: list[str] = []):
+def assert_prefix_empty(
+    neon_env_builder: "NeonEnvBuilder",
+    prefix: Optional[str] = None,
+    allowed_postfixes: list[str] = [],
+):
     response = list_prefix(neon_env_builder, prefix)
     keys = response["KeyCount"]
     objects = response.get("Contents", [])
@@ -263,10 +267,12 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
 
     filtered_count = 0
     for key, obj in objects:
-        if not(allowed_postfixes.contains(key)):
+        if not (allowed_postfixes.contains(key)):
             filtered_count += 1
 
-    assert filtered_count == 0, f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    assert (
+        filtered_count == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
