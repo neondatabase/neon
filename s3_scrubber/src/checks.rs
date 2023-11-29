@@ -304,10 +304,7 @@ pub(crate) async fn list_timeline_blobs(
         errors.push("S3 list response got no index_part.json file".to_string());
     }
 
-    if let Some(index_part_object_key) = index_part_object
-        .as_ref()
-        .and_then(|object| Some(object.key()))
-    {
+    if let Some(index_part_object_key) = index_part_object.as_ref().map(|object| object.key()) {
         let index_part_bytes = download_object_with_retries(
             s3_client,
             &timeline_dir_target.bucket_name,
