@@ -397,7 +397,10 @@ pub(super) async fn handle_walreceiver_connection(
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
             let current_timeline_size = timeline
-                .get_current_logical_size(&ctx)
+                .get_current_logical_size(
+                    crate::tenant::timeline::GetLogicalSizePriority::User,
+                    &ctx,
+                )
                 // FIXME: https://github.com/neondatabase/neon/issues/5963
                 .size_dont_care_about_accuracy();
             let status_update = PageserverFeedback {
