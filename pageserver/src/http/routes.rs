@@ -338,13 +338,7 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size = match timeline.get_current_logical_size(ctx) {
-        Ok((size, _)) => Some(size),
-        Err(err) => {
-            error!("Timeline info creation failed to get current logical size: {err:?}");
-            None
-        }
-    };
+    let current_logical_size = timeline.get_current_logical_size(ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -368,7 +362,11 @@ async fn build_timeline_info_common(
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-        current_logical_size,
+        current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
+        current_logical_size_is_accurate: match current_logical_size.accuracy() {
+            tenant::timeline::logical_size::Accuracy::Approximate => false,
+            tenant::timeline::logical_size::Accuracy::Exact => true,
+        },
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,

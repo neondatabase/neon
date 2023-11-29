@@ -59,21 +59,50 @@ pub(super) struct LogicalSize {
 
 /// Normalized current size, that the data in pageserver occupies.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum CurrentLogicalSize {
+pub(crate) enum CurrentLogicalSize {
     /// The size is not yet calculated to the end, this is an intermediate result,
     /// constructed from walreceiver increments and normalized: logical data could delete some objects, hence be negative,
     /// yet total logical size cannot be below 0.
-    Approximate(u64),
+    Approximate(Approximate),
     // Fully calculated logical size, only other future walreceiver increments are changing it, and those changes are
     // available for observation without any calculations.
-    Exact(u64),
+    Exact(Exact),
+}
+
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum Accuracy {
+    Approximate,
+    Exact,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Approximate(u64);
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Exact(u64);
+
+impl From<&Approximate> for u64 {
+    fn from(value: &Approximate) -> Self {
+        value.0
+    }
+}
+
+impl From<&Exact> for u64 {
+    fn from(val: &Exact) -> Self {
+        val.0
+    }
 }
 
 impl CurrentLogicalSize {
-    pub(super) fn size(&self) -> u64 {
-        *match self {
-            Self::Approximate(size) => size,
-            Self::Exact(size) => size,
+    pub(crate) fn size_dont_care_about_accuracy(&self) -> u64 {
+        match self {
+            Self::Approximate(size) => size.into(),
+            Self::Exact(size) => size.into(),
+        }
+    }
+    pub(crate) fn accuracy(&self) -> Accuracy {
+        match self {
+            Self::Approximate(_) => Accuracy::Approximate,
+            Self::Exact(_) => Accuracy::Exact,
         }
     }
 }
@@ -109,16 +138,16 @@ impl LogicalSize {
         match self.initial_logical_size.get() {
             Some((initial_size, _)) => {
                 crate::metrics::initial_logical_size::CALLS.exact.inc();
-                CurrentLogicalSize::Exact(initial_size.checked_add_signed(size_increment)
+                CurrentLogicalSize::Exact(Exact(initial_size.checked_add_signed(size_increment)
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                    .unwrap())
+                    .unwrap()))
             }
             None => {
                 crate::metrics::initial_logical_size::CALLS
                     .approximate
                     .inc();
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
-                CurrentLogicalSize::Approximate(non_negative_size_increment)
+                CurrentLogicalSize::Approximate(Approximate(non_negative_size_increment))
             }
         }
     }
