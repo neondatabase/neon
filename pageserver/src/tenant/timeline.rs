@@ -2,7 +2,7 @@ pub mod delete;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
-mod logical_size;
+pub(crate) mod logical_size;
 pub mod span;
 pub mod uninit;
 mod walreceiver;
@@ -855,23 +855,20 @@ impl Timeline {
     /// the initial size calculation has not been run (gets triggered on the first size access).
     ///
     /// return size and boolean flag that shows if the size is exact
-    pub fn get_current_logical_size(
+    pub(crate) fn get_current_logical_size(
         self: &Arc<Self>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(u64, bool)> {
+    ) -> logical_size::CurrentLogicalSize {
         let current_size = self.current_logical_size.current_size();
         debug!("Current size: {current_size:?}");
 
-        let mut is_exact = true;
-        let size = current_size.size();
         if let (CurrentLogicalSize::Approximate(_), Some(initial_part_end)) =
             (current_size, self.current_logical_size.initial_part_end)
         {
-            is_exact = false;
             self.try_spawn_size_init_task(initial_part_end, ctx);
         }
 
-        Ok((size, is_exact))
+        current_size
     }
 
     /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
@@ -2057,10 +2054,10 @@ impl Timeline {
         // one value while current_logical_size is set to the
         // other.
         match logical_size.current_size() {
-            CurrentLogicalSize::Exact(new_current_size) => self
+            CurrentLogicalSize::Exact(ref new_current_size) => self
                 .metrics
                 .current_logical_size_gauge
-                .set(new_current_size),
+                .set(new_current_size.into()),
             CurrentLogicalSize::Approximate(_) => {
                 // don't update the gauge yet, this allows us not to update the gauge back and
                 // forth between the initial size calculation task.

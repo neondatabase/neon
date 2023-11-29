@@ -384,7 +384,9 @@ pub struct TimelineInfo {
     /// The LSN that we are advertizing to safekeepers
     pub remote_consistent_lsn_visible: Lsn,
 
-    pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+    pub current_logical_size: u64,
+    pub current_logical_size_is_accurate: bool,
+
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
