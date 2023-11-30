@@ -1,11 +1,11 @@
-# GetPage@LSN Rate Limit
+# GetPage@LSN Throttling
 
 Author: Christian Schwarz
 Date: Oct 24, 2023
 
 ## Summary
 
-This RFC proposes basic rate-limiting GetPage@LSN requests inside Pageserver
+This RFC proposes per-tenant throttling of GetPage@LSN requests inside Pageserver
 and the interactions with its client, i.e., the neon_smgr component in Compute.
 
 The result of implementing & executing this RFC will be a fleet-wide upper limit for
@@ -82,10 +82,11 @@ Note: It is helpful to think of Pageserver as a disk, because it's precisely whe
 vanilla Postgres gets its pages from disk, Neon Postgres gets them from Pageserver.
 So, regarding the above performance & economic arguments, it is fair to say that we currently provide an "as-fast-as-possible-IOPS" disk that we charge for only by capacity.
 
-## Solution: Limiting IOPS
+## Solution: Throttling GetPage Requests
 
-**The consequence of the above analysis must be that Pageserver limits IOPS; unless we want to start charging for IOPS**.
-Limiting IOPS sets the correct incentive for a thrashing Compute to scale up its DRAM to the working set size.
+**The consequence of the above analysis must be that Pageserver throttles GetPage@LSN requests**.
+That is, unless we want to start charging for provisioned GetPage@LSN/second.
+Throttling sets the correct incentive for a thrashing Compute to scale up its DRAM to the working set size.
 Neon Autoscaling will make this easy, [eventually](https://github.com/neondatabase/neon/pull/3913).
 
 ## The Design Space
@@ -100,7 +101,7 @@ Candidates are:
       This is a major operational pain point / risk right now.
 * hard limit, configurable per connection|timeline|tenant
     * This outsources policy to console/control plane, with obvious advantages for flexible structuring of what service we offer to customers.
-    * Note that this is not a mechanism to guarantee a *lower* bound of IOPS, i.e., to guarantee a certain QoS.
+    * Note that this is not a mechanism to guarantee a minium provisioned rate, i.e., this is not a mechanism to guarantee a certain QoS for a tenant.
 * fair share among active connections|timelines|tenants per instance
     * example: divide available IOPS evenly among the tenants that were active in the last 5min
     * needs definition of "active", and knowledge of available IOPS in advance
@@ -112,22 +113,22 @@ However, we must choose between
 * **implicit** backpressure through pq/TCP and
 * **explicit** rejection of requests + retries with exponential backoff
 
-Further, there is the question of how limiting IOPS will affect the **internal GetPage latency SLO**:
-where do we measure the SLI for Pageserver's internal getpage latency SLO? Before or after the rate limiter?
+Further, there is the question of how throttling GetPage@LSN will affect the **internal GetPage latency SLO**:
+where do we measure the SLI for Pageserver's internal getpage latency SLO? Before or after the throttling?
 
 And when we eventually move the measurement point into the Computes (to avoid coordinated omission),
-how do we avoid counting rate-limiting induced latency toward the internal getpage latency SLI/SLO?
+how do we avoid counting throttling-induced latency toward the internal getpage latency SLI/SLO?
 
 ## Scope Of This RFC
 
-**This RFC proposes introducing a hard IOPS limit per tenant, with the same value applying to each tenant on a Pageserver**.
+**This RFC proposes introducing a hard GetPage@LSN/second limit per tenant, with the same value applying to each tenant on a Pageserver**.
 
 This proposal is easy to implement and significantly de-risks operating large Pageservers,
-based on the assumption that extremely-high-IOPS-episodes like the one from the "Motivation" section are uncorrelated between tenants.
+based on the assumption that extremely-high-GetPage-rate-episodes like the one from the "Motivation" section are uncorrelated between tenants.
 
-For example, suppose we pick a limit that allows up to 10 tenants to go at limit IOPS, and our
-For example, suppose our Pageserver can serve 100k IOPS total at a 100% page cache miss rate.
-If each tenant gets a hard limit of 10k IOPS, we can serve up to 10 tenants at limit speed without latency degradation.
+For example, suppose we pick a limit that allows up to 10 tenants to go at limit rate.
+Suppose our Pageserver can serve 100k GetPage/second total at a 100% page cache miss rate.
+If each tenant gets a hard limit of 10k GetPage/second, we can serve up to 10 tenants at limit speed without latency degradation.
 
 The mechanism for backpressure will be TCP-based implicit backpressure.
 The compute team isn't concerned about prefetch queue depth.
@@ -135,13 +136,13 @@ Pageserver will implement it by delaying the reading of requests from the libpq 
 Pageserver will implement starvation prevention, but not guaranteed fairness, among connections by using a fair semaphore.
 
 Regarding metrics / the internal GetPage latency SLO:
-we will measure the GetPage latency SLO _after_ the rate limiter and introduce a new metric to measure the amount of rate limiting, quantified by:
+we will measure the GetPage latency SLO _after_ the throttler and introduce a new metric to measure the amount of throttling, quantified by:
 - histogram that records the tenants' observations of queue depth before they start waiting (one such histogram per pageserver)
 - histogram that records the tenants' observations of time spent waiting (one such histogram per pageserver)
 
 Further observability measures:
-- a WARN log message at frequency 1/min if the tenant/timeline/connection spent any time waiting for the rate limit;
-  the message will identify the tenant/timeline/connection to allow correlation with compute logs/stats
+- a WARN log message at frequency 1/min if the tenant/timeline/connection was throttled in that last minute.
+  The message will identify the tenant/timeline/connection to allow correlation with compute logs/stats.
 
 Rollout will happen as follows:
 - deploy 1: implementation + config: disabled by default, ability to enable it per tenant through tenant_conf
@@ -169,12 +170,12 @@ We decided against error + retry because of worries about starvation.
 
 Enable per-tenant emergency override of the limit via Console.
 Should be part of a more general framework to specify tenant config overrides.
-**NB:** this is **not** the right mechanism to _sell_ different max GetPage/IOPS levels to users,
-or _auto-scale_ max GetPage/IOPS levels. Such functionality will require a separate RFC that
-concerns itself with GetPage/IOPS capacity planning.
+**NB:** this is **not** the right mechanism to _sell_ different max GetPage/second levels to users,
+or _auto-scale_ the GetPage/second levels. Such functionality will require a separate RFC that
+concerns itself with GetPage/second capacity planning.
 
 Compute-side metrics for GetPage latency.
 
-Back-channel to inform Compute/Autoscaling/ControlPlane that the project is being IO-rate-limited.
+Back-channel to inform Compute/Autoscaling/ControlPlane that the project is being throttled.
 
 Compute-side neon_smgr improvements to avoid sending the same GetPage request multiple times if multiple backends experience a cache miss.
