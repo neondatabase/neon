@@ -19,7 +19,6 @@
 #include "access/xlog.h"
 #include "access/xlogutils.h"
 #include "storage/buf_internals.h"
-#include "storage/lwlock.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "c.h"
@@ -36,6 +35,8 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "neon_utils.h"
+
+#include <pthread.h>
 
 #define PageStoreTrace DEBUG5
 
@@ -69,7 +70,7 @@ int			max_reconnect_attempts = 60;
 
 typedef struct
 {
-    LWLockId lock;
+    pthread_rwlock_t lock;
     pg_atomic_uint64 update_counter;
     char pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 } PagestoreShmemState;
@@ -105,10 +106,10 @@ AssignPageserverConnstring(const char *newval, void *extra)
 {
     if(!PagestoreShmemIsValid())
         return;
-    LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
+    pthread_rwlock_wrlock(&pagestore_shared->lock);
     strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
     pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
-    LWLockRelease(pagestore_shared->lock);
+    pthread_rwlock_unlock(&pagestore_shared->lock);
 }
 
 static bool
@@ -125,17 +126,17 @@ ReloadConnstring()
 {
     if(!PagestoreShmemIsValid())
         return false;
-    LWLockAcquire(pagestore_shared->lock, LW_SHARED);
+    pthread_rwlock_rdlock(&pagestore_shared->lock);
 
     if(strcmp(local_pageserver_connstring, pagestore_shared->pageserver_connstring) == 0)
     {
-        LWLockRelease(pagestore_shared->lock);
+        pthread_rwlock_unlock(&pagestore_shared->lock);
         return false;
     }
 
     strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
     pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
-    LWLockRelease(pagestore_shared->lock);
+    pthread_rwlock_unlock(&pagestore_shared->lock);
     return true;
 }
 
@@ -496,7 +497,12 @@ PagestoreShmemInit(void)
                                        &found);
     if(!found)
     {
-        pagestore_shared->lock = &(GetNamedLWLockTranche("neon_libpagestore")->lock);
+        pthread_rwlockattr_t attr;
+        pthread_rwlockattr_init(&attr);
+        pthread_rwlockattr_setpshared(&attr, PTHREAD_PROCESS_SHARED); 
+        pthread_rwlock_init(&pagestore_shared->lock, &attr);
+        pthread_rwlockattr_destroy(&attr);
+
         pg_atomic_init_u64(&pagestore_shared->update_counter, 0);
         AssignPageserverConnstring(page_server_connstring, NULL);
     }
