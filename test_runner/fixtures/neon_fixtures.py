@@ -1876,7 +1876,7 @@ class PgBin:
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[str] = None,
-        with_command_header=False,
+        with_command_header=True,
         **popen_kwargs: Any,
     ) -> str:
         """
