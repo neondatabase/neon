@@ -15,7 +15,9 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
+use futures::stream::FuturesUnordered;
 use futures::FutureExt;
+use futures::StreamExt;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
@@ -32,6 +34,7 @@ use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
+use utils::sync::gate::GateGuard;
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -51,6 +54,7 @@ use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
+use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -3281,6 +3285,66 @@ impl Tenant {
 
     pub fn cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
+    }
+
+    /// Flush any in-progress layers, schedule uploads, and wait for uploads to complete.
+    ///
+    /// This function can take a long time: callers should wrap it in a timeout if calling
+    /// from an external API handler.
+    ///
+    /// Cancel-safety: cancelling this function may leave I/O running, but such I/O is
+    /// still bounded by tenant/timeline shutdown.
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn flush_remote(&self) -> anyhow::Result<()> {
+        let timelines = self.timelines.lock().unwrap().clone();
+
+        async fn flush_timeline(_gate: GateGuard, timeline: Arc<Timeline>) -> anyhow::Result<()> {
+            tracing::info!(timeline_id=%timeline.timeline_id, "Flushing...");
+            timeline.freeze_and_flush().await?;
+            tracing::info!(timeline_id=%timeline.timeline_id, "Waiting for uploads...");
+            if let Some(client) = &timeline.remote_client {
+                client.wait_completion().await?;
+            }
+
+            Ok(())
+        }
+
+        // We do not use a JoinSet for these tasks, because we don't want them to be
+        // aborted when this function's future is cancelled: they should stay alive
+        // holding their GateGuard until they complete, to ensure their I/Os complete
+        // before Timeline shutdown completes.
+        let mut results = FuturesUnordered::new();
+
+        for (_timeline_id, timeline) in timelines {
+            // Run each timeline's flush in a task holding the timeline's gate: this
+            // means that if this function's future is cancelled, the Timeline shutdown
+            // will still wait for any I/O in here to complete.
+            let gate = match timeline.gate.enter() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let jh = tokio::task::spawn(async move { flush_timeline(gate, timeline).await });
+            results.push(jh);
+        }
+
+        while let Some(r) = results.next().await {
+            if let Err(e) = r {
+                if !e.is_cancelled() && !e.is_panic() {
+                    tracing::error!("unexpected join error: {e:?}");
+                }
+            }
+        }
+
+        // The flushes we did above were just writes, but the Tenant might have had
+        // pending deletions as well from recent compaction/gc: we want to flush those
+        // as well.  This requires flushing the global delete queue.  This is cheap
+        // because it's typically a no-op.
+        match self.deletion_queue_client.flush_execute().await {
+            Ok(_) => {}
+            Err(DeletionQueueError::ShuttingDown) => {}
+        }
+
+        Ok(())
     }
 }
 

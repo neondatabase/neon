@@ -117,7 +117,7 @@ pub fn migrate_tenant(
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
             let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
             let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-            dest_ps.location_config(tenant_id, dest_conf)?;
+            dest_ps.location_config(tenant_id, dest_conf, None)?;
             println!("✅ Migration complete");
             return Ok(());
         }
@@ -126,7 +126,7 @@ pub fn migrate_tenant(
 
         let stale_conf =
             build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
-        origin_ps.location_config(tenant_id, stale_conf)?;
+        origin_ps.location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps)?);
     }
@@ -135,7 +135,7 @@ pub fn migrate_tenant(
     let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
-    dest_ps.location_config(tenant_id, dest_conf)?;
+    dest_ps.location_config(tenant_id, dest_conf, None)?;
 
     if let Some(baseline) = baseline_lsns {
         println!("🕑 Waiting for LSN to catch up...");
@@ -181,7 +181,7 @@ pub fn migrate_tenant(
             "💤 Switching to secondary mode on pageserver {}",
             other_ps.conf.id
         );
-        other_ps.location_config(tenant_id, secondary_conf)?;
+        other_ps.location_config(tenant_id, secondary_conf, None)?;
     }
 
     println!(
@@ -189,7 +189,7 @@ pub fn migrate_tenant(
         dest_ps.conf.id
     );
     let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-    dest_ps.location_config(tenant_id, dest_conf)?;
+    dest_ps.location_config(tenant_id, dest_conf, None)?;
 
     println!("✅ Migration complete");
 

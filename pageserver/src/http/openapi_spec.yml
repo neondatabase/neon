@@ -624,6 +624,99 @@ paths:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
 
+  /v1/tenant/{tenant_id}/location_config:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: flush_ms
+        in: query
+        required: false
+        schema:
+          type: integer
+    put:
+      description: |
+        Configures a _tenant location_, that is how a particular pageserver handles
+        a particular tenant.  This includes _attached_ tenants, i.e. those ingesting WAL
+        and page service requests, and _secondary_ tenants, i.e. those which are just keeping
+        a warm cache in anticipation of transitioning to attached state in the future.
+
+        This is a declarative, idempotent API: there are not separate endpoints
+        for different tenant location configurations.  Rather, this single endpoint accepts
+        a description of the desired location configuration, and makes whatever changes
+        are required to reach that state.
+
+        In imperative terms, this API is used to attach and detach tenants, and
+        to transition tenants to and from secondary mode.
+
+        This is a synchronous API: there is no 202 response.  State transitions should always
+        be fast (milliseconds), with the exception of requests setting `flush_ms`, in which case
+        the caller controls the runtime of the request.
+
+        In some state transitions, it makes sense to flush dirty data to remote storage: this includes transitions
+        to AttachedStale and Detached.  Flushing is never necessary for correctness, but is an
+        important optimization when doing migrations.  The `flush_ms` parameter controls whether
+        flushing should be attempted, and how much time is allowed for flushing.  If the time limit expires,
+        the requested transition will continue without waiting for any outstanding data to flush.  Callers
+        should use a duration which is substantially less than their HTTP client's request
+        timeout.  It is safe to supply flush_ms irrespective of the request body: in state transitions
+        where flushing doesn't make sense, the server will ignore it.
+
+        It is safe to retry requests, but if one receives a 409 or 503 response, it is not
+        useful to retry aggressively: there is probably an existing request still ongoing.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantLocationConfigRequest"
+      responses:
+        "200":
+          description: Tenant is now in requested state
+        "503":
+          description: Tenant's state cannot be changed right now.  Wait a few seconds and retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "409":
+          description: |
+            The tenant is already known to Pageserver in some way,
+            and hence this `/attach` call has been rejected.
+
+            Some examples of how this can happen:
+            - tenant was created on this pageserver
+            - tenant attachment was started by an earlier call to `/attach`.
+
+            Callers should poll the tenant status's `attachment_status` field,
+            like for status 202. See the longer description for `POST /attach`
+            for details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/detach:
     parameters:
       - name: tenant_id
@@ -1274,6 +1367,31 @@ components:
             tenant_id:
               type: string
               format: hex
+    TenantLocationConfigRequest:
+      type: object
+      required:
+        - tenant_id
+      properties:
+        tenant_id:
+          type: string
+          format: hex
+        mode:
+          type: string
+          enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]
+          description: Mode of functionality that this pageserver will run in for this tenant.
+        generation:
+          type: integer
+          description: Attachment generation number, mandatory when `mode` is an attached state
+        secondary_conf:
+          $ref: '#/components/schemas/SecondaryConfig'
+        tenant_conf:
+          $ref: '#/components/schemas/TenantConfig'
+    SecondaryConfig:
+      type: object
+      properties:
+        warm:
+          type: boolean
+          description: Whether to poll remote storage for layers to download.  If false, secondary locations don't download anything.
     TenantConfig:
       type: object
       properties:
