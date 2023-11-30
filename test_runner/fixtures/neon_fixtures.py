@@ -1876,7 +1876,7 @@ class PgBin:
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[str] = None,
-        capture_command=False,
+        with_command_header=False,
         **popen_kwargs: Any,
     ) -> str:
         """
@@ -1895,7 +1895,7 @@ class PgBin:
             env=env,
             cwd=cwd,
             check=True,
-            capture_command=capture_command,
+            with_command_header=with_command_header,
             **popen_kwargs,
         )
         return base_path

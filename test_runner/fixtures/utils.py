@@ -49,7 +49,7 @@ def subprocess_capture(
     echo_stdout=False,
     capture_stdout=False,
     timeout=None,
-    capture_command=True,
+    with_command_header=True,
     **popen_kwargs: Any,
 ) -> Tuple[str, Optional[str], int]:
     """Run a process and bifurcate its output to files and the `log` logger
@@ -87,12 +87,15 @@ def subprocess_capture(
             self.captured = ""
 
         def run(self):
-            first = capture_command
+            first = with_command_header
             for line in self.in_file:
                 if first:
-                    # do this only after receiving any input so that we can keep deleting empty files
+                    # do this only after receiving any input so that we can
+                    # keep deleting empty files, or leave it out completly if
+                    # it was unwanted (using the file as input later for example)
                     first = False
-                    # prefix the files with the command line so that we can later understand which file is for what command
+                    # prefix the files with the command line so that we can
+                    # later understand which file is for what command
                     cmdline = " ".join(cmd)
                     self.out_file.write(("# " + cmdline + "\n---\n").encode("utf-8"))
 
