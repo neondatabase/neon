@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use thiserror;
 use utils::id::TenantId;
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardNumber(pub u8);
 
-#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug)]
+#[derive(Ord, PartialOrd, Eq, PartialEq, Clone, Copy, Serialize, Deserialize, Debug, Hash)]
 pub struct ShardCount(pub u8);
 
 impl ShardCount {
@@ -39,7 +39,7 @@ impl ShardNumber {
 /// Note that the binary encoding is _not_ backward compatible, because
 /// at the time sharding is introduced, there are no existing binary structures
 /// containing TenantId that we need to handle.
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
 pub struct TenantShardId {
     pub tenant_id: TenantId,
     pub shard_number: ShardNumber,

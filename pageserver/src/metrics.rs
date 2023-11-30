@@ -7,6 +7,7 @@ use metrics::{
     HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
@@ -1252,6 +1253,15 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_process_launch_duration",
+        "Histogram of the duration of successful WalRedoProcess::launch calls",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
@@ -1571,9 +1581,9 @@ pub struct RemoteTimelineClientMetrics {
 }
 
 impl RemoteTimelineClientMetrics {
-    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+    pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         RemoteTimelineClientMetrics {
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_shard_id.tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
@@ -1961,6 +1971,7 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
+        &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
     ]
     .into_iter()
     .for_each(|h| {

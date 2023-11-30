@@ -90,6 +90,9 @@ struct ProxyCliArgs {
     /// timeout for http connections
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     sql_over_http_timeout: tokio::time::Duration,
+    /// Whether the SQL over http pool is opt-in
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    sql_over_http_pool_opt_in: bool,
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
@@ -275,7 +278,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
     let http_config = HttpConfig {
-        sql_over_http_timeout: args.sql_over_http_timeout,
+        timeout: args.sql_over_http_timeout,
+        pool_opt_in: args.sql_over_http_pool_opt_in,
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
