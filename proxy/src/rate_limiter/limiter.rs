@@ -306,8 +306,7 @@ impl reqwest_middleware::Middleware for Limiter {
                 )
             })?;
         info!(duration = ?start.elapsed(), "waiting for token to connect to the control plane");
-        crate::proxy::RATE_LIMITER_ACQUIRE_LATENCY
-            .observe((start.elapsed().as_micros() as f64) / 1000.0);
+        crate::proxy::RATE_LIMITER_ACQUIRE_LATENCY.observe(start.elapsed().as_secs_f64());
         match next.run(req, extensions).await {
             Ok(response) => {
                 self.release(token, Some(Outcome::from_reqwest_response(&response)))
