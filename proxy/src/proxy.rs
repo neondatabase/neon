@@ -117,7 +117,7 @@ pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         // proxy_wake_compute/proxy_get_role_info
         &["request"],
         // largest bucket = 2^16 * 0.2ms = 13s
-        exponential_buckets(0.2, 2.0, 16).unwrap(),
+        exponential_buckets(0.0002, 2.0, 16).unwrap(),
     )
     .unwrap()
 });
