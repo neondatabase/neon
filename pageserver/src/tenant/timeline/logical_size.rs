@@ -23,7 +23,10 @@ pub(super) struct LogicalSize {
     ///
     /// NOTE: size at a given LSN is constant, but after a restart we will calculate
     /// the initial size at a different LSN.
-    pub initial_logical_size: OnceCell<u64>,
+    pub initial_logical_size: OnceCell<(
+        u64,
+        crate::metrics::initial_logical_size::FinishedCalculationGuard,
+    )>,
 
     /// Semaphore to track ongoing calculation of `initial_logical_size`.
     pub initial_size_computation: Arc<tokio::sync::Semaphore>,
@@ -78,7 +81,11 @@ impl CurrentLogicalSize {
 impl LogicalSize {
     pub(super) fn empty_initial() -> Self {
         Self {
-            initial_logical_size: OnceCell::with_value(0),
+            initial_logical_size: OnceCell::with_value((0, {
+                crate::metrics::initial_logical_size::START_CALCULATION
+                    .first(None)
+                    .calculation_result_saved()
+            })),
             //  initial_logical_size already computed, so, don't admit any calculations
             initial_size_computation: Arc::new(Semaphore::new(0)),
             initial_part_end: None,
@@ -100,12 +107,16 @@ impl LogicalSize {
         //                  ^^^ keep this type explicit so that the casts in this function break if
         //                  we change the type.
         match self.initial_logical_size.get() {
-            Some(initial_size) => {
+            Some((initial_size, _)) => {
+                crate::metrics::initial_logical_size::CALLS.exact.inc();
                 initial_size.checked_add_signed(size_increment)
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
                     .map(CurrentLogicalSize::Exact)
             }
             None => {
+                crate::metrics::initial_logical_size::CALLS
+                    .approximate
+                    .inc();
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
                 Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
             }
@@ -121,7 +132,7 @@ impl LogicalSize {
     /// available for re-use. This doesn't contain the incremental part.
     pub(super) fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
         match self.initial_part_end {
-            Some(v) if v == lsn => self.initial_logical_size.get().copied(),
+            Some(v) if v == lsn => self.initial_logical_size.get().map(|(s, _)| *s),
             _ => None,
         }
     }
