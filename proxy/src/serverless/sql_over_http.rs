@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -201,11 +202,19 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    peer_addr: SocketAddr,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.timeout,
-        handle_inner(config, request, sni_hostname, conn_pool, session_id),
+        handle_inner(
+            config,
+            request,
+            sni_hostname,
+            conn_pool,
+            session_id,
+            peer_addr,
+        ),
     )
     .await;
     let mut response = match result {
@@ -292,6 +301,7 @@ async fn handle_inner(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    peer_addr: SocketAddr,
 ) -> anyhow::Result<Response<Body>> {
     NUM_CONNECTIONS_ACCEPTED_COUNTER
         .with_label_values(&["http"])
@@ -351,7 +361,9 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
+    let mut client = conn_pool
+        .get(&conn_info, !allow_pool, session_id, peer_addr)
+        .await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)

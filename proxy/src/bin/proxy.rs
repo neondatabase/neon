@@ -1,8 +1,11 @@
 use futures::future::Either;
 use proxy::auth;
 use proxy::config::AuthenticationConfig;
+use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::console;
+use proxy::console::provider::AllowedIpsCache;
+use proxy::console::provider::NodeInfoCache;
 use proxy::http;
 use proxy::rate_limiter::RateLimiterConfig;
 use proxy::usage_metrics;
@@ -113,6 +116,12 @@ struct ProxyCliArgs {
     initial_limit: usize,
     #[clap(flatten)]
     aimd_config: proxy::rate_limiter::AimdConfig,
+    /// cache for `allowed_ips` (use `size=0` to disable)
+    #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
+    allowed_ips_cache: String,
+    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    disable_ip_check_for_http: bool,
 }
 
 #[tokio::main]
@@ -241,11 +250,24 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
-            let config::CacheOptions { size, ttl } = args.wake_compute_cache.parse()?;
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let allowed_ips_cache_config: CacheOptions = args.allowed_ips_cache.parse()?;
 
-            info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!("Using AllowedIpsCache (wake_compute) with options={allowed_ips_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                node_info: console::caches::NodeInfoCache::new("node_info_cache", size, ttl),
+                node_info: NodeInfoCache::new(
+                    "node_info_cache",
+                    wake_compute_cache_config.size,
+                    wake_compute_cache_config.ttl,
+                    true,
+                ),
+                allowed_ips: AllowedIpsCache::new(
+                    "allowed_ips_cache",
+                    allowed_ips_cache_config.size,
+                    allowed_ips_cache_config.ttl,
+                    false,
+                ),
             }));
 
             let config::WakeComputeLockOptions {
@@ -292,6 +314,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
+        disable_ip_check_for_http: args.disable_ip_check_for_http,
     }));
 
     Ok(config)

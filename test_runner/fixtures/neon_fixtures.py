@@ -2390,6 +2390,10 @@ def static_proxy(
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
+    vanilla_pg.safe_psql("CREATE SCHEMA IF NOT EXISTS neon_control_plane")
+    vanilla_pg.safe_psql(
+        "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
+    )
 
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()

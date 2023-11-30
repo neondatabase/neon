@@ -8,7 +8,7 @@ use pbkdf2::{
     Params, Pbkdf2,
 };
 use pq_proto::StartupMessageParams;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -21,7 +21,8 @@ use tokio::time;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
-    auth, console,
+    auth::{self, check_peer_addr_is_in_list},
+    console,
     proxy::{
         neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
         NUM_DB_CONNECTIONS_OPENED_COUNTER,
@@ -144,6 +145,7 @@ impl GlobalConnPool {
         conn_info: &ConnInfo,
         force_new: bool,
         session_id: uuid::Uuid,
+        peer_addr: SocketAddr,
     ) -> anyhow::Result<Client> {
         let mut client: Option<ClientInner> = None;
         let mut latency_timer = LatencyTimer::new("http");
@@ -203,6 +205,7 @@ impl GlobalConnPool {
                     conn_id,
                     session_id,
                     latency_timer,
+                    peer_addr,
                 )
                 .await
             } else {
@@ -225,6 +228,7 @@ impl GlobalConnPool {
                 conn_id,
                 session_id,
                 latency_timer,
+                peer_addr,
             )
             .await
         };
@@ -401,6 +405,7 @@ async fn connect_to_compute(
     conn_id: uuid::Uuid,
     session_id: uuid::Uuid,
     latency_timer: LatencyTimer,
+    peer_addr: SocketAddr,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -411,12 +416,13 @@ async fn connect_to_compute(
         ("application_name", APP_NAME),
         ("options", conn_info.options.as_deref().unwrap_or("")),
     ]);
-
-    let creds = config
-        .auth_backend
-        .as_ref()
-        .map(|_| auth::ClientCredentials::parse(&params, Some(&conn_info.hostname), common_names))
-        .transpose()?;
+    let creds = auth::ClientCredentials::parse(
+        &params,
+        Some(&conn_info.hostname),
+        common_names,
+        peer_addr,
+    )?;
+    let backend = config.auth_backend.as_ref().map(|_| creds);
 
     let console_options = neon_options(&params);
 
@@ -425,8 +431,14 @@ async fn connect_to_compute(
         application_name: Some(APP_NAME),
         options: console_options.as_deref(),
     };
-
-    let node_info = creds
+    // TODO(anna): this is a bit hacky way, consider using console notification listener.
+    if !config.disable_ip_check_for_http {
+        let allowed_ips = backend.get_allowed_ips(&extra).await?;
+        if !check_peer_addr_is_in_list(&peer_addr.ip(), &allowed_ips) {
+            return Err(auth::AuthError::ip_address_not_allowed().into());
+        }
+    }
+    let node_info = backend
         .wake_compute(&extra)
         .await?
         .context("missing cache entry from wake_compute")?;
@@ -439,7 +451,7 @@ async fn connect_to_compute(
         },
         node_info,
         &extra,
-        &creds,
+        &backend,
         latency_timer,
     )
     .await

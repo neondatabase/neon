@@ -19,6 +19,7 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
+    pub disable_ip_check_for_http: bool,
 }
 
 #[derive(Debug)]
@@ -298,6 +299,7 @@ impl CertResolver {
 }
 
 /// Helper for cmdline cache options parsing.
+#[derive(Debug)]
 pub struct CacheOptions {
     /// Max number of entries.
     pub size: usize,

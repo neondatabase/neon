@@ -24,7 +24,7 @@ use prometheus::{
     IntGaugeVec,
 };
 use regex::Regex;
-use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
+use std::{error::Error, io, net::SocketAddr, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -110,12 +110,34 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "proxy_console_request_latency",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // proxy_wake_compute/proxy_get_role_info
+        &["request"],
+        // largest bucket = 2^16 * 0.2ms = 13s
+        exponential_buckets(0.2, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_BY_CACHE_OUTCOME: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_allowed_ips_cache_misses",
+        "Number of cache hits/misses for allowed ips",
+        // hit/miss
+        &["outcome"],
+    )
+    .unwrap()
+});
+
 pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "semaphore_control_plane_token_acquire_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        // largest bucket = 2^16 * 0.5ms = 32s
-        exponential_buckets(0.0005, 2.0, 16).unwrap(),
+        // largest bucket = 3^16 * 0.00005s = 3.28s
+        exponential_buckets(0.00005, 3.0, 16).unwrap(),
     )
     .unwrap()
 });
@@ -134,6 +156,15 @@ pub static NUM_CONNECTION_ACCEPTED_BY_SNI: Lazy<IntCounterVec> = Lazy::new(|| {
         "proxy_accepted_connections_by_sni",
         "Number of connections (per sni).",
         &["kind"],
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_allowed_ips_number",
+        "Number of allowed ips",
+        vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0],
     )
     .unwrap()
 });
@@ -265,7 +296,7 @@ pub async fn task_main(
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
-                let (socket, _) = accept_result?;
+                let (socket, peer_addr) = accept_result?;
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
@@ -274,7 +305,9 @@ pub async fn task_main(
                         info!("accepted postgres client connection");
 
                         let mut socket = WithClientIp::new(socket);
+                        let mut peer_addr = peer_addr;
                         if let Some(ip) = socket.wait_for_addr().await? {
+                            peer_addr = ip;
                             tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
                         } else if config.require_client_ip {
                             bail!("missing required client IP");
@@ -285,7 +318,7 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr).await
                     }
                     .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
@@ -375,6 +408,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
+    peer_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -408,7 +442,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names, peer_addr))
             .transpose();
 
         match result {

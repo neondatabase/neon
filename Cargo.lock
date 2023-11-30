@@ -2382,9 +2382,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.7.2"
+version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12b6ee2129af8d4fb011108c73d99a1b83a85977f23b82460c0ae2e25bb4b57f"
+checksum = "8f518f335dce6725a761382244631d86cf0ccb2863413590b31338feb467f9c3"
 
 [[package]]
 name = "is-terminal"
@@ -3612,6 +3612,7 @@ dependencies = [
  "humantime",
  "hyper",
  "hyper-tungstenite",
+ "ipnet",
  "itertools",
  "md5",
  "metrics",

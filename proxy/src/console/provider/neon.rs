@@ -3,11 +3,17 @@
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, ApiLocks, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, http, scram};
+use crate::{
+    auth::ClientCredentials,
+    compute, http,
+    proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
+    scram,
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use itertools::Itertools;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
@@ -48,7 +54,7 @@ impl Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
+    ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
             let request = self
@@ -72,16 +78,25 @@ impl Api {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => return Ok(None),
+                    Some(http::StatusCode::NOT_FOUND) => return Ok(AuthInfo::default()),
                     _otherwise => return Err(e.into()),
                 },
             };
 
             let secret = scram::ServerSecret::parse(&body.role_secret)
-                .map(AuthInfo::Scram)
+                .map(AuthSecret::Scram)
                 .ok_or(GetAuthInfoError::BadSecret)?;
-
-            Ok(Some(secret))
+            let allowed_ips = body
+                .allowed_ips
+                .into_iter()
+                .flatten()
+                .map(String::from)
+                .collect_vec();
+            ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
+            Ok(AuthInfo {
+                secret: Some(secret),
+                allowed_ips,
+            })
         }
         .map_err(crate::error::log_error)
         .instrument(info_span!("http", id = request_id))
@@ -148,8 +163,30 @@ impl super::Api for Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
+    ) -> Result<AuthInfo, GetAuthInfoError> {
         self.do_get_auth_info(extra, creds).await
+    }
+
+    async fn get_allowed_ips(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials,
+    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+        let key: &str = creds.project().expect("impossible");
+        if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
+            ALLOWED_IPS_BY_CACHE_OUTCOME
+                .with_label_values(&["hit"])
+                .inc();
+            return Ok(Arc::new(allowed_ips.to_vec()));
+        }
+        ALLOWED_IPS_BY_CACHE_OUTCOME
+            .with_label_values(&["miss"])
+            .inc();
+        let allowed_ips = Arc::new(self.do_get_auth_info(extra, creds).await?.allowed_ips);
+        self.caches
+            .allowed_ips
+            .insert(key.into(), allowed_ips.clone());
+        Ok(allowed_ips)
     }
 
     #[tracing::instrument(skip_all)]
