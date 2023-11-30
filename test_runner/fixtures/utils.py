@@ -142,7 +142,7 @@ _global_counter_lock = threading.Lock()
 
 
 def global_counter() -> int:
-    """A really dumb global counter.
+    """A really dumb but thread-safe global counter.
 
     This is useful for giving output files a unique number, so if we run the
     same command multiple times we can keep their output separate.
