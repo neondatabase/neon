@@ -2114,6 +2114,7 @@ class NeonProxy(PgProtocol):
                 # Console auth backend params
                 *["--auth-backend", "console"],
                 *["--auth-endpoint", self.endpoint],
+                *["--sql-over-http-pool-opt-in", "false"],
             ]
             if self.fixed_rate_limit is not None:
                 args += [

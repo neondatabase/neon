@@ -35,7 +35,8 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub sql_over_http_timeout: tokio::time::Duration,
+    pub timeout: tokio::time::Duration,
+    pub pool_opt_in: bool,
 }
 
 pub struct AuthenticationConfig {
