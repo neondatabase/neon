@@ -96,7 +96,7 @@ def subprocess_capture(
                     first = False
                     # prefix the files with the command line so that we can
                     # later understand which file is for what command
-                    self.out_file.write((f"# #{' '.join(cmd)}\n\n").encode("utf-8"))
+                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode("utf-8"))
 
                 # Only bother decoding if we are going to do something more than stream to a file
                 if self.echo or self.capture:
