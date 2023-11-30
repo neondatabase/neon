@@ -1347,7 +1347,7 @@ mod tests {
                 max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
                 auth_token: None,
                 availability_zone: None,
-                ingest_batch_size: NonZeroU64::new(1).unwrap(),
+                ingest_batch_size: 1,
             },
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),

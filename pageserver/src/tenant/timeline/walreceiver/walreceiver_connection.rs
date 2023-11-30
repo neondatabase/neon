@@ -2,7 +2,6 @@
 
 use std::{
     error::Error,
-    num::NonZeroU64,
     pin::pin,
     str::FromStr,
     sync::Arc,
@@ -116,7 +115,7 @@ pub(super) async fn handle_walreceiver_connection(
     connect_timeout: Duration,
     ctx: RequestContext,
     node: NodeId,
-    ingest_batch_size: NonZeroU64,
+    ingest_batch_size: u64,
 ) -> Result<(), WalReceiverError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -337,7 +336,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                         uncommitted_records += 1;
                         // Commit every ingest_batch_size records.
-                        if uncommitted_records >= ingest_batch_size.get() {
+                        if uncommitted_records >= ingest_batch_size {
                             modification.commit(&ctx).await?;
                             uncommitted_records = 0;
                         }

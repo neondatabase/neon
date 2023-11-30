@@ -1430,10 +1430,7 @@ impl Timeline {
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        let ingest_batch_size = tenant_conf_guard
-            .tenant_conf
-            .ingest_batch_size
-            .unwrap_or(self.conf.default_tenant_conf.ingest_batch_size);
+        let ingest_batch_size = self.conf.ingest_batch_size;
         drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();
