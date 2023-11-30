@@ -188,7 +188,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
-use pageserver_api::shard::ShardIndex;
+use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 pub(crate) use upload::upload_initdb_dir;
@@ -301,7 +301,7 @@ pub struct RemoteTimelineClient {
 
     runtime: tokio::runtime::Handle,
 
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     generation: Generation,
 
@@ -325,7 +325,7 @@ impl RemoteTimelineClient {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         conf: &'static PageServerConf,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         generation: Generation,
     ) -> RemoteTimelineClient {
@@ -337,13 +337,16 @@ impl RemoteTimelineClient {
             } else {
                 BACKGROUND_RUNTIME.handle().clone()
             },
-            tenant_id,
+            tenant_shard_id,
             timeline_id,
             generation,
             storage_impl: remote_storage,
             deletion_queue_client,
             upload_queue: Mutex::new(UploadQueue::Uninitialized),
-            metrics: Arc::new(RemoteTimelineClientMetrics::new(&tenant_id, &timeline_id)),
+            metrics: Arc::new(RemoteTimelineClientMetrics::new(
+                &tenant_shard_id,
+                &timeline_id,
+            )),
         }
     }
 
@@ -401,11 +404,6 @@ impl RemoteTimelineClient {
             .deleted_at = SetDeletedFlagProgress::Successful(deleted_at);
 
         Ok(())
-    }
-
-    pub(crate) fn get_shard_index(&self) -> ShardIndex {
-        // TODO: carry this on the struct
-        ShardIndex::unsharded()
     }
 
     pub fn remote_consistent_lsn_projected(&self) -> Option<Lsn> {
@@ -469,14 +467,13 @@ impl RemoteTimelineClient {
 
         let index_part = download::download_index_part(
             &self.storage_impl,
-            &self.tenant_id,
+            &self.tenant_shard_id,
             &self.timeline_id,
-            self.get_shard_index(),
             self.generation,
             cancel,
         )
         .measure_remote_op(
-            self.tenant_id,
+            self.tenant_shard_id.tenant_id,
             self.timeline_id,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
@@ -512,13 +509,13 @@ impl RemoteTimelineClient {
             download::download_layer_file(
                 self.conf,
                 &self.storage_impl,
-                self.tenant_id,
+                self.tenant_shard_id,
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
             )
             .measure_remote_op(
-                self.tenant_id,
+                self.tenant_shard_id.tenant_id,
                 self.timeline_id,
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Download,
@@ -966,9 +963,8 @@ impl RemoteTimelineClient {
             || {
                 upload::upload_index_part(
                     &self.storage_impl,
-                    &self.tenant_id,
+                    &self.tenant_shard_id,
                     &self.timeline_id,
-                    self.get_shard_index(),
                     self.generation,
                     &index_part_with_deleted_at,
                 )
@@ -1025,7 +1021,7 @@ impl RemoteTimelineClient {
                 .drain()
                 .map(|(file_name, meta)| {
                     remote_layer_path(
-                        &self.tenant_id,
+                        &self.tenant_shard_id.tenant_id,
                         &self.timeline_id,
                         meta.shard,
                         &file_name,
@@ -1040,7 +1036,7 @@ impl RemoteTimelineClient {
 
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
-        let timeline_storage_path = remote_timeline_path(&self.tenant_id, &self.timeline_id);
+        let timeline_storage_path = remote_timeline_path(&self.tenant_shard_id, &self.timeline_id);
 
         // Execute all pending deletions, so that when we proceed to do a list_prefixes below, we aren't
         // taking the burden of listing all the layers that we already know we should delete.
@@ -1076,12 +1072,7 @@ impl RemoteTimelineClient {
             .unwrap_or(
                 // No generation-suffixed indices, assume we are dealing with
                 // a legacy index.
-                remote_index_path(
-                    &self.tenant_id,
-                    &self.timeline_id,
-                    self.get_shard_index(),
-                    Generation::none(),
-                ),
+                remote_index_path(&self.tenant_shard_id, &self.timeline_id, Generation::none()),
             );
 
         let remaining_layers: Vec<RemotePath> = remaining
@@ -1213,12 +1204,12 @@ impl RemoteTimelineClient {
 
             // Spawn task to perform the task
             let self_rc = Arc::clone(self);
-            let tenant_id = self.tenant_id;
+            let tenant_shard_id = self.tenant_shard_id;
             let timeline_id = self.timeline_id;
             task_mgr::spawn(
                 &self.runtime,
                 TaskKind::RemoteUploadTask,
-                Some(self.tenant_id),
+                Some(self.tenant_shard_id.tenant_id),
                 Some(self.timeline_id),
                 "remote upload",
                 false,
@@ -1226,7 +1217,7 @@ impl RemoteTimelineClient {
                     self_rc.perform_upload_task(task).await;
                     Ok(())
                 }
-                .instrument(info_span!(parent: None, "remote_upload", %tenant_id, %timeline_id, %upload_task_id)),
+                .instrument(info_span!(parent: None, "remote_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id, %upload_task_id)),
             );
 
             // Loop back to process next task
@@ -1278,7 +1269,7 @@ impl RemoteTimelineClient {
                         self.generation,
                     )
                     .measure_remote_op(
-                        self.tenant_id,
+                        self.tenant_shard_id.tenant_id,
                         self.timeline_id,
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
@@ -1298,14 +1289,13 @@ impl RemoteTimelineClient {
 
                     let res = upload::upload_index_part(
                         &self.storage_impl,
-                        &self.tenant_id,
+                        &self.tenant_shard_id,
                         &self.timeline_id,
-                        self.get_shard_index(),
                         self.generation,
                         index_part,
                     )
                     .measure_remote_op(
-                        self.tenant_id,
+                        self.tenant_shard_id.tenant_id,
                         self.timeline_id,
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
@@ -1325,7 +1315,7 @@ impl RemoteTimelineClient {
                     pausable_failpoint!("before-delete-layer-pausable");
                     self.deletion_queue_client
                         .push_layers(
-                            self.tenant_id,
+                            self.tenant_shard_id,
                             self.timeline_id,
                             self.generation,
                             delete.layers.clone(),
@@ -1444,7 +1434,7 @@ impl RemoteTimelineClient {
             // data safety guarantees (see docs/rfcs/025-generation-numbers.md)
             self.deletion_queue_client
                 .update_remote_consistent_lsn(
-                    self.tenant_id,
+                    self.tenant_shard_id,
                     self.timeline_id,
                     self.generation,
                     lsn,
@@ -1602,15 +1592,21 @@ impl RemoteTimelineClient {
     }
 }
 
-pub fn remote_timelines_path(tenant_id: &TenantId) -> RemotePath {
-    let path = format!("tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}");
+pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
+    let path = format!("tenants/{tenant_shard_id}/{TIMELINES_SEGMENT_NAME}");
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
-pub fn remote_timeline_path(tenant_id: &TenantId, timeline_id: &TimelineId) -> RemotePath {
-    remote_timelines_path(tenant_id).join(Utf8Path::new(&timeline_id.to_string()))
+pub fn remote_timeline_path(
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+) -> RemotePath {
+    remote_timelines_path(tenant_shard_id).join(Utf8Path::new(&timeline_id.to_string()))
 }
 
+/// Note that the shard component of a remote layer path is _not_ always the same
+/// as in the TenantShardId of the caller: tenants may reference layers from a different
+/// ShardIndex.  Use the ShardIndex from the layer's metadata.
 pub fn remote_layer_path(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
@@ -1637,14 +1633,12 @@ pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId
 }
 
 pub fn remote_index_path(
-    tenant_id: &TenantId,
+    tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
-    shard: ShardIndex,
     generation: Generation,
 ) -> RemotePath {
     RemotePath::from_string(&format!(
-        "tenants/{tenant_id}{0}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{1}{2}",
-        shard.get_suffix(),
+        "tenants/{tenant_shard_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{0}{1}",
         IndexPart::FILE_NAME,
         generation.get_suffix()
     ))
@@ -1786,14 +1780,14 @@ mod tests {
             Arc::new(RemoteTimelineClient {
                 conf: self.harness.conf,
                 runtime: tokio::runtime::Handle::current(),
-                tenant_id: self.harness.tenant_id,
+                tenant_shard_id: self.harness.tenant_shard_id,
                 timeline_id: TIMELINE_ID,
                 generation,
                 storage_impl: self.harness.remote_storage.clone(),
                 deletion_queue_client: self.harness.deletion_queue.new_client(),
                 upload_queue: Mutex::new(UploadQueue::Uninitialized),
                 metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                    &self.harness.tenant_id,
+                    &self.harness.tenant_shard_id,
                     &TIMELINE_ID,
                 )),
             })
@@ -2100,11 +2094,7 @@ mod tests {
         assert_eq!(actual_c, expected_c);
     }
 
-    async fn inject_index_part(
-        test_state: &TestSetup,
-        generation: Generation,
-        shard: ShardIndex,
-    ) -> IndexPart {
+    async fn inject_index_part(test_state: &TestSetup, generation: Generation) -> IndexPart {
         // An empty IndexPart, just sufficient to ensure deserialization will succeed
         let example_metadata = TimelineMetadata::example();
         let example_index_part = IndexPart::new(
@@ -2126,9 +2116,8 @@ mod tests {
 
         let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(
-                &test_state.harness.tenant_id,
+                &test_state.harness.tenant_shard_id,
                 &TIMELINE_ID,
-                shard,
                 generation,
             )
             .get_path(),
@@ -2168,12 +2157,7 @@ mod tests {
 
         // Simple case: we are in generation N, load the index from generation N - 1
         let generation_n = 5;
-        let injected = inject_index_part(
-            &test_state,
-            Generation::new(generation_n - 1),
-            ShardIndex::unsharded(),
-        )
-        .await;
+        let injected = inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
 
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected).await;
 
@@ -2191,34 +2175,22 @@ mod tests {
 
         // A generation-less IndexPart exists in the bucket, we should find it
         let generation_n = 5;
-        let injected_none =
-            inject_index_part(&test_state, Generation::none(), ShardIndex::unsharded()).await;
+        let injected_none = inject_index_part(&test_state, Generation::none()).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_none).await;
 
         // If a more recent-than-none generation exists, we should prefer to load that
-        let injected_1 =
-            inject_index_part(&test_state, Generation::new(1), ShardIndex::unsharded()).await;
+        let injected_1 = inject_index_part(&test_state, Generation::new(1)).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
         // If a more-recent-than-me generation exists, we should ignore it.
-        let _injected_10 =
-            inject_index_part(&test_state, Generation::new(10), ShardIndex::unsharded()).await;
+        let _injected_10 = inject_index_part(&test_state, Generation::new(10)).await;
         assert_got_index_part(&test_state, Generation::new(generation_n), &injected_1).await;
 
         // If a directly previous generation exists, _and_ an index exists in my own
         // generation, I should prefer my own generation.
-        let _injected_prev = inject_index_part(
-            &test_state,
-            Generation::new(generation_n - 1),
-            ShardIndex::unsharded(),
-        )
-        .await;
-        let injected_current = inject_index_part(
-            &test_state,
-            Generation::new(generation_n),
-            ShardIndex::unsharded(),
-        )
-        .await;
+        let _injected_prev =
+            inject_index_part(&test_state, Generation::new(generation_n - 1)).await;
+        let injected_current = inject_index_part(&test_state, Generation::new(generation_n)).await;
         assert_got_index_part(
             &test_state,
             Generation::new(generation_n),

@@ -608,11 +608,9 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
     };
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
-    // All subcommands take an optional --tenant-id option
-    let tenant_id = get_tenant_id(sub_args, env)?;
-
     match sub_name {
         "list" => {
+            let tenant_id = get_tenant_id(sub_args, env)?;
             let timeline_infos = get_timeline_infos(env, &tenant_id).unwrap_or_else(|e| {
                 eprintln!("Failed to load timeline info: {}", e);
                 HashMap::new()
@@ -672,6 +670,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
             println!("{table}");
         }
         "create" => {
+            let tenant_id = get_tenant_id(sub_args, env)?;
             let branch_name = sub_args
                 .get_one::<String>("branch-name")
                 .map(|s| s.as_str())
@@ -716,6 +715,18 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
             };
 
+            match (mode, hot_standby) {
+                (ComputeMode::Static(_), true) => {
+                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                }
+                (ComputeMode::Primary, true) => {
+                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                }
+                _ => {}
+            }
+
+            cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+
             cplane.new_endpoint(
                 &endpoint_id,
                 tenant_id,
@@ -728,8 +739,6 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
             )?;
         }
         "start" => {
-            let pg_port: Option<u16> = sub_args.get_one::<u16>("pg-port").copied();
-            let http_port: Option<u16> = sub_args.get_one::<u16>("http-port").copied();
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
@@ -758,80 +767,28 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     env.safekeepers.iter().map(|sk| sk.id).collect()
                 };
 
-            let endpoint = cplane.endpoints.get(endpoint_id.as_str());
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("endpoint {endpoint_id} not found"))?;
+
+            cplane.check_conflicting_endpoints(
+                endpoint.mode,
+                endpoint.tenant_id,
+                endpoint.timeline_id,
+            )?;
 
             let ps_conf = env.get_pageserver_conf(pageserver_id)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
-                let claims = Claims::new(Some(tenant_id), Scope::Tenant);
+                let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
 
                 Some(env.generate_auth_token(&claims)?)
             } else {
                 None
             };
 
-            let hot_standby = sub_args
-                .get_one::<bool>("hot-standby")
-                .copied()
-                .unwrap_or(false);
-
-            if let Some(endpoint) = endpoint {
-                match (&endpoint.mode, hot_standby) {
-                    (ComputeMode::Static(_), true) => {
-                        bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
-                    }
-                    (ComputeMode::Primary, true) => {
-                        bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
-                    }
-                    _ => {}
-                }
-                println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
-            } else {
-                let branch_name = sub_args
-                    .get_one::<String>("branch-name")
-                    .map(|s| s.as_str())
-                    .unwrap_or(DEFAULT_BRANCH_NAME);
-                let timeline_id = env
-                    .get_branch_timeline_id(branch_name, tenant_id)
-                    .ok_or_else(|| {
-                        anyhow!("Found no timeline id for branch name '{branch_name}'")
-                    })?;
-                let lsn = sub_args
-                    .get_one::<String>("lsn")
-                    .map(|lsn_str| Lsn::from_str(lsn_str))
-                    .transpose()
-                    .context("Failed to parse Lsn from the request")?;
-                let pg_version = sub_args
-                    .get_one::<u32>("pg-version")
-                    .copied()
-                    .context("Failed to `pg-version` from the argument string")?;
-
-                let mode = match (lsn, hot_standby) {
-                    (Some(lsn), false) => ComputeMode::Static(lsn),
-                    (None, true) => ComputeMode::Replica,
-                    (None, false) => ComputeMode::Primary,
-                    (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
-                };
-
-                // when used with custom port this results in non obvious behaviour
-                // port is remembered from first start command, i e
-                // start --port X
-                // stop
-                // start <-- will also use port X even without explicit port argument
-                println!("Starting new endpoint {endpoint_id} (PostgreSQL v{pg_version}) on timeline {timeline_id} ...");
-
-                let ep = cplane.new_endpoint(
-                    endpoint_id,
-                    tenant_id,
-                    timeline_id,
-                    pg_port,
-                    http_port,
-                    pg_version,
-                    mode,
-                    pageserver_id,
-                )?;
-                ep.start(&auth_token, safekeepers, remote_ext_config)?;
-            }
+            println!("Starting existing endpoint {endpoint_id}...");
+            endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
         }
         "reconfigure" => {
             let endpoint_id = sub_args
@@ -1437,15 +1394,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
                     .arg(endpoint_id_arg.clone())
-                    .arg(tenant_id_arg.clone())
-                    .arg(branch_name_arg.clone())
-                    .arg(timeline_id_arg.clone())
-                    .arg(lsn_arg)
-                    .arg(pg_port_arg)
-                    .arg(http_port_arg)
                     .arg(endpoint_pageserver_id_arg.clone())
-                    .arg(pg_version_arg)
-                    .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
                 )
@@ -1458,7 +1407,6 @@ fn cli() -> Command {
                 .subcommand(
                     Command::new("stop")
                     .arg(endpoint_id_arg)
-                    .arg(tenant_id_arg.clone())
                     .arg(
                         Arg::new("destroy")
                             .help("Also delete data directory (now optional, should be default in future)")

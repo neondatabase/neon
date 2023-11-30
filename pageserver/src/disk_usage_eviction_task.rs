@@ -310,7 +310,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 .unwrap()
                 .as_micros(),
             partition,
-            desc.tenant_id,
+            desc.tenant_shard_id,
             desc.timeline_id,
             candidate.layer,
         );
@@ -380,7 +380,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let limit = Arc::new(tokio::sync::Semaphore::new(1000.max(max_batch_size)));
 
     for (timeline, batch) in batched {
-        let tenant_id = timeline.tenant_id;
+        let tenant_shard_id = timeline.tenant_shard_id;
         let timeline_id = timeline.timeline_id;
         let batch_size =
             u32::try_from(batch.len()).expect("batch size limited to u32::MAX during partitioning");
@@ -431,7 +431,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 (evicted_bytes, evictions_failed)
             }
         }
-        .instrument(tracing::info_span!("evict_batch", %tenant_id, %timeline_id, batch_size));
+        .instrument(tracing::info_span!("evict_batch", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id, batch_size));
 
         js.spawn(evict);
 
@@ -572,7 +572,7 @@ async fn collect_eviction_candidates(
                 continue;
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
-            debug!(tenant_id=%tl.tenant_id, timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+            debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
             tenant_candidates.extend(
                 info.resident_layers
                     .into_iter()

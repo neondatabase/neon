@@ -1414,34 +1414,19 @@ class NeonCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
-        pg_port: int,
-        http_port: int,
         safekeepers: Optional[List[int]] = None,
-        tenant_id: Optional[TenantId] = None,
-        lsn: Optional[Lsn] = None,
-        branch_name: Optional[str] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "start",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
-            "--pg-version",
-            self.env.pg_version,
         ]
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
-        if lsn is not None:
-            args.append(f"--lsn={lsn}")
-        args.extend(["--pg-port", str(pg_port)])
-        args.extend(["--http-port", str(http_port)])
 
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
-        if branch_name is not None:
-            args.extend(["--branch-name", branch_name])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if pageserver_id is not None:
@@ -1468,15 +1453,12 @@ class NeonCli(AbstractNeonCli):
     def endpoint_stop(
         self,
         endpoint_id: str,
-        tenant_id: Optional[TenantId] = None,
         destroy=False,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "stop",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
         ]
         if destroy:
             args.append("--destroy")
@@ -2507,9 +2489,6 @@ class Endpoint(PgProtocol):
 
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
-            pg_port=self.pg_port,
-            http_port=self.http_port,
-            tenant_id=self.tenant_id,
             safekeepers=self.active_safekeepers,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
@@ -2589,7 +2568,7 @@ class Endpoint(PgProtocol):
         if self.running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, self.tenant_id, check_return_code=self.check_stop_result
+                self.endpoint_id, check_return_code=self.check_stop_result
             )
             self.running = False
 
@@ -2603,7 +2582,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, self.tenant_id, True, check_return_code=self.check_stop_result
+            self.endpoint_id, True, check_return_code=self.check_stop_result
         )
         self.endpoint_id = None
         self.running = False

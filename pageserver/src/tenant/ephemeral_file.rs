@@ -7,18 +7,19 @@ use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use camino::Utf8PathBuf;
+use pageserver_api::shard::TenantShardId;
 use std::cmp::min;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicU64;
 use tracing::*;
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 
 pub struct EphemeralFile {
     page_cache_file_id: page_cache::FileId,
 
-    _tenant_id: TenantId,
+    _tenant_shard_id: TenantShardId,
     _timeline_id: TimelineId,
     file: VirtualFile,
     len: u64,
@@ -31,7 +32,7 @@ pub struct EphemeralFile {
 impl EphemeralFile {
     pub async fn create(
         conf: &PageServerConf,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Result<EphemeralFile, io::Error> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
@@ -39,7 +40,7 @@ impl EphemeralFile {
             NEXT_FILENAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let filename = conf
-            .timeline_path(&tenant_id, &timeline_id)
+            .timeline_path(&tenant_shard_id, &timeline_id)
             .join(Utf8PathBuf::from(format!(
                 "ephemeral-{filename_disambiguator}"
             )));
@@ -52,7 +53,7 @@ impl EphemeralFile {
 
         Ok(EphemeralFile {
             page_cache_file_id: page_cache::next_file_id(),
-            _tenant_id: tenant_id,
+            _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
             file,
             len: 0,
@@ -282,7 +283,7 @@ mod tests {
     ) -> Result<
         (
             &'static PageServerConf,
-            TenantId,
+            TenantShardId,
             TimelineId,
             RequestContext,
         ),
@@ -295,13 +296,13 @@ mod tests {
         // OK in a test.
         let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-        let tenant_id = TenantId::from_str("11000000000000000000000000000000").unwrap();
+        let tenant_shard_id = TenantShardId::from_str("11000000000000000000000000000000").unwrap();
         let timeline_id = TimelineId::from_str("22000000000000000000000000000000").unwrap();
-        fs::create_dir_all(conf.timeline_path(&tenant_id, &timeline_id))?;
+        fs::create_dir_all(conf.timeline_path(&tenant_shard_id, &timeline_id))?;
 
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
-        Ok((conf, tenant_id, timeline_id, ctx))
+        Ok((conf, tenant_shard_id, timeline_id, ctx))
     }
 
     #[tokio::test]

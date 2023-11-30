@@ -13,8 +13,12 @@ use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::models::{
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo, TimelineState,
+use pageserver_api::{
+    models::{
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
+        TimelineState,
+    },
+    shard::TenantShardId,
 };
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
@@ -149,7 +153,7 @@ pub struct Timeline {
 
     myself: Weak<Self>,
 
-    pub tenant_id: TenantId,
+    pub(crate) tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
@@ -701,7 +705,7 @@ impl Timeline {
     }
 
     /// Flush to disk all data that was written with the put_* functions
-    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
         self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
@@ -937,7 +941,7 @@ impl Timeline {
         tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
         )
         .await;
@@ -988,7 +992,7 @@ impl Timeline {
         // Shut down the layer flush task before the remote client, as one depends on the other
         task_mgr::shutdown_tasks(
             Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
         )
         .await;
@@ -1006,7 +1010,12 @@ impl Timeline {
 
         tracing::debug!("Waiting for tasks...");
 
-        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
+        task_mgr::shutdown_tasks(
+            None,
+            Some(self.tenant_shard_id.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
@@ -1125,7 +1134,7 @@ impl Timeline {
         }
     }
 
-    #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
+    #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
@@ -1330,7 +1339,11 @@ impl Timeline {
                 &self.tenant_conf.read().unwrap().tenant_conf,
                 &self.conf.default_tenant_conf,
             );
-            let tenant_id_str = self.tenant_id.to_string();
+
+            // TODO(sharding): make evictions state shard aware
+            // (https://github.com/neondatabase/neon/issues/5953)
+            let tenant_id_str = self.tenant_shard_id.tenant_id.to_string();
+
             let timeline_id_str = self.timeline_id.to_string();
             self.metrics
                 .evictions_with_low_residence_duration
@@ -1350,7 +1363,7 @@ impl Timeline {
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         generation: Generation,
         walredo_mgr: Arc<super::WalRedoManager>,
         resources: TimelineResources,
@@ -1381,7 +1394,7 @@ impl Timeline {
                 tenant_conf,
                 myself: myself.clone(),
                 timeline_id,
-                tenant_id,
+                tenant_shard_id,
                 generation,
                 pg_version,
                 layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
@@ -1408,7 +1421,7 @@ impl Timeline {
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(
-                    &tenant_id,
+                    &tenant_shard_id.tenant_id,
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
@@ -1459,7 +1472,7 @@ impl Timeline {
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
                 cancel,
-                gate: Gate::new(format!("Timeline<{tenant_id}/{timeline_id}>")),
+                gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 gc_lock: tokio::sync::Mutex::default(),
@@ -1481,14 +1494,14 @@ impl Timeline {
             FlushLoopState::Running { .. } => {
                 info!(
                     "skipping attempt to start flush_loop twice {}/{}",
-                    self.tenant_id, self.timeline_id
+                    self.tenant_shard_id, self.timeline_id
                 );
                 return;
             }
             FlushLoopState::Exited => {
                 warn!(
                     "ignoring attempt to restart exited flush_loop {}/{}",
-                    self.tenant_id, self.timeline_id
+                    self.tenant_shard_id, self.timeline_id
                 );
                 return;
             }
@@ -1507,7 +1520,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "layer flush task",
             false,
@@ -1519,7 +1532,7 @@ impl Timeline {
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))
+            .instrument(info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))
         );
     }
 
@@ -1534,7 +1547,7 @@ impl Timeline {
     ) {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
-            self.timeline_id, self.tenant_id
+            self.timeline_id, self.tenant_shard_id
         );
 
         let tenant_conf_guard = self.tenant_conf.read().unwrap();
@@ -1595,7 +1608,9 @@ impl Timeline {
 
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
-        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+        let timeline_path = self
+            .conf
+            .timeline_path(&self.tenant_shard_id, &self.timeline_id);
         let conf = self.conf;
         let span = tracing::Span::current();
 
@@ -1802,7 +1817,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "initial size calculation",
             false,
@@ -1912,7 +1927,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
             false,
@@ -1988,7 +2003,7 @@ impl Timeline {
         fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
             if !self
                 .conf
-                .metadata_path(&self.tenant_id, &self.timeline_id)
+                .metadata_path(&self.tenant_shard_id, &self.timeline_id)
                 .exists()
             {
                 error!("timeline-calculate-logical-size-pre metadata file does not exist")
@@ -2341,7 +2356,13 @@ impl Timeline {
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
         let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn, ctx)
+            .lookup_materialized_page(
+                self.tenant_shard_id.tenant_id,
+                self.timeline_id,
+                key,
+                lsn,
+                ctx,
+            )
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
@@ -2369,7 +2390,7 @@ impl Timeline {
                 self.get_last_record_lsn(),
                 self.conf,
                 self.timeline_id,
-                self.tenant_id,
+                self.tenant_shard_id,
             )
             .await?;
         Ok(layer)
@@ -2535,7 +2556,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -2656,9 +2677,14 @@ impl Timeline {
 
         // If we updated our disk_consistent_lsn, persist the updated metadata to local disk.
         if let Some(metadata) = metadata {
-            save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
-                .await
-                .context("save_metadata")?;
+            save_metadata(
+                self.conf,
+                &self.tenant_shard_id,
+                &self.timeline_id,
+                &metadata,
+            )
+            .await
+            .context("save_metadata")?;
         }
         Ok(())
     }
@@ -2722,9 +2748,14 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         let metadata = self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
 
-        save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
-            .await
-            .context("save_metadata")?;
+        save_metadata(
+            self.conf,
+            &self.tenant_shard_id,
+            &self.timeline_id,
+            &metadata,
+        )
+        .await
+        .context("save_metadata")?;
 
         Ok(())
     }
@@ -2772,7 +2803,7 @@ impl Timeline {
                 par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
-                    .timeline_path(&self_clone.tenant_id, &self_clone.timeline_id)])
+                    .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id)])
                 .context("fsync of timeline dir")?;
 
                 anyhow::Ok(new_delta)
@@ -2928,7 +2959,7 @@ impl Timeline {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
-                    self.tenant_id,
+                    self.tenant_shard_id,
                     &img_range,
                     lsn,
                 )
@@ -3001,9 +3032,11 @@ impl Timeline {
             .await
             .context("fsync of newly created layer files")?;
 
-        par_fsync::par_fsync_async(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
-            .await
-            .context("fsync of timeline dir")?;
+        par_fsync::par_fsync_async(&[self
+            .conf
+            .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
+        .await
+        .context("fsync of timeline dir")?;
 
         let mut guard = self.layers.write().await;
 
@@ -3489,7 +3522,7 @@ impl Timeline {
                     DeltaLayerWriter::new(
                         self.conf,
                         self.timeline_id,
-                        self.tenant_id,
+                        self.tenant_shard_id,
                         key,
                         if dup_end_lsn.is_valid() {
                             // this is a layer containing slice of values of the same key
@@ -3550,7 +3583,9 @@ impl Timeline {
                 .await
                 .context("fsync all new layers")?;
 
-            let timeline_dir = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+            let timeline_dir = self
+                .conf
+                .timeline_path(&self.tenant_shard_id, &self.timeline_id);
 
             par_fsync::par_fsync_async(&[timeline_dir])
                 .await
@@ -3601,7 +3636,7 @@ impl Timeline {
             let ctx = ctx.attached_child();
             let mut stats = CompactLevel0Phase1StatsBuilder {
                 version: Some(2),
-                tenant_id: Some(self.tenant_id),
+                tenant_id: Some(self.tenant_shard_id.tenant_id),
                 timeline_id: Some(self.timeline_id),
                 ..Default::default()
             };
@@ -4062,7 +4097,7 @@ impl Timeline {
                     let cache = page_cache::get();
                     if let Err(e) = cache
                         .memorize_materialized_page(
-                            self.tenant_id,
+                            self.tenant_shard_id.tenant_id,
                             self.timeline_id,
                             key,
                             last_rec_lsn,
@@ -4106,7 +4141,7 @@ impl Timeline {
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "download all remote layers task",
             false,
@@ -4128,7 +4163,7 @@ impl Timeline {
                 };
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))
+            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))
         );
 
         let initial_info = DownloadRemoteLayersTaskInfo {
@@ -4329,8 +4364,10 @@ impl Timeline {
     }
 
     pub(crate) fn get_shard_index(&self) -> ShardIndex {
-        // TODO: carry this on the struct
-        ShardIndex::unsharded()
+        ShardIndex {
+            shard_number: self.tenant_shard_id.shard_number,
+            shard_count: self.tenant_shard_id.shard_count,
+        }
     }
 }
 

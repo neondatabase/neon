@@ -41,10 +41,14 @@ use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 #[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "testing")]
+use pageserver_api::shard::TenantShardId;
+
 use crate::config::PageServerConf;
 use crate::metrics::{
     WalRedoKillCause, WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_COUNTERS,
-    WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
+    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM,
+    WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
@@ -238,10 +242,13 @@ impl PostgresRedoManager {
                         let mut proc_guard = self.redo_process.write().unwrap();
                         match &*proc_guard {
                             None => {
+                                let timer =
+                                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.start_timer();
                                 let proc = Arc::new(
                                     WalRedoProcess::launch(self.conf, self.tenant_id, pg_version)
                                         .context("launch walredo process")?,
                                 );
+                                timer.observe_duration();
                                 *proc_guard = Some(Arc::clone(&proc));
                                 proc
                             }
@@ -991,7 +998,11 @@ impl WalRedoProcess {
         // these files will be collected to an allure report
         let filename = format!("walredo-{millis}-{}-{seq}.walredo", writebuf.len());
 
-        let path = self.conf.tenant_path(&self.tenant_id).join(&filename);
+        // TODO(sharding): update this call when WalRedoProcess gets a TenantShardId.
+        let path = self
+            .conf
+            .tenant_path(&TenantShardId::unsharded(self.tenant_id))
+            .join(&filename);
 
         let res = std::fs::OpenOptions::new()
             .write(true)
