@@ -163,7 +163,9 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
 
-def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
+def test_import_from_pageserver_small(
+    pg_bin: PgBin, neon_env_builder: NeonEnvBuilder, test_output_dir: Path
+):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
@@ -177,7 +179,7 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
 
     num_rows = 3000
     lsn = _generate_data(num_rows, endpoint)
-    _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir)
+    _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir)
 
 
 @pytest.mark.timeout(1800)
@@ -185,7 +187,9 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
 # the test back after finding the failure cause.
 # @pytest.mark.skipif(os.environ.get('BUILD_TYPE') == "debug", reason="only run with release build")
 @pytest.mark.skip("See https://github.com/neondatabase/neon/issues/2255")
-def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
+def test_import_from_pageserver_multisegment(
+    pg_bin: PgBin, neon_env_builder: NeonEnvBuilder, test_output_dir: Path
+):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
@@ -205,7 +209,9 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
-    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir)
+    tar_output_file = _import(
+        num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir
+    )
 
     # Check if the backup data contains multiple segment files
     cnt_seg_files = 0
@@ -246,7 +252,8 @@ def _import(
     pg_bin: PgBin,
     timeline: TimelineId,
     pg_distrib_dir: Path,
-) -> str:
+    test_output_dir: Path,
+) -> Path:
     """Test importing backup data to the pageserver.
 
     Args:
@@ -263,9 +270,9 @@ def _import(
 
     # Get a fullbackup from pageserver
     query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
-    result_basepath = pg_bin.run_capture(cmd, env=psql_env)
-    tar_output_file = result_basepath + ".stdout"
+    tar_output_file = test_output_dir / "fullbackup.tar"
+    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
+    pg_bin.run_capture(cmd, env=psql_env)
 
     # Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -299,7 +306,7 @@ def _import(
             "--base-lsn",
             str(lsn),
             "--base-tarfile",
-            os.path.join(tar_output_file),
+            str(tar_output_file),
             "--pg-version",
             env.pg_version,
         ]
@@ -315,9 +322,17 @@ def _import(
 
     # Take another fullbackup
     query = f"fullbackup { tenant} {timeline} {lsn}"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
-    result_basepath = pg_bin.run_capture(cmd, env=psql_env)
-    new_tar_output_file = result_basepath + ".stdout"
+    new_tar_output_file = test_output_dir / "fullbackup-new.tar"
+    cmd = [
+        "psql",
+        "--no-psqlrc",
+        env.pageserver.connstr(),
+        "-c",
+        query,
+        "-o",
+        str(new_tar_output_file),
+    ]
+    pg_bin.run_capture(cmd, env=psql_env)
 
     # Check it's the same as the first fullbackup
     # TODO pageserver should be checking checksum

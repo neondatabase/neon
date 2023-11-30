@@ -20,7 +20,6 @@ pub fn stream_tenants<'a>(
 
             let new_entry_ids = fetch_response
                 .common_prefixes()
-                .unwrap_or_default()
                 .iter()
                 .filter_map(|prefix| prefix.prefix())
                 .filter_map(|prefix| -> Option<&str> {
@@ -72,7 +71,6 @@ pub async fn stream_tenant_timelines<'a>(
 
         let new_entry_ids = fetch_response
             .common_prefixes()
-            .unwrap_or_default()
             .iter()
             .filter_map(|prefix| prefix.prefix())
             .filter_map(|prefix| -> Option<&str> {
@@ -116,15 +114,15 @@ pub(crate) fn stream_listing<'a>(
                 list_objects_with_retries(s3_client, target, continuation_token.clone()).await?;
 
             if target.delimiter.is_empty() {
-                for object_id in fetch_response.contents().unwrap_or_default().iter().filter_map(|object| object.key()).map(|i|
-                    ObjectIdentifier::builder().key(i).build()
-                ) {
+                for object_key in fetch_response.contents().iter().filter_map(|object| object.key())
+                {
+                    let object_id = ObjectIdentifier::builder().key(object_key).build()?;
                     yield object_id;
                 }
             } else {
-                for prefix in fetch_response.common_prefixes().unwrap_or_default()
-                .iter().filter_map(|p| p.prefix().map(|k| ObjectIdentifier::builder().key(k).build())) {
-                    yield prefix;
+                for prefix in fetch_response.common_prefixes().iter().filter_map(|p| p.prefix()) {
+                    let object_id = ObjectIdentifier::builder().key(prefix).build()?;
+                    yield object_id;
                 }
             }
 

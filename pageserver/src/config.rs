@@ -779,7 +779,7 @@ impl PageServerConf {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
                 "tenant_config" => {
-                    t_conf = Self::parse_toml_tenant_conf(item)?;
+                    t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
@@ -851,111 +851,6 @@ impl PageServerConf {
         conf.default_tenant_conf = t_conf.merge(TenantConf::default());
 
         Ok(conf)
-    }
-
-    // subroutine of parse_and_validate to parse `[tenant_conf]` section
-
-    pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
-        let mut t_conf: TenantConfOpt = Default::default();
-        if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
-            t_conf.checkpoint_distance =
-                Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
-        }
-
-        if let Some(checkpoint_timeout) = item.get("checkpoint_timeout") {
-            t_conf.checkpoint_timeout = Some(parse_toml_duration(
-                "checkpoint_timeout",
-                checkpoint_timeout,
-            )?);
-        }
-
-        if let Some(compaction_target_size) = item.get("compaction_target_size") {
-            t_conf.compaction_target_size = Some(parse_toml_u64(
-                "compaction_target_size",
-                compaction_target_size,
-            )?);
-        }
-
-        if let Some(compaction_period) = item.get("compaction_period") {
-            t_conf.compaction_period =
-                Some(parse_toml_duration("compaction_period", compaction_period)?);
-        }
-
-        if let Some(compaction_threshold) = item.get("compaction_threshold") {
-            t_conf.compaction_threshold =
-                Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
-        }
-
-        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
-            t_conf.image_creation_threshold = Some(
-                parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?,
-            );
-        }
-
-        if let Some(gc_horizon) = item.get("gc_horizon") {
-            t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
-        }
-
-        if let Some(gc_period) = item.get("gc_period") {
-            t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
-        }
-
-        if let Some(pitr_interval) = item.get("pitr_interval") {
-            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
-        }
-        if let Some(walreceiver_connect_timeout) = item.get("walreceiver_connect_timeout") {
-            t_conf.walreceiver_connect_timeout = Some(parse_toml_duration(
-                "walreceiver_connect_timeout",
-                walreceiver_connect_timeout,
-            )?);
-        }
-        if let Some(lagging_wal_timeout) = item.get("lagging_wal_timeout") {
-            t_conf.lagging_wal_timeout = Some(parse_toml_duration(
-                "lagging_wal_timeout",
-                lagging_wal_timeout,
-            )?);
-        }
-        if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
-            t_conf.max_lsn_wal_lag =
-                Some(deserialize_from_item("max_lsn_wal_lag", max_lsn_wal_lag)?);
-        }
-        if let Some(trace_read_requests) = item.get("trace_read_requests") {
-            t_conf.trace_read_requests =
-                Some(trace_read_requests.as_bool().with_context(|| {
-                    "configure option trace_read_requests is not a bool".to_string()
-                })?);
-        }
-
-        if let Some(eviction_policy) = item.get("eviction_policy") {
-            t_conf.eviction_policy = Some(
-                deserialize_from_item("eviction_policy", eviction_policy)
-                    .context("parse eviction_policy")?,
-            );
-        }
-
-        if let Some(item) = item.get("min_resident_size_override") {
-            t_conf.min_resident_size_override = Some(
-                deserialize_from_item("min_resident_size_override", item)
-                    .context("parse min_resident_size_override")?,
-            );
-        }
-
-        if let Some(item) = item.get("evictions_low_residence_duration_metric_threshold") {
-            t_conf.evictions_low_residence_duration_metric_threshold = Some(parse_toml_duration(
-                "evictions_low_residence_duration_metric_threshold",
-                item,
-            )?);
-        }
-
-        if let Some(gc_feedback) = item.get("gc_feedback") {
-            t_conf.gc_feedback = Some(
-                gc_feedback
-                    .as_bool()
-                    .with_context(|| "configure option gc_feedback is not a bool".to_string())?,
-            );
-        }
-
-        Ok(t_conf)
     }
 
     #[cfg(test)]
@@ -1425,6 +1320,37 @@ trace_read_requests = {trace_read_requests}"#,
             conf.default_tenant_conf.trace_read_requests, trace_read_requests,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_incorrect_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"
+            [tenant_config]
+            checkpoint_distance = -1 # supposed to be an u64
+        "#
+        .to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let error = TenantConfOpt::try_from(item.to_owned()).unwrap_err();
+
+        let expected_error_str = "checkpoint_distance: invalid value: integer `-1`, expected u64";
+        assert_eq!(error.to_string(), expected_error_str);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_override_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"tenant_config={ min_resident_size_override =  400 }"#.to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let conf = TenantConfOpt::try_from(item.to_owned()).unwrap();
+
+        assert_eq!(conf.min_resident_size_override, Some(400));
 
         Ok(())
     }

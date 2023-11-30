@@ -14,18 +14,20 @@ use aws_config::{
     provider_config::ProviderConfig,
     retry::{RetryConfigBuilder, RetryMode},
     web_identity_token::WebIdentityTokenCredentialsProvider,
+    BehaviorVersion,
 };
-use aws_credential_types::cache::CredentialsCache;
+use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::{
-    config::{AsyncSleep, Config, Region, SharedAsyncSleep},
+    config::{AsyncSleep, Builder, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
-    primitives::ByteStream,
     types::{Delete, ObjectIdentifier},
     Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
-use aws_smithy_http::body::SdkBody;
+
+use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::byte_stream::ByteStream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
 use tokio::io::{self, AsyncRead};
@@ -78,7 +80,6 @@ impl S3Bucket {
             // needed to access remote extensions bucket
             .or_else("token", {
                 let provider_conf = ProviderConfig::without_region().with_region(region.clone());
-
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
                     .build()
@@ -98,18 +99,20 @@ impl S3Bucket {
             .set_max_attempts(Some(1))
             .set_mode(Some(RetryMode::Adaptive));
 
-        let mut config_builder = Config::builder()
+        let mut config_builder = Builder::default()
+            .behavior_version(BehaviorVersion::v2023_11_09())
             .region(region)
-            .credentials_cache(CredentialsCache::lazy())
-            .credentials_provider(credentials_provider)
-            .sleep_impl(SharedAsyncSleep::from(sleep_impl))
-            .retry_config(retry_config.build());
+            .identity_cache(IdentityCache::lazy().build())
+            .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
+            .retry_config(retry_config.build())
+            .sleep_impl(SharedAsyncSleep::from(sleep_impl));
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
             config_builder = config_builder
                 .endpoint_url(custom_endpoint)
                 .force_path_style(true);
         }
+
         let client = Client::from_conf(config_builder.build());
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
@@ -371,7 +374,7 @@ impl RemoteStorage for S3Bucket {
 
             let response = response?;
 
-            let keys = response.contents().unwrap_or_default();
+            let keys = response.contents();
             let empty = Vec::new();
             let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
 
@@ -411,7 +414,7 @@ impl RemoteStorage for S3Bucket {
         let started_at = start_measuring_requests(kind);
 
         let body = Body::wrap_stream(ReaderStream::new(from));
-        let bytes_stream = ByteStream::new(SdkBody::from(body));
+        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
         let res = self
             .client
@@ -474,7 +477,7 @@ impl RemoteStorage for S3Bucket {
         for path in paths {
             let obj_id = ObjectIdentifier::builder()
                 .set_key(Some(self.relative_path_to_s3_object(path)))
-                .build();
+                .build()?;
             delete_objects.push(obj_id);
         }
 
@@ -485,7 +488,11 @@ impl RemoteStorage for S3Bucket {
                 .client
                 .delete_objects()
                 .bucket(self.bucket_name.clone())
-                .delete(Delete::builder().set_objects(Some(chunk.to_vec())).build())
+                .delete(
+                    Delete::builder()
+                        .set_objects(Some(chunk.to_vec()))
+                        .build()?,
+                )
                 .send()
                 .await;
 

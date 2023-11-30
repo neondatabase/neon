@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -13,6 +14,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use tokio_postgres::error::DbError;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -200,11 +202,19 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    peer_addr: SocketAddr,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        config.sql_over_http_timeout,
-        handle_inner(request, sni_hostname, conn_pool, session_id),
+        config.timeout,
+        handle_inner(
+            config,
+            request,
+            sni_hostname,
+            conn_pool,
+            session_id,
+            peer_addr,
+        ),
     )
     .await;
     let mut response = match result {
@@ -212,14 +222,33 @@ pub async fn handle(
             Ok(r) => r,
             Err(e) => {
                 let message = format!("{:?}", e);
-                let code = e.downcast_ref::<tokio_postgres::Error>().and_then(|e| {
-                    e.code()
-                        .map(|s| serde_json::to_value(s.code()).unwrap_or_default())
-                });
-                let code = match code {
-                    Some(c) => c,
-                    None => Value::Null,
-                };
+                let db_error = e
+                    .downcast_ref::<tokio_postgres::Error>()
+                    .and_then(|e| e.as_db_error());
+                fn get<'a, T: serde::Serialize>(
+                    db: Option<&'a DbError>,
+                    x: impl FnOnce(&'a DbError) -> T,
+                ) -> Value {
+                    db.map(x)
+                        .and_then(|t| serde_json::to_value(t).ok())
+                        .unwrap_or_default()
+                }
+
+                // TODO(conrad): db_error.position()
+                let code = get(db_error, |db| db.code().code());
+                let severity = get(db_error, |db| db.severity());
+                let detail = get(db_error, |db| db.detail());
+                let hint = get(db_error, |db| db.hint());
+                let where_ = get(db_error, |db| db.where_());
+                let table = get(db_error, |db| db.table());
+                let column = get(db_error, |db| db.column());
+                let schema = get(db_error, |db| db.schema());
+                let datatype = get(db_error, |db| db.datatype());
+                let constraint = get(db_error, |db| db.constraint());
+                let file = get(db_error, |db| db.file());
+                let line = get(db_error, |db| db.line());
+                let routine = get(db_error, |db| db.routine());
+
                 error!(
                     ?code,
                     "sql-over-http per-client task finished with an error: {e:#}"
@@ -227,14 +256,29 @@ pub async fn handle(
                 // TODO: this shouldn't always be bad request.
                 json_response(
                     StatusCode::BAD_REQUEST,
-                    json!({ "message": message, "code": code }),
+                    json!({
+                        "message": message,
+                        "code": code,
+                        "detail": detail,
+                        "hint": hint,
+                        "severity": severity,
+                        "where": where_,
+                        "table": table,
+                        "column": column,
+                        "schema": schema,
+                        "datatype": datatype,
+                        "constraint": constraint,
+                        "file": file,
+                        "line": line,
+                        "routine": routine,
+                    }),
                 )?
             }
         },
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                config.sql_over_http_timeout.as_secs()
+                config.timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -252,10 +296,12 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
+    config: &'static HttpConfig,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
+    peer_addr: SocketAddr,
 ) -> anyhow::Result<Response<Body>> {
     NUM_CONNECTIONS_ACCEPTED_COUNTER
         .with_label_values(&["http"])
@@ -276,7 +322,8 @@ async fn handle_inner(
     let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
     // Allow connection pooling only if explicitly requested
-    let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    // or if we have decided that http pool is no longer opt-in
+    let allow_pool = !config.pool_opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level, read only and deferrable
 
@@ -314,7 +361,9 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool.get(&conn_info, !allow_pool, session_id).await?;
+    let mut client = conn_pool
+        .get(&conn_info, !allow_pool, session_id, peer_addr)
+        .await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)

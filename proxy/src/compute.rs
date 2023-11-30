@@ -1,9 +1,6 @@
 use crate::{
-    auth::parse_endpoint_param,
-    cancellation::CancelClosure,
-    console::errors::WakeComputeError,
-    error::{io_error, UserFacingError},
-    proxy::is_neon_param,
+    auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
+    error::UserFacingError, proxy::is_neon_param,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
@@ -28,12 +25,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] native_tls::Error),
-}
 
-impl From<WakeComputeError> for ConnectionError {
-    fn from(value: WakeComputeError) -> Self {
-        io_error(value).into()
-    }
+    #[error("{COULD_NOT_CONNECT}: {0}")]
+    WakeComputeError(#[from] WakeComputeError),
 }
 
 impl UserFacingError for ConnectionError {
@@ -46,6 +40,7 @@ impl UserFacingError for ConnectionError {
                 Some(err) => err.message().to_owned(),
                 None => err.to_string(),
             },
+            WakeComputeError(err) => err.to_string_client(),
             _ => COULD_NOT_CONNECT.to_owned(),
         }
     }

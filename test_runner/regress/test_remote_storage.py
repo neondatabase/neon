@@ -588,6 +588,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     env.pageserver.allowed_errors.extend(
         [
             ".* ERROR .*Error processing HTTP request: InternalServerError\\(The timeline or pageserver is shutting down",
+            ".* ERROR .*queue is in state Stopped.*",
             ".* ERROR .*[Cc]ould not flush frozen layer.*",
         ]
     )

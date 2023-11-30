@@ -68,20 +68,20 @@ use super::{AsLayerDesc, Layer, PersistentLayerDesc, ResidentLayer};
 /// the 'index' starts at the block indicated by 'index_start_blk'
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct Summary {
+pub struct Summary {
     /// Magic value to identify this as a neon image file. Always IMAGE_FILE_MAGIC.
-    magic: u16,
-    format_version: u16,
+    pub magic: u16,
+    pub format_version: u16,
 
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    key_range: Range<Key>,
-    lsn: Lsn,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub key_range: Range<Key>,
+    pub lsn: Lsn,
 
     /// Block number where the 'index' part of the file begins.
-    index_start_blk: u32,
+    pub index_start_blk: u32,
     /// Block within the 'index', where the B-tree root page is stored
-    index_root_blk: u32,
+    pub index_root_blk: u32,
     // the 'values' part starts after the summary header, on block 1.
 }
 
@@ -299,6 +299,61 @@ impl ImageLayer {
 
     fn path(&self) -> Utf8PathBuf {
         self.path.clone()
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RewriteSummaryError {
+    #[error("magic mismatch")]
+    MagicMismatch,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<std::io::Error> for RewriteSummaryError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Other(anyhow::anyhow!(e))
+    }
+}
+
+impl ImageLayer {
+    pub async fn rewrite_summary<F>(
+        path: &Utf8Path,
+        rewrite: F,
+        ctx: &RequestContext,
+    ) -> Result<(), RewriteSummaryError>
+    where
+        F: Fn(Summary) -> Summary,
+    {
+        let file = VirtualFile::open_with_options(
+            path,
+            &*std::fs::OpenOptions::new().read(true).write(true),
+        )
+        .await
+        .with_context(|| format!("Failed to open file '{}'", path))?;
+        let file = FileBlockReader::new(file);
+        let summary_blk = file.read_blk(0, ctx).await?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
+        let mut file = file.file;
+        if actual_summary.magic != IMAGE_FILE_MAGIC {
+            return Err(RewriteSummaryError::MagicMismatch);
+        }
+
+        let new_summary = rewrite(actual_summary);
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
+        if buf.spilled() {
+            // The code in ImageLayerWriterInner just warn!()s for this.
+            // It should probably error out as well.
+            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            )));
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf).await?;
+        Ok(())
     }
 }
 

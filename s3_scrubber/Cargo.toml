@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 aws-sdk-s3.workspace = true
-aws-smithy-http.workspace = true
-aws-types.workspace = true
 either.workspace = true
 tokio-rustls.workspace = true
 anyhow.workspace = true
@@ -30,7 +28,7 @@ itertools.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
-aws-config = { workspace = true, default-features = false, features = ["rustls", "credentials-sso"] }
+aws-config = { workspace = true, default-features = false, features = ["rustls", "sso"] }
 
 pageserver = { path = "../pageserver" }
 remote_storage = { path = "../libs/remote_storage" }

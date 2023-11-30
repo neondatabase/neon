@@ -19,6 +19,7 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
+    pub disable_ip_check_for_http: bool,
 }
 
 #[derive(Debug)]
@@ -34,7 +35,8 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub sql_over_http_timeout: tokio::time::Duration,
+    pub timeout: tokio::time::Duration,
+    pub pool_opt_in: bool,
 }
 
 pub struct AuthenticationConfig {
@@ -297,6 +299,7 @@ impl CertResolver {
 }
 
 /// Helper for cmdline cache options parsing.
+#[derive(Debug)]
 pub struct CacheOptions {
     /// Max number of entries.
     pub size: usize,

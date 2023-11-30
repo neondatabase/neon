@@ -466,6 +466,10 @@ impl TestBackend for TestConnectMechanism {
             x => panic!("expecting action {:?}, wake_compute is called instead", x),
         }
     }
+
+    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError> {
+        unimplemented!("not used in tests")
+    }
 }
 
 fn helper_create_cached_node_info() -> CachedNodeInfo {
