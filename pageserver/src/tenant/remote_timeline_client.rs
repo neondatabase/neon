@@ -188,6 +188,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
+pub(crate) use download::download_initdb_tar_zst;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -1077,7 +1078,17 @@ impl RemoteTimelineClient {
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| p!= &latest_index)
+            .filter(|p| {
+                if p == &latest_index {
+                    return false;
+                }
+                if let Some(name) = p.object_name() {
+                    if name == INITDB_PATH {
+                        return false;
+                    }
+                }
+                true
+            })
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
                     info!(%name, "deleting a file not referenced from index_part.json");

@@ -1028,6 +1028,9 @@ paths:
                   format: hex
                 pg_version:
                   type: integer
+                existing_initdb_timeline_id:
+                  type: string
+                  format: hex
       responses:
         "201":
           description: TimelineInfo

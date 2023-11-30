@@ -24,6 +24,7 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
+use tokio::io::BufReader;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -1558,12 +1559,14 @@ impl Tenant {
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
@@ -1638,7 +1641,7 @@ impl Tenant {
                     .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, ctx)
+                self.bootstrap_timeline(new_timeline_id, pg_version, load_existing_initdb, ctx)
                     .await?
             }
         };
@@ -2951,6 +2954,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
@@ -2973,8 +2977,6 @@ impl Tenant {
                 format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
-        // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&pgdata_path) {
@@ -2982,31 +2984,58 @@ impl Tenant {
                 error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
         }
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+        if let Some(existing_initdb_timeline_id) = load_existing_initdb {
+            let Some(storage) = &self.remote_storage else {
+                bail!("no storage configured but load_existing_initdb set to {existing_initdb_timeline_id}");
+            };
+            let (initdb_tar_zst_path, initdb_tar_zst) =
+                self::remote_timeline_client::download_initdb_tar_zst(
+                    self.conf,
+                    storage,
+                    &self.tenant_shard_id,
+                    &existing_initdb_timeline_id,
+                )
+                .await
+                .context("download initdb tar")?;
+            let buf_read = Box::pin(BufReader::new(initdb_tar_zst));
+            import_datadir::extract_tar_zst(&pgdata_path, buf_read)
+                .await
+                .context("extract initdb tar")?;
 
-        // Upload the created data dir to S3
-        if let Some(storage) = &self.remote_storage {
-            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
-            let pgdata_zstd = Bytes::from(pgdata_zstd);
-            backoff::retry(
-                || async {
-                    self::remote_timeline_client::upload_initdb_dir(
-                        storage,
-                        &self.tenant_shard_id.tenant_id,
-                        &timeline_id,
-                        pgdata_zstd.clone(),
-                    )
+            if initdb_tar_zst_path.exists() {
+                tokio::fs::remove_file(&initdb_tar_zst_path)
                     .await
-                },
-                |_| false,
-                3,
-                u32::MAX,
-                "persist_initdb_tar_zst",
-                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
-            )
-            .await?;
+                    .context("tempfile removal")?;
+            }
+        } else {
+            // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
+            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
+
+            // Upload the created data dir to S3
+            if let Some(storage) = &self.remote_storage {
+                let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
+                let pgdata_zstd = Bytes::from(pgdata_zstd);
+                backoff::retry(
+                    || async {
+                        self::remote_timeline_client::upload_initdb_dir(
+                            storage,
+                            &self.tenant_shard_id.tenant_id,
+                            &timeline_id,
+                            pgdata_zstd.clone(),
+                        )
+                        .await
+                    },
+                    |_| false,
+                    3,
+                    u32::MAX,
+                    "persist_initdb_tar_zst",
+                    // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                    backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+                )
+                .await?;
+            }
         }
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
