@@ -163,7 +163,7 @@ impl Timeline {
         &self,
         tag: RelTag,
         blknum: BlockNumber,
-        lsn: Lsn,
+        version: Version<'_>,
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
@@ -173,17 +173,20 @@ impl Timeline {
             ));
         }
 
-        let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
+        let nblocks = self.get_rel_size(tag, version, latest, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                tag, blknum, lsn, nblocks
+                tag,
+                blknum,
+                version.get_lsn(),
+                nblocks
             );
             return Ok(ZERO_PAGE.clone());
         }
 
         let key = rel_block_to_key(tag, blknum);
-        self.get(key, lsn, ctx).await
+        version.get(self, key, ctx).await
     }
 
     // Get size of a database in blocks
@@ -191,16 +194,16 @@ impl Timeline {
         &self,
         spcnode: Oid,
         dbnode: Oid,
-        lsn: Lsn,
+        version: Version<'_>,
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
-        let rels = self.list_rels(spcnode, dbnode, lsn, ctx).await?;
+        let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, lsn, latest, ctx).await?;
+            let n_blocks = self.get_rel_size(rel, version, latest, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -210,7 +213,7 @@ impl Timeline {
     pub async fn get_rel_size(
         &self,
         tag: RelTag,
-        lsn: Lsn,
+        version: Version<'_>,
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
@@ -220,12 +223,12 @@ impl Timeline {
             ));
         }
 
-        if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(nblocks);
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, lsn, latest, ctx).await?
+            && !self.get_rel_exists(tag, version, latest, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -235,7 +238,7 @@ impl Timeline {
         }
 
         let key = rel_size_to_key(tag);
-        let mut buf = self.get(key, lsn, ctx).await?;
+        let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
 
         if latest {
@@ -246,7 +249,7 @@ impl Timeline {
             // latest=true, then it can not cause cache corruption, because with latest=true
             // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
             // associated with most recent value of LSN.
-            self.update_cached_rel_size(tag, lsn, nblocks);
+            self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
         }
         Ok(nblocks)
     }
@@ -255,7 +258,7 @@ impl Timeline {
     pub async fn get_rel_exists(
         &self,
         tag: RelTag,
-        lsn: Lsn,
+        version: Version<'_>,
         _latest: bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
@@ -266,12 +269,12 @@ impl Timeline {
         }
 
         // first try to lookup relation in cache
-        if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(true);
         }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -291,12 +294,12 @@ impl Timeline {
         &self,
         spcnode: Oid,
         dbnode: Oid,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -332,11 +335,11 @@ impl Timeline {
         &self,
         kind: SlruKind,
         segno: u32,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
-        let mut buf = self.get(key, lsn, ctx).await?;
+        let mut buf = version.get(self, key, ctx).await?;
         Ok(buf.get_u32_le())
     }
 
@@ -345,12 +348,12 @@ impl Timeline {
         &self,
         kind: SlruKind,
         segno: u32,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
 
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -501,11 +504,11 @@ impl Timeline {
         mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
     ) -> Result<T, PageReconstructError> {
         for segno in self
-            .list_slru_segments(SlruKind::Clog, probe_lsn, ctx)
+            .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
             .await?
         {
             let nblocks = self
-                .get_slru_segment_size(SlruKind::Clog, segno, probe_lsn, ctx)
+                .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
                 .await?;
             for blknum in (0..nblocks).rev() {
                 let clog_page = self
@@ -531,13 +534,13 @@ impl Timeline {
     pub async fn list_slru_segments(
         &self,
         kind: SlruKind,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => Ok(dir.segments),
             Err(e) => Err(PageReconstructError::from(e)),
@@ -548,12 +551,12 @@ impl Timeline {
         &self,
         spcnode: Oid,
         dbnode: Oid,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
         Ok(buf)
     }
 
@@ -652,7 +655,10 @@ impl Timeline {
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
+            for rel in self
+                .list_rels(*spcnode, *dbnode, Version::Lsn(lsn), ctx)
+                .await?
+            {
                 if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
@@ -692,7 +698,7 @@ impl Timeline {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, lsn, ctx)
+                .list_rels(spcnode, dbnode, Version::Lsn(lsn), ctx)
                 .await?
                 .into_iter()
                 .collect();
@@ -984,11 +990,9 @@ impl<'a> DatadirModification<'a> {
         dbnode: Oid,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let req_lsn = self.tline.get_last_record_lsn();
-
         let total_blocks = self
             .tline
-            .get_db_size(spcnode, dbnode, req_lsn, true, ctx)
+            .get_db_size(spcnode, dbnode, Version::Modified(self), true, ctx)
             .await?;
 
         // Remove entry from dbdir
@@ -1077,8 +1081,11 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
-        let last_lsn = self.tline.get_last_record_lsn();
-        if self.tline.get_rel_exists(rel, last_lsn, true, ctx).await? {
+        if self
+            .tline
+            .get_rel_exists(rel, Version::Modified(self), true, ctx)
+            .await?
+        {
             let size_key = rel_size_to_key(rel);
             // Fetch the old size first
             let old_size = self.get(size_key, ctx).await?.get_u32_le();
@@ -1408,6 +1415,33 @@ impl<'a> DatadirModification<'a> {
     fn delete(&mut self, key_range: Range<Key>) {
         trace!("DELETE {}-{}", key_range.start, key_range.end);
         self.pending_deletions.push(key_range);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Version<'a> {
+    Lsn(Lsn),
+    Modified(&'a DatadirModification<'a>),
+}
+
+impl<'a> Version<'a> {
+    async fn get(
+        &self,
+        timeline: &Timeline,
+        key: Key,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        match self {
+            Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
+            Version::Modified(modification) => modification.get(key, ctx).await,
+        }
+    }
+
+    fn get_lsn(&self) -> Lsn {
+        match self {
+            Version::Lsn(lsn) => *lsn,
+            Version::Modified(modification) => modification.lsn,
+        }
     }
 }
 

@@ -983,16 +983,14 @@ impl WalIngest {
         let src_db_id = rec.src_db_id;
         let src_tablespace_id = rec.src_tablespace_id;
 
-        // Creating a database is implemented by copying the template (aka. source) database.
-        // To copy all the relations, we need to ask for the state as of the same LSN, but we
-        // cannot pass 'lsn' to the Timeline.get_* functions, or they will block waiting for
-        // the last valid LSN to advance up to it. So we use the previous record's LSN in the
-        // get calls instead.
-        let req_lsn = modification.tline.get_last_record_lsn();
-
         let rels = modification
             .tline
-            .list_rels(src_tablespace_id, src_db_id, req_lsn, ctx)
+            .list_rels(
+                src_tablespace_id,
+                src_db_id,
+                Version::Modified(modification),
+                ctx,
+            )
             .await?;
 
         debug!("ingest_xlog_dbase_create: {} rels", rels.len());
@@ -1000,7 +998,12 @@ impl WalIngest {
         // Copy relfilemap
         let filemap = modification
             .tline
-            .get_relmap_file(src_tablespace_id, src_db_id, req_lsn, ctx)
+            .get_relmap_file(
+                src_tablespace_id,
+                src_db_id,
+                Version::Modified(modification),
+                ctx,
+            )
             .await?;
         modification
             .put_relmap_file(tablespace_id, db_id, filemap, ctx)
@@ -1014,7 +1017,7 @@ impl WalIngest {
 
             let nblocks = modification
                 .tline
-                .get_rel_size(src_rel, req_lsn, true, ctx)
+                .get_rel_size(src_rel, Version::Modified(modification), true, ctx)
                 .await?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
@@ -1032,7 +1035,13 @@ impl WalIngest {
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(src_rel, blknum, req_lsn, true, ctx)
+                    .get_rel_page_at_lsn(
+                        src_rel,
+                        blknum,
+                        Version::Modified(modification),
+                        true,
+                        ctx,
+                    )
                     .await?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
@@ -1198,10 +1207,9 @@ impl WalIngest {
                     dbnode: xnode.dbnode,
                     relnode: xnode.relnode,
                 };
-                let last_lsn = modification.tline.get_last_record_lsn();
                 if modification
                     .tline
-                    .get_rel_exists(rel, last_lsn, true, ctx)
+                    .get_rel_exists(rel, Version::Modified(modification), true, ctx)
                     .await?
                 {
                     self.put_rel_drop(modification, rel, ctx).await?;
@@ -1255,10 +1263,9 @@ impl WalIngest {
         // will block waiting for the last valid LSN to advance up to
         // it. So we use the previous record's LSN in the get calls
         // instead.
-        let req_lsn = modification.tline.get_last_record_lsn();
         for segno in modification
             .tline
-            .list_slru_segments(SlruKind::Clog, req_lsn, ctx)
+            .list_slru_segments(SlruKind::Clog, Version::Modified(modification), ctx)
             .await?
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -1494,7 +1501,7 @@ impl WalIngest {
                 nblocks
             } else if !modification
                 .tline
-                .get_rel_exists(rel, last_lsn, true, ctx)
+                .get_rel_exists(rel, Version::Modified(modification), true, ctx)
                 .await?
             {
                 // create it with 0 size initially, the logic below will extend it
@@ -1506,7 +1513,7 @@ impl WalIngest {
             } else {
                 modification
                     .tline
-                    .get_rel_size(rel, last_lsn, true, ctx)
+                    .get_rel_size(rel, Version::Modified(modification), true, ctx)
                     .await?
             };
 
@@ -1560,10 +1567,9 @@ impl WalIngest {
         // Check if the relation exists. We implicitly create relations on first
         // record.
         // TODO: would be nice if to be more explicit about it
-        let last_lsn = modification.tline.get_last_record_lsn();
         let old_nblocks = if !modification
             .tline
-            .get_slru_segment_exists(kind, segno, last_lsn, ctx)
+            .get_slru_segment_exists(kind, segno, Version::Modified(modification), ctx)
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
@@ -1574,7 +1580,7 @@ impl WalIngest {
         } else {
             modification
                 .tline
-                .get_slru_segment_size(kind, segno, last_lsn, ctx)
+                .get_slru_segment_size(kind, segno, Version::Modified(modification), ctx)
                 .await?
         };
 
@@ -1604,14 +1610,14 @@ async fn get_relsize(
 ) -> anyhow::Result<BlockNumber> {
     let nblocks = if !modification
         .tline
-        .get_rel_exists(rel, modification.lsn, true, ctx)
+        .get_rel_exists(rel, Version::Modified(modification), true, ctx)
         .await?
     {
         0
     } else {
         modification
             .tline
-            .get_rel_size(rel, modification.lsn, true, ctx)
+            .get_rel_size(rel, Version::Modified(modification), true, ctx)
             .await?
     };
     Ok(nblocks)
@@ -1687,29 +1693,29 @@ mod tests {
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x10), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
                 .await?,
             false
         );
         assert!(tline
-            .get_rel_size(TESTREL_A, Lsn(0x10), false, &ctx)
+            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
             .await
             .is_err());
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x20), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             1
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x50), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             3
         );
@@ -1717,46 +1723,46 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x20), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 0 at 2")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x30), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x40), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x40), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 1 at 4")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x50), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x50), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 2 at 5")
         );
@@ -1772,19 +1778,19 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x60), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
             2
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x60), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x60), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 1 at 4")
         );
@@ -1792,13 +1798,13 @@ mod tests {
         // should still see the truncated block with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x50), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             3
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Lsn(0x50), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 2 at 5")
         );
@@ -1811,7 +1817,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x68), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x68)), false, &ctx)
                 .await?,
             0
         );
@@ -1824,19 +1830,19 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x70), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x70)), false, &ctx)
                 .await?,
             2
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Lsn(0x70), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), false, &ctx)
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Lsn(0x70), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 1")
         );
@@ -1849,21 +1855,21 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x80), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), false, &ctx)
                 .await?,
             1501
         );
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Lsn(0x80), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), false, &ctx)
                     .await?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Lsn(0x80), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), false, &ctx)
                 .await?,
             TEST_IMG("foo blk 1500")
         );
@@ -1890,13 +1896,13 @@ mod tests {
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x20), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             1
         );
@@ -1909,7 +1915,7 @@ mod tests {
         // Check that rel is not visible anymore
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x30), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x30)), false, &ctx)
                 .await?,
             false
         );
@@ -1927,13 +1933,13 @@ mod tests {
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x40), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x40), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x40)), false, &ctx)
                 .await?,
             1
         );
@@ -1966,24 +1972,24 @@ mod tests {
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x10), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
                 .await?,
             false
         );
         assert!(tline
-            .get_rel_size(TESTREL_A, Lsn(0x10), false, &ctx)
+            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
             .await
             .is_err());
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x20), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x20), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
                 .await?,
             relsize
         );
@@ -1994,7 +2000,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, lsn, false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), false, &ctx)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -2011,7 +2017,7 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x60), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), false, &ctx)
                 .await?,
             1
         );
@@ -2021,7 +2027,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x60), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), false, &ctx)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -2030,7 +2036,7 @@ mod tests {
         // should still see all blocks with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x50), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), false, &ctx)
                 .await?,
             relsize
         );
@@ -2039,7 +2045,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x50), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), false, &ctx)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -2059,13 +2065,13 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Lsn(0x80), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x80)), false, &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Lsn(0x80), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), false, &ctx)
                 .await?,
             relsize
         );
@@ -2075,7 +2081,7 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Lsn(0x80), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), false, &ctx)
                     .await?,
                 TEST_IMG(&data)
             );
@@ -2108,7 +2114,9 @@ mod tests {
         assert_current_logical_size(&tline, Lsn(lsn));
 
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
+            tline
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                .await?,
             RELSEG_SIZE + 1
         );
 
@@ -2120,7 +2128,9 @@ mod tests {
             .await?;
         m.commit(&ctx).await?;
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
+            tline
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                .await?,
             RELSEG_SIZE
         );
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -2133,7 +2143,9 @@ mod tests {
             .await?;
         m.commit(&ctx).await?;
         assert_eq!(
-            tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
+            tline
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                .await?,
             RELSEG_SIZE - 1
         );
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -2149,7 +2161,9 @@ mod tests {
                 .await?;
             m.commit(&ctx).await?;
             assert_eq!(
-                tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
+                tline
+                    .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                    .await?,
                 size as BlockNumber
             );
 
