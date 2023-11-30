@@ -132,6 +132,7 @@ serde_assert = "0.5.0"
 sha2 = "0.10.2"
 signal-hook = "0.3"
 smallvec = "1.11"
+smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"

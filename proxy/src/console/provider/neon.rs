@@ -144,7 +144,7 @@ impl Api {
 
             let node = NodeInfo {
                 config,
-                aux: body.aux.into(),
+                aux: body.aux,
                 allow_self_signed_compute: false,
             };
 

@@ -229,7 +229,7 @@ pub struct NodeInfo {
     pub config: compute::ConnCfg,
 
     /// Labels for proxy's metrics.
-    pub aux: Arc<MetricsAuxInfo>,
+    pub aux: MetricsAuxInfo,
 
     /// Whether we should accept self-signed certificates (for testing)
     pub allow_self_signed_compute: bool,

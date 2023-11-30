@@ -182,16 +182,16 @@ fn get_conn_info(
 
     for (key, value) in pairs {
         if key == "options" {
-            options = Some(value.to_string());
+            options = Some(value.into());
             break;
         }
     }
 
     Ok(ConnInfo {
-        username: username.to_owned(),
-        dbname: dbname.to_owned(),
-        hostname: hostname.to_owned(),
-        password: password.to_owned(),
+        username: username.into(),
+        dbname: dbname.into(),
+        hostname: hostname.into(),
+        password: password.into(),
         options,
     })
 }

@@ -877,11 +877,11 @@ async fn prepare_client_connection(
 pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
-    aux: &MetricsAuxInfo,
+    aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let usage = USAGE_METRICS.register(Ids {
-        endpoint_id: aux.endpoint_id.to_string(),
-        branch_id: aux.branch_id.to_string(),
+        endpoint_id: aux.endpoint_id.clone(),
+        branch_id: aux.branch_id.clone(),
     });
 
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
@@ -1032,7 +1032,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, &aux).await
+        proxy_pass(stream, node.stream, aux).await
     }
 }
 

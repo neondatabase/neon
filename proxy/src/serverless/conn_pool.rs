@@ -8,6 +8,7 @@ use pbkdf2::{
     Params, Pbkdf2,
 };
 use pq_proto::StartupMessageParams;
+use smol_str::SmolStr;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     fmt,
@@ -41,16 +42,16 @@ const MAX_CONNS_PER_ENDPOINT: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
-    pub username: String,
-    pub dbname: String,
-    pub hostname: String,
-    pub password: String,
-    pub options: Option<String>,
+    pub username: SmolStr,
+    pub dbname: SmolStr,
+    pub hostname: SmolStr,
+    pub password: SmolStr,
+    pub options: Option<SmolStr>,
 }
 
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
-    pub fn db_and_user(&self) -> (String, String) {
+    pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
         (self.dbname.clone(), self.username.clone())
     }
 }
@@ -70,7 +71,7 @@ struct ConnPoolEntry {
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
 pub struct EndpointConnPool {
-    pools: HashMap<(String, String), DbUserConnPool>,
+    pools: HashMap<(SmolStr, SmolStr), DbUserConnPool>,
     total_conns: usize,
 }
 
@@ -95,7 +96,7 @@ pub struct GlobalConnPool {
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<String, Arc<RwLock<EndpointConnPool>>>,
+    global_pool: DashMap<SmolStr, Arc<RwLock<EndpointConnPool>>>,
 
     /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
     /// That seems like far too much effort, so we're using a relaxed increment counter instead.
@@ -327,7 +328,7 @@ impl GlobalConnPool {
         Ok(())
     }
 
-    fn get_or_create_endpoint_pool(&self, endpoint: &String) -> Arc<RwLock<EndpointConnPool>> {
+    fn get_or_create_endpoint_pool(&self, endpoint: &SmolStr) -> Arc<RwLock<EndpointConnPool>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();
@@ -468,7 +469,7 @@ async fn connect_to_compute_once(
 
     let (client, mut connection) = config
         .user(&conn_info.username)
-        .password(&conn_info.password)
+        .password(&*conn_info.password)
         .dbname(&conn_info.dbname)
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
@@ -482,8 +483,8 @@ async fn connect_to_compute_once(
         info!(%conn_info, %session, "new connection");
     });
     let ids = Ids {
-        endpoint_id: node_info.aux.endpoint_id.to_string(),
-        branch_id: node_info.aux.branch_id.to_string(),
+        endpoint_id: node_info.aux.endpoint_id.clone(),
+        branch_id: node_info.aux.branch_id.clone(),
     };
 
     tokio::spawn(
