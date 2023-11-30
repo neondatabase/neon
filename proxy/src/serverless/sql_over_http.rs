@@ -204,8 +204,8 @@ pub async fn handle(
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        config.sql_over_http_timeout,
-        handle_inner(request, sni_hostname, conn_pool, session_id),
+        config.timeout,
+        handle_inner(config, request, sni_hostname, conn_pool, session_id),
     )
     .await;
     let mut response = match result {
@@ -269,7 +269,7 @@ pub async fn handle(
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                config.sql_over_http_timeout.as_secs()
+                config.timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -287,6 +287,7 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
+    config: &'static HttpConfig,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
@@ -311,7 +312,8 @@ async fn handle_inner(
     let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
 
     // Allow connection pooling only if explicitly requested
-    let allow_pool = headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    // or if we have decided that http pool is no longer opt-in
+    let allow_pool = !config.pool_opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level, read only and deferrable
 
