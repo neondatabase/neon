@@ -190,6 +190,7 @@ impl<'a> WalIngest<'a> {
             }
             pg_constants::RM_CLOG_ID => {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
+
                 if info == pg_constants::CLOG_ZEROPAGE {
                     let pageno = buf.get_u32_le();
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -212,6 +213,7 @@ impl<'a> WalIngest<'a> {
             }
             pg_constants::RM_XACT_ID => {
                 let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
+
                 if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
                     let parsed_xact =
                         XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
@@ -295,6 +297,7 @@ impl<'a> WalIngest<'a> {
             }
             pg_constants::RM_XLOG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
                 if info == pg_constants::XLOG_NEXTOID {
                     let next_oid = buf.get_u32_le();
                     if self.checkpoint.nextOid != next_oid {
@@ -325,6 +328,7 @@ impl<'a> WalIngest<'a> {
             }
             pg_constants::RM_LOGICALMSG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
                 if info == pg_constants::XLOG_LOGICAL_MESSAGE {
                     let xlrec = XlLogicalMessage::decode(&mut buf);
                     let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
