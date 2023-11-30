@@ -119,6 +119,9 @@ struct ProxyCliArgs {
     /// cache for `allowed_ips` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
     allowed_ips_cache: String,
+    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    disable_ip_check_for_http: bool,
 }
 
 #[tokio::main]
@@ -303,7 +306,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
     };
-    let allowed_ips_cache: config::CacheOptions = args.allowed_ips_cache.parse()?;
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
@@ -312,7 +314,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
-        allowed_ips_cache,
+        disable_ip_check_for_http: args.disable_ip_check_for_http,
     }));
 
     Ok(config)

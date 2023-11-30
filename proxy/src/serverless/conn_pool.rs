@@ -432,9 +432,11 @@ async fn connect_to_compute(
         options: console_options.as_deref(),
     };
     // TODO(anna): this is a bit hacky way, consider using console notification listener.
-    let allowed_ips = backend.get_allowed_ips(&extra).await?;
-    if !check_peer_addr_is_in_list(&peer_addr.ip(), &allowed_ips) {
-        return Err(auth::AuthError::ip_address_not_allowed().into());
+    if !config.disable_ip_check_for_http {
+        let allowed_ips = backend.get_allowed_ips(&extra).await?;
+        if !check_peer_addr_is_in_list(&peer_addr.ip(), &allowed_ips) {
+            return Err(auth::AuthError::ip_address_not_allowed().into());
+        }
     }
     let node_info = backend
         .wake_compute(&extra)
