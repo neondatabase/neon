@@ -147,6 +147,7 @@ impl Timeline {
     {
         DatadirModification {
             tline: self,
+            pending_lsns: Vec::new(),
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
@@ -805,12 +806,13 @@ pub struct DatadirModification<'a> {
     /// in the state in 'tline' yet.
     pub tline: &'a Timeline,
 
-    /// Lsn assigned by begin_modification
+    /// Current LSN of the modification
     lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
+    pending_lsns: Vec<Lsn>,
     pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
@@ -830,7 +832,10 @@ impl<'a> DatadirModification<'a> {
             lsn,
             self.lsn
         );
-        self.lsn = lsn;
+        if lsn > self.lsn {
+            self.pending_lsns.push(self.lsn);
+            self.lsn = lsn;
+        }
         Ok(())
     }
 
@@ -1380,7 +1385,7 @@ impl<'a> DatadirModification<'a> {
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let writer = self.tline.writer().await;
-        let lsn = self.lsn;
+
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
@@ -1390,7 +1395,14 @@ impl<'a> DatadirModification<'a> {
         writer.delete_batch(&self.pending_deletions).await?;
         self.pending_deletions.clear();
 
-        writer.finish_write(lsn);
+        self.pending_lsns.push(self.lsn);
+        for pending_lsn in self.pending_lsns.drain(..) {
+            // Ideally, we should be able to call writer.finish_write() only once
+            // with the highest LSN. However, the last_record_lsn variable in the
+            // timeline keeps track of the latest LSN and the immediate previous LSN
+            // so we need to record every LSN to not leave a gap between them.
+            writer.finish_write(pending_lsn);
+        }
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
