@@ -117,7 +117,7 @@ pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         // proxy_wake_compute/proxy_get_role_info
         &["request"],
         // largest bucket = 2^16 * 0.2ms = 13s
-        exponential_buckets(0.2, 2.0, 16).unwrap(),
+        exponential_buckets(0.0002, 2.0, 16).unwrap(),
     )
     .unwrap()
 });
@@ -136,7 +136,7 @@ pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "semaphore_control_plane_token_acquire_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        // largest bucket = 3^16 * 0.00005s = 3.28s
+        // largest bucket = 3^16 * 0.00005ms = 2.15s
         exponential_buckets(0.00005, 3.0, 16).unwrap(),
     )
     .unwrap()

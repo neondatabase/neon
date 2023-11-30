@@ -95,7 +95,7 @@ impl Endpoint {
         let res = self.client.execute(request).await;
         CONSOLE_REQUEST_LATENCY
             .with_label_values(&[&path])
-            .observe(start.elapsed().as_micros() as f64);
+            .observe(start.elapsed().as_secs_f64());
         res
     }
 }
