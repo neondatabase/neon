@@ -250,10 +250,7 @@ pub(crate) async fn list_timeline_blobs(
     pin_mut!(stream);
     while let Some(obj) = stream.next().await {
         let obj = obj?;
-        let key = match obj.key() {
-            Some(k) => k,
-            None => continue,
-        };
+        let key = obj.key();
 
         let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
         match blob_name {
@@ -286,7 +283,7 @@ pub(crate) async fn list_timeline_blobs(
     let (index_part_object, index_part_generation) = match index_parts
         .iter()
         .filter_map(|k| {
-            let key = k.key().unwrap();
+            let key = k.key();
             // Stripping the index key to the last part, because RemotePath doesn't
             // like absolute paths, and depending on prefix_in_bucket it's possible
             // for the keys we read back to start with a slash.
@@ -307,8 +304,7 @@ pub(crate) async fn list_timeline_blobs(
         errors.push("S3 list response got no index_part.json file".to_string());
     }
 
-    if let Some(index_part_object_key) = index_part_object.as_ref().and_then(|object| object.key())
-    {
+    if let Some(index_part_object_key) = index_part_object.as_ref().map(|object| object.key()) {
         let index_part_bytes = download_object_with_retries(
             s3_client,
             &timeline_dir_target.bucket_name,

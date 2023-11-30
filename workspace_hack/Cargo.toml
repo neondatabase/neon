@@ -14,12 +14,16 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-aws-config = { version = "0.56", default-features = false, features = ["credentials-sso", "rustls"] }
-aws-runtime = { version = "0.56", default-features = false, features = ["event-stream"] }
-aws-sigv4 = { version = "0.56", features = ["sign-eventstream"] }
-aws-smithy-http = { version = "0.56", default-features = false, features = ["event-stream", "rt-tokio"] }
+aws-config = { version = "1", default-features = false, features = ["rustls", "sso"] }
+aws-runtime = { version = "1", default-features = false, features = ["event-stream", "sigv4a"] }
+aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream", "sigv4a"] }
+aws-smithy-async = { version = "1", default-features = false, features = ["rt-tokio"] }
+aws-smithy-http = { version = "0.60", default-features = false, features = ["event-stream"] }
+aws-smithy-runtime-api = { version = "1", features = ["client", "http-02x", "http-auth"] }
+aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "rt-tokio"] }
 axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
+base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "string"] }
@@ -36,6 +40,7 @@ futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 hex = { version = "0.4", features = ["serde"] }
+hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "0.14", features = ["full"] }
 itertools = { version = "0.10" }
 libc = { version = "0.2", features = ["extra_traits"] }
@@ -56,13 +61,14 @@ scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 smallvec = { version = "1", default-features = false, features = ["write"] }
+subtle = { version = "2" }
 time = { version = "0.3", features = ["local-offset", "macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-rustls = { version = "0.24" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.19", features = ["serde"] }
-tower = { version = "0.4", features = ["balance", "buffer", "limit", "retry", "timeout", "util"] }
+tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 tungstenite = { version = "0.20" }
