@@ -148,12 +148,9 @@ def global_counter() -> int:
     same command multiple times we can keep their output separate.
     """
     global _global_counter, _global_counter_lock
-    _global_counter_lock.acquire()
-    try:
+    with _global_counter_lock:
         _global_counter += 1
         return _global_counter
-    finally:
-        _global_counter_lock.release()
 
 
 def print_gc_result(row: Dict[str, Any]):
