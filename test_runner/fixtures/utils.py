@@ -103,7 +103,7 @@ def subprocess_capture(
                     string = line.decode(encoding="utf-8", errors="replace")
 
                     if self.echo:
-                        log.info(string)
+                        log.info(string.strip())
 
                     if self.capture:
                         self.captured += string
