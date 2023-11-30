@@ -456,6 +456,7 @@ class NeonEnvBuilder:
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
         self.enable_generations = False
+        self.initial_shard_count = 1
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
 
@@ -497,7 +498,10 @@ class NeonEnvBuilder:
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(
-            tenant_id=env.initial_tenant, conf=initial_tenant_conf, timeline_id=env.initial_timeline
+            tenant_id=env.initial_tenant,
+            conf=initial_tenant_conf,
+            timeline_id=env.initial_timeline,
+            shard_count=self.initial_shard_count,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1144,6 +1148,7 @@ class NeonCli(AbstractNeonCli):
         timeline_id: Optional[TimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
         set_default: bool = False,
+        shard_count: int = 1,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1160,6 +1165,8 @@ class NeonCli(AbstractNeonCli):
             str(timeline_id),
             "--pg-version",
             self.env.pg_version,
+            "--shard-count",
+            str(shard_count),
         ]
         if conf is not None:
             args.extend(
@@ -1382,7 +1389,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
-        pageserver_id: Optional[int] = None,
+        pageserver_ids: Optional[list[int]] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1404,8 +1411,10 @@ class NeonCli(AbstractNeonCli):
             args.append(endpoint_id)
         if hot_standby:
             args.extend(["--hot-standby", "true"])
-        if pageserver_id is not None:
-            args.extend(["--pageserver-id", str(pageserver_id)])
+        if pageserver_ids is not None:
+            args.extend(["--pageserver-id", ",".join(str(i) for i in pageserver_ids)])
+
+        log.info(f"endpoint_create: {args}")
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -2451,7 +2460,7 @@ class Endpoint(PgProtocol):
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-        pageserver_id: Optional[int] = None,
+        pageserver_ids: Optional[list[int]] = None,
     ) -> "Endpoint":
         """
         Create a new Postgres endpoint.
@@ -2473,7 +2482,7 @@ class Endpoint(PgProtocol):
             hot_standby=hot_standby,
             pg_port=self.pg_port,
             http_port=self.http_port,
-            pageserver_id=pageserver_id,
+            pageserver_ids=pageserver_ids,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -2609,7 +2618,7 @@ class Endpoint(PgProtocol):
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
         remote_ext_config: Optional[str] = None,
-        pageserver_id: Optional[int] = None,
+        pageserver_ids: Optional[list[int]] = None,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -2624,7 +2633,7 @@ class Endpoint(PgProtocol):
             config_lines=config_lines,
             hot_standby=hot_standby,
             lsn=lsn,
-            pageserver_id=pageserver_id,
+            pageserver_ids=pageserver_ids,
         ).start(remote_ext_config=remote_ext_config)
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
@@ -2660,7 +2669,7 @@ class EndpointFactory:
         hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
         remote_ext_config: Optional[str] = None,
-        pageserver_id: Optional[int] = None,
+        pageserver_ids: Optional[list[int]] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -2678,7 +2687,7 @@ class EndpointFactory:
             config_lines=config_lines,
             lsn=lsn,
             remote_ext_config=remote_ext_config,
-            pageserver_id=pageserver_id,
+            pageserver_ids=pageserver_ids,
         )
 
     def create(
@@ -3162,7 +3171,15 @@ def check_restored_datadir_content(
             cur.execute("CHECKPOINT")
 
     # wait for pageserver to catch up
-    wait_for_last_flush_lsn(env, endpoint, endpoint.tenant_id, timeline_id)
+    if len(env.pageservers) > 1:
+        # FIXME: wait_for_last_flush_lsn needs teaching about sharding: it tries to query
+        # LSNs for shard-naive TenantId
+        return
+    for pageserver in env.pageservers:
+        wait_for_last_flush_lsn(
+            env, endpoint, endpoint.tenant_id, timeline_id, pageserver_id=pageserver.id
+        )
+
     # stop postgres to ensure that files won't change
     endpoint.stop()
 
