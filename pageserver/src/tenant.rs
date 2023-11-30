@@ -2442,9 +2442,7 @@ impl Tenant {
             for (key, item) in deserialized.iter() {
                 match key {
                     "tenant_config" => {
-                        tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
-                            format!("Failed to parse config from file '{legacy_config_path}' as pageserver config")
-                        })?;
+                        tenant_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("Failed to parse config from file '{legacy_config_path}' as pageserver config"))?;
                     }
                     _ => bail!(
                         "config file {legacy_config_path} has unrecognized pageserver option '{key}'"

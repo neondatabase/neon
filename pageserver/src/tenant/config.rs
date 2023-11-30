@@ -8,10 +8,12 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
-use anyhow::Context;
+use anyhow::bail;
 use pageserver_api::models;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::num::NonZeroU64;
 use std::time::Duration;
 use utils::generation::Generation;
@@ -521,105 +523,49 @@ impl Default for TenantConf {
     }
 }
 
-// Helper function to standardize the error messages we produce on bad durations
-//
-// Intended to be used with anyhow's `with_context`, e.g.:
-//
-//   let value = result.with_context(bad_duration("name", &value))?;
-//
-fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() -> String {
-    move || format!("Cannot parse `{field_name}` duration {value:?}")
-}
-
 impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
     type Error = anyhow::Error;
 
     fn try_from(request_data: &'_ models::TenantConfig) -> Result<Self, Self::Error> {
-        let mut tenant_conf = TenantConfOpt::default();
+        // Convert the request_data to a JSON Value
+        let json_value: Value = serde_json::to_value(request_data)?;
 
-        if let Some(gc_period) = &request_data.gc_period {
-            tenant_conf.gc_period = Some(
-                humantime::parse_duration(gc_period)
-                    .with_context(bad_duration("gc_period", gc_period))?,
-            );
-        }
-        tenant_conf.gc_horizon = request_data.gc_horizon;
-        tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
+        // Create a Deserializer from the JSON Value
+        let deserializer = json_value.into_deserializer();
 
-        if let Some(pitr_interval) = &request_data.pitr_interval {
-            tenant_conf.pitr_interval = Some(
-                humantime::parse_duration(pitr_interval)
-                    .with_context(bad_duration("pitr_interval", pitr_interval))?,
-            );
-        }
-
-        if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
-            tenant_conf.walreceiver_connect_timeout = Some(
-                humantime::parse_duration(walreceiver_connect_timeout).with_context(
-                    bad_duration("walreceiver_connect_timeout", walreceiver_connect_timeout),
-                )?,
-            );
-        }
-        if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
-            tenant_conf.lagging_wal_timeout = Some(
-                humantime::parse_duration(lagging_wal_timeout)
-                    .with_context(bad_duration("lagging_wal_timeout", lagging_wal_timeout))?,
-            );
-        }
-        if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
-            tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
-        }
-        if let Some(trace_read_requests) = request_data.trace_read_requests {
-            tenant_conf.trace_read_requests = Some(trace_read_requests);
-        }
-
-        tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
-        if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
-            tenant_conf.checkpoint_timeout = Some(
-                humantime::parse_duration(checkpoint_timeout)
-                    .with_context(bad_duration("checkpoint_timeout", checkpoint_timeout))?,
-            );
-        }
-
-        tenant_conf.compaction_target_size = request_data.compaction_target_size;
-        tenant_conf.compaction_threshold = request_data.compaction_threshold;
-
-        if let Some(compaction_period) = &request_data.compaction_period {
-            tenant_conf.compaction_period = Some(
-                humantime::parse_duration(compaction_period)
-                    .with_context(bad_duration("compaction_period", compaction_period))?,
-            );
-        }
-
-        if let Some(eviction_policy) = &request_data.eviction_policy {
-            tenant_conf.eviction_policy = Some(
-                serde::Deserialize::deserialize(eviction_policy)
-                    .context("parse field `eviction_policy`")?,
-            );
-        }
-
-        tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
-
-        if let Some(evictions_low_residence_duration_metric_threshold) =
-            &request_data.evictions_low_residence_duration_metric_threshold
-        {
-            tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
-                humantime::parse_duration(evictions_low_residence_duration_metric_threshold)
-                    .with_context(bad_duration(
-                        "evictions_low_residence_duration_metric_threshold",
-                        evictions_low_residence_duration_metric_threshold,
-                    ))?,
-            );
-        }
-        tenant_conf.gc_feedback = request_data.gc_feedback;
+        // Use serde_path_to_error to deserialize the JSON Value into TenantConfOpt
+        let tenant_conf: TenantConfOpt = serde_path_to_error::deserialize(deserializer)?;
 
         Ok(tenant_conf)
+    }
+}
+
+impl TryFrom<toml_edit::Item> for TenantConfOpt {
+    type Error = anyhow::Error;
+
+    fn try_from(item: toml_edit::Item) -> Result<Self, Self::Error> {
+        match item {
+            toml_edit::Item::Value(value) => {
+                let d = value.into_deserializer();
+                return serde_path_to_error::deserialize(d)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
+            }
+            toml_edit::Item::Table(table) => {
+                let deserializer = toml_edit::de::Deserializer::new(table.into());
+                return serde_path_to_error::deserialize(deserializer)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
+            }
+            _ => {
+                bail!("expected non-inline table but found {item}")
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use models::TenantConfig;
 
     #[test]
     fn de_serializing_pageserver_config_omits_empty_values() {
@@ -635,5 +581,39 @@ mod tests {
         let json_form = serde_json::to_string(&small_conf).unwrap();
         assert_eq!(json_form, "{\"gc_horizon\":42}");
         assert_eq!(small_conf, serde_json::from_str(&json_form).unwrap());
+    }
+
+    #[test]
+    fn test_try_from_models_tenant_config_err() {
+        let tenant_config = models::TenantConfig {
+            lagging_wal_timeout: Some("5a".to_string()),
+            ..TenantConfig::default()
+        };
+
+        let tenant_conf_opt = TenantConfOpt::try_from(&tenant_config);
+
+        assert!(
+            tenant_conf_opt.is_err(),
+            "Suceeded to convert TenantConfig to TenantConfOpt"
+        );
+
+        let expected_error_str =
+            "lagging_wal_timeout: invalid value: string \"5a\", expected a duration";
+        assert_eq!(tenant_conf_opt.unwrap_err().to_string(), expected_error_str);
+    }
+
+    #[test]
+    fn test_try_from_models_tenant_config_success() {
+        let tenant_config = models::TenantConfig {
+            lagging_wal_timeout: Some("5s".to_string()),
+            ..TenantConfig::default()
+        };
+
+        let tenant_conf_opt = TenantConfOpt::try_from(&tenant_config).unwrap();
+
+        assert_eq!(
+            tenant_conf_opt.lagging_wal_timeout,
+            Some(Duration::from_secs(5))
+        );
     }
 }
