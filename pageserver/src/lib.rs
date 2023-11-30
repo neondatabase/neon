@@ -186,13 +186,6 @@ pub struct InitializationOrder {
     /// Each initial tenant load task carries this until completion.
     pub initial_tenant_load: Option<utils::completion::Completion>,
 
-    /// Barrier for when we can start initial logical size calculations.
-    pub initial_logical_size_can_start: utils::completion::Barrier,
-
-    /// Each timeline owns a clone of this to be consumed on the initial logical size calculation
-    /// attempt. It is important to drop this once the attempt has completed.
-    pub initial_logical_size_attempt: Option<utils::completion::Completion>,
-
     /// Barrier for when we can start any background jobs.
     ///
     /// This can be broken up later on, but right now there is just one class of a background job.
