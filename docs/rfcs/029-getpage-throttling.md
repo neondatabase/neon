@@ -1,4 +1,4 @@
-# GetPage@LSN Throttling
+# Per-Tenant GetPage@LSN Throttling
 
 Author: Christian Schwarz
 Date: Oct 24, 2023
