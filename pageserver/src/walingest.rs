@@ -1440,27 +1440,21 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = self.timeline.get_rel_size(rel, last_lsn, true, ctx).await?;
-
-        // Create relation if not exists.
-        //
-        // NOTE: We check that old_nblocks == 0 as an optimization. At the time of
-        //       writing, this sped up walingest by 13% on pgbench init. The bottleneck
-        //       here is redundant calls to relation size cache and redundant locking
-        //       in all of these functions. The proper solution is to manually inline
-        //       and lock only once.
-        if old_nblocks == 0
-            && !self
-                .timeline
-                .get_rel_exists(rel, last_lsn, true, ctx)
-                .await?
+        let old_nblocks = match self
+            .timeline
+            .get_rel_size_if_exists(rel, last_lsn, true, ctx)
+            .await?
         {
-            // create it with 0 size initially, the logic below will extend it
-            modification
-                .put_rel_creation(rel, 0, ctx)
-                .await
-                .context("Relation Error")?;
-        }
+            Some(nblocks) => nblocks,
+            None => {
+                // create it with 0 size initially, the logic below will extend it
+                modification
+                    .put_rel_creation(rel, 0, ctx)
+                    .await
+                    .context("Relation Error")?;
+                0
+            }
+        };
 
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
