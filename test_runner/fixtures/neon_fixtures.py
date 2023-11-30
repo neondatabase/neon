@@ -1858,7 +1858,8 @@ class PgBin:
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[str] = None,
-        **kwargs: Any,
+        with_command_header=True,
+        **popen_kwargs: Any,
     ) -> str:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
@@ -1871,7 +1872,13 @@ class PgBin:
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         base_path, _, _ = subprocess_capture(
-            self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs
+            self.log_dir,
+            command,
+            env=env,
+            cwd=cwd,
+            check=True,
+            with_command_header=with_command_header,
+            **popen_kwargs,
         )
         return base_path
 
