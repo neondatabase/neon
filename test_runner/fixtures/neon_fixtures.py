@@ -1142,7 +1142,7 @@ class NeonCli(AbstractNeonCli):
         self,
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
-        conf: Optional[Dict[str, Any]] = None,
+        conf: Optional[Dict[str, str]] = None,
         set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
