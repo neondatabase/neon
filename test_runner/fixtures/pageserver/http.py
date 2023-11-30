@@ -362,12 +362,16 @@ class PageserverHttpClient(requests.Session):
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        existing_initdb_timeline_id: Optional[TimelineId] = None,
         **kwargs,
     ) -> Dict[Any, Any]:
         body: Dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
             "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
             "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
+            "existing_initdb_timeline_id": str(existing_initdb_timeline_id)
+            if existing_initdb_timeline_id
+            else None,
         }
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)

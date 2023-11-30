@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use enumset::EnumSet;
@@ -440,6 +441,7 @@ async fn timeline_create_handler(
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+            request_data.existing_initdb_timeline_id,
             state.broker_client.clone(),
             &ctx,
         )
@@ -1158,6 +1160,7 @@ async fn put_tenant_location_config_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
 
     let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
+    let flush = parse_query_param(&request, "flush_ms")?.map(Duration::from_millis);
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
@@ -1190,7 +1193,7 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, &ctx)
+        .upsert_location(tenant_shard_id, location_conf, flush, &ctx)
         .await
         // TODO: badrequest assumes the caller was asking for something unreasonable, but in
         // principle we might have hit something like concurrent API calls to the same tenant,

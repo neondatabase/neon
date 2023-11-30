@@ -5,7 +5,12 @@ mod link;
 pub use link::LinkAuthError;
 use tokio_postgres::config::AuthKeys;
 
+use crate::auth::credentials::check_peer_addr_is_in_list;
+use crate::console::errors::GetAuthInfoError;
+use crate::console::provider::AuthInfo;
+use crate::console::AuthSecret;
 use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
+use crate::scram;
 use crate::stream::Stream;
 use crate::{
     auth::{self, ClientCredentials},
@@ -20,6 +25,7 @@ use crate::{
 use futures::TryFutureExt;
 use std::borrow::Cow;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
@@ -64,6 +70,7 @@ pub enum BackendType<'a, T> {
 
 pub trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
+    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -140,14 +147,38 @@ async fn auth_quirks_creds(
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
-    if creds.project.is_none() {
+    let maybe_success = if creds.project.is_none() {
         // Password will be checked by the compute node later.
-        return hacks::password_hack(creds, client, latency_timer).await;
-    }
+        Some(hacks::password_hack(creds, client, latency_timer).await?)
+    } else {
+        None
+    };
 
     // Password hack should set the project name.
     // TODO: make `creds.project` more type-safe.
     assert!(creds.project.is_some());
+    info!("fetching user's authentication info");
+    // TODO(anna): this will slow down both "hacks" below; we probably need a cache.
+    let AuthInfo {
+        secret,
+        allowed_ips,
+    } = api.get_auth_info(extra, creds).await?;
+
+    // check allowed list
+    if !check_peer_addr_is_in_list(&creds.peer_addr.ip(), &allowed_ips) {
+        return Err(auth::AuthError::ip_address_not_allowed());
+    }
+    let secret = secret.unwrap_or_else(|| {
+        // If we don't have an authentication secret, we mock one to
+        // prevent malicious probing (possible due to missing protocol steps).
+        // This mocked secret will never lead to successful authentication.
+        info!("authentication info not found, mocking it");
+        AuthSecret::Scram(scram::ServerSecret::mock(creds.user, rand::random()))
+    });
+
+    if let Some(success) = maybe_success {
+        return Ok(success);
+    }
 
     // Perform cleartext auth if we're allowed to do that.
     // Currently, we use it for websocket connections (latency).
@@ -157,7 +188,7 @@ async fn auth_quirks_creds(
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
-    classic::authenticate(api, extra, creds, client, config, latency_timer).await
+    classic::authenticate(creds, client, config, latency_timer, secret).await
 }
 
 /// True to its name, this function encapsulates our current auth trade-offs.
@@ -303,6 +334,19 @@ impl BackendType<'_, ClientCredentials<'_>> {
 
         info!("user successfully authenticated");
         Ok(res)
+    }
+
+    pub async fn get_allowed_ips(
+        &self,
+        extra: &ConsoleReqExtra<'_>,
+    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+        use BackendType::*;
+        match self {
+            Console(api, creds) => api.get_allowed_ips(extra, creds).await,
+            Postgres(api, creds) => api.get_allowed_ips(extra, creds).await,
+            Link(_) => Ok(Arc::new(vec![])),
+            Test(x) => x.get_allowed_ips(),
+        }
     }
 
     /// When applicable, wake the compute node, gaining its connection info in the process.

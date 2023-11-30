@@ -1858,7 +1858,8 @@ class PgBin:
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[str] = None,
-        **kwargs: Any,
+        with_command_header=True,
+        **popen_kwargs: Any,
     ) -> str:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
@@ -1871,7 +1872,13 @@ class PgBin:
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         base_path, _, _ = subprocess_capture(
-            self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs
+            self.log_dir,
+            command,
+            env=env,
+            cwd=cwd,
+            check=True,
+            with_command_header=with_command_header,
+            **popen_kwargs,
         )
         return base_path
 
@@ -2114,6 +2121,7 @@ class NeonProxy(PgProtocol):
                 # Console auth backend params
                 *["--auth-backend", "console"],
                 *["--auth-endpoint", self.endpoint],
+                *["--sql-over-http-pool-opt-in", "false"],
             ]
             if self.fixed_rate_limit is not None:
                 args += [
@@ -2389,6 +2397,10 @@ def static_proxy(
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
+    vanilla_pg.safe_psql("CREATE SCHEMA IF NOT EXISTS neon_control_plane")
+    vanilla_pg.safe_psql(
+        "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
+    )
 
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()

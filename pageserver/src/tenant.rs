@@ -15,13 +15,16 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
+use futures::stream::FuturesUnordered;
 use futures::FutureExt;
+use futures::StreamExt;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use std::fmt;
 use storage_broker::BrokerClientChannel;
+use tokio::io::BufReader;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -32,6 +35,7 @@ use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
+use utils::sync::gate::GateGuard;
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -51,6 +55,7 @@ use self::timeline::TimelineResources;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
+use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::metrics::TENANT_ACTIVATION;
@@ -1554,12 +1559,14 @@ impl Tenant {
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
@@ -1634,7 +1641,7 @@ impl Tenant {
                     .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, ctx)
+                self.bootstrap_timeline(new_timeline_id, pg_version, load_existing_initdb, ctx)
                     .await?
             }
         };
@@ -2442,9 +2449,7 @@ impl Tenant {
             for (key, item) in deserialized.iter() {
                 match key {
                     "tenant_config" => {
-                        tenant_conf = PageServerConf::parse_toml_tenant_conf(item).with_context(|| {
-                            format!("Failed to parse config from file '{legacy_config_path}' as pageserver config")
-                        })?;
+                        tenant_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("Failed to parse config from file '{legacy_config_path}' as pageserver config"))?;
                     }
                     _ => bail!(
                         "config file {legacy_config_path} has unrecognized pageserver option '{key}'"
@@ -2949,6 +2954,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
@@ -2971,8 +2977,6 @@ impl Tenant {
                 format!("Failed to remove already existing initdb directory: {pgdata_path}")
             })?;
         }
-        // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&pgdata_path) {
@@ -2980,31 +2984,58 @@ impl Tenant {
                 error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
         }
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+        if let Some(existing_initdb_timeline_id) = load_existing_initdb {
+            let Some(storage) = &self.remote_storage else {
+                bail!("no storage configured but load_existing_initdb set to {existing_initdb_timeline_id}");
+            };
+            let (initdb_tar_zst_path, initdb_tar_zst) =
+                self::remote_timeline_client::download_initdb_tar_zst(
+                    self.conf,
+                    storage,
+                    &self.tenant_shard_id,
+                    &existing_initdb_timeline_id,
+                )
+                .await
+                .context("download initdb tar")?;
+            let buf_read = Box::pin(BufReader::new(initdb_tar_zst));
+            import_datadir::extract_tar_zst(&pgdata_path, buf_read)
+                .await
+                .context("extract initdb tar")?;
 
-        // Upload the created data dir to S3
-        if let Some(storage) = &self.remote_storage {
-            let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
-            let pgdata_zstd = Bytes::from(pgdata_zstd);
-            backoff::retry(
-                || async {
-                    self::remote_timeline_client::upload_initdb_dir(
-                        storage,
-                        &self.tenant_shard_id.tenant_id,
-                        &timeline_id,
-                        pgdata_zstd.clone(),
-                    )
+            if initdb_tar_zst_path.exists() {
+                tokio::fs::remove_file(&initdb_tar_zst_path)
                     .await
-                },
-                |_| false,
-                3,
-                u32::MAX,
-                "persist_initdb_tar_zst",
-                // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-                backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
-            )
-            .await?;
+                    .context("tempfile removal")?;
+            }
+        } else {
+            // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
+            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
+
+            // Upload the created data dir to S3
+            if let Some(storage) = &self.remote_storage {
+                let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
+                let pgdata_zstd = Bytes::from(pgdata_zstd);
+                backoff::retry(
+                    || async {
+                        self::remote_timeline_client::upload_initdb_dir(
+                            storage,
+                            &self.tenant_shard_id.tenant_id,
+                            &timeline_id,
+                            pgdata_zstd.clone(),
+                        )
+                        .await
+                    },
+                    |_| false,
+                    3,
+                    u32::MAX,
+                    "persist_initdb_tar_zst",
+                    // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
+                    backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+                )
+                .await?;
+            }
         }
+        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
@@ -3283,6 +3314,66 @@ impl Tenant {
 
     pub fn cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
+    }
+
+    /// Flush any in-progress layers, schedule uploads, and wait for uploads to complete.
+    ///
+    /// This function can take a long time: callers should wrap it in a timeout if calling
+    /// from an external API handler.
+    ///
+    /// Cancel-safety: cancelling this function may leave I/O running, but such I/O is
+    /// still bounded by tenant/timeline shutdown.
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn flush_remote(&self) -> anyhow::Result<()> {
+        let timelines = self.timelines.lock().unwrap().clone();
+
+        async fn flush_timeline(_gate: GateGuard, timeline: Arc<Timeline>) -> anyhow::Result<()> {
+            tracing::info!(timeline_id=%timeline.timeline_id, "Flushing...");
+            timeline.freeze_and_flush().await?;
+            tracing::info!(timeline_id=%timeline.timeline_id, "Waiting for uploads...");
+            if let Some(client) = &timeline.remote_client {
+                client.wait_completion().await?;
+            }
+
+            Ok(())
+        }
+
+        // We do not use a JoinSet for these tasks, because we don't want them to be
+        // aborted when this function's future is cancelled: they should stay alive
+        // holding their GateGuard until they complete, to ensure their I/Os complete
+        // before Timeline shutdown completes.
+        let mut results = FuturesUnordered::new();
+
+        for (_timeline_id, timeline) in timelines {
+            // Run each timeline's flush in a task holding the timeline's gate: this
+            // means that if this function's future is cancelled, the Timeline shutdown
+            // will still wait for any I/O in here to complete.
+            let gate = match timeline.gate.enter() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let jh = tokio::task::spawn(async move { flush_timeline(gate, timeline).await });
+            results.push(jh);
+        }
+
+        while let Some(r) = results.next().await {
+            if let Err(e) = r {
+                if !e.is_cancelled() && !e.is_panic() {
+                    tracing::error!("unexpected join error: {e:?}");
+                }
+            }
+        }
+
+        // The flushes we did above were just writes, but the Tenant might have had
+        // pending deletions as well from recent compaction/gc: we want to flush those
+        // as well.  This requires flushing the global delete queue.  This is cheap
+        // because it's typically a no-op.
+        match self.deletion_queue_client.flush_execute().await {
+            Ok(_) => {}
+            Err(DeletionQueueError::ShuttingDown) => {}
+        }
+
+        Ok(())
     }
 }
 

@@ -23,6 +23,7 @@ use hyper::{
     Body, Method, Request, Response,
 };
 
+use std::net::SocketAddr;
 use std::task::Poll;
 use std::{future::ready, sync::Arc};
 use tls_listener::TlsListener;
@@ -102,7 +103,7 @@ pub async fn task_main(
                             let session_id = uuid::Uuid::new_v4();
 
                             request_handler(
-                                req, config, conn_pool, cancel_map, session_id, sni_name,
+                                req, config, conn_pool, cancel_map, session_id, sni_name, peer_addr,
                             )
                             .instrument(info_span!(
                                 "serverless",
@@ -170,6 +171,7 @@ async fn request_handler(
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
+    peer_addr: SocketAddr,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()
@@ -187,9 +189,15 @@ async fn request_handler(
 
         tokio::spawn(
             async move {
-                if let Err(e) =
-                    websocket::serve_websocket(websocket, config, &cancel_map, session_id, host)
-                        .await
+                if let Err(e) = websocket::serve_websocket(
+                    websocket,
+                    config,
+                    &cancel_map,
+                    session_id,
+                    host,
+                    peer_addr,
+                )
+                .await
                 {
                     error!(session_id = ?session_id, "error in websocket connection: {e:#}");
                 }
@@ -205,6 +213,7 @@ async fn request_handler(
             sni_hostname,
             conn_pool,
             session_id,
+            peer_addr,
             &config.http_config,
         )
         .await

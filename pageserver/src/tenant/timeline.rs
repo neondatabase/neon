@@ -1488,6 +1488,10 @@ impl Timeline {
     }
 
     pub(super) fn maybe_spawn_flush_loop(self: &Arc<Self>) {
+        let Ok(guard) = self.gate.enter() else {
+            info!("cannot start flush loop when the timeline gate has already been closed");
+            return;
+        };
         let mut flush_loop_state = self.flush_loop_state.lock().unwrap();
         match *flush_loop_state {
             FlushLoopState::NotStarted => (),
@@ -1525,6 +1529,7 @@ impl Timeline {
             "layer flush task",
             false,
             async move {
+                let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();

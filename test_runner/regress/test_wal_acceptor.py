@@ -1,6 +1,5 @@
 import filecmp
 import os
-import pathlib
 import random
 import shutil
 import signal
@@ -639,7 +638,7 @@ class ProposerPostgres(PgProtocol):
     def __init__(
         self,
         pgdata_dir: str,
-        pg_bin,
+        pg_bin: PgBin,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         listen_addr: str,
@@ -665,7 +664,7 @@ class ProposerPostgres(PgProtocol):
     def create_dir_config(self, safekeepers: str):
         """Create dir and config for running --sync-safekeepers"""
 
-        pathlib.Path(self.pg_data_dir_path()).mkdir(exist_ok=True)
+        Path(self.pg_data_dir_path()).mkdir(exist_ok=True)
         with open(self.config_file_path(), "w") as f:
             cfg = [
                 "synchronous_standby_names = 'walproposer'\n",
@@ -691,7 +690,7 @@ class ProposerPostgres(PgProtocol):
             "PGDATA": self.pg_data_dir_path(),
         }
 
-        basepath = self.pg_bin.run_capture(command, env)
+        basepath = self.pg_bin.run_capture(command, env, with_command_header=False)
 
         log.info(f"postgres --sync-safekeepers output: {basepath}")
 

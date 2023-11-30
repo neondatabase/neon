@@ -179,6 +179,8 @@ pub struct TimelineCreateRequest {
     #[serde(default)]
     pub ancestor_timeline_id: Option<TimelineId>,
     #[serde(default)]
+    pub existing_initdb_timeline_id: Option<TimelineId>,
+    #[serde(default)]
     pub ancestor_start_lsn: Option<Lsn>,
     pub pg_version: Option<u32>,
 }
@@ -314,25 +316,7 @@ impl std::ops::Deref for TenantConfigRequest {
 
 impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
-        let config = TenantConfig {
-            checkpoint_distance: None,
-            checkpoint_timeout: None,
-            compaction_target_size: None,
-            compaction_period: None,
-            compaction_threshold: None,
-            gc_horizon: None,
-            gc_period: None,
-            image_creation_threshold: None,
-            pitr_interval: None,
-            walreceiver_connect_timeout: None,
-            lagging_wal_timeout: None,
-            max_lsn_wal_lag: None,
-            trace_read_requests: None,
-            eviction_policy: None,
-            min_resident_size_override: None,
-            evictions_low_residence_duration_metric_threshold: None,
-            gc_feedback: None,
-        };
+        let config = TenantConfig::default();
         TenantConfigRequest { tenant_id, config }
     }
 }

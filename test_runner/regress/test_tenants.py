@@ -290,10 +290,13 @@ def test_pageserver_with_empty_tenants(
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
+            ".*Failed to load index_part from remote storage, failed creation?.*",
+            ".*load failed.*list timelines directory.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*load failed.*list timelines directory.*")
 
     client = env.pageserver.http_client()
 
