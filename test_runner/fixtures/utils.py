@@ -138,17 +138,19 @@ def subprocess_capture(
 
 
 _global_counter = 0
+_global_counter_lock = threading.Lock()
 
 
 def global_counter() -> int:
-    """A really dumb global counter.
+    """A really dumb but thread-safe global counter.
 
     This is useful for giving output files a unique number, so if we run the
     same command multiple times we can keep their output separate.
     """
-    global _global_counter
-    _global_counter += 1
-    return _global_counter
+    global _global_counter, _global_counter_lock
+    with _global_counter_lock:
+        _global_counter += 1
+        return _global_counter
 
 
 def print_gc_result(row: Dict[str, Any]):
