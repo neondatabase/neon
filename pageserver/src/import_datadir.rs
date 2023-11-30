@@ -317,8 +317,9 @@ async fn import_wal(
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx, true)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                modification.commit(ctx).await?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -453,8 +454,9 @@ pub async fn import_wal_from_tar(
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx, true)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                modification.commit(ctx).await?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);

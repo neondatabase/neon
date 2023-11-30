@@ -1389,11 +1389,15 @@ impl<'a> DatadirModification<'a> {
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
-        writer.put_batch(&self.pending_updates, ctx).await?;
-        self.pending_updates.clear();
+        if !self.pending_updates.is_empty() {
+            writer.put_batch(&self.pending_updates, ctx).await?;
+            self.pending_updates.clear();
+        }
 
-        writer.delete_batch(&self.pending_deletions).await?;
-        self.pending_deletions.clear();
+        if !self.pending_deletions.is_empty() {
+            writer.delete_batch(&self.pending_deletions).await?;
+            self.pending_deletions.clear();
+        }
 
         self.pending_lsns.push(self.lsn);
         for pending_lsn in self.pending_lsns.drain(..) {
@@ -1411,8 +1415,8 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.pending_updates.is_empty() && self.pending_deletions.is_empty()
+    pub(crate) fn len(&self) -> usize {
+        self.pending_updates.len() + self.pending_deletions.len()
     }
 
     // Internal helper functions to batch the modifications
@@ -1461,6 +1465,12 @@ impl<'a> DatadirModification<'a> {
     }
 }
 
+/// This struct facilitates accessing either a committed key from the timeline at a
+/// specific LSN, or the latest uncommitted key from a pending modification.
+/// During WAL ingestion, the records from multiple LSNs may be batched in the same
+/// modification before being flushed to the timeline. Hence, the routines in WalIngest
+/// need to look up the keys in the modification first before looking them up in the
+/// timeline to not miss the latest updates.
 #[derive(Clone, Copy)]
 pub enum Version<'a> {
     Lsn(Lsn),

@@ -57,7 +57,7 @@ impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
         startpoint: Lsn,
-        ctx: &'_ RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<WalIngest> {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
@@ -80,6 +80,8 @@ impl WalIngest {
     /// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
     /// relations/pages that the record affects.
     ///
+    /// This function returns `true` if the record was ingested, and `false` if it was filtered out
+    ///
     pub async fn ingest_record(
         &mut self,
         recdata: Bytes,
@@ -87,10 +89,10 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
-        commit: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
         let pg_version = modification.tline.pg_version;
+        let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
         decode_wal_record(recdata, decoded, pg_version)?;
@@ -399,22 +401,11 @@ impl WalIngest {
             self.checkpoint_modified = false;
         }
 
-        if modification.is_empty() {
-            tracing::debug!("ingest: filtered out record @ LSN {lsn}");
-            WAL_INGEST.records_filtered.inc();
-            modification.tline.finish_write(lsn);
-        } else {
-            WAL_INGEST.records_committed.inc();
-            modification.commit(ctx).await?;
-        }
+        // Note that at this point this record is only cached in the modification
+        // until commit() is called to flush the data into the repository and update
+        // the latest LSN.
 
-        // Now that this record has been fully handled, including updating the
-        // checkpoint data, let the repository know that it is up-to-date to this LSN.
-        if commit {
-            modification.commit(ctx).await?;
-        }
-
-        Ok(())
+        Ok(modification.len() > prev_len)
     }
 
     /// Do not store this block, but observe it for the purposes of updating our relation size state.
@@ -2253,10 +2244,11 @@ mod tests {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx, true)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
                     .await
                     .unwrap();
             }
+            modification.commit(&ctx).await.unwrap();
         }
 
         let duration = started_at.elapsed();

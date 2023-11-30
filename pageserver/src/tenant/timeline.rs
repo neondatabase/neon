@@ -1430,7 +1430,6 @@ impl Timeline {
             .tenant_conf
             .max_lsn_wal_lag
             .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        let ingest_batch_size = self.conf.ingest_batch_size;
         drop(tenant_conf_guard);
 
         let mut guard = self.walreceiver.lock().unwrap();
@@ -1446,7 +1445,7 @@ impl Timeline {
                 max_lsn_wal_lag,
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
-                ingest_batch_size,
+                ingest_batch_size: self.conf.ingest_batch_size,
             },
             broker_client,
             ctx,
