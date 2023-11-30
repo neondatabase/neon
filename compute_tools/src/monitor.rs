@@ -3,88 +3,83 @@ use std::{thread, time::Duration};
 
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::compute::ComputeNode;
+use compute_api::responses::ComputeStatus;
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 // Spin in a loop and figure out the last activity time in the Postgres.
 // Then update it in the shared state. This function never errors out.
-// XXX: the only expected panic is at `RwLock` unwrap().
+// NB: the only expected panic is at `Mutex` unwrap(), all other errors
+// should be handled gracefully.
 fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
     let connstr = compute.connstr.as_str();
+
+    // During startup and configuration we connect to every Postgres database,
+    // but we don't want to count this as some user activity. So wait until
+    // the compute fully started before monitoring activity.
+    wait_for_postgres_start(compute);
+
     // Define `client` outside of the loop to reuse existing connection if it's active.
     let mut client = Client::connect(connstr, NoTls);
+
+    let mut prev_active_time: f64 = 0.0;
 
     info!("watching Postgres activity at {}", connstr);
 
     loop {
-        // Should be outside of the write lock to allow others to read while we sleep.
+        // Should be outside of the mutex lock to allow others to read while we sleep.
         thread::sleep(MONITOR_CHECK_INTERVAL);
 
         match &mut client {
             Ok(cli) => {
                 if cli.is_closed() {
-                    info!("connection to postgres closed, trying to reconnect");
+                    info!("connection to Postgres is closed, trying to reconnect");
 
                     // Connection is closed, reconnect and try again.
                     client = Client::connect(connstr, NoTls);
                     continue;
                 }
 
-                // Get all running client backends except ourself, use RFC3339 DateTime format.
-                let backends = cli
-                    .query(
-                        "SELECT state, to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS state_change
-                         FROM pg_stat_activity
-                         WHERE backend_type = 'client backend'
-                            AND pid != pg_backend_pid()
-                            AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
-                        &[],
-                    );
-                let mut last_active = compute.state.lock().unwrap().last_active;
-
-                if let Ok(backs) = backends {
-                    let mut idle_backs: Vec<DateTime<Utc>> = vec![];
-
-                    for b in backs.into_iter() {
-                        let state: String = match b.try_get("state") {
-                            Ok(state) => state,
-                            Err(_) => continue,
-                        };
-
-                        if state == "idle" {
-                            let change: String = match b.try_get("state_change") {
-                                Ok(state_change) => state_change,
-                                Err(_) => continue,
-                            };
-                            let change = DateTime::parse_from_rfc3339(&change);
-                            match change {
-                                Ok(t) => idle_backs.push(t.with_timezone(&Utc)),
-                                Err(e) => {
-                                    info!("cannot parse backend state_change DateTime: {}", e);
-                                    continue;
-                                }
-                            }
-                        } else {
-                            // Found non-idle backend, so the last activity is NOW.
-                            // Save it and exit the for loop. Also clear the idle backend
-                            // `state_change` timestamps array as it doesn't matter now.
-                            last_active = Some(Utc::now());
-                            idle_backs.clear();
-                            break;
+                // First, check if the total active time across all databases has changed. If it did,
+                // it means that user executed some queries. In theory, it can even go down if
+                // some databases were dropped, but it's still a user activity.
+                match get_databases_active_time(cli) {
+                    Ok(active_time) => {
+                        if prev_active_time == 0.0 {
+                            prev_active_time = active_time;
+                        } else if active_time != prev_active_time {
+                            // Update the last active time and continue, we don't need to
+                            // check backends state change.
+                            compute.update_last_active(Some(Utc::now()));
+                            prev_active_time = active_time;
+                            continue;
                         }
                     }
-
-                    // Get idle backend `state_change` with the max timestamp.
-                    if let Some(last) = idle_backs.iter().max() {
-                        last_active = Some(*last);
+                    Err(e) => {
+                        error!("could not get active_time: {}", e);
+                        continue;
                     }
                 }
 
-                // If there are existing (logical) walsenders, do not suspend.
+                // Second, is databases statistics is the same, check all backends state change,
+                // maybe there is some with more recent activity. `get_backends_state_change()`
+                // can return None or stale timestamp, so it's `compute.update_last_active()`
+                // responsibility to check if the new timestamp is more recent than the current one.
+                // This helps us to discover new sessions, that did nothing yet.
+                match get_backends_state_change(cli) {
+                    Ok(last_active) => {
+                        compute.update_last_active(last_active);
+                    }
+                    Err(e) => {
+                        error!("could not get backends state change: {}", e);
+                    }
+                }
+
+                // Finally, if there are existing (logical) walsenders, do not suspend.
                 //
                 // walproposer doesn't currently show up in pg_stat_replication,
                 // but protect if it will be
@@ -93,11 +88,12 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     Ok(r) => match r.try_get::<&str, i64>("count") {
                         Ok(num_ws) => {
                             if num_ws > 0 {
-                                last_active = Some(Utc::now());
+                                compute.update_last_active(Some(Utc::now()));
+                                continue;
                             }
                         }
                         Err(e) => {
-                            warn!("failed to parse ws count: {:?}", e);
+                            warn!("failed to parse walsenders count: {:?}", e);
                             continue;
                         }
                     },
@@ -106,17 +102,9 @@ fn watch_compute_activity(compute: &ComputeNode) {
                         continue;
                     }
                 }
-
-                // Update the last activity in the shared state if we got a more recent one.
-                let mut state = compute.state.lock().unwrap();
-                // NB: `Some(<DateTime>)` is always greater than `None`.
-                if last_active > state.last_active {
-                    state.last_active = last_active;
-                    debug!("set the last compute activity time to: {:?}", last_active);
-                }
             }
             Err(e) => {
-                debug!("cannot connect to postgres: {}, retrying", e);
+                debug!("could not connect to Postgres: {}, retrying", e);
 
                 // Establish a new connection and try again.
                 client = Client::connect(connstr, NoTls);
@@ -125,12 +113,110 @@ fn watch_compute_activity(compute: &ComputeNode) {
     }
 }
 
+// Hang on condition variable waiting until the compute status is `Running`.
+fn wait_for_postgres_start(compute: &ComputeNode) {
+    let mut state = compute.state.lock().unwrap();
+    while state.status != ComputeStatus::Running {
+        info!("compute is not running, waiting before monitoring activity");
+        state = compute.state_changed.wait(state).unwrap();
+
+        if state.status == ComputeStatus::Running {
+            break;
+        }
+    }
+}
+
+// Figure out the total active time across all non-system databases.
+// It can return `0.0`, which means no user databases exist.
+fn get_databases_active_time(cli: &mut Client) -> anyhow::Result<f64> {
+    let active_time = cli.query_one(
+        "SELECT coalesce(sum(active_time), 0.0) AS total_active_time
+        FROM pg_stat_database
+        WHERE datname NOT IN (
+                'postgres',
+                'template0',
+                'template1'
+            );",
+        &[],
+    );
+    let active_time = match active_time {
+        Ok(active_time) => active_time,
+        Err(e) => {
+            return Err(anyhow::anyhow!("could not query active_time: {}", e));
+        }
+    };
+
+    match active_time.try_get("total_active_time") {
+        Ok(active_time) => Ok(active_time),
+        Err(e) => Err(anyhow::anyhow!("could not get total_active_time: {}", e)),
+    }
+}
+
+// Figure out the most recent state change time across all client backends.
+// If there is currently active backend, timestamp will be `Utc::now()`.
+// It can return `None`, which means no client backends exist or we were
+// unable to parse the timestamp.
+fn get_backends_state_change(cli: &mut Client) -> anyhow::Result<Option<DateTime<Utc>>> {
+    let mut last_active: Option<DateTime<Utc>> = None;
+    // Get all running client backends except ourself, use RFC3339 DateTime format.
+    let backends = cli.query(
+        "SELECT state, to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS state_change
+                FROM pg_stat_activity
+                    WHERE backend_type = 'client backend'
+                    AND pid != pg_backend_pid()
+                    AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
+        &[],
+    );
+
+    match backends {
+        Ok(backs) => {
+            let mut idle_backs: Vec<DateTime<Utc>> = vec![];
+
+            for b in backs.into_iter() {
+                let state: String = match b.try_get("state") {
+                    Ok(state) => state,
+                    Err(_) => continue,
+                };
+
+                if state == "idle" {
+                    let change: String = match b.try_get("state_change") {
+                        Ok(state_change) => state_change,
+                        Err(_) => continue,
+                    };
+                    let change = DateTime::parse_from_rfc3339(&change);
+                    match change {
+                        Ok(t) => idle_backs.push(t.with_timezone(&Utc)),
+                        Err(e) => {
+                            info!("cannot parse backend state_change DateTime: {}", e);
+                            continue;
+                        }
+                    }
+                } else {
+                    // Found non-idle backend, so the last activity is NOW.
+                    // Return immediately, no need to check other backends.
+                    return Ok(Some(Utc::now()));
+                }
+            }
+
+            // Get idle backend `state_change` with the max timestamp.
+            if let Some(last) = idle_backs.iter().max() {
+                last_active = Some(*last);
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("could not query backends: {}", e));
+        }
+    }
+
+    Ok(last_active)
+}
+
 /// Launch a separate compute monitor thread and return its `JoinHandle`.
-pub fn launch_monitor(state: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
-    let state = Arc::clone(state);
+pub fn launch_monitor(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
+    let compute = Arc::clone(compute);
 
     thread::Builder::new()
         .name("compute-monitor".into())
-        .spawn(move || watch_compute_activity(&state))
+        .spawn(move || watch_compute_activity(&compute))
         .expect("cannot launch compute monitor thread")
 }
