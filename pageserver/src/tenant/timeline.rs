@@ -302,14 +302,6 @@ pub struct Timeline {
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
-    /// Barrier to wait before doing initial logical size calculation. Used only during startup.
-    #[allow(unused)]
-    initial_logical_size_can_start: Option<completion::Barrier>,
-
-    /// Completion shared between all timelines loaded during startup; used to delay heavier
-    /// background tasks until some logical sizes have been calculated.
-    initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
-
     /// Load or creation time information about the disk_consistent_lsn and when the loading
     /// happened. Used for consumption metrics.
     pub(crate) loaded_at: (Lsn, SystemTime),
@@ -1022,17 +1014,6 @@ impl Timeline {
                 error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
-                if matches!(
-                    new_state,
-                    TimelineState::Stopping | TimelineState::Broken { .. }
-                ) {
-                    // drop the completion guard, if any; it might be holding off the completion
-                    // forever needlessly
-                    self.initial_logical_size_attempt
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take();
-                }
                 self.state.send_replace(new_state);
             }
         }
@@ -1354,8 +1335,6 @@ impl Timeline {
         walredo_mgr: Arc<super::WalRedoManager>,
         resources: TimelineResources,
         pg_version: u32,
-        initial_logical_size_can_start: Option<completion::Barrier>,
-        initial_logical_size_attempt: Option<completion::Completion>,
         state: TimelineState,
         cancel: CancellationToken,
     ) -> Arc<Self> {
@@ -1455,8 +1434,6 @@ impl Timeline {
                 ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
-                initial_logical_size_can_start,
-                initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
                 cancel,
                 gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
 

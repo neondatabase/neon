@@ -15,7 +15,6 @@ use crate::{
     context::RequestContext,
     task_mgr::{self, TaskKind},
     tenant::mgr::{TenantSlot, TenantsMapRemoveResult},
-    InitializationOrder,
 };
 
 use super::{
@@ -390,7 +389,6 @@ impl DeleteTenantFlow {
         tenant: &Arc<Tenant>,
         preload: Option<TenantPreload>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
-        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
@@ -400,10 +398,7 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant
-            .attach(init_order, preload, ctx)
-            .await
-            .context("attach")?;
+        tenant.attach(preload, ctx).await.context("attach")?;
 
         Self::background(
             guard,
