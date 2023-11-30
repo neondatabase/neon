@@ -690,7 +690,7 @@ class ProposerPostgres(PgProtocol):
             "PGDATA": self.pg_data_dir_path(),
         }
 
-        basepath = self.pg_bin.run_capture(command, env, capture_command=False)
+        basepath = self.pg_bin.run_capture(command, env, with_command_header=False)
 
         log.info(f"postgres --sync-safekeepers output: {basepath}")
 
