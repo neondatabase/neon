@@ -124,11 +124,8 @@ impl<'a> WalIngest<'a> {
                 }
             }
             pg_constants::RM_DBASE_ID => {
-                debug!(
-                    "handle RM_DBASE_ID for Postgres version {:?}",
-                    self.timeline.pg_version
-                );
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                debug!(%info, pg_version=%self.timeline.pg_version, "handle RM_DBASE_ID");
 
                 if self.timeline.pg_version == 14 {
                     if info == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE {
