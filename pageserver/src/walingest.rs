@@ -2204,7 +2204,7 @@ mod tests {
         let path = "test_data/sk_wal_segment_from_pgbench";
         let wal_segment_path = format!("{path}/000000010000000000000001.zst");
         let startpoint = Lsn::from_hex("14AEC08").unwrap();
-        let endpoint = Lsn::from_hex("1FFFF98").unwrap();
+        let _endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
         // Bootstrap a real timeline. We can't use create_test_timeline because
         // it doesn't create a real checkpoint, and Walingest::new tries to parse
@@ -2243,7 +2243,7 @@ mod tests {
         let mut walingest = WalIngest::new(tline.as_ref(), startpoint, &ctx)
             .await
             .unwrap();
-        let mut modification = tline.begin_modification(endpoint);
+        let mut modification = tline.begin_modification(startpoint);
         let mut decoded = DecodedWALRecord::default();
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
