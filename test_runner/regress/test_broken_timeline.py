@@ -144,7 +144,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
 
 
 # The "pause" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
-@pytest.mark.parametrize("pause_or_return", ["return", "pause"])
+@pytest.mark.parametrize("pause_or_return", ["return", "exit"])
 def test_timeline_init_break_before_checkpoint_recreate(
     neon_env_builder: NeonEnvBuilder, pause_or_return: str
 ):
@@ -175,12 +175,11 @@ def test_timeline_init_break_before_checkpoint_recreate(
     timeline_id = TimelineId("1080243c1f76fe3c5147266663c9860b")
 
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
-    if pause_or_return == "pause":
-        pattern = "Read timed out."
-        failpoint = "before-checkpoint-new-timeline-pausable"
-    else:
-        failpoint = "before-checkpoint-new-timeline"
-        pattern = failpoint
+    failpoint = "before-checkpoint-new-timeline"
+    pattern = failpoint
+    if pause_or_return == "exit":
+        # in reality a read error happens, but there are automatic retries which now fail because pageserver is dead
+        pattern = "Connection aborted."
 
     pageserver_http.configure_failpoints((failpoint, pause_or_return))
     with pytest.raises(Exception, match=pattern):
