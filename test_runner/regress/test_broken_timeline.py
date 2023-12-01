@@ -148,7 +148,8 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
 def test_timeline_init_break_before_checkpoint_recreate(
     neon_env_builder: NeonEnvBuilder, pause_or_return: str
 ):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+    env.start()
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(
@@ -163,6 +164,7 @@ def test_timeline_init_break_before_checkpoint_recreate(
             ".*method=POST path=.*/timeline .*request was dropped before completing.*"
         )
 
+    pageserver_http.tenant_create(env.initial_tenant)
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)
