@@ -22,7 +22,7 @@ pub(super) struct LogicalSize {
     ///
     /// NOTE: size at a given LSN is constant, but after a restart we will calculate
     /// the initial size at a different LSN.
-    pub initial_logical_size: OnceCell<(
+    pub initial_logical_size: tokio::sync::OnceCell<(
         u64,
         crate::metrics::initial_logical_size::FinishedCalculationGuard,
     )>,
