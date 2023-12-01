@@ -459,11 +459,7 @@ where
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
-            if self.lsn == self.timeline.get_ancestor_lsn() {
-                write!(zenith_signal, "PREV LSN: none")?;
-            } else {
-                write!(zenith_signal, "PREV LSN: invalid")?;
-            }
+            write!(zenith_signal, "PREV LSN: none")?;
         } else {
             write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)?;
         }
