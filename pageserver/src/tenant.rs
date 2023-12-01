@@ -3239,7 +3239,10 @@ impl Tenant {
         let uninit_mark_path = self
             .conf
             .timeline_uninit_mark_file_path(tenant_shard_id, timeline_id);
-        fs::File::create(&uninit_mark_path)
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&uninit_mark_path)
             .context("Failed to create uninit mark file")
             .and_then(|_| {
                 crashsafe::fsync_file_and_parent(&uninit_mark_path)
