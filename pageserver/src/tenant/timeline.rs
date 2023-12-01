@@ -1738,32 +1738,16 @@ impl Timeline {
     ) -> logical_size::CurrentLogicalSize {
         let current_size = self.current_logical_size.current_size();
         debug!("Current size: {current_size:?}");
-
-        match (current_size.accuracy(), priority) {
-            (logical_size::Accuracy::Exact, _) => (), // nothing to do
-            (logical_size::Accuracy::Approximate, GetLogicalSizePriority::Background) => {
-                // background task will eventually deliver an exact value, we're in no rush
-            }
-            (logical_size::Accuracy::Approximate, GetLogicalSizePriority::User) => {
-                // background task is not ready, but user is asking for it now;
-                // => make the background task skip the line
-                // (The alternative would be to calculate the size here, but,
-                //  it can actually take a long time if the user has a lot of rels.
-                //  And we'll inevitable need it again; So, let the background task do the work.)
-                match self
-                    .current_logical_size
-                    .cancel_wait_for_background_loop_concurrency_limit_semaphore
-                    .get()
-                {
-                    Some(cancel) => cancel.cancel(),
-                    None => {
-                        warn!("unexpected: priority_tx not set, logical size calculation will not be prioritized");
-                    }
-                };
-            }
-        }
-
         current_size
+    }
+
+    // if it's not already computed, it computes it _now_
+    pub(crate) async fn get_current_logical_size_wait_exact(
+        self: &Arc<Self>,
+    ) -> Result<logical_size::Exact, TimelineCancelled | CalculationError> {
+        self.current_logical_size.initial_logical_size.get_or_try_init(async {
+            // do calcualtion here
+        })
     }
 
     fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &RequestContext) {
@@ -1832,31 +1816,9 @@ impl Timeline {
                     &cancel,
                 );
 
-                use crate::metrics::initial_logical_size::StartCircumstances;
-                let (_maybe_permit, circumstances) = tokio::select! {
-                    res = wait_for_permit => {
-                        match res {
-                            Ok(permit) => (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit),
-                            Err(RateLimitError::Cancelled) => {
-                                return Err(BackgroundCalculationError::Cancelled);
-                            }
-                        }
-                    }
-                    () = skip_concurrency_limiter.cancelled() => {
-                        // Some action that is part of a end user interaction requested logical size
-                        // => break out of the rate limit
-                        // TODO: ideally we'd not run on BackgroundRuntime but the requester's runtime;
-                        // but then again what happens if they cancel; also, we should just be using
-                        // one runtime across the entire process, so, let's leave this for now.
-                        (None, StartCircumstances::SkippedConcurrencyLimiter)
-                    }
-                };
-
-                let metrics_guard = if attempt == 1 {
-                    crate::metrics::initial_logical_size::START_CALCULATION.first(circumstances)
-                } else {
-                    crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
-                };
+                self.current_logical_size.initial_logical_size.get_or_init(async {
+                    // do calcualtion here
+                });
 
                 match self_ref
                     .logical_size_calculation_task(

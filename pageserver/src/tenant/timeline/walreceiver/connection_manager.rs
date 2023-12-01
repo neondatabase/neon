@@ -206,6 +206,10 @@ pub(super) async fn connection_manager_loop_step(
 
         if let Some(new_candidate) = connection_manager_state.next_connection_candidate() {
             info!("Switching to new connection candidate: {new_candidate:?}");
+            tokio::select! {
+                logical_size = connection_manager_state.timeline.get_current_logical_size_wait_exact().await,
+                _ = connection_manager.should_shutdown(),
+            }
             connection_manager_state
                 .change_connection(new_candidate, ctx)
                 .await
