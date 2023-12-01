@@ -733,7 +733,7 @@ impl ComputeNode {
         // temporarily reset max_cluster_size in config
         // to avoid the possibility of hitting the limit, while we are reconfiguring:
         // creating new extensions, roles, etc...
-        config::compute_ctl_temp_override_create(&pgdata_path, "neon.max_cluster_size=-1")?;
+        config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
         self.pg_reload_conf()?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
@@ -755,7 +755,7 @@ impl ComputeNode {
         drop(client);
 
         // reset max_cluster_size in config back to original value and reload config
-        config::compute_ctl_temp_override_remove(&pgdata_path)?;
+        config::compute_ctl_temp_override_remove(pgdata_path)?;
         self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
@@ -822,12 +822,12 @@ impl ComputeNode {
             // temporarily reset max_cluster_size in config
             // to avoid the possibility of hitting the limit, while we are applying config:
             // creating new extensions, roles, etc...
-            config::compute_ctl_temp_override_create(&pgdata_path, "neon.max_cluster_size=-1")?;
+            config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
             self.pg_reload_conf()?;
 
             self.apply_config(&compute_state)?;
 
-            config::compute_ctl_temp_override_remove(&pgdata_path)?;
+            config::compute_ctl_temp_override_remove(pgdata_path)?;
             self.pg_reload_conf()?;
         }
 
