@@ -796,20 +796,31 @@ impl Tenant {
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
-            // In this context a timeline "exists" if it has any content in remote storage: this will
-            // be our cue to not delete any corresponding local directory
-            existent_timelines.insert(timeline_id);
-
             let index_part = match preload.index_part {
                 Ok(i) => {
                     debug!("remote index part exists for timeline {timeline_id}");
+                    // We found index_part on the remote, this is the standard case.
+                    existent_timelines.insert(timeline_id);
                     i
                 }
+                Err(DownloadError::NotFound) => {
+                    // There is no index_part on the remote. We only get here
+                    // if there is some prefix for the timeline in the remote storage.
+                    // This can e.g. be the initdb.tar.zst archive, maybe a
+                    // remnant from a prior incomplete creation or deletion attempt.
+                    // Delete the local directory as the deciding criterion for a
+                    // timeline's existence is presence of index_part.
+                    info!(%timeline_id, "index_part not found on remote");
+                    continue;
+                }
                 Err(e) => {
-                    // Timeline creation is not atomic: we might upload a layer but no index_part.  We expect
-                    // that the creation will be retried by the control plane and eventually result in
-                    // a valid loadable state.
+                    // Some (possibly ephemeral) error happened during index_part download.
+                    // Pretend the timeline exists to not delete the timeline directory,
+                    // as it might be a temporary issue and we don't want to re-download
+                    // everything after it resolves.
                     warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
+
+                    existent_timelines.insert(timeline_id);
                     continue;
                 }
             };

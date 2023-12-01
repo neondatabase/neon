@@ -293,7 +293,6 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.extend(
         [
             ".*marking .* as locally complete, while it doesnt exist in remote index.*",
-            ".*Failed to load index_part from remote storage, failed creation?.*",
             ".*load failed.*list timelines directory.*",
         ]
     )
