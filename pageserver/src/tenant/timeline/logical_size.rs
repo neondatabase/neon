@@ -137,15 +137,11 @@ impl LogicalSize {
         //                  we change the type.
         match self.initial_logical_size.get() {
             Some((initial_size, _)) => {
-                crate::metrics::initial_logical_size::CALLS.exact.inc();
                 CurrentLogicalSize::Exact(Exact(initial_size.checked_add_signed(size_increment)
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
                     .unwrap()))
             }
             None => {
-                crate::metrics::initial_logical_size::CALLS
-                    .approximate
-                    .inc();
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
                 CurrentLogicalSize::Approximate(Approximate(non_negative_size_increment))
             }

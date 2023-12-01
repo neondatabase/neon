@@ -510,25 +510,6 @@ pub(crate) mod initial_logical_size {
             self.inc_on_drop.inc();
         }
     }
-
-    pub(crate) struct Calls {
-        pub(crate) approximate: IntCounter,
-        pub(crate) exact: IntCounter,
-    }
-
-    pub(crate) static CALLS: Lazy<Calls> = Lazy::new(|| {
-        let vec = register_int_counter_vec!(
-            "pageserver_initial_logical_size_calls",
-            "Incremented each time some code asks for incremental logical size.\
-             The label records the accuracy of the result.",
-            &["accuracy"]
-        )
-        .unwrap();
-        Calls {
-            approximate: vec.with_label_values(&["approximate"]),
-            exact: vec.with_label_values(&["exact"]),
-        }
-    });
 }
 
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
