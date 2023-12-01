@@ -230,9 +230,6 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
     env.pageserver.allowed_errors.append(".*Timeline dir entry become invalid.*")
     # In one of the branches we poll for tenant to become active. Polls can generate this log message:
     env.pageserver.allowed_errors.append(f".*Tenant {env.initial_tenant} is not active*")
-    env.pageserver.allowed_errors.append(
-        ".*Failed to load index_part from remote storage, failed creation?.*"
-    )
 
     ps_http.configure_failpoints((failpoint, "return"))
 
@@ -311,9 +308,10 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         )
 
     timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, timeline_id)
-    if failpoint != "timeline-delete-after-index-delete":
-        # Check local is empty
-        assert (not timeline_dir.exists()) or len(os.listdir(timeline_dir)) == 0
+
+    # Check local is empty
+    assert (not timeline_dir.exists()) or len(os.listdir(timeline_dir)) == 0
+
     # Check no delete mark present
     assert not (timeline_dir.parent / f"{timeline_id}.___deleted").exists()
 

@@ -114,7 +114,6 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
         [
             ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
             ".*Timeline got dropped without initializing, cleaning its files.*",
-            ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )
 
@@ -144,7 +143,11 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
 
-def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEnvBuilder):
+# The "pause" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
+@pytest.mark.parametrize("pause_or_return", ["return", "pause"])
+def test_timeline_init_break_before_checkpoint_recreate(
+    neon_env_builder: NeonEnvBuilder, pause_or_return: str
+):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
@@ -155,6 +158,10 @@ def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEn
             ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )
+    if pause_or_return == "pause":
+        env.pageserver.allowed_errors.append(
+            ".*method=POST path=.*/timeline .*request was dropped before completing.*"
+        )
 
     tenant_id = env.initial_tenant
 
@@ -166,13 +173,16 @@ def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEn
     timeline_id = TimelineId("1080243c1f76fe3c5147266663c9860b")
 
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
-    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "return"))
-    with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
+    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", pause_or_return))
+    pattern = (
+        "operation timed out" if pause_or_return == "pause" else "before-checkpoint-new-timeline"
+    )
+    with pytest.raises(Exception, match=pattern):
         _ = env.neon_cli.create_timeline(
             "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
         )
 
-    # Restart the page server
+    # Restart the page server (with the failpoint disabled)
     env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
@@ -186,8 +196,6 @@ def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEn
         timeline_dirs == initial_timeline_dirs
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
-    # Disable the failpoint again
-    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "off"))
     # creating the branch should have worked now
     new_timeline_id = env.neon_cli.create_timeline(
         "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id

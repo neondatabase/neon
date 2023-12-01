@@ -197,7 +197,6 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             # So by ignoring these instead of waiting for empty upload queue
             # we execute more distinct code paths.
             '.*stopping left-over name="remote upload".*',
-            ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )
 
