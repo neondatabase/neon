@@ -22,7 +22,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeMode, ComputeSpec};
+use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
 use remote_storage::{DownloadError, RemotePath};
@@ -277,6 +277,17 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
 }
 
 impl ComputeNode {
+    /// Check that compute node has corresponding feature enabled.
+    pub fn has_feature(&self, feature: ComputeFeature) -> bool {
+        let state = self.state.lock().unwrap();
+
+        if let Some(s) = state.pspec.as_ref() {
+            s.spec.features.contains(&feature)
+        } else {
+            false
+        }
+    }
+
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
         state.status = status;
