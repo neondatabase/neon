@@ -1437,7 +1437,16 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !self
+
+        // Get current size and put rel creation if rel doesn't exist
+        //
+        // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
+        //       check the cache too. This is because eagerly checking the cache results in
+        //       less work overall and 10% better performance. It's more work on cache miss
+        //       but cache miss is rare.
+        let old_nblocks = if let Some(nblocks) = self.timeline.get_cached_rel_size(&rel, last_lsn) {
+            nblocks
+        } else if !self
             .timeline
             .get_rel_exists(rel, last_lsn, true, ctx)
             .await?
