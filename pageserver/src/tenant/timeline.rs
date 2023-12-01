@@ -1812,6 +1812,7 @@ impl Timeline {
             "spawning logical size computation from context of task kind {:?}",
             ctx.task_kind()
         );
+        let causing_task_kind = ctx.task_kind();
         // We need to start the computation task.
         // It gets a separate context since it will outlive the request that called this function.
         let self_clone = Arc::clone(self);
@@ -1839,6 +1840,8 @@ impl Timeline {
                     _ = completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()) => {}
                 };
 
+
+
                 // hold off background tasks from starting until all timelines get to try at least
                 // once initial logical size calculation; though retry will rarely be useful.
                 // holding off is done because heavier tasks execute blockingly on the same
@@ -1846,7 +1849,12 @@ impl Timeline {
                 //
                 // dropping this at every outcome is probably better than trying to cling on to it,
                 // delay will be terminated by a timeout regardless.
-                let _completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
+                let completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
+
+                let metrics_guard = match &completion {
+                    Some(_) => crate::metrics::initial_logical_size::START_CALCULATION.first(Some(causing_task_kind)),
+                    None => crate::metrics::initial_logical_size::START_CALCULATION.retry(Some(causing_task_kind)),
+                };
 
                 let calculated_size = match self_clone
                     .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx)
@@ -1891,11 +1899,11 @@ impl Timeline {
                 match self_clone
                     .current_logical_size
                     .initial_logical_size
-                    .set(calculated_size)
+                    .set((calculated_size, metrics_guard.calculation_result_saved()))
                 {
                     Ok(()) => (),
                     Err(_what_we_just_attempted_to_set) => {
-                        let existing_size = self_clone
+                        let (existing_size, _) = self_clone
                             .current_logical_size
                             .initial_logical_size
                             .get()

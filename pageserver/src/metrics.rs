@@ -403,6 +403,134 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define current logical size metric")
 });
 
+pub(crate) mod initial_logical_size {
+    use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    use crate::task_mgr::TaskKind;
+
+    pub(crate) struct StartCalculation(IntCounterVec);
+    pub(crate) static START_CALCULATION: Lazy<StartCalculation> = Lazy::new(|| {
+        StartCalculation(
+            register_int_counter_vec!(
+                "pageserver_initial_logical_size_start_calculation",
+                "Incremented each time we start an initial logical size calculation attempt. \
+                 The `task_kind` label is for the task kind that caused this attempt.",
+                &["attempt", "task_kind"]
+            )
+            .unwrap(),
+        )
+    });
+
+    struct DropCalculation {
+        first: IntCounter,
+        retry: IntCounter,
+    }
+
+    static DROP_CALCULATION: Lazy<DropCalculation> = Lazy::new(|| {
+        let vec = register_int_counter_vec!(
+            "pageserver_initial_logical_size_drop_calculation",
+            "Incremented each time we abort a started size calculation attmpt.",
+            &["attempt"]
+        )
+        .unwrap();
+        DropCalculation {
+            first: vec.with_label_values(&["first"]),
+            retry: vec.with_label_values(&["retry"]),
+        }
+    });
+
+    pub(crate) struct Calculated {
+        pub(crate) births: IntCounter,
+        pub(crate) deaths: IntCounter,
+    }
+
+    pub(crate) static CALCULATED: Lazy<Calculated> = Lazy::new(|| Calculated {
+        births: register_int_counter!(
+            "pageserver_initial_logical_size_finish_calculation",
+            "Incremented every time we finish calculation of initial logical size.\
+             If everything is working well, this should happen at most once per Timeline object."
+        )
+        .unwrap(),
+        deaths: register_int_counter!(
+            "pageserver_initial_logical_size_drop_finished_calculation",
+            "Incremented when we drop a finished initial logical size calculation result.\
+             Mainly useful to turn pageserver_initial_logical_size_finish_calculation into a gauge."
+        )
+        .unwrap(),
+    });
+
+    pub(crate) struct OngoingCalculationGuard {
+        inc_drop_calculation: Option<IntCounter>,
+    }
+
+    impl StartCalculation {
+        pub(crate) fn first(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
+            let task_kind_label: &'static str =
+                causing_task_kind.map(|k| k.into()).unwrap_or_default();
+            self.0.with_label_values(&["first", task_kind_label]);
+            OngoingCalculationGuard {
+                inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
+            }
+        }
+        pub(crate) fn retry(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
+            let task_kind_label: &'static str =
+                causing_task_kind.map(|k| k.into()).unwrap_or_default();
+            self.0.with_label_values(&["retry", task_kind_label]);
+            OngoingCalculationGuard {
+                inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
+            }
+        }
+    }
+
+    impl Drop for OngoingCalculationGuard {
+        fn drop(&mut self) {
+            if let Some(counter) = self.inc_drop_calculation.take() {
+                counter.inc();
+            }
+        }
+    }
+
+    impl OngoingCalculationGuard {
+        pub(crate) fn calculation_result_saved(mut self) -> FinishedCalculationGuard {
+            drop(self.inc_drop_calculation.take());
+            CALCULATED.births.inc();
+            FinishedCalculationGuard {
+                inc_on_drop: CALCULATED.deaths.clone(),
+            }
+        }
+    }
+
+    pub(crate) struct FinishedCalculationGuard {
+        inc_on_drop: IntCounter,
+    }
+
+    impl Drop for FinishedCalculationGuard {
+        fn drop(&mut self) {
+            self.inc_on_drop.inc();
+        }
+    }
+
+    pub(crate) struct Calls {
+        pub(crate) approximate: IntCounter,
+        pub(crate) exact: IntCounter,
+    }
+
+    pub(crate) static CALLS: Lazy<Calls> = Lazy::new(|| {
+        let vec = register_int_counter_vec!(
+            "pageserver_initial_logical_size_calls",
+            "Incremented each time some code asks for incremental logical size.\
+             The label records the accuracy of the result.",
+            &["accuracy"]
+        )
+        .unwrap();
+        Calls {
+            approximate: vec.with_label_values(&["approximate"]),
+            exact: vec.with_label_values(&["exact"]),
+        }
+    });
+}
+
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_tenant_states_count",
