@@ -1804,7 +1804,7 @@ impl Timeline {
                     .await;
                 Ok(())
             }
-            .in_current_span(),
+            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_id, timeline_id=%self.timeline_id)),
         );
     }
 
