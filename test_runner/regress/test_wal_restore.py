@@ -1,6 +1,7 @@
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -125,3 +126,43 @@ def test_wal_restore_initdb(
         )
         log.info(f"original lsn: {original_lsn}, restored lsn: {restored_lsn}")
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
+
+
+def test_wal_restore_http(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+):
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("create table t as select generate_series(1,300000)")
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    ps_client = env.pageserver.http_client()
+
+    # shut down the endpoint and delete the timeline from the pageserver
+    endpoint.stop()
+
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    test_output_dir / "initdb.tar.zst"
+
+    (env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst")
+
+    ps_client.timeline_delete(tenant_id, timeline_id)
+    time.sleep(2)
+
+    # verify that it is indeed deleted
+    # TODO
+
+    # issue the restoration command
+    ps_client.timeline_create(
+        tenant_id=tenant_id,
+        new_timeline_id=timeline_id,
+        existing_initdb_timeline_id=timeline_id,
+        pg_version=env.pg_version,
+    )
+
+    # the table is back now!
+    restored = env.endpoints.create_start("main")
+    assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]

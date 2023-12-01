@@ -1,8 +1,9 @@
 use anyhow::{bail, ensure, Context, Result};
+use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{AtomicLsn, Lsn},
 };
 
@@ -73,7 +74,7 @@ impl LayerManager {
         last_record_lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
 
@@ -109,7 +110,8 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn).await?;
+            let new_layer =
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
