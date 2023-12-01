@@ -79,6 +79,11 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     # Try failing back, and this time we will stop the current pageserver before reconfiguring
     # the endpoint.  Whereas the previous reconfiguration was like a healthy migration, this
     # is more like what happens in an unexpected  pageserver failure.
+    #
+    # Since we're dual-attached, need to tip-off attachment service to treat the one we're
+    # about to start as the attached pageserver
+    assert env.attachment_service is not None
+    env.attachment_service.attach_hook_issue(env.initial_tenant, env.pageservers[0].id)
     env.pageservers[0].start()
     env.pageservers[1].stop()
 
@@ -88,6 +93,9 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     assert fetchone() == (100000,)
 
     env.pageservers[0].stop()
+    # Since we're dual-attached, need to tip-off attachment service to treat the one we're
+    # about to start as the attached pageserver
+    env.attachment_service.attach_hook_issue(env.initial_tenant, env.pageservers[1].id)
     env.pageservers[1].start()
 
     # Test a (former) bug where a child process spins without updating its connection string
