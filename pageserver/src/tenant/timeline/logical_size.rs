@@ -56,8 +56,8 @@ pub(super) struct LogicalSize {
     /// to modify this, it will also keep the prometheus metric in sync.
     pub size_added_after_initial: AtomicI64,
 
-    /// For [`crate::metrics::initial_logical_size::TIMELINES_THAT_RETURNED_APPROXIMATE`].
-    did_return_approximate: AtomicBool,
+    /// For [`crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE`].
+    pub(super) did_return_approximate_to_walreceiver: AtomicBool,
 }
 
 /// Normalized current size, that the data in pageserver occupies.
@@ -122,7 +122,7 @@ impl LogicalSize {
             initial_size_computation: Arc::new(Semaphore::new(0)),
             initial_part_end: None,
             size_added_after_initial: AtomicI64::new(0),
-            did_return_approximate: AtomicBool::new(false),
+            did_return_approximate_to_walreceiver: AtomicBool::new(false),
         }
     }
 
@@ -132,7 +132,7 @@ impl LogicalSize {
             initial_size_computation: Arc::new(Semaphore::new(1)),
             initial_part_end: Some(compute_to),
             size_added_after_initial: AtomicI64::new(0),
-            did_return_approximate: AtomicBool::new(false),
+            did_return_approximate_to_walreceiver: AtomicBool::new(false),
         }
     }
 
@@ -147,10 +147,7 @@ impl LogicalSize {
                     .unwrap()))
             }
             None => {
-                if self.did_return_approximate.compare_exchange(false, true, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed).is_ok() {
-                    // not yet observed for this timeline
-                    crate::metrics::initial_logical_size::TIMELINES_THAT_RETURNED_APPROXIMATE.inc();
-                }
+
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
                 CurrentLogicalSize::Approximate(Approximate(non_negative_size_increment))
             }
