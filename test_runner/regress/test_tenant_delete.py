@@ -419,7 +419,7 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
         f".*Error processing HTTP request: InternalServerError\\(new timeline {env.initial_tenant}/{env.initial_timeline} has invalid disk_consistent_lsn"
     )
 
-    pageserver_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     failpoint = "flush-layer-cancel-after-writing-layer-out-pausable"
     pageserver_http.configure_failpoints((failpoint, "pause"))
