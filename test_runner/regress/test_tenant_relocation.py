@@ -224,6 +224,8 @@ def test_tenant_relocation(
 
     # Needed for detach polling on the original pageserver
     env.pageservers[0].allowed_errors.append(f".*NotFound: tenant {tenant_id}.*")
+    # We will dual-attach in this test, so stale generations are expected
+    env.pageservers[0].allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
