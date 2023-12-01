@@ -174,17 +174,15 @@ def test_timeline_init_break_before_checkpoint_recreate(
 
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
     if pause_or_return == "pause":
-        pattern = "operation timed out"
+        pattern = "Read timed out."
         failpoint = "before-checkpoint-new-timeline-pausable"
     else:
-        pattern = "before-checkpoint-new-timeline"
         failpoint = "before-checkpoint-new-timeline"
+        pattern = failpoint
 
     pageserver_http.configure_failpoints((failpoint, pause_or_return))
     with pytest.raises(Exception, match=pattern):
-        _ = env.neon_cli.create_timeline(
-            "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
-        )
+        _ = pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id, timeout=5)
 
     # Restart the page server (with the failpoint disabled)
     env.pageserver.restart(immediate=True)
@@ -201,8 +199,8 @@ def test_timeline_init_break_before_checkpoint_recreate(
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
     # creating the branch should have worked now
-    new_timeline_id = env.neon_cli.create_timeline(
-        "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
+    new_timeline_id = TimelineId(
+        pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id)["timeline_id"]
     )
 
     assert timeline_id == new_timeline_id
