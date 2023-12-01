@@ -964,7 +964,6 @@ page_server_request(void const *req)
 	do
 	{
 		while (!page_server->send(shard_no, (NeonRequest *) req) || !page_server->flush(shard_no));
-		MyPState->ring_flush = MyPState->ring_unused;
 		consume_prefetch_responses();
 		resp = page_server->receive(shard_no);
 	} while (resp == NULL);

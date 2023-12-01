@@ -61,6 +61,7 @@ bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = 
 
 static bool pageserver_flush(shardno_t shard_no);
 static void pageserver_disconnect(shardno_t shard_no);
+static void AssignPageserverConnstring(const char *newval, void *extra);
 
 static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM>=150000
@@ -112,6 +113,7 @@ psm_shmem_startup(void)
 	{
 		shard_map->n_shards = 0;
 		pg_atomic_init_u64(&shard_map->update_counter, 0);
+		AssignPageserverConnstring(page_server_connstring, NULL);
 	}
 	LWLockRelease(AddinShmemInitLock);
 }
@@ -149,30 +151,35 @@ load_shard_map(shardno_t shard_no, char* connstr)
 	shardno_t n_shards;
 	uint64 update_counter = pg_atomic_read_u64(&shard_map->update_counter);
 
-	/*
-	 * There is race condition here between backendc and postmaster which can update shard map.
-	 * We recheck update couner after copying connection string to check that configuration was not changed.
-	 */
-	while (shard_map_update_counter != update_counter)
+	if (shard_map_update_counter != update_counter)
 	{
-		/* Reset all connections */
+		/* Reset all connections if connection strings are changed */
 		for (shardno_t i = 0; i < max_attached_shard_no; i++)
 		{
 			if (page_servers[i].conn)
 				pageserver_disconnect(i);
 		}
 		max_attached_shard_no = 0;
+	}
 
+	/*
+	 * There is race condition here between backendc and postmaster which can update shard map.
+	 * We recheck update couner after copying connection string to check that configuration was not changed.
+	 */
+	do
+	{
 		shard_map_update_counter = update_counter;
 		n_shards = shard_map->n_shards;
 		if (shard_no >= n_shards)
 			elog(ERROR, "Shard %d is greater or equal than number of shards %d", shard_no, n_shards);
 
 		if (connstr)
-			strcpy(connstr, shard_map->shard_connstr[shard_no]);
+			strncpy(connstr, shard_map->shard_connstr[shard_no], MAX_PS_CONNSTR_LEN);
 
 		update_counter = pg_atomic_read_u64(&shard_map->update_counter);
 	}
+	while (update_counter != shard_map_update_counter);
+
 	return n_shards;
 }
 
@@ -542,7 +549,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	 * Load shard map only at Postmaster.
 	 * If old page server is not available, then backends can be blocked in attempts to reconnect to it and do not reload config in this loop
 	 */
-	if (MyProcPid == PostmasterPid)
+	if (shard_map != NULL && (MyProcPid == PostmasterPid || shard_map->n_shards == 0))
 	{
 		char const* shard_connstr = newval;
 		char const* sep;
