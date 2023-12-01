@@ -510,6 +510,15 @@ pub(crate) mod initial_logical_size {
             self.inc_on_drop.inc();
         }
     }
+
+    pub(crate) static TIMELINES_THAT_RETURNED_APPROXIMATE: Lazy<IntCounter> = Lazy::new(|| {
+        register_int_counter!(
+            "pageserver_initial_logical_size_timelines_that_returned_approximate",
+            "Incremented the first time a Timeline object is asked for initial size\
+             and has to return Approximate because the Exact result is not ready yet",
+        )
+        .unwrap()
+    });
 }
 
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
