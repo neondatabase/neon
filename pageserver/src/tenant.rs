@@ -3095,6 +3095,8 @@ impl Tenant {
             anyhow::bail!("failpoint before-checkpoint-new-timeline");
         });
 
+        pausable_failpoint!("before-checkpoint-new-timeline-pausable");
+
         unfinished_timeline
             .freeze_and_flush()
             .await

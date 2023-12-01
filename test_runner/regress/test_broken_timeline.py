@@ -173,10 +173,14 @@ def test_timeline_init_break_before_checkpoint_recreate(
     timeline_id = TimelineId("1080243c1f76fe3c5147266663c9860b")
 
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
-    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", pause_or_return))
-    pattern = (
-        "operation timed out" if pause_or_return == "pause" else "before-checkpoint-new-timeline"
-    )
+    if pause_or_return == "pause":
+        pattern = "operation timed out"
+        failpoint = "before-checkpoint-new-timeline-pausable"
+    else:
+        pattern = "before-checkpoint-new-timeline"
+        failpoint = "before-checkpoint-new-timeline"
+
+    pageserver_http.configure_failpoints((failpoint, pause_or_return))
     with pytest.raises(Exception, match=pattern):
         _ = env.neon_cli.create_timeline(
             "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
