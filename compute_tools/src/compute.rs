@@ -731,6 +731,8 @@ impl ComputeNode {
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
         config::write_postgres_conf(&postgresql_conf_path, &spec, None)?;
         // temporarily reset max_cluster_size in config
+        // to avoid the possibility of hitting the limit, while we are reconfiguring:
+        // creating new extensions, roles, etc...
         config::compute_ctl_temp_override_create(&pgdata_path, "neon.max_cluster_size=-1")?;
         self.pg_reload_conf()?;
 
@@ -817,6 +819,9 @@ impl ComputeNode {
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
             let pgdata_path = Path::new(&self.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
             config::compute_ctl_temp_override_create(&pgdata_path, "neon.max_cluster_size=-1")?;
             self.pg_reload_conf()?;
 
