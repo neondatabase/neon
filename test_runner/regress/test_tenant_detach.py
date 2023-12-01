@@ -20,7 +20,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.remote_storage import (
     RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
@@ -52,13 +51,9 @@ def do_gc_target(
 
 
 # Basic detach and re-attach test
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_tenant_reattach(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
@@ -166,10 +161,8 @@ num_rows = 100000
 #
 # I don't know what's causing that...
 @pytest.mark.skip(reason="fixme")
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_tenant_reattach_while_busy(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
     updates_started = 0
     updates_finished = 0
@@ -227,7 +220,6 @@ def test_tenant_reattach_while_busy(
 
         assert updates_finished == updates_to_perform
 
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
     env = neon_env_builder.init_start()
 
     pageserver_http = env.pageserver.http_client()
@@ -418,13 +410,9 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
         should not be present in pageserver's memory"
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_detach_while_attaching(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
