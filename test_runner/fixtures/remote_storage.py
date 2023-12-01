@@ -12,7 +12,6 @@ import boto3
 from mypy_boto3_s3 import S3Client
 
 from fixtures.log_helper import log
-from fixtures.pageserver.types import LayerFileName
 from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
@@ -88,11 +87,6 @@ class LocalFsStorage:
     def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
-    def layer_path(
-        self, tenant_id: TenantId, timeline_id: TimelineId, layer_file_name: LayerFileName
-    ):
-        return self.timeline_path(tenant_id, timeline_id) / layer_file_name.to_str()
-
     def timeline_latest_generation(self, tenant_id, timeline_id):
         timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
@@ -119,13 +113,20 @@ class LocalFsStorage:
 
         return self.timeline_path(tenant_id, timeline_id) / filename
 
-    def remote_layer_path(self, tenant_id: TenantId, timeline_id: TimelineId, local_name: str):
-        latest_gen = self.timeline_latest_generation(tenant_id, timeline_id)
+    def remote_layer_path(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        local_name: str,
+        generation: Optional[int] = None,
+    ):
+        if generation is None:
+            generation = self.timeline_latest_generation(tenant_id, timeline_id)
 
-        if latest_gen is None:
+        if generation is None:
             filename = local_name
         else:
-            filename = f"{local_name}-{latest_gen:08x}"
+            filename = f"{local_name}-{generation:08x}"
 
         # Assume this is a simple test that uploads in just one generation
         return self.timeline_path(tenant_id, timeline_id) / filename

@@ -1571,6 +1571,20 @@ class NeonAttachmentService:
         )
         response.raise_for_status()
 
+    def inspect(self, tenant_id: TenantId) -> Optional[tuple[int, int]]:
+        response = requests.post(
+            f"{self.env.control_plane_api}/inspect",
+            json={"tenant_id": str(tenant_id)},
+        )
+        response.raise_for_status()
+        json = response.json()
+        log.info(f"Response: {json}")
+        if json["attachment"]:
+            # Explicit int() to make python type linter happy
+            return (int(json["attachment"][0]), int(json["attachment"][1]))
+        else:
+            return None
+
     def __enter__(self) -> "NeonAttachmentService":
         return self
 
