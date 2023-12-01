@@ -855,7 +855,8 @@ impl PageServerConf {
 
     #[cfg(test)]
     pub fn test_repo_dir(test_name: &str) -> Utf8PathBuf {
-        Utf8PathBuf::from(format!("../tmp_check/test_{test_name}"))
+        let test_output_dir = std::env::var("TEST_OUTPUT").unwrap_or("../tmp_check".into());
+        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}"))
     }
 
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
