@@ -143,10 +143,10 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
 
-# The "pause" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
-@pytest.mark.parametrize("pause_or_return", ["return", "exit"])
+# The "exit" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
+@pytest.mark.parametrize("exit_or_return", ["return", "exit"])
 def test_timeline_init_break_before_checkpoint_recreate(
-    neon_env_builder: NeonEnvBuilder, pause_or_return: str
+    neon_env_builder: NeonEnvBuilder, exit_or_return: str
 ):
     env = neon_env_builder.init_configs()
     env.start()
@@ -159,10 +159,6 @@ def test_timeline_init_break_before_checkpoint_recreate(
             ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )
-    if pause_or_return == "pause":
-        env.pageserver.allowed_errors.append(
-            ".*method=POST path=.*/timeline .*request was dropped before completing.*"
-        )
 
     pageserver_http.tenant_create(env.initial_tenant)
     tenant_id = env.initial_tenant
@@ -177,13 +173,13 @@ def test_timeline_init_break_before_checkpoint_recreate(
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
     failpoint = "before-checkpoint-new-timeline"
     pattern = failpoint
-    if pause_or_return == "exit":
+    if exit_or_return == "exit":
         # in reality a read error happens, but there are automatic retries which now fail because pageserver is dead
         pattern = "Connection aborted."
 
-    pageserver_http.configure_failpoints((failpoint, pause_or_return))
+    pageserver_http.configure_failpoints((failpoint, exit_or_return))
     with pytest.raises(Exception, match=pattern):
-        _ = pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id, timeout=5)
+        _ = pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id)
 
     # Restart the page server (with the failpoint disabled)
     env.pageserver.restart(immediate=True)
