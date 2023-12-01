@@ -71,7 +71,8 @@ static shmem_request_hook_type prev_shmem_request_hook;
 typedef struct
 {
 	size_t n_shards;
-	pg_atomic_uint64 update_counter;
+	pg_atomic_uint64 begin_update_counter;
+	pg_atomic_uint64 end_update_counter;
 	char   shard_connstr[MAX_SHARDS][MAX_PS_CONNSTR_LEN];
 } ShardMap;
 
@@ -112,7 +113,8 @@ psm_shmem_startup(void)
 	if (!found)
 	{
 		shard_map->n_shards = 0;
-		pg_atomic_init_u64(&shard_map->update_counter, 0);
+		pg_atomic_init_u64(&shard_map->begin_update_counter, 0);
+		pg_atomic_init_u64(&shard_map->end_update_counter, 0);
 		AssignPageserverConnstring(page_server_connstring, NULL);
 	}
 	LWLockRelease(AddinShmemInitLock);
@@ -149,9 +151,32 @@ static shardno_t
 load_shard_map(shardno_t shard_no, char* connstr)
 {
 	shardno_t n_shards;
-	uint64 update_counter = pg_atomic_read_u64(&shard_map->update_counter);
+	uint64 begin_update_counter;
+	uint64 end_update_counter;
 
-	if (shard_map_update_counter != update_counter)
+	/*
+	 * There is race condition here between backendc and postmaster which can update shard map.
+	 * We recheck update couner after copying connection string to check that configuration was not changed.
+	 */
+	do
+	{
+		begin_update_counter = pg_atomic_read_u64(&shard_map->begin_update_counter);
+		end_update_counter = pg_atomic_read_u64(&shard_map->end_update_counter);
+
+		n_shards = shard_map->n_shards;
+		if (shard_no >= n_shards)
+			elog(ERROR, "Shard %d is greater or equal than number of shards %d", shard_no, n_shards);
+
+		if (connstr)
+			strncpy(connstr, shard_map->shard_connstr[shard_no], MAX_PS_CONNSTR_LEN);
+
+	}
+	while (begin_update_counter != end_update_counter
+		   || begin_update_counter != pg_atomic_read_u64(&shard_map->begin_update_counter)
+		   || end_update_counter != pg_atomic_read_u64(&shard_map->end_update_counter));
+
+
+	if (shard_map_update_counter != end_update_counter)
 	{
 		/* Reset all connections if connection strings are changed */
 		for (shardno_t i = 0; i < max_attached_shard_no; i++)
@@ -160,25 +185,8 @@ load_shard_map(shardno_t shard_no, char* connstr)
 				pageserver_disconnect(i);
 		}
 		max_attached_shard_no = 0;
+		shard_map_update_counter = end_update_counter;
 	}
-
-	/*
-	 * There is race condition here between backendc and postmaster which can update shard map.
-	 * We recheck update couner after copying connection string to check that configuration was not changed.
-	 */
-	do
-	{
-		shard_map_update_counter = update_counter;
-		n_shards = shard_map->n_shards;
-		if (shard_no >= n_shards)
-			elog(ERROR, "Shard %d is greater or equal than number of shards %d", shard_no, n_shards);
-
-		if (connstr)
-			strncpy(connstr, shard_map->shard_connstr[shard_no], MAX_PS_CONNSTR_LEN);
-
-		update_counter = pg_atomic_read_u64(&shard_map->update_counter);
-	}
-	while (update_counter != shard_map_update_counter);
 
 	return n_shards;
 }
@@ -575,7 +583,11 @@ AssignPageserverConnstring(const char *newval, void *extra)
 			if (i >= shard_map->n_shards ||
 				strcmp(shard_map->shard_connstr[i], shard_connstr) != 0)
 			{
-				shard_map_changed = true;
+				if (!shard_map_changed)
+				{
+					pg_atomic_add_fetch_u64(&shard_map->begin_update_counter, 1);
+					shard_map_changed = true;
+				}
 				memcpy(shard_map->shard_connstr[i], shard_connstr, connstr_len+1);
 			}
 			shard_connstr = sep + 1;
@@ -590,7 +602,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 		if (shard_map_changed)
 		{
 			shard_map->n_shards = i;
-			pg_atomic_add_fetch_u64(&shard_map->update_counter, 1);
+			pg_atomic_add_fetch_u64(&shard_map->end_update_counter, 1);
 		}
 	}
 }
