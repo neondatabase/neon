@@ -728,7 +728,12 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
+        let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+        config::write_postgres_conf(&postgresql_conf_path, &spec, None)?;
+        // temporarily reset max_cluster_size in config
+        // to avoid the possibility of hitting the limit, while we are reconfiguring:
+        // creating new extensions, roles, etc...
+        config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
         self.pg_reload_conf()?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
@@ -748,6 +753,10 @@ impl ComputeNode {
 
         // 'Close' connection
         drop(client);
+
+        // reset max_cluster_size in config back to original value and reload config
+        config::compute_ctl_temp_override_remove(pgdata_path)?;
+        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -809,7 +818,17 @@ impl ComputeNode {
 
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
+            let pgdata_path = Path::new(&self.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
+            config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
+            self.pg_reload_conf()?;
+
             self.apply_config(&compute_state)?;
+
+            config::compute_ctl_temp_override_remove(pgdata_path)?;
+            self.pg_reload_conf()?;
         }
 
         let startup_end_time = Utc::now();
