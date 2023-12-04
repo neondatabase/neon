@@ -179,3 +179,12 @@ Compute-side metrics for GetPage latency.
 Back-channel to inform Compute/Autoscaling/ControlPlane that the project is being throttled.
 
 Compute-side neon_smgr improvements to avoid sending the same GetPage request multiple times if multiple backends experience a cache miss.
+
+Dealing with read-only endpoints: users use read-only endpoints to scale reads for a single tenant.
+Possibly there are also assumptions around read-only endpoints not affecting the primary read-write endpoint's performance.
+With per-tenant rate limiting, we will not meet that expectation.
+However, we can currently only scale per tenant.
+Soon, we will have sharding (#5505), which will apply the throttling on a per-shard basis.
+But, that's orthogonal to scaling reads: if many endpoints hit one shard, they share the same throttling limit.
+To solve this properly, I think we'll need replicas for tenants / shard.
+To performance-isolate a tenant's endpoints from each other, we'd then route them to different replicas.
