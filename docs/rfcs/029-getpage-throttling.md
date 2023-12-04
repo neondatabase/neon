@@ -9,7 +9,7 @@ This RFC proposes per-tenant throttling of GetPage@LSN requests inside Pageserve
 and the interactions with its client, i.e., the neon_smgr component in Compute.
 
 The result of implementing & executing this RFC will be a fleet-wide upper limit for
-**"the highest GetPage/second that Pageserver can support for a single tenant"**.
+**"the highest GetPage/second that Pageserver can support for a single tenant/shard"**.
 
 ## Background
 
