@@ -1,6 +1,6 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
-use crate::key::Key;
+use crate::key::{is_rel_block_key, Key};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use thiserror;
@@ -462,11 +462,6 @@ impl<'de> Deserialize<'de> for ShardIndex {
 
 /// Whether this key should be ingested by all shards
 fn key_is_broadcast(key: &Key) -> bool {
-    // TODO: deduplicate wrt pgdatadir_mapping.rs
-    fn is_rel_block_key(key: &Key) -> bool {
-        key.field1 == 0x00 && key.field4 != 0
-    }
-
     // TODO: can we be less conservative?  Starting point is to broadcast everything
     // except for rel block keys
     !is_rel_block_key(key)
