@@ -363,7 +363,7 @@ pub(super) async fn download_index_part(
         None => {
             // Migration from legacy pre-generation state: we have a generation but no prior
             // attached pageservers did.  Try to load from a no-generation path.
-            tracing::info!("No index_part.json* found");
+            tracing::debug!("No index_part.json* found");
             do_download_index_part(
                 storage,
                 tenant_shard_id,
