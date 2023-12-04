@@ -2115,6 +2115,10 @@ impl Tenant {
             .attach_mode
             .clone()
     }
+
+    pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
+        &self.tenant_shard_id
+    }
 }
 
 /// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),

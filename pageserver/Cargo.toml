@@ -36,6 +36,7 @@ humantime.workspace = true
 humantime-serde.workspace = true
 hyper.workspace = true
 itertools.workspace = true
+md5.workspace = true
 nix.workspace = true
 # hack to get the number of worker threads tokio uses
 num_cpus = { version = "1.15" }
