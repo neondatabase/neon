@@ -727,8 +727,8 @@ impl WalRedoProcess {
                     match stderr_lines.read_until(b'\n', &mut buf).await {
                         Ok(0) => break Ok(()), // eof
                         Ok(num_bytes) => {
-                            let output = String::from_utf8_lossy(&buf[..num_bytes]).to_string();
-                            error!(output, "received output");
+                            let output = String::from_utf8_lossy(&buf[..num_bytes]);
+                            error!(%output, "received output");
                         }
                         Err(e) => {
                             break Err(e);
