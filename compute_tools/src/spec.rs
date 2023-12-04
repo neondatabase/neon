@@ -118,19 +118,6 @@ pub fn get_spec_from_control_plane(
     spec
 }
 
-/// It takes cluster specification and does the following:
-/// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.
-/// - Update `pg_hba.conf` to allow external connections.
-pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
-    // File `postgresql.conf` is no longer included into `basebackup`, so just
-    // always write all config into it creating new file.
-    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec, None)?;
-
-    update_pg_hba(pgdata_path)?;
-
-    Ok(())
-}
-
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json

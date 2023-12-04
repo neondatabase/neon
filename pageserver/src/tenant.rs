@@ -312,6 +312,9 @@ impl WalRedoManager {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn request_redo(
         &self,
         key: crate::repository::Key,
@@ -3852,6 +3855,9 @@ pub(crate) mod harness {
     pub(crate) struct TestRedoManager;
 
     impl TestRedoManager {
+        /// # Cancel-Safety
+        ///
+        /// This method is cancellation-safe.
         pub async fn request_redo(
             &self,
             key: Key,
