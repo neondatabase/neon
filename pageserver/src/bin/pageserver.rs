@@ -14,7 +14,7 @@ use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
-use pageserver::tenant::TenantSharedResources;
+use pageserver::tenant::{secondary, TenantSharedResources};
 use remote_storage::GenericRemoteStorage;
 use tokio::time::Instant;
 use tracing::*;
@@ -504,6 +504,17 @@ fn start_pageserver(
         }
     });
 
+    let secondary_controller = if let Some(remote_storage) = &remote_storage {
+        secondary::spawn_tasks(
+            tenant_manager.clone(),
+            remote_storage.clone(),
+            background_jobs_barrier.clone(),
+            shutdown_pageserver.clone(),
+        )
+    } else {
+        secondary::null_controller()
+    };
+
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
     // is still accessible even if background task is not configured as long as remote storage has
@@ -533,6 +544,7 @@ fn start_pageserver(
                 broker_client.clone(),
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
+                secondary_controller,
             )
             .context("Failed to initialize router state")?,
         );
