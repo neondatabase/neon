@@ -274,7 +274,13 @@ fn main() -> Result<()> {
             let mut state = compute.state.lock().unwrap();
             state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
-            drop(state);
+            // Notify others that Postgres failed to start. In case of configuring the
+            // empty compute, it's likely that API handler is still waiting for compute
+            // state change. With this we will notify it that compute is in Failed state,
+            // so control plane will know about it earlier and record proper error instead
+            // of timeout.
+            compute.state_changed.notify_all();
+            drop(state); // unlock
             delay_exit = true;
             None
         }
