@@ -255,6 +255,7 @@ pub enum GenericRemoteStorage {
     AwsS3(Arc<S3Bucket>),
     AzureBlob(Arc<AzureBlobStorage>),
     Unreliable(Arc<UnreliableWrapper>),
+    Nothing,
 }
 
 impl GenericRemoteStorage {
@@ -268,6 +269,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.list(prefix, mode).await,
             Self::AzureBlob(s) => s.list(prefix, mode).await,
             Self::Unreliable(s) => s.list(prefix, mode).await,
+            Self::Nothing => unimplemented!(),
         }
     }
 
@@ -280,6 +282,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.list_files(folder).await,
             Self::AzureBlob(s) => s.list_files(folder).await,
             Self::Unreliable(s) => s.list_files(folder).await,
+            Self::Nothing => unimplemented!(),
         }
     }
 
@@ -295,6 +298,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.list_prefixes(prefix).await,
             Self::AzureBlob(s) => s.list_prefixes(prefix).await,
             Self::Unreliable(s) => s.list_prefixes(prefix).await,
+            Self::Nothing => unimplemented!(),
         }
     }
 
@@ -310,6 +314,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::Nothing => Ok(()),
         }
     }
 
@@ -319,6 +324,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.download(from).await,
             Self::AzureBlob(s) => s.download(from).await,
             Self::Unreliable(s) => s.download(from).await,
+            Self::Nothing => unimplemented!(),
         }
     }
 
@@ -345,6 +351,7 @@ impl GenericRemoteStorage {
                 s.download_byte_range(from, start_inclusive, end_exclusive)
                     .await
             }
+            Self::Nothing => unimplemented!(),
         }
     }
 
@@ -354,6 +361,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.delete(path).await,
             Self::AzureBlob(s) => s.delete(path).await,
             Self::Unreliable(s) => s.delete(path).await,
+            Self::Nothing => Ok(()),
         }
     }
 
@@ -363,6 +371,7 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.delete_objects(paths).await,
             Self::AzureBlob(s) => s.delete_objects(paths).await,
             Self::Unreliable(s) => s.delete_objects(paths).await,
+            Self::Nothing => Ok(()),
         }
     }
 }
@@ -384,6 +393,7 @@ impl GenericRemoteStorage {
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config)?))
             }
+            RemoteStorageKind::Nothing => Self::Nothing,
         })
     }
 
@@ -438,6 +448,8 @@ pub struct RemoteStorageConfig {
 /// A kind of a remote storage to connect to, with its connection configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteStorageKind {
+    /// For microbenchmarks it's useful to turn off remote storage
+    Nothing,
     /// Storage based on local file system.
     /// Specify a root folder to place all stored files into.
     LocalFs(Utf8PathBuf),
