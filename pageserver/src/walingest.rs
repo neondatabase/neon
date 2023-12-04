@@ -2175,9 +2175,12 @@ mod tests {
                 }
 
                 // Do operations we do on every XLogData message
-                // TODO check if 50 is the right chunk size
-                // TODO there's more operations to include here
+                //
+                // TODO also do status update
+                // 1. make a construct_status_update function
+                // 2. call it here
                 tline.check_checkpoint_distance().await.unwrap();
+                tline.get_current_logical_size(&ctx).size_dont_care_about_accuracy();
             }
 
             drop(prof_guard);
