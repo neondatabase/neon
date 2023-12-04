@@ -3760,8 +3760,10 @@ pub(crate) mod harness {
             let remote_fs_dir = conf.workdir.join("localfs");
             std::fs::create_dir_all(&remote_fs_dir).unwrap();
             let config = RemoteStorageConfig {
-                // storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
                 storage: RemoteStorageKind::Nothing,
+
+                // TODO use the following for tests that need it:
+                // storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
             };
             let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
