@@ -2159,9 +2159,13 @@ mod tests {
             let prof_guard = crate::profiling::profpoint_start();
             let started_at = std::time::Instant::now();
 
-            // Decode and ingest wal. We process the wal in chunks because
-            // that's what happens when we get bytes from safekeepers.
-            for chunk in bytes[xlogoff..].chunks(50) {
+            // Decode and ingest wal.
+            //
+            // NOTE We process the wal in chunks because that's what happens
+            // when we get bytes from safekeepers. We use size 1906 because
+            // that was the average chunk size during the test that generated
+            // this data.
+            for chunk in bytes[xlogoff..].chunks(1906) {
                 decoder.feed_bytes(chunk);
                 while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                     walingest
@@ -2169,6 +2173,11 @@ mod tests {
                         .await
                         .unwrap();
                 }
+
+                // Do operations we do on every XLogData message
+                // TODO check if 50 is the right chunk size
+                // TODO there's more operations to include here
+                tline.check_checkpoint_distance().await.unwrap();
             }
 
             drop(prof_guard);
