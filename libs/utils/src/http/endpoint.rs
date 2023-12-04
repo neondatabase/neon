@@ -1,4 +1,4 @@
-use crate::auth::{Claims, JwtAuth};
+use crate::auth::{AuthError, Claims, SwappableJwtAuth};
 use crate::http::error::{api_error_handler, route_error_handler, ApiError};
 use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
@@ -13,6 +13,11 @@ use tracing::{self, debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
 use std::str::FromStr;
+
+use bytes::{Bytes, BytesMut};
+use std::io::Write as _;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -146,93 +151,88 @@ impl Drop for RequestCancelled {
     }
 }
 
+/// An [`std::io::Write`] implementation on top of a channel sending [`bytes::Bytes`] chunks.
+pub struct ChannelWriter {
+    buffer: BytesMut,
+    pub tx: mpsc::Sender<std::io::Result<Bytes>>,
+    written: usize,
+}
+
+impl ChannelWriter {
+    pub fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
+        assert_ne!(buf_len, 0);
+        ChannelWriter {
+            // split about half off the buffer from the start, because we flush depending on
+            // capacity. first flush will come sooner than without this, but now resizes will
+            // have better chance of picking up the "other" half. not guaranteed of course.
+            buffer: BytesMut::with_capacity(buf_len).split_off(buf_len / 2),
+            tx,
+            written: 0,
+        }
+    }
+
+    pub fn flush0(&mut self) -> std::io::Result<usize> {
+        let n = self.buffer.len();
+        if n == 0 {
+            return Ok(0);
+        }
+
+        tracing::trace!(n, "flushing");
+        let ready = self.buffer.split().freeze();
+
+        // not ideal to call from blocking code to block_on, but we are sure that this
+        // operation does not spawn_blocking other tasks
+        let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
+            self.tx.send(Ok(ready)).await.map_err(|_| ())?;
+
+            // throttle sending to allow reuse of our buffer in `write`.
+            self.tx.reserve().await.map_err(|_| ())?;
+
+            // now the response task has picked up the buffer and hopefully started
+            // sending it to the client.
+            Ok(())
+        });
+        if res.is_err() {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        self.written += n;
+        Ok(n)
+    }
+
+    pub fn flushed_bytes(&self) -> usize {
+        self.written
+    }
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.buffer.capacity() - self.buffer.len();
+
+        let out_of_space = remaining < buf.len();
+
+        let original_len = buf.len();
+
+        if out_of_space {
+            let can_still_fit = buf.len() - remaining;
+            self.buffer.extend_from_slice(&buf[..can_still_fit]);
+            buf = &buf[can_still_fit..];
+            self.flush0()?;
+        }
+
+        // assume that this will often under normal operation just move the pointer back to the
+        // beginning of allocation, because previous split off parts are already sent and
+        // dropped.
+        self.buffer.extend_from_slice(buf);
+        Ok(original_len)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush0().map(|_| ())
+    }
+}
+
 async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    use bytes::{Bytes, BytesMut};
-    use std::io::Write as _;
-    use tokio::sync::mpsc;
-    use tokio_stream::wrappers::ReceiverStream;
-
     SERVE_METRICS_COUNT.inc();
-
-    /// An [`std::io::Write`] implementation on top of a channel sending [`bytes::Bytes`] chunks.
-    struct ChannelWriter {
-        buffer: BytesMut,
-        tx: mpsc::Sender<std::io::Result<Bytes>>,
-        written: usize,
-    }
-
-    impl ChannelWriter {
-        fn new(buf_len: usize, tx: mpsc::Sender<std::io::Result<Bytes>>) -> Self {
-            assert_ne!(buf_len, 0);
-            ChannelWriter {
-                // split about half off the buffer from the start, because we flush depending on
-                // capacity. first flush will come sooner than without this, but now resizes will
-                // have better chance of picking up the "other" half. not guaranteed of course.
-                buffer: BytesMut::with_capacity(buf_len).split_off(buf_len / 2),
-                tx,
-                written: 0,
-            }
-        }
-
-        fn flush0(&mut self) -> std::io::Result<usize> {
-            let n = self.buffer.len();
-            if n == 0 {
-                return Ok(0);
-            }
-
-            tracing::trace!(n, "flushing");
-            let ready = self.buffer.split().freeze();
-
-            // not ideal to call from blocking code to block_on, but we are sure that this
-            // operation does not spawn_blocking other tasks
-            let res: Result<(), ()> = tokio::runtime::Handle::current().block_on(async {
-                self.tx.send(Ok(ready)).await.map_err(|_| ())?;
-
-                // throttle sending to allow reuse of our buffer in `write`.
-                self.tx.reserve().await.map_err(|_| ())?;
-
-                // now the response task has picked up the buffer and hopefully started
-                // sending it to the client.
-                Ok(())
-            });
-            if res.is_err() {
-                return Err(std::io::ErrorKind::BrokenPipe.into());
-            }
-            self.written += n;
-            Ok(n)
-        }
-
-        fn flushed_bytes(&self) -> usize {
-            self.written
-        }
-    }
-
-    impl std::io::Write for ChannelWriter {
-        fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
-            let remaining = self.buffer.capacity() - self.buffer.len();
-
-            let out_of_space = remaining < buf.len();
-
-            let original_len = buf.len();
-
-            if out_of_space {
-                let can_still_fit = buf.len() - remaining;
-                self.buffer.extend_from_slice(&buf[..can_still_fit]);
-                buf = &buf[can_still_fit..];
-                self.flush0()?;
-            }
-
-            // assume that this will often under normal operation just move the pointer back to the
-            // beginning of allocation, because previous split off parts are already sent and
-            // dropped.
-            self.buffer.extend_from_slice(buf);
-            Ok(original_len)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.flush0().map(|_| ())
-        }
-    }
 
     let started_at = std::time::Instant::now();
 
@@ -389,7 +389,7 @@ fn parse_token(header_value: &str) -> Result<&str, ApiError> {
 }
 
 pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
-    provide_auth: fn(&Request<Body>) -> Option<&JwtAuth>,
+    provide_auth: fn(&Request<Body>) -> Option<&SwappableJwtAuth>,
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         if let Some(auth) = provide_auth(&req) {
@@ -400,9 +400,11 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
                     })?;
                     let token = parse_token(header_value)?;
 
-                    let data = auth
-                        .decode(token)
-                        .map_err(|_| ApiError::Unauthorized("malformed jwt token".to_string()))?;
+                    let data = auth.decode(token).map_err(|err| {
+                        warn!("Authentication error: {err}");
+                        // Rely on From<AuthError> for ApiError impl
+                        err
+                    })?;
                     req.set_context(data.claims);
                 }
                 None => {
@@ -450,12 +452,11 @@ where
 
 pub fn check_permission_with(
     req: &Request<Body>,
-    check_permission: impl Fn(&Claims) -> Result<(), anyhow::Error>,
+    check_permission: impl Fn(&Claims) -> Result<(), AuthError>,
 ) -> Result<(), ApiError> {
     match req.context::<Claims>() {
-        Some(claims) => {
-            Ok(check_permission(&claims).map_err(|err| ApiError::Forbidden(err.to_string()))?)
-        }
+        Some(claims) => Ok(check_permission(&claims)
+            .map_err(|_err| ApiError::Forbidden("JWT authentication error".to_string()))?),
         None => Ok(()), // claims is None because auth is disabled
     }
 }

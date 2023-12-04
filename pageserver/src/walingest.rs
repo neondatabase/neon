@@ -98,260 +98,257 @@ impl<'a> WalIngest<'a> {
             self.checkpoint_modified = true;
         }
 
-        // Heap AM records need some special handling, because they modify VM pages
-        // without registering them with the standard mechanism.
-        if decoded.xl_rmid == pg_constants::RM_HEAP_ID
-            || decoded.xl_rmid == pg_constants::RM_HEAP2_ID
-        {
-            self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
-                .await?;
-        }
-        if decoded.xl_rmid == pg_constants::RM_NEON_ID {
-            self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
-                .await?;
-        }
-        // Handle other special record types
-        if decoded.xl_rmid == pg_constants::RM_SMGR_ID
-            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_SMGR_CREATE
-        {
-            let create = XlSmgrCreate::decode(&mut buf);
-            self.ingest_xlog_smgr_create(modification, &create, ctx)
-                .await?;
-        } else if decoded.xl_rmid == pg_constants::RM_SMGR_ID
-            && (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                == pg_constants::XLOG_SMGR_TRUNCATE
-        {
-            let truncate = XlSmgrTruncate::decode(&mut buf);
-            self.ingest_xlog_smgr_truncate(modification, &truncate, ctx)
-                .await?;
-        } else if decoded.xl_rmid == pg_constants::RM_DBASE_ID {
-            debug!(
-                "handle RM_DBASE_ID for Postgres version {:?}",
-                self.timeline.pg_version
-            );
-            if self.timeline.pg_version == 14 {
-                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
-                {
-                    let createdb = XlCreateDatabase::decode(&mut buf);
-                    debug!("XLOG_DBASE_CREATE v14");
+        match decoded.xl_rmid {
+            pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
+                // Heap AM records need some special handling, because they modify VM pages
+                // without registering them with the standard mechanism.
+                self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
+                    .await?;
+            }
+            pg_constants::RM_NEON_ID => {
+                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                    .await?;
+            }
+            // Handle other special record types
+            pg_constants::RM_SMGR_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
-                    self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                if info == pg_constants::XLOG_SMGR_CREATE {
+                    let create = XlSmgrCreate::decode(&mut buf);
+                    self.ingest_xlog_smgr_create(modification, &create, ctx)
                         .await?;
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v14::bindings::XLOG_DBASE_DROP
-                {
-                    let dropdb = XlDropDatabase::decode(&mut buf);
-                    for tablespace_id in dropdb.tablespace_ids {
-                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification
-                            .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
-                            .await?;
-                    }
-                }
-            } else if self.timeline.pg_version == 15 {
-                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG
-                {
-                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY
-                {
-                    // The XLOG record was renamed between v14 and v15,
-                    // but the record format is the same.
-                    // So we can reuse XlCreateDatabase here.
-                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
-                    let createdb = XlCreateDatabase::decode(&mut buf);
-                    self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                } else if info == pg_constants::XLOG_SMGR_TRUNCATE {
+                    let truncate = XlSmgrTruncate::decode(&mut buf);
+                    self.ingest_xlog_smgr_truncate(modification, &truncate, ctx)
                         .await?;
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v15::bindings::XLOG_DBASE_DROP
-                {
-                    let dropdb = XlDropDatabase::decode(&mut buf);
-                    for tablespace_id in dropdb.tablespace_ids {
-                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification
-                            .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
-                            .await?;
-                    }
-                }
-            } else if self.timeline.pg_version == 16 {
-                if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG
-                {
-                    debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY
-                {
-                    // The XLOG record was renamed between v14 and v15,
-                    // but the record format is the same.
-                    // So we can reuse XlCreateDatabase here.
-                    debug!("XLOG_DBASE_CREATE_FILE_COPY");
-                    let createdb = XlCreateDatabase::decode(&mut buf);
-                    self.ingest_xlog_dbase_create(modification, &createdb, ctx)
-                        .await?;
-                } else if (decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK)
-                    == postgres_ffi::v16::bindings::XLOG_DBASE_DROP
-                {
-                    let dropdb = XlDropDatabase::decode(&mut buf);
-                    for tablespace_id in dropdb.tablespace_ids {
-                        trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
-                        modification
-                            .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
-                            .await?;
-                    }
                 }
             }
-        } else if decoded.xl_rmid == pg_constants::RM_TBLSPC_ID {
-            trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
-        } else if decoded.xl_rmid == pg_constants::RM_CLOG_ID {
-            let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
-            if info == pg_constants::CLOG_ZEROPAGE {
-                let pageno = buf.get_u32_le();
-                let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                self.put_slru_page_image(
-                    modification,
-                    SlruKind::Clog,
-                    segno,
-                    rpageno,
-                    ZERO_PAGE.clone(),
-                    ctx,
-                )
-                .await?;
-            } else {
-                assert!(info == pg_constants::CLOG_TRUNCATE);
-                let xlrec = XlClogTruncate::decode(&mut buf);
-                self.ingest_clog_truncate_record(modification, &xlrec, ctx)
-                    .await?;
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_XACT_ID {
-            let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
-            if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
-                let parsed_xact =
-                    XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-                self.ingest_xact_record(
-                    modification,
-                    &parsed_xact,
-                    info == pg_constants::XLOG_XACT_COMMIT,
-                    ctx,
-                )
-                .await?;
-            } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
-                || info == pg_constants::XLOG_XACT_ABORT_PREPARED
-            {
-                let parsed_xact =
-                    XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
-                self.ingest_xact_record(
-                    modification,
-                    &parsed_xact,
-                    info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
-                    ctx,
-                )
-                .await?;
-                // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
-                trace!(
-                    "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
-                    decoded.xl_xid,
-                    parsed_xact.xid,
-                    lsn,
-                );
-                modification
-                    .drop_twophase_file(parsed_xact.xid, ctx)
-                    .await?;
-            } else if info == pg_constants::XLOG_XACT_PREPARE {
-                modification
-                    .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
-                    .await?;
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_MULTIXACT_ID {
-            let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+            pg_constants::RM_DBASE_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                debug!(%info, pg_version=%self.timeline.pg_version, "handle RM_DBASE_ID");
 
-            if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-                let pageno = buf.get_u32_le();
-                let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                self.put_slru_page_image(
-                    modification,
-                    SlruKind::MultiXactOffsets,
-                    segno,
-                    rpageno,
-                    ZERO_PAGE.clone(),
-                    ctx,
-                )
-                .await?;
-            } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
-                let pageno = buf.get_u32_le();
-                let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                self.put_slru_page_image(
-                    modification,
-                    SlruKind::MultiXactMembers,
-                    segno,
-                    rpageno,
-                    ZERO_PAGE.clone(),
-                    ctx,
-                )
-                .await?;
-            } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
-                let xlrec = XlMultiXactCreate::decode(&mut buf);
-                self.ingest_multixact_create_record(modification, &xlrec)?;
-            } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
-                let xlrec = XlMultiXactTruncate::decode(&mut buf);
-                self.ingest_multixact_truncate_record(modification, &xlrec, ctx)
+                if self.timeline.pg_version == 14 {
+                    if info == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE {
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        debug!("XLOG_DBASE_CREATE v14");
+
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                            .await?;
+                    } else if info == postgres_ffi::v14::bindings::XLOG_DBASE_DROP {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
+                } else if self.timeline.pg_version == 15 {
+                    if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                    } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                            .await?;
+                    } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_DROP {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
+                } else if self.timeline.pg_version == 16 {
+                    if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                    } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                            .await?;
+                    } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_DROP {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
+                }
+            }
+            pg_constants::RM_TBLSPC_ID => {
+                trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
+            }
+            pg_constants::RM_CLOG_ID => {
+                let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
+
+                if info == pg_constants::CLOG_ZEROPAGE {
+                    let pageno = buf.get_u32_le();
+                    let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    self.put_slru_page_image(
+                        modification,
+                        SlruKind::Clog,
+                        segno,
+                        rpageno,
+                        ZERO_PAGE.clone(),
+                        ctx,
+                    )
                     .await?;
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_RELMAP_ID {
-            let xlrec = XlRelmapUpdate::decode(&mut buf);
-            self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
-                .await?;
-        } else if decoded.xl_rmid == pg_constants::RM_XLOG_ID {
-            let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-            if info == pg_constants::XLOG_NEXTOID {
-                let next_oid = buf.get_u32_le();
-                if self.checkpoint.nextOid != next_oid {
-                    self.checkpoint.nextOid = next_oid;
-                    self.checkpoint_modified = true;
+                } else {
+                    assert!(info == pg_constants::CLOG_TRUNCATE);
+                    let xlrec = XlClogTruncate::decode(&mut buf);
+                    self.ingest_clog_truncate_record(modification, &xlrec, ctx)
+                        .await?;
                 }
-            } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
-                || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
-            {
-                let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
-                buf.copy_to_slice(&mut checkpoint_bytes);
-                let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-                trace!(
-                    "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
-                    xlog_checkpoint.oldestXid,
-                    self.checkpoint.oldestXid
-                );
-                if (self
-                    .checkpoint
-                    .oldestXid
-                    .wrapping_sub(xlog_checkpoint.oldestXid) as i32)
-                    < 0
+            }
+            pg_constants::RM_XACT_ID => {
+                let info = decoded.xl_info & pg_constants::XLOG_XACT_OPMASK;
+
+                if info == pg_constants::XLOG_XACT_COMMIT || info == pg_constants::XLOG_XACT_ABORT {
+                    let parsed_xact =
+                        XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
+                    self.ingest_xact_record(
+                        modification,
+                        &parsed_xact,
+                        info == pg_constants::XLOG_XACT_COMMIT,
+                        ctx,
+                    )
+                    .await?;
+                } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
+                    || info == pg_constants::XLOG_XACT_ABORT_PREPARED
                 {
-                    self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
-                    self.checkpoint_modified = true;
-                }
-            }
-        } else if decoded.xl_rmid == pg_constants::RM_LOGICALMSG_ID {
-            let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-            if info == pg_constants::XLOG_LOGICAL_MESSAGE {
-                let xlrec = XlLogicalMessage::decode(&mut buf);
-                let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
-                let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
-                if prefix == "neon-test" {
-                    // This is a convenient way to make the WAL ingestion pause at
-                    // particular point in the WAL. For more fine-grained control,
-                    // we could peek into the message and only pause if it contains
-                    // a particular string, for example, but this is enough for now.
-                    crate::failpoint_support::sleep_millis_async!(
-                        "wal-ingest-logical-message-sleep"
+                    let parsed_xact =
+                        XlXactParsedRecord::decode(&mut buf, decoded.xl_xid, decoded.xl_info);
+                    self.ingest_xact_record(
+                        modification,
+                        &parsed_xact,
+                        info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
+                        ctx,
+                    )
+                    .await?;
+                    // Remove twophase file. see RemoveTwoPhaseFile() in postgres code
+                    trace!(
+                        "Drop twophaseFile for xid {} parsed_xact.xid {} here at {}",
+                        decoded.xl_xid,
+                        parsed_xact.xid,
+                        lsn,
                     );
-                } else if let Some(path) = prefix.strip_prefix("neon-file:") {
-                    modification.put_file(path, message, ctx).await?;
+                    modification
+                        .drop_twophase_file(parsed_xact.xid, ctx)
+                        .await?;
+                } else if info == pg_constants::XLOG_XACT_PREPARE {
+                    modification
+                        .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
+                        .await?;
                 }
+            }
+            pg_constants::RM_MULTIXACT_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+                if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
+                    let pageno = buf.get_u32_le();
+                    let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    self.put_slru_page_image(
+                        modification,
+                        SlruKind::MultiXactOffsets,
+                        segno,
+                        rpageno,
+                        ZERO_PAGE.clone(),
+                        ctx,
+                    )
+                    .await?;
+                } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
+                    let pageno = buf.get_u32_le();
+                    let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+                    self.put_slru_page_image(
+                        modification,
+                        SlruKind::MultiXactMembers,
+                        segno,
+                        rpageno,
+                        ZERO_PAGE.clone(),
+                        ctx,
+                    )
+                    .await?;
+                } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
+                    let xlrec = XlMultiXactCreate::decode(&mut buf);
+                    self.ingest_multixact_create_record(modification, &xlrec)?;
+                } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
+                    let xlrec = XlMultiXactTruncate::decode(&mut buf);
+                    self.ingest_multixact_truncate_record(modification, &xlrec, ctx)
+                        .await?;
+                }
+            }
+            pg_constants::RM_RELMAP_ID => {
+                let xlrec = XlRelmapUpdate::decode(&mut buf);
+                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                    .await?;
+            }
+            pg_constants::RM_XLOG_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+                if info == pg_constants::XLOG_NEXTOID {
+                    let next_oid = buf.get_u32_le();
+                    if self.checkpoint.nextOid != next_oid {
+                        self.checkpoint.nextOid = next_oid;
+                        self.checkpoint_modified = true;
+                    }
+                } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
+                    || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                {
+                    let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
+                    buf.copy_to_slice(&mut checkpoint_bytes);
+                    let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
+                    trace!(
+                        "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
+                        xlog_checkpoint.oldestXid,
+                        self.checkpoint.oldestXid
+                    );
+                    if (self
+                        .checkpoint
+                        .oldestXid
+                        .wrapping_sub(xlog_checkpoint.oldestXid) as i32)
+                        < 0
+                    {
+                        self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
+                        self.checkpoint_modified = true;
+                    }
+                }
+            }
+            pg_constants::RM_LOGICALMSG_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+                if info == pg_constants::XLOG_LOGICAL_MESSAGE {
+                    let xlrec = XlLogicalMessage::decode(&mut buf);
+                    let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
+                    let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
+                    if prefix == "neon-test" {
+                        // This is a convenient way to make the WAL ingestion pause at
+                        // particular point in the WAL. For more fine-grained control,
+                        // we could peek into the message and only pause if it contains
+                        // a particular string, for example, but this is enough for now.
+                        crate::failpoint_support::sleep_millis_async!(
+                            "wal-ingest-logical-message-sleep"
+                        );
+                    } else if let Some(path) = prefix.strip_prefix("neon-file:") {
+                        modification.put_file(path, message, ctx).await?;
+                    }
+                }
+            }
+            _x => {
+                // TODO: should probably log & fail here instead of blindly
+                // doing something without understanding the protocol
             }
         }
 
@@ -443,7 +440,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
+        decoded: &DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -749,7 +746,7 @@ impl<'a> WalIngest<'a> {
         &mut self,
         buf: &mut Bytes,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
+        decoded: &DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Handle VM bit updates that are implicitly part of heap records.
@@ -1440,7 +1437,16 @@ impl<'a> WalIngest<'a> {
         // record.
         // TODO: would be nice if to be more explicit about it
         let last_lsn = modification.lsn;
-        let old_nblocks = if !self
+
+        // Get current size and put rel creation if rel doesn't exist
+        //
+        // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
+        //       check the cache too. This is because eagerly checking the cache results in
+        //       less work overall and 10% better performance. It's more work on cache miss
+        //       but cache miss is rare.
+        let old_nblocks = if let Some(nblocks) = self.timeline.get_cached_rel_size(&rel, last_lsn) {
+            nblocks
+        } else if !self
             .timeline
             .get_rel_exists(rel, last_lsn, true, ctx)
             .await?
@@ -2078,5 +2084,89 @@ mod tests {
         assert_current_logical_size(&tline, Lsn(lsn));
 
         Ok(())
+    }
+
+    /// Replay a wal segment file taken directly from safekeepers.
+    ///
+    /// This test is useful for benchmarking since it allows us to profile only
+    /// the walingest code in a single-threaded executor, and iterate more quickly
+    /// without waiting for unrelated steps.
+    #[tokio::test]
+    async fn test_ingest_real_wal() {
+        use crate::tenant::harness::*;
+        use postgres_ffi::waldecoder::WalStreamDecoder;
+        use postgres_ffi::WAL_SEGMENT_SIZE;
+
+        // Define test data path and constants.
+        //
+        // Steps to reconstruct the data, if needed:
+        // 1. Run the pgbench python test
+        // 2. Take the first wal segment file from safekeeper
+        // 3. Compress it using `zstd --long input_file`
+        // 4. Copy initdb.tar.zst from local_fs_remote_storage
+        // 5. Grep sk logs for "restart decoder" to get startpoint
+        // 6. Run just the decoder from this test to get the endpoint.
+        //    It's the last LSN the decoder will output.
+        let pg_version = 15; // The test data was generated by pg15
+        let path = "test_data/sk_wal_segment_from_pgbench";
+        let wal_segment_path = format!("{path}/000000010000000000000001.zst");
+        let startpoint = Lsn::from_hex("14AEC08").unwrap();
+        let endpoint = Lsn::from_hex("1FFFF98").unwrap();
+
+        // Bootstrap a real timeline. We can't use create_test_timeline because
+        // it doesn't create a real checkpoint, and Walingest::new tries to parse
+        // the garbage data.
+        //
+        // TODO use the initdb.tar.zst file stored with the test data to avoid
+        //      problems with inconsistent initdb results after pg minor version bumps.
+        let (tenant, ctx) = TenantHarness::create("test_ingest_real_wal")
+            .unwrap()
+            .load()
+            .await;
+        let tline = tenant
+            .bootstrap_timeline(TIMELINE_ID, pg_version, None, &ctx)
+            .await
+            .unwrap();
+
+        // We fully read and decompress this into memory before decoding
+        // to get a more accurate perf profile of the decoder.
+        let bytes = {
+            use async_compression::tokio::bufread::ZstdDecoder;
+            let file = tokio::fs::File::open(wal_segment_path).await.unwrap();
+            let reader = tokio::io::BufReader::new(file);
+            let decoder = ZstdDecoder::new(reader);
+            let mut reader = tokio::io::BufReader::new(decoder);
+            let mut buffer = Vec::new();
+            tokio::io::copy_buf(&mut reader, &mut buffer).await.unwrap();
+            buffer
+        };
+
+        // TODO start a profiler too
+        let started_at = std::time::Instant::now();
+
+        // Initialize walingest
+        let xlogoff: usize = startpoint.segment_offset(WAL_SEGMENT_SIZE);
+        let mut decoder = WalStreamDecoder::new(startpoint, pg_version);
+        let mut walingest = WalIngest::new(tline.as_ref(), startpoint, &ctx)
+            .await
+            .unwrap();
+        let mut modification = tline.begin_modification(endpoint);
+        let mut decoded = DecodedWALRecord::default();
+        println!("decoding {} bytes", bytes.len() - xlogoff);
+
+        // Decode and ingest wal. We process the wal in chunks because
+        // that's what happens when we get bytes from safekeepers.
+        for chunk in bytes[xlogoff..].chunks(50) {
+            decoder.feed_bytes(chunk);
+            while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let duration = started_at.elapsed();
+        println!("done in {:?}", duration);
     }
 }

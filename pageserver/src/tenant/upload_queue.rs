@@ -1,5 +1,5 @@
 use super::storage_layer::LayerFileName;
-use super::Generation;
+use super::storage_layer::ResidentLayer;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -13,6 +13,9 @@ use utils::lsn::AtomicLsn;
 
 use std::sync::atomic::AtomicU32;
 use utils::lsn::Lsn;
+
+#[cfg(feature = "testing")]
+use utils::generation::Generation;
 
 // clippy warns that Uninitialized is much smaller than Initialized, which wastes
 // memory for Uninitialized variants. Doesn't matter in practice, there are not
@@ -79,6 +82,22 @@ pub(crate) struct UploadQueueInitialized {
     /// tasks to finish. For example, metadata upload cannot be performed before all
     /// preceding layer file uploads have completed.
     pub(crate) queued_operations: VecDeque<UploadOp>,
+
+    /// Files which have been unlinked but not yet had scheduled a deletion for. Only kept around
+    /// for error logging.
+    ///
+    /// Putting this behind a testing feature to catch problems in tests, but assuming we could have a
+    /// bug causing leaks, then it's better to not leave this enabled for production builds.
+    #[cfg(feature = "testing")]
+    pub(crate) dangling_files: HashMap<LayerFileName, Generation>,
+
+    /// Set to true when we have inserted the `UploadOp::Shutdown` into the `inprogress_tasks`.
+    pub(crate) shutting_down: bool,
+
+    /// Permitless semaphore on which any number of `RemoteTimelineClient::shutdown` futures can
+    /// wait on until one of them stops the queue. The semaphore is closed when
+    /// `RemoteTimelineClient::launch_queued_tasks` encounters `UploadOp::Shutdown`.
+    pub(crate) shutdown_ready: Arc<tokio::sync::Semaphore>,
 }
 
 impl UploadQueueInitialized {
@@ -135,6 +154,10 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
+            shutting_down: false,
+            shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -180,6 +203,10 @@ impl UploadQueue {
             num_inprogress_deletions: 0,
             inprogress_tasks: HashMap::new(),
             queued_operations: VecDeque::new(),
+            #[cfg(feature = "testing")]
+            dangling_files: HashMap::new(),
+            shutting_down: false,
+            shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -191,7 +218,13 @@ impl UploadQueue {
             UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
-            UploadQueue::Initialized(x) => Ok(x),
+            UploadQueue::Initialized(x) => {
+                if !x.shutting_down {
+                    Ok(x)
+                } else {
+                    anyhow::bail!("queue is shutting down")
+                }
+            }
         }
     }
 
@@ -201,18 +234,6 @@ impl UploadQueue {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
             UploadQueue::Stopped(stopped) => Ok(stopped),
-        }
-    }
-
-    pub(crate) fn get_layer_metadata(
-        &self,
-        name: &LayerFileName,
-    ) -> anyhow::Result<Option<LayerFileMetadata>> {
-        match self {
-            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
-                anyhow::bail!("queue is in state {}", self.as_str())
-            }
-            UploadQueue::Initialized(inner) => Ok(inner.latest_files.get(name).cloned()),
         }
     }
 }
@@ -231,13 +252,13 @@ pub(crate) struct UploadTask {
 /// for timeline deletion, which skips this queue and goes directly to DeletionQueue.
 #[derive(Debug)]
 pub(crate) struct Delete {
-    pub(crate) layers: Vec<(LayerFileName, Generation)>,
+    pub(crate) layers: Vec<(LayerFileName, LayerFileMetadata)>,
 }
 
 #[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
-    UploadLayer(LayerFileName, LayerFileMetadata),
+    UploadLayer(ResidentLayer, LayerFileMetadata),
 
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
@@ -247,18 +268,22 @@ pub(crate) enum UploadOp {
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
+
+    /// Shutdown; upon encountering this operation no new operations will be spawned, otherwise
+    /// this is the same as a Barrier.
+    Shutdown,
 }
 
 impl std::fmt::Display for UploadOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            UploadOp::UploadLayer(path, metadata) => {
+            UploadOp::UploadLayer(layer, metadata) => {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    path.file_name(),
+                    layer,
                     metadata.file_size(),
-                    metadata.generation,
+                    metadata.generation
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => {
@@ -268,6 +293,7 @@ impl std::fmt::Display for UploadOp {
                 write!(f, "Delete({} layers)", delete.layers.len())
             }
             UploadOp::Barrier(_) => write!(f, "Barrier"),
+            UploadOp::Shutdown => write!(f, "Shutdown"),
         }
     }
 }

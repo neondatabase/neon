@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// See docs/rfcs/025-generation-numbers.md for detail on how generation
 /// numbers are used.
-#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Generation {
     // Generations with this magic value will not add a suffix to S3 keys, and will not
     // be included in persisted index_part.json.  This value is only to be used
@@ -150,5 +150,18 @@ impl Debug for Generation {
                 write!(f, "<broken>")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn generation_gt() {
+        // Important that a None generation compares less than a valid one, during upgrades from
+        // pre-generation systems.
+        assert!(Generation::none() < Generation::new(0));
+        assert!(Generation::none() < Generation::new(1));
     }
 }

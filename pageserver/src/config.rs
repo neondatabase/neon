@@ -5,6 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde::de::IntoDeserializer;
 use std::env;
@@ -25,7 +26,7 @@ use toml_edit::{Document, Item};
 use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
 use utils::{
-    id::{NodeId, TenantId, TimelineId},
+    id::{NodeId, TimelineId},
     logging::LogFormat,
 };
 
@@ -33,8 +34,7 @@ use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
-    TENANTS_SEGMENT_NAME, TENANT_ATTACHING_MARKER_FILENAME, TENANT_DELETED_MARKER_FILE_NAME,
-    TIMELINES_SEGMENT_NAME,
+    TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
@@ -162,7 +162,7 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
-    /// Path to a file containing public key for verifying JWT tokens.
+    /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
 
@@ -629,17 +629,13 @@ impl PageServerConf {
         self.deletion_prefix().join(format!("header-{VERSION:02x}"))
     }
 
-    pub fn tenant_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenants_path().join(tenant_id.to_string())
+    pub fn tenant_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenants_path().join(tenant_shard_id.to_string())
     }
 
-    pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id)
-            .join(TENANT_ATTACHING_MARKER_FILENAME)
-    }
-
-    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id).join(IGNORED_TENANT_FILE_NAME)
+    pub fn tenant_ignore_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
@@ -647,47 +643,53 @@ impl PageServerConf {
     ///
     /// Legacy: superseded by tenant_location_config_path.  Eventually
     /// remove this function.
-    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
+    pub fn tenant_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id).join(TENANT_CONFIG_NAME)
     }
 
-    pub fn tenant_location_config_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id)
+    pub fn tenant_location_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
             .join(TENANT_LOCATION_CONFIG_NAME)
     }
 
-    pub fn timelines_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
+    pub fn timelines_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(TIMELINES_SEGMENT_NAME)
     }
 
-    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> Utf8PathBuf {
-        self.timelines_path(tenant_id).join(timeline_id.to_string())
+    pub fn timeline_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.timelines_path(tenant_shard_id)
+            .join(timeline_id.to_string())
     }
 
     pub fn timeline_uninit_mark_file_path(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Utf8PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&tenant_id, &timeline_id),
+            self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
         )
     }
 
     pub fn timeline_delete_mark_file_path(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
     ) -> Utf8PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&tenant_id, &timeline_id),
+            self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
     }
 
-    pub fn tenant_deleted_mark_file_path(&self, tenant_id: &TenantId) -> Utf8PathBuf {
-        self.tenant_path(tenant_id)
+    pub fn tenant_deleted_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
             .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
 
@@ -697,20 +699,24 @@ impl PageServerConf {
 
     pub fn trace_path(
         &self,
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         connection_id: &ConnectionId,
     ) -> Utf8PathBuf {
         self.traces_path()
-            .join(tenant_id.to_string())
+            .join(tenant_shard_id.to_string())
             .join(timeline_id.to_string())
             .join(connection_id.to_string())
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> Utf8PathBuf {
-        self.timeline_path(tenant_id, timeline_id)
+    pub fn metadata_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.timeline_path(tenant_shard_id, timeline_id)
             .join(METADATA_FILE_NAME)
     }
 
@@ -773,7 +779,7 @@ impl PageServerConf {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
                 "tenant_config" => {
-                    t_conf = Self::parse_toml_tenant_conf(item)?;
+                    t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
@@ -847,114 +853,10 @@ impl PageServerConf {
         Ok(conf)
     }
 
-    // subroutine of parse_and_validate to parse `[tenant_conf]` section
-
-    pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
-        let mut t_conf: TenantConfOpt = Default::default();
-        if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
-            t_conf.checkpoint_distance =
-                Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
-        }
-
-        if let Some(checkpoint_timeout) = item.get("checkpoint_timeout") {
-            t_conf.checkpoint_timeout = Some(parse_toml_duration(
-                "checkpoint_timeout",
-                checkpoint_timeout,
-            )?);
-        }
-
-        if let Some(compaction_target_size) = item.get("compaction_target_size") {
-            t_conf.compaction_target_size = Some(parse_toml_u64(
-                "compaction_target_size",
-                compaction_target_size,
-            )?);
-        }
-
-        if let Some(compaction_period) = item.get("compaction_period") {
-            t_conf.compaction_period =
-                Some(parse_toml_duration("compaction_period", compaction_period)?);
-        }
-
-        if let Some(compaction_threshold) = item.get("compaction_threshold") {
-            t_conf.compaction_threshold =
-                Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
-        }
-
-        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
-            t_conf.image_creation_threshold = Some(
-                parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?,
-            );
-        }
-
-        if let Some(gc_horizon) = item.get("gc_horizon") {
-            t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
-        }
-
-        if let Some(gc_period) = item.get("gc_period") {
-            t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
-        }
-
-        if let Some(pitr_interval) = item.get("pitr_interval") {
-            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
-        }
-        if let Some(walreceiver_connect_timeout) = item.get("walreceiver_connect_timeout") {
-            t_conf.walreceiver_connect_timeout = Some(parse_toml_duration(
-                "walreceiver_connect_timeout",
-                walreceiver_connect_timeout,
-            )?);
-        }
-        if let Some(lagging_wal_timeout) = item.get("lagging_wal_timeout") {
-            t_conf.lagging_wal_timeout = Some(parse_toml_duration(
-                "lagging_wal_timeout",
-                lagging_wal_timeout,
-            )?);
-        }
-        if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
-            t_conf.max_lsn_wal_lag =
-                Some(deserialize_from_item("max_lsn_wal_lag", max_lsn_wal_lag)?);
-        }
-        if let Some(trace_read_requests) = item.get("trace_read_requests") {
-            t_conf.trace_read_requests =
-                Some(trace_read_requests.as_bool().with_context(|| {
-                    "configure option trace_read_requests is not a bool".to_string()
-                })?);
-        }
-
-        if let Some(eviction_policy) = item.get("eviction_policy") {
-            t_conf.eviction_policy = Some(
-                deserialize_from_item("eviction_policy", eviction_policy)
-                    .context("parse eviction_policy")?,
-            );
-        }
-
-        if let Some(item) = item.get("min_resident_size_override") {
-            t_conf.min_resident_size_override = Some(
-                deserialize_from_item("min_resident_size_override", item)
-                    .context("parse min_resident_size_override")?,
-            );
-        }
-
-        if let Some(item) = item.get("evictions_low_residence_duration_metric_threshold") {
-            t_conf.evictions_low_residence_duration_metric_threshold = Some(parse_toml_duration(
-                "evictions_low_residence_duration_metric_threshold",
-                item,
-            )?);
-        }
-
-        if let Some(gc_feedback) = item.get("gc_feedback") {
-            t_conf.gc_feedback = Some(
-                gc_feedback
-                    .as_bool()
-                    .with_context(|| "configure option gc_feedback is not a bool".to_string())?,
-            );
-        }
-
-        Ok(t_conf)
-    }
-
     #[cfg(test)]
     pub fn test_repo_dir(test_name: &str) -> Utf8PathBuf {
-        Utf8PathBuf::from(format!("../tmp_check/test_{test_name}"))
+        let test_output_dir = std::env::var("TEST_OUTPUT").unwrap_or("../tmp_check".into());
+        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}"))
     }
 
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
@@ -1320,12 +1222,6 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_syncs: NonZeroUsize::new(
-                        remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS
-                    )
-                        .unwrap(),
-                    max_sync_errors: NonZeroU32::new(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
-                        .unwrap(),
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
                 },
                 "Remote storage config should correctly parse the local FS config and fill other storage defaults"
@@ -1386,8 +1282,6 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_syncs,
-                    max_sync_errors,
                     storage: RemoteStorageKind::AwsS3(S3Config {
                         bucket_name: bucket_name.clone(),
                         bucket_region: bucket_region.clone(),
@@ -1427,6 +1321,37 @@ trace_read_requests = {trace_read_requests}"#,
             conf.default_tenant_conf.trace_read_requests, trace_read_requests,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_incorrect_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"
+            [tenant_config]
+            checkpoint_distance = -1 # supposed to be an u64
+        "#
+        .to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let error = TenantConfOpt::try_from(item.to_owned()).unwrap_err();
+
+        let expected_error_str = "checkpoint_distance: invalid value: integer `-1`, expected u64";
+        assert_eq!(error.to_string(), expected_error_str);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_override_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"tenant_config={ min_resident_size_override =  400 }"#.to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let conf = TenantConfOpt::try_from(item.to_owned()).unwrap();
+
+        assert_eq!(conf.min_resident_size_override, Some(400));
 
         Ok(())
     }

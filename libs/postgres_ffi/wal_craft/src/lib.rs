@@ -14,6 +14,7 @@ macro_rules! xlog_utils_test {
     ($version:ident) => {
         #[path = "."]
         mod $version {
+            #[allow(unused_imports)]
             pub use postgres_ffi::$version::wal_craft_test_export::*;
             #[allow(clippy::duplicate_mod)]
             #[cfg(test)]

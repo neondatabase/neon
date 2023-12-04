@@ -72,7 +72,7 @@ class DdlForwardingContext:
         self.dbs: Dict[str, str] = {}
         self.roles: Dict[str, str] = {}
         self.fail = False
-        endpoint = "/management/api/v2/roles_and_databases"
+        endpoint = "/test/roles_and_databases"
         ddl_url = f"http://{host}:{port}{endpoint}"
         self.pg.configure(
             [
@@ -244,6 +244,19 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     if not result:
         raise AssertionError("Could not count databases")
     assert result[0] == 0, "Database 'failure' still exists after drop"
+
+    # We don't have compute_ctl, so here, so create neon_superuser here manually
+    cur.execute("CREATE ROLE neon_superuser NOLOGIN CREATEDB CREATEROLE")
+
+    with pytest.raises(psycopg2.InternalError):
+        cur.execute("ALTER ROLE neon_superuser LOGIN")
+
+    with pytest.raises(psycopg2.InternalError):
+        cur.execute("CREATE DATABASE trololobus WITH OWNER neon_superuser")
+
+    cur.execute("CREATE DATABASE trololobus")
+    with pytest.raises(psycopg2.InternalError):
+        cur.execute("ALTER DATABASE trololobus OWNER TO neon_superuser")
 
     conn.close()
 

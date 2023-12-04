@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg(target_os = "linux")]
 
 use anyhow::Context;
@@ -38,16 +40,6 @@ pub struct Args {
     /// The connection string for the Postgres file cache we should manage.
     #[arg(short, long)]
     pub pgconnstr: Option<String>,
-
-    /// Flag to signal that the Postgres file cache is on disk (i.e. not in memory aside from the
-    /// kernel's page cache), and therefore should not count against available memory.
-    //
-    // NB: Ideally this flag would directly refer to whether the file cache is in memory (rather
-    // than a roundabout way, via whether it's on disk), but in order to be backwards compatible
-    // during the switch away from an in-memory file cache, we had to default to the previous
-    // behavior.
-    #[arg(long)]
-    pub file_cache_on_disk: bool,
 
     /// The address we should listen on for connection requests. For the
     /// agent, this is 0.0.0.0:10301. For the informant, this is 127.0.0.1:10369.

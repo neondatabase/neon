@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::time::Duration;
 
+use pageserver_api::shard::TenantShardId;
 use regex::Regex;
 use remote_storage::RemotePath;
 use tokio_util::sync::CancellationToken;
@@ -26,14 +27,16 @@ use tracing::debug;
 use tracing::info;
 use tracing::warn;
 use utils::generation::Generation;
-use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use crate::config::PageServerConf;
 use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::virtual_file::on_fatal_io_error;
+use crate::virtual_file::MaybeFatalIo;
 
 // The number of keys in a DeletionList before we will proactively persist it
 // (without reaching a flush deadline).  This aims to deliver objects of the order
@@ -51,22 +54,22 @@ const FRONTEND_FLUSHING_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(super) struct DeletionOp {
-    pub(super) tenant_id: TenantId,
+    pub(super) tenant_shard_id: TenantShardId,
     pub(super) timeline_id: TimelineId,
     // `layers` and `objects` are both just lists of objects.  `layers` is used if you do not
     // have a config object handy to project it to a remote key, and need the consuming worker
     // to do it for you.
-    pub(super) layers: Vec<(LayerFileName, Generation)>,
+    pub(super) layers: Vec<(LayerFileName, LayerFileMetadata)>,
     pub(super) objects: Vec<RemotePath>,
 
-    /// The _current_ generation of the Tenant attachment in which we are enqueuing
+    /// The _current_ generation of the Tenant shard attachment in which we are enqueuing
     /// this deletion.
     pub(super) generation: Generation,
 }
 
 #[derive(Debug)]
 pub(super) struct RecoverOp {
-    pub(super) attached_tenants: HashMap<TenantId, Generation>,
+    pub(super) attached_tenants: HashMap<TenantShardId, Generation>,
 }
 
 #[derive(Debug)]
@@ -195,7 +198,7 @@ impl ListWriter {
                     debug!("Deletion header {header_path} not found, first start?");
                     Ok(None)
                 } else {
-                    Err(anyhow::anyhow!(e))
+                    on_fatal_io_error(&e, "reading deletion header");
                 }
             }
         }
@@ -203,7 +206,7 @@ impl ListWriter {
 
     async fn recover(
         &mut self,
-        attached_tenants: HashMap<TenantId, Generation>,
+        attached_tenants: HashMap<TenantShardId, Generation>,
     ) -> Result<(), anyhow::Error> {
         debug!(
             "recovering with {} attached tenants",
@@ -216,16 +219,9 @@ impl ListWriter {
         self.pending.sequence = validated_sequence + 1;
 
         let deletion_directory = self.conf.deletion_prefix();
-        let mut dir = match tokio::fs::read_dir(&deletion_directory).await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("Failed to open deletion list directory {deletion_directory}: {e:#}");
-
-                // Give up: if we can't read the deletion list directory, we probably can't
-                // write lists into it later, so the queue won't work.
-                return Err(e.into());
-            }
-        };
+        let mut dir = tokio::fs::read_dir(&deletion_directory)
+            .await
+            .fatal_err("read deletion directory");
 
         let list_name_pattern =
             Regex::new("(?<sequence>[a-zA-Z0-9]{16})-(?<version>[a-zA-Z0-9]{2}).list").unwrap();
@@ -233,7 +229,7 @@ impl ListWriter {
         let temp_extension = format!(".{TEMP_SUFFIX}");
         let header_path = self.conf.deletion_header_path();
         let mut seqs: Vec<u64> = Vec::new();
-        while let Some(dentry) = dir.next_entry().await? {
+        while let Some(dentry) = dir.next_entry().await.fatal_err("read deletion dentry") {
             let file_name = dentry.file_name();
             let dentry_str = file_name.to_string_lossy();
 
@@ -246,11 +242,9 @@ impl ListWriter {
                 info!("Cleaning up temporary file {dentry_str}");
                 let absolute_path =
                     deletion_directory.join(dentry.file_name().to_str().expect("non-Unicode path"));
-                if let Err(e) = tokio::fs::remove_file(&absolute_path).await {
-                    // Non-fatal error: we will just leave the file behind but not
-                    // try and load it.
-                    warn!("Failed to clean up temporary file {absolute_path}: {e:#}");
-                }
+                tokio::fs::remove_file(&absolute_path)
+                    .await
+                    .fatal_err("delete temp file");
 
                 continue;
             }
@@ -290,7 +284,9 @@ impl ListWriter {
         for s in seqs {
             let list_path = self.conf.deletion_list_path(s);
 
-            let list_bytes = tokio::fs::read(&list_path).await?;
+            let list_bytes = tokio::fs::read(&list_path)
+                .await
+                .fatal_err("read deletion list");
 
             let mut deletion_list = match serde_json::from_slice::<DeletionList>(&list_bytes) {
                 Ok(l) => l,
@@ -313,8 +309,8 @@ impl ListWriter {
                 // generation was issued to another node in the interval while we restarted,
                 // then we may treat deletion lists from the previous generation as if they
                 // belong to our currently attached generation, and proceed to validate & execute.
-                for (tenant_id, tenant_list) in &mut deletion_list.tenants {
-                    if let Some(attached_gen) = attached_tenants.get(tenant_id) {
+                for (tenant_shard_id, tenant_list) in &mut deletion_list.tenants {
+                    if let Some(attached_gen) = attached_tenants.get(tenant_shard_id) {
                         if attached_gen.previous() == tenant_list.generation {
                             tenant_list.generation = *attached_gen;
                         }
@@ -349,7 +345,7 @@ impl ListWriter {
         info!("Started deletion frontend worker");
 
         // Synchronous, but we only do it once per process lifetime so it's tolerable
-        if let Err(e) = create_dir_all(&self.conf.deletion_prefix()) {
+        if let Err(e) = create_dir_all(self.conf.deletion_prefix()) {
             tracing::error!(
                 "Failed to create deletion list directory {}, deletions will not be executed ({e})",
                 self.conf.deletion_prefix(),
@@ -392,25 +388,26 @@ impl ListWriter {
                     );
 
                     let mut layer_paths = Vec::new();
-                    for (layer, generation) in op.layers {
+                    for (layer, meta) in op.layers {
                         layer_paths.push(remote_layer_path(
-                            &op.tenant_id,
+                            &op.tenant_shard_id.tenant_id,
                             &op.timeline_id,
+                            meta.shard,
                             &layer,
-                            generation,
+                            meta.generation,
                         ));
                     }
                     layer_paths.extend(op.objects);
 
                     if !self.pending.push(
-                        &op.tenant_id,
+                        &op.tenant_shard_id,
                         &op.timeline_id,
                         op.generation,
                         &mut layer_paths,
                     ) {
                         self.flush().await;
                         let retry_succeeded = self.pending.push(
-                            &op.tenant_id,
+                            &op.tenant_shard_id,
                             &op.timeline_id,
                             op.generation,
                             &mut layer_paths,

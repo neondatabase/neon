@@ -1,5 +1,6 @@
 import time
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -15,7 +16,11 @@ from fixtures.utils import query_scalar
 # and then download them back.
 def test_basic_eviction(
     neon_env_builder: NeonEnvBuilder,
+    build_type: str,
 ):
+    if build_type == "debug":
+        pytest.skip("times out in debug builds")
+
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start(
@@ -247,34 +252,34 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     ps_http.evict_all_layers(tenant_id, timeline_id)
 
     def ensure_resident_and_remote_size_metrics():
-        log.info("ensure that all the layers are gone")
         resident_layers = list(env.pageserver.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
         # we have disabled all background loops, so, this should hold
-        assert len(resident_layers) == 0
+        assert len(resident_layers) == 0, "ensure that all the layers are gone"
 
         info = ps_http.layer_map_info(tenant_id, timeline_id)
         log.info("layer map dump: %s", info)
 
-        log.info("ensure that resident_physical_size metric is zero")
         resident_physical_size_metric = ps_http.get_timeline_metric(
             tenant_id, timeline_id, "pageserver_resident_physical_size"
         )
-        assert resident_physical_size_metric == 0
-        log.info("ensure that resident_physical_size metric corresponds to layer map dump")
+        assert (
+            resident_physical_size_metric == 0
+        ), "ensure that resident_physical_size metric is zero"
         assert resident_physical_size_metric == sum(
-            [layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote]
-        )
+            layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote
+        ), "ensure that resident_physical_size metric corresponds to layer map dump"
 
-        log.info("ensure that remote_physical_size metric matches layer map")
         remote_physical_size_metric = ps_http.get_timeline_metric(
             tenant_id, timeline_id, "pageserver_remote_physical_size"
         )
-        log.info("ensure that remote_physical_size metric corresponds to layer map dump")
         assert remote_physical_size_metric == sum(
             layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote
-        )
+        ), "ensure that remote_physical_size metric corresponds to layer map dump"
 
     log.info("before runnning GC, ensure that remote_physical size is zero")
+    # leaving index_part.json upload from successful compaction out will show
+    # up here as a mismatch between remove_physical_size and summed up layermap
+    # size
     ensure_resident_and_remote_size_metrics()
 
     log.info("run GC")

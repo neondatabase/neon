@@ -4,24 +4,30 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use anyhow::Context;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
-    imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
-    provider_config::ProviderConfig, web_identity_token::WebIdentityTokenCredentialsProvider,
+    imds::credentials::ImdsCredentialsProvider,
+    meta::credentials::CredentialsProviderChain,
+    provider_config::ProviderConfig,
+    retry::{RetryConfigBuilder, RetryMode},
+    web_identity_token::WebIdentityTokenCredentialsProvider,
+    BehaviorVersion,
 };
-use aws_credential_types::cache::CredentialsCache;
+use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::{
-    config::{Config, Region},
+    config::{AsyncSleep, Builder, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
-    primitives::ByteStream,
     types::{Delete, ObjectIdentifier},
     Client,
 };
-use aws_smithy_http::body::SdkBody;
+use aws_smithy_async::rt::sleep::TokioSleep;
+
+use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::byte_stream::ByteStream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
 use tokio::io::{self, AsyncRead};
@@ -30,8 +36,8 @@ use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, RemotePath, RemoteStorage, S3Config,
-    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -74,7 +80,6 @@ impl S3Bucket {
             // needed to access remote extensions bucket
             .or_else("token", {
                 let provider_conf = ProviderConfig::without_region().with_region(region.clone());
-
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
                     .build()
@@ -83,16 +88,31 @@ impl S3Bucket {
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
-        let mut config_builder = Config::builder()
+        // AWS SDK requires us to specify how the RetryConfig should sleep when it wants to back off
+        let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
+
+        // We do our own retries (see [`backoff::retry`]).  However, for the AWS SDK to enable rate limiting in response to throttling
+        // responses (e.g. 429 on too many ListObjectsv2 requests), we must provide a retry config.  We set it to use at most one
+        // attempt, and enable 'Adaptive' mode, which causes rate limiting to be enabled.
+        let mut retry_config = RetryConfigBuilder::new();
+        retry_config
+            .set_max_attempts(Some(1))
+            .set_mode(Some(RetryMode::Adaptive));
+
+        let mut config_builder = Builder::default()
+            .behavior_version(BehaviorVersion::v2023_11_09())
             .region(region)
-            .credentials_cache(CredentialsCache::lazy())
-            .credentials_provider(credentials_provider);
+            .identity_cache(IdentityCache::lazy().build())
+            .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
+            .retry_config(retry_config.build())
+            .sleep_impl(SharedAsyncSleep::from(sleep_impl));
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
             config_builder = config_builder
                 .endpoint_url(custom_endpoint)
                 .force_path_style(true);
         }
+
         let client = Client::from_conf(config_builder.build());
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
@@ -299,13 +319,13 @@ impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    /// See the doc for `RemoteStorage::list_prefixes`
-    /// Note: it wont include empty "directories"
-    async fn list_prefixes(
+    async fn list(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
+        let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -314,13 +334,13 @@ impl RemoteStorage for S3Bucket {
             .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
                     p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
                 p
             });
-
-        let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
 
@@ -328,14 +348,19 @@ impl RemoteStorage for S3Bucket {
             let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
-            let fetch_response = self
+            let mut request = self
                 .client
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
-                .set_max_keys(self.max_keys_per_list_response)
+                .set_max_keys(self.max_keys_per_list_response);
+
+            if let ListingMode::WithDelimiter = mode {
+                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+            }
+
+            let response = request
                 .send()
                 .await
                 .context("Failed to list S3 prefixes")
@@ -345,71 +370,35 @@ impl RemoteStorage for S3Bucket {
 
             metrics::BUCKET_METRICS
                 .req_seconds
-                .observe_elapsed(kind, &fetch_response, started_at);
+                .observe_elapsed(kind, &response, started_at);
 
-            let fetch_response = fetch_response?;
+            let response = response?;
 
-            document_keys.extend(
-                fetch_response
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
+            let keys = response.contents();
+            let empty = Vec::new();
+            let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
+
+            tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+
+            for object in keys {
+                let object_path = object.key().expect("response does not contain a key");
+                let remote_path = self.s3_object_to_relative_path(object_path);
+                result.keys.push(remote_path);
+            }
+
+            result.prefixes.extend(
+                prefixes
+                    .iter()
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            continuation_token = match fetch_response.next_continuation_token {
+            continuation_token = match response.next_continuation_token {
                 Some(new_token) => Some(new_token),
                 None => break,
             };
         }
 
-        Ok(document_keys)
-    }
-
-    /// See the doc for `RemoteStorage::list_files`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let kind = RequestKind::List;
-
-        let folder_name = folder
-            .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone());
-
-        // AWS may need to break the response into several parts
-        let mut continuation_token = None;
-        let mut all_files = vec![];
-        loop {
-            let _guard = self.permit(kind).await;
-            let started_at = start_measuring_requests(kind);
-
-            let response = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(folder_name.clone())
-                .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response)
-                .send()
-                .await
-                .context("Failed to list files in S3 bucket");
-
-            let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &response, started_at);
-
-            let response = response?;
-
-            for object in response.contents().unwrap_or_default() {
-                let object_path = object.key().expect("response does not contain a key");
-                let remote_path = self.s3_object_to_relative_path(object_path);
-                all_files.push(remote_path);
-            }
-            match response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-        Ok(all_files)
+        Ok(result)
     }
 
     async fn upload(
@@ -425,7 +414,7 @@ impl RemoteStorage for S3Bucket {
         let started_at = start_measuring_requests(kind);
 
         let body = Body::wrap_stream(ReaderStream::new(from));
-        let bytes_stream = ByteStream::new(SdkBody::from(body));
+        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
         let res = self
             .client
@@ -488,7 +477,7 @@ impl RemoteStorage for S3Bucket {
         for path in paths {
             let obj_id = ObjectIdentifier::builder()
                 .set_key(Some(self.relative_path_to_s3_object(path)))
-                .build();
+                .build()?;
             delete_objects.push(obj_id);
         }
 
@@ -499,7 +488,11 @@ impl RemoteStorage for S3Bucket {
                 .client
                 .delete_objects()
                 .bucket(self.bucket_name.clone())
-                .delete(Delete::builder().set_objects(Some(chunk.to_vec())).build())
+                .delete(
+                    Delete::builder()
+                        .set_objects(Some(chunk.to_vec()))
+                        .build()?,
+                )
                 .send()
                 .await;
 

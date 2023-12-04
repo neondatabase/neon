@@ -8,18 +8,23 @@ use crate::{
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
-    metrics::{Ids, USAGE_METRICS},
     protocol2::WithClientIp,
     stream::{PqStream, Stream},
+    usage_metrics::{Ids, USAGE_METRICS},
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use itertools::Itertools;
 use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use prometheus::{register_histogram_vec, HistogramVec};
-use std::{error::Error, io, ops::ControlFlow, sync::Arc, time::Instant};
+use prometheus::{
+    register_histogram, register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec,
+    IntGaugeVec,
+};
+use regex::Regex;
+use std::{error::Error, io, net::SocketAddr, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -105,18 +110,86 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "proxy_console_request_latency",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // proxy_wake_compute/proxy_get_role_info
+        &["request"],
+        // largest bucket = 2^16 * 0.2ms = 13s
+        exponential_buckets(0.0002, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_BY_CACHE_OUTCOME: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_allowed_ips_cache_misses",
+        "Number of cache hits/misses for allowed ips",
+        // hit/miss
+        &["outcome"],
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "semaphore_control_plane_token_acquire_seconds",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 3^16 * 0.00005ms = 2.15s
+        exponential_buckets(0.00005, 3.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_LIMIT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "semaphore_control_plane_limit",
+        "Current limit of the semaphore control plane",
+        &["limit"], // 2 counters
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTION_ACCEPTED_BY_SNI: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_accepted_connections_by_sni",
+        "Number of connections (per sni).",
+        &["kind"],
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_allowed_ips_number",
+        "Number of allowed ips",
+        vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0],
+    )
+    .unwrap()
+});
+
 pub struct LatencyTimer {
-    start: Instant,
+    // time since the stopwatch was started
+    start: Option<Instant>,
+    // accumulated time on the stopwatch
+    accumulated: std::time::Duration,
+    // label data
     protocol: &'static str,
     cache_miss: bool,
     pool_miss: bool,
     outcome: &'static str,
 }
 
+pub struct LatencyTimerPause<'a> {
+    timer: &'a mut LatencyTimer,
+}
+
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
-            start: Instant::now(),
+            start: Some(Instant::now()),
+            accumulated: std::time::Duration::ZERO,
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -124,6 +197,13 @@ impl LatencyTimer {
             // assume failed unless otherwise specified
             outcome: "failed",
         }
+    }
+
+    pub fn pause(&mut self) -> LatencyTimerPause<'_> {
+        // stop the stopwatch and record the time that we have accumulated
+        let start = self.start.take().expect("latency timer should be started");
+        self.accumulated += start.elapsed();
+        LatencyTimerPause { timer: self }
     }
 
     pub fn cache_miss(&mut self) {
@@ -139,9 +219,17 @@ impl LatencyTimer {
     }
 }
 
+impl Drop for LatencyTimerPause<'_> {
+    fn drop(&mut self) {
+        // start the stopwatch again
+        self.timer.start = Some(Instant::now());
+    }
+}
+
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
-        let duration = self.start.elapsed().as_secs_f64();
+        let duration =
+            self.start.map(|start| start.elapsed()).unwrap_or_default() + self.accumulated;
         COMPUTE_CONNECTION_LATENCY
             .with_label_values(&[
                 self.protocol,
@@ -149,7 +237,7 @@ impl Drop for LatencyTimer {
                 bool_to_str(self.pool_miss),
                 self.outcome,
             ])
-            .observe(duration)
+            .observe(duration.as_secs_f64())
     }
 }
 
@@ -171,11 +259,20 @@ static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+static NUM_BYTES_PROXIED_PER_CLIENT_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "proxy_io_bytes_per_client",
         "Number of bytes sent/received between client and backend.",
         crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
+    )
+    .unwrap()
+});
+
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes",
+        "Number of bytes sent/received between all clients and backends.",
+        &["direction"],
     )
     .unwrap()
 });
@@ -199,7 +296,7 @@ pub async fn task_main(
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
-                let (socket, _) = accept_result?;
+                let (socket, peer_addr) = accept_result?;
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
@@ -208,7 +305,9 @@ pub async fn task_main(
                         info!("accepted postgres client connection");
 
                         let mut socket = WithClientIp::new(socket);
+                        let mut peer_addr = peer_addr;
                         if let Some(ip) = socket.wait_for_addr().await? {
+                            peer_addr = ip;
                             tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
                         } else if config.require_client_ip {
                             bail!("missing required client IP");
@@ -219,7 +318,7 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp).await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr).await
                     }
                     .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
@@ -228,9 +327,18 @@ pub async fn task_main(
                     }),
                 );
             }
-            Some(Err(e)) = connections.join_next(), if !connections.is_empty() => {
-                if !e.is_panic() && !e.is_cancelled() {
-                    warn!("unexpected error from joined connection task: {e:?}");
+            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
+            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
+            // This only counts for this loop and it will be enabled again on next `select!`.
+            //
+            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
+            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
+            // not get called again, even if there are more connections to remove.
+            Some(res) = connections.join_next() => {
+                if let Err(e) = res {
+                    if !e.is_panic() && !e.is_cancelled() {
+                        warn!("unexpected error from joined connection task: {e:?}");
+                    }
                 }
             }
             _ = cancellation_token.cancelled() => {
@@ -300,6 +408,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
+    peer_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -333,7 +442,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names, peer_addr))
             .transpose();
 
         match result {
@@ -395,7 +504,17 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         if !read_buf.is_empty() {
                             bail!("data is sent before server replied with EncryptionResponse");
                         }
-                        stream = PqStream::new(raw.upgrade(tls.to_server_config()).await?);
+                        let tls_stream = raw.upgrade(tls.to_server_config()).await?;
+
+                        let (_, tls_server_end_point) = tls
+                            .cert_resolver
+                            .resolve(tls_stream.get_ref().1.server_name())
+                            .context("missing certificate")?;
+
+                        stream = PqStream::new(Stream::Tls {
+                            tls: Box::new(tls_stream),
+                            tls_server_end_point,
+                        });
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -448,7 +567,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
 }
 
 /// Try to connect to the compute node once.
-#[tracing::instrument(name = "connect_once", skip_all)]
+#[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     timeout: time::Duration,
@@ -535,6 +654,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             "api_console_other_server_error"
         }
         WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
+        WakeComputeError::TimeoutError => "timeout_error",
     };
     NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
 }
@@ -757,31 +877,35 @@ async fn prepare_client_connection(
 pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
-    aux: &MetricsAuxInfo,
+    aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let usage = USAGE_METRICS.register(Ids {
-        endpoint_id: aux.endpoint_id.to_string(),
-        branch_id: aux.branch_id.to_string(),
+        endpoint_id: aux.endpoint_id.clone(),
+        branch_id: aux.branch_id.clone(),
     });
 
-    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx"]);
+    let m_sent2 = NUM_BYTES_PROXIED_PER_CLIENT_COUNTER.with_label_values(&aux.traffic_labels("tx"));
     let mut client = MeasuredStream::new(
         client,
         |_| {},
         |cnt| {
             // Number of bytes we sent to the client (outbound).
             m_sent.inc_by(cnt as u64);
+            m_sent2.inc_by(cnt as u64);
             usage.record_egress(cnt as u64);
         },
     );
 
-    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx"]);
+    let m_recv2 = NUM_BYTES_PROXIED_PER_CLIENT_COUNTER.with_label_values(&aux.traffic_labels("rx"));
     let mut compute = MeasuredStream::new(
         compute,
         |_| {},
         |cnt| {
             // Number of bytes the client sent to the compute node (inbound).
             m_recv.inc_by(cnt as u64);
+            m_recv2.inc_by(cnt as u64);
         },
     );
 
@@ -795,7 +919,7 @@ pub async fn proxy_pass(
 /// Thin connection context.
 struct Client<'a, S> {
     /// The underlying libpq protocol stream.
-    stream: PqStream<S>,
+    stream: PqStream<Stream<S>>,
     /// Client credentials that we care about.
     creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
     /// KV-dictionary with PostgreSQL connection params.
@@ -809,7 +933,7 @@ struct Client<'a, S> {
 impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
-        stream: PqStream<S>,
+        stream: PqStream<Stream<S>>,
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
@@ -844,15 +968,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             allow_self_signed_compute,
         } = self;
 
+        let console_options = neon_options(params);
+
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
+            options: console_options.as_deref(),
         };
 
-        let latency_timer = LatencyTimer::new(mode.protocol_label());
+        let mut latency_timer = LatencyTimer::new(mode.protocol_label());
 
         let auth_result = match creds
-            .authenticate(&extra, &mut stream, mode.allow_cleartext(), config)
+            .authenticate(
+                &extra,
+                &mut stream,
+                mode.allow_cleartext(),
+                config,
+                &mut latency_timer,
+            )
             .await
         {
             Ok(auth_result) => auth_result,
@@ -899,6 +1032,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, &aux).await
+        proxy_pass(stream, node.stream, aux).await
     }
+}
+
+pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
+    #[allow(unstable_name_collisions)]
+    let options: String = params
+        .options_raw()?
+        .filter(|opt| is_neon_param(opt))
+        .sorted() // we sort it to use as cache key
+        .intersperse(" ") // TODO: use impl from std once it's stabilized
+        .collect();
+
+    // Don't even bother with empty options.
+    if options.is_empty() {
+        return None;
+    }
+
+    Some(options)
+}
+
+pub fn is_neon_param(bytes: &str) -> bool {
+    static RE: OnceCell<Regex> = OnceCell::new();
+    RE.get_or_init(|| Regex::new(r"^neon_\w+:").unwrap());
+
+    RE.get().unwrap().is_match(bytes)
 }

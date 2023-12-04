@@ -1,11 +1,8 @@
-use super::AuthSuccess;
+use super::{AuthSuccess, ComputeCredentials};
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    console::{
-        self,
-        provider::{CachedNodeInfo, ConsoleReqExtra},
-    },
-    stream,
+    proxy::LatencyTimer,
+    stream::{self, Stream},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -15,37 +12,39 @@ use tracing::{info, warn};
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
 pub async fn cleartext_hack(
-    api: &impl console::Api,
-    extra: &ConsoleReqExtra<'_>,
-    creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    latency_timer: &mut LatencyTimer,
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("cleartext auth flow override is enabled, proceeding");
+
+    // pause the timer while we communicate with the client
+    let _paused = latency_timer.pause();
+
     let password = AuthFlow::new(client)
         .begin(auth::CleartextPassword)
         .await?
         .authenticate()
         .await?;
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(password);
-
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: node,
+        value: ComputeCredentials::Password(password),
     })
 }
 
 /// Workaround for clients which don't provide an endpoint (project) name.
 /// Very similar to [`cleartext_hack`], but there's a specific password format.
 pub async fn password_hack(
-    api: &impl console::Api,
-    extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    latency_timer: &mut LatencyTimer,
+) -> auth::Result<AuthSuccess<ComputeCredentials>> {
     warn!("project not specified, resorting to the password hack auth flow");
+
+    // pause the timer while we communicate with the client
+    let _paused = latency_timer.pause();
+
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
         .await?
@@ -55,12 +54,9 @@ pub async fn password_hack(
     info!(project = &payload.endpoint, "received missing parameter");
     creds.project = Some(payload.endpoint);
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(payload.password);
-
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: node,
+        value: ComputeCredentials::Password(payload.password),
     })
 }

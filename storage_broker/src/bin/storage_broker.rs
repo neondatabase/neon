@@ -44,10 +44,11 @@ use storage_broker::{
 };
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
-use utils::project_git_version;
 use utils::sentry_init::init_sentry;
+use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const DEFAULT_CHAN_SIZE: usize = 32;
 const DEFAULT_ALL_KEYS_CHAN_SIZE: usize = 16384;
@@ -433,12 +434,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::init(
         LogFormat::from_config(&args.log_format)?,
         logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
     info!("version: {GIT_VERSION}");
-    ::metrics::set_build_info_metric(GIT_VERSION);
+    info!("build_tag: {BUILD_TAG}");
+    metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // On any shutdown signal, log receival and exit.
     std::thread::spawn(move || {

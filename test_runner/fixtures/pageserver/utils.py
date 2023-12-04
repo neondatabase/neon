@@ -1,7 +1,7 @@
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef
+from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef, ObjectTypeDef
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -235,10 +235,14 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+def assert_prefix_empty(
+    neon_env_builder: "NeonEnvBuilder",
+    prefix: Optional[str] = None,
+    allowed_postfix: Optional[str] = None,
+):
     response = list_prefix(neon_env_builder, prefix)
     keys = response["KeyCount"]
-    objects = response.get("Contents", [])
+    objects: List[ObjectTypeDef] = response.get("Contents", [])
     common_prefixes = response.get("CommonPrefixes", [])
 
     remote_storage = neon_env_builder.pageserver_remote_storage
@@ -249,7 +253,7 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
             # this has been seen in the wild by tests with the below contradicting logging
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-5322/6207777020/index.html#suites/3556ed71f2d69272a7014df6dcb02317/53b5c368b5a68865
             # this seems like a mock_s3 issue
-            log.warn(
+            log.warning(
                 f"contrading ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
             )
             keys = 0
@@ -257,11 +261,22 @@ def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str
             # this has been seen in one case with mock_s3:
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-4938/6000769714/index.html#suites/3556ed71f2d69272a7014df6dcb02317/ca01e4f4d8d9a11f
             # looking at moto impl, it might be there's a race with common prefix (sub directory) not going away with deletes
-            log.warn(
+            log.warning(
                 f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}"
             )
 
-    assert keys == 0, f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    filtered_count = 0
+    if allowed_postfix is None:
+        filtered_count = len(objects)
+    else:
+        for _obj in objects:
+            key: str = str(response.get("Key", []))
+            if not (allowed_postfix.endswith(key)):
+                filtered_count += 1
+
+    assert (
+        filtered_count == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):

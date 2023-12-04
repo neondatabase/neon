@@ -43,37 +43,52 @@ impl<'t> UninitializedTimeline<'t> {
     /// The caller is responsible for activating the timeline (function `.activate()`).
     pub(crate) fn finish_creation(mut self) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
-        let tenant_id = self.owning_tenant.tenant_id;
+        let tenant_shard_id = self.owning_tenant.tenant_shard_id;
 
-        let (new_timeline, uninit_mark) = self.raw_timeline.take().with_context(|| {
-            format!("No timeline for initalization found for {tenant_id}/{timeline_id}")
-        })?;
+        if self.raw_timeline.is_none() {
+            return Err(anyhow::anyhow!(
+                "No timeline for initialization found for {tenant_shard_id}/{timeline_id}"
+            ));
+        }
 
         // Check that the caller initialized disk_consistent_lsn
-        let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
+        let new_disk_consistent_lsn = self
+            .raw_timeline
+            .as_ref()
+            .expect("checked above")
+            .0
+            .get_disk_consistent_lsn();
+
         anyhow::ensure!(
             new_disk_consistent_lsn.is_valid(),
-            "new timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
+            "new timeline {tenant_shard_id}/{timeline_id} has invalid disk_consistent_lsn"
         );
 
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         match timelines.entry(timeline_id) {
             Entry::Occupied(_) => anyhow::bail!(
-                "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
+                "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
+                // after taking here should be no fallible operations, because the drop guard will not
+                // cleanup after and would block for example the tenant deletion
+                let (new_timeline, uninit_mark) =
+                    self.raw_timeline.take().expect("already checked");
+
+                // this is the mutual exclusion between different retries to create the timeline;
+                // this should be an assertion.
                 uninit_mark.remove_uninit_mark().with_context(|| {
                     format!(
-                        "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
+                        "Failed to remove uninit mark file for timeline {tenant_shard_id}/{timeline_id}"
                     )
                 })?;
                 v.insert(Arc::clone(&new_timeline));
 
                 new_timeline.maybe_spawn_flush_loop();
+
+                Ok(new_timeline)
             }
         }
-
-        Ok(new_timeline)
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -119,7 +134,7 @@ impl<'t> UninitializedTimeline<'t> {
             .with_context(|| {
                 format!(
                     "No raw timeline {}/{} found",
-                    self.owning_tenant.tenant_id, self.timeline_id
+                    self.owning_tenant.tenant_shard_id, self.timeline_id
                 )
             })?
             .0)
@@ -129,7 +144,7 @@ impl<'t> UninitializedTimeline<'t> {
 impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
         if let Some((_, uninit_mark)) = self.raw_timeline.take() {
-            let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_id, timeline_id = %self.timeline_id).entered();
+            let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_shard_id.tenant_id, shard_id = %self.owning_tenant.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id).entered();
             error!("Timeline got dropped without initializing, cleaning its files");
             cleanup_timeline_directory(uninit_mark);
         }

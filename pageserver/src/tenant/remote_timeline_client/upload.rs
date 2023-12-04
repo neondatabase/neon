@@ -1,15 +1,19 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
 use anyhow::{bail, Context};
+use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
+use pageserver_api::shard::TenantShardId;
 use std::io::ErrorKind;
 use tokio::fs;
 
 use super::Generation;
 use crate::{
     config::PageServerConf,
-    tenant::remote_timeline_client::{index::IndexPart, remote_index_path, remote_path},
+    tenant::remote_timeline_client::{
+        index::IndexPart, remote_index_path, remote_initdb_archive_path, remote_path,
+    },
 };
 use remote_storage::GenericRemoteStorage;
 use utils::id::{TenantId, TimelineId};
@@ -21,7 +25,7 @@ use tracing::info;
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
-    tenant_id: &TenantId,
+    tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     generation: Generation,
     index_part: &'a IndexPart,
@@ -33,16 +37,17 @@ pub(super) async fn upload_index_part<'a>(
     });
     pausable_failpoint!("before-upload-index-pausable");
 
-    let index_part_bytes =
-        serde_json::to_vec(&index_part).context("serialize index part file into bytes")?;
+    let index_part_bytes = index_part
+        .to_s3_bytes()
+        .context("serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
+    let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
-        .with_context(|| format!("upload index part for '{tenant_id} / {timeline_id}'"))
+        .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -72,6 +77,8 @@ pub(super) async fn upload_timeline_layer<'a>(
             // upload. However, a nonexistent file can also be indicative of
             // something worse, like when a file is scheduled for upload before
             // it has been written to disk yet.
+            //
+            // This is tested against `test_compaction_delete_before_upload`
             info!(path = %source_path, "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more.");
             return Ok(());
         }
@@ -100,4 +107,23 @@ pub(super) async fn upload_timeline_layer<'a>(
         .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
     Ok(())
+}
+
+/// Uploads the given `initdb` data to the remote storage.
+pub(crate) async fn upload_initdb_dir(
+    storage: &GenericRemoteStorage,
+    tenant_id: &TenantId,
+    timeline_id: &TimelineId,
+    initdb_dir: Bytes,
+) -> anyhow::Result<()> {
+    tracing::trace!("uploading initdb dir");
+
+    let size = initdb_dir.len();
+    let bytes = tokio::io::BufReader::new(std::io::Cursor::new(initdb_dir));
+
+    let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
+    storage
+        .upload_storage_object(bytes, size, &remote_path)
+        .await
+        .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }

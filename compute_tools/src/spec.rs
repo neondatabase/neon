@@ -24,7 +24,7 @@ fn do_control_plane_request(
 ) -> Result<ControlPlaneSpecResponse, (bool, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
-        .header("Authorization", jwt)
+        .header("Authorization", format!("Bearer {}", jwt))
         .send()
         .map_err(|e| {
             (
@@ -68,7 +68,7 @@ pub fn get_spec_from_control_plane(
     base_uri: &str,
     compute_id: &str,
 ) -> Result<Option<ComputeSpec>> {
-    let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
+    let cp_uri = format!("{base_uri}/compute/api/v2/computes/{compute_id}/spec");
     let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
         Ok(v) => v,
         Err(_) => "".to_string(),
@@ -116,19 +116,6 @@ pub fn get_spec_from_control_plane(
 
     // All attempts failed, return error.
     spec
-}
-
-/// It takes cluster specification and does the following:
-/// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.
-/// - Update `pg_hba.conf` to allow external connections.
-pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
-    // File `postgresql.conf` is no longer included into `basebackup`, so just
-    // always write all config into it creating new file.
-    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec, None)?;
-
-    update_pg_hba(pgdata_path)?;
-
-    Ok(())
 }
 
 /// Check `pg_hba.conf` and update if needed to allow external connections.
@@ -265,6 +252,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         let action = if let Some(r) = pg_role {
             if (r.encrypted_password.is_none() && role.encrypted_password.is_some())
                 || (r.encrypted_password.is_some() && role.encrypted_password.is_none())
+                || !r.bypassrls.unwrap_or(false)
+                || !r.replication.unwrap_or(false)
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
@@ -296,7 +285,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         match action {
             RoleAction::None => {}
             RoleAction::Update => {
-                let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
+                let mut query: String =
+                    format!("ALTER ROLE {} BYPASSRLS REPLICATION", name.pg_quote());
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
@@ -668,6 +658,36 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             client.simple_query(query)?;
         }
     }
+
+    Ok(())
+}
+
+/// Run CREATE and ALTER EXTENSION neon UPDATE for postgres database
+#[instrument(skip_all)]
+pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
+    info!("handle extension neon");
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon";
+    client.simple_query(query)?;
+
+    query = "CREATE EXTENSION IF NOT EXISTS neon WITH SCHEMA neon";
+    info!("create neon extension with query: {}", query);
+    client.simple_query(query)?;
+
+    query = "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'";
+    client.simple_query(query)?;
+
+    query = "ALTER EXTENSION neon SET SCHEMA neon";
+    info!("alter neon extension schema with query: {}", query);
+    client.simple_query(query)?;
+
+    // this will be a no-op if extension is already up to date,
+    // which may happen in two cases:
+    // - extension was just installed
+    // - extension was already installed and is up to date
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension schema with query: {}", query);
+    client.simple_query(query)?;
 
     Ok(())
 }

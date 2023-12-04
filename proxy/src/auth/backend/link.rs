@@ -106,7 +106,7 @@ pub(super) async fn authenticate(
         reported_auth_ok: true,
         value: NodeInfo {
             config,
-            aux: db_info.aux.into(),
+            aux: db_info.aux,
             allow_self_signed_compute: false, // caller may override
         },
     })

@@ -11,13 +11,14 @@ use compute_api::spec::ComputeMode;
 use control_plane::attachment_service::AttachmentService;
 use control_plane::endpoint::ComputeControlPlane;
 use control_plane::local_env::LocalEnv;
-use control_plane::pageserver::PageServerNode;
+use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
+use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
 use pageserver_api::{
-    DEFAULT_HTTP_LISTEN_ADDR as DEFAULT_PAGESERVER_HTTP_ADDR,
-    DEFAULT_PG_LISTEN_ADDR as DEFAULT_PAGESERVER_PG_ADDR,
+    DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
 use postgres_backend::AuthType;
 use safekeeper_api::{
@@ -46,8 +47,8 @@ const DEFAULT_PG_VERSION: &str = "15";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/";
 
-fn default_conf() -> String {
-    format!(
+fn default_conf(num_pageservers: u16) -> String {
+    let mut template = format!(
         r#"
 # Default built-in configuration, defined in main.rs
 control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
@@ -55,21 +56,33 @@ control_plane_api = '{DEFAULT_PAGESERVER_CONTROL_PLANE_API}'
 [broker]
 listen_addr = '{DEFAULT_BROKER_ADDR}'
 
-[[pageservers]]
-id = {DEFAULT_PAGESERVER_ID}
-listen_pg_addr = '{DEFAULT_PAGESERVER_PG_ADDR}'
-listen_http_addr = '{DEFAULT_PAGESERVER_HTTP_ADDR}'
-pg_auth_type = '{trust_auth}'
-http_auth_type = '{trust_auth}'
-
 [[safekeepers]]
 id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
 
 "#,
-        trust_auth = AuthType::Trust,
-    )
+    );
+
+    for i in 0..num_pageservers {
+        let pageserver_id = NodeId(DEFAULT_PAGESERVER_ID.0 + i as u64);
+        let pg_port = DEFAULT_PAGESERVER_PG_PORT + i;
+        let http_port = DEFAULT_PAGESERVER_HTTP_PORT + i;
+
+        template += &format!(
+            r#"
+[[pageservers]]
+id = {pageserver_id}
+listen_pg_addr = '127.0.0.1:{pg_port}'
+listen_http_addr = '127.0.0.1:{http_port}'
+pg_auth_type = '{trust_auth}'
+http_auth_type = '{trust_auth}'
+"#,
+            trust_auth = AuthType::Trust,
+        )
+    }
+
+    template
 }
 
 ///
@@ -295,6 +308,9 @@ fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId
 }
 
 fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
+    let num_pageservers = init_match
+        .get_one::<u16>("num-pageservers")
+        .expect("num-pageservers arg has a default");
     // Create config file
     let toml_file: String = if let Some(config_path) = init_match.get_one::<PathBuf>("config") {
         // load and parse the file
@@ -306,7 +322,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
         })?
     } else {
         // Built-in default config
-        default_conf()
+        default_conf(*num_pageservers)
     };
 
     let pg_version = init_match
@@ -319,6 +335,9 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
     let force = init_match.get_flag("force");
     env.init(pg_version, force)
         .context("Failed to initialize neon repository")?;
+
+    // Create remote storage location for default LocalFs remote storage
+    std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
     // Initialize pageserver, create initial tenant and timeline.
     for ps_conf in &env.pageservers {
@@ -396,6 +415,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 None,
                 None,
                 Some(pg_version),
+                None,
             )?;
             let new_timeline_id = timeline_info.timeline_id;
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -433,6 +453,15 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
             println!("tenant {tenant_id} successfully configured on the pageserver");
         }
+        Some(("migrate", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+            let new_pageserver = get_pageserver(env, matches)?;
+            let new_pageserver_id = new_pageserver.conf.id;
+
+            migrate_tenant(env, tenant_id, new_pageserver)?;
+            println!("tenant {tenant_id} migrated to {}", new_pageserver_id);
+        }
+
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
     }
@@ -459,8 +488,16 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info =
-                pageserver.timeline_create(tenant_id, None, None, None, Some(pg_version))?;
+            let new_timeline_id_opt = parse_timeline_id(create_match)?;
+
+            let timeline_info = pageserver.timeline_create(
+                tenant_id,
+                new_timeline_id_opt,
+                None,
+                None,
+                Some(pg_version),
+                None,
+            )?;
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -547,6 +584,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 start_lsn,
                 Some(ancestor_timeline_id),
                 None,
+                None,
             )?;
             let new_timeline_id = timeline_info.timeline_id;
 
@@ -573,11 +611,9 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
     };
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
-    // All subcommands take an optional --tenant-id option
-    let tenant_id = get_tenant_id(sub_args, env)?;
-
     match sub_name {
         "list" => {
+            let tenant_id = get_tenant_id(sub_args, env)?;
             let timeline_infos = get_timeline_infos(env, &tenant_id).unwrap_or_else(|e| {
                 eprintln!("Failed to load timeline info: {}", e);
                 HashMap::new()
@@ -637,6 +673,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
             println!("{table}");
         }
         "create" => {
+            let tenant_id = get_tenant_id(sub_args, env)?;
             let branch_name = sub_args
                 .get_one::<String>("branch-name")
                 .map(|s| s.as_str())
@@ -681,6 +718,18 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
             };
 
+            match (mode, hot_standby) {
+                (ComputeMode::Static(_), true) => {
+                    bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                }
+                (ComputeMode::Primary, true) => {
+                    bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                }
+                _ => {}
+            }
+
+            cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+
             cplane.new_endpoint(
                 &endpoint_id,
                 tenant_id,
@@ -693,8 +742,6 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
             )?;
         }
         "start" => {
-            let pg_port: Option<u16> = sub_args.get_one::<u16>("pg-port").copied();
-            let http_port: Option<u16> = sub_args.get_one::<u16>("http-port").copied();
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
@@ -723,80 +770,46 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     env.safekeepers.iter().map(|sk| sk.id).collect()
                 };
 
-            let endpoint = cplane.endpoints.get(endpoint_id.as_str());
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("endpoint {endpoint_id} not found"))?;
+
+            cplane.check_conflicting_endpoints(
+                endpoint.mode,
+                endpoint.tenant_id,
+                endpoint.timeline_id,
+            )?;
 
             let ps_conf = env.get_pageserver_conf(pageserver_id)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
-                let claims = Claims::new(Some(tenant_id), Scope::Tenant);
+                let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
 
                 Some(env.generate_auth_token(&claims)?)
             } else {
                 None
             };
 
-            let hot_standby = sub_args
-                .get_one::<bool>("hot-standby")
-                .copied()
-                .unwrap_or(false);
-
-            if let Some(endpoint) = endpoint {
-                match (&endpoint.mode, hot_standby) {
-                    (ComputeMode::Static(_), true) => {
-                        bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
-                    }
-                    (ComputeMode::Primary, true) => {
-                        bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
-                    }
-                    _ => {}
-                }
-                println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
-            } else {
-                let branch_name = sub_args
-                    .get_one::<String>("branch-name")
-                    .map(|s| s.as_str())
-                    .unwrap_or(DEFAULT_BRANCH_NAME);
-                let timeline_id = env
-                    .get_branch_timeline_id(branch_name, tenant_id)
-                    .ok_or_else(|| {
-                        anyhow!("Found no timeline id for branch name '{branch_name}'")
-                    })?;
-                let lsn = sub_args
-                    .get_one::<String>("lsn")
-                    .map(|lsn_str| Lsn::from_str(lsn_str))
-                    .transpose()
-                    .context("Failed to parse Lsn from the request")?;
-                let pg_version = sub_args
-                    .get_one::<u32>("pg-version")
-                    .copied()
-                    .context("Failed to `pg-version` from the argument string")?;
-
-                let mode = match (lsn, hot_standby) {
-                    (Some(lsn), false) => ComputeMode::Static(lsn),
-                    (None, true) => ComputeMode::Replica,
-                    (None, false) => ComputeMode::Primary,
-                    (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+            println!("Starting existing endpoint {endpoint_id}...");
+            endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
+        }
+        "reconfigure" => {
+            let endpoint_id = sub_args
+                .get_one::<String>("endpoint_id")
+                .ok_or_else(|| anyhow!("No endpoint ID provided to reconfigure"))?;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let pageserver_id =
+                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
+                    Some(NodeId(
+                        id_str.parse().context("while parsing pageserver id")?,
+                    ))
+                } else {
+                    None
                 };
-
-                // when used with custom port this results in non obvious behaviour
-                // port is remembered from first start command, i e
-                // start --port X
-                // stop
-                // start <-- will also use port X even without explicit port argument
-                println!("Starting new endpoint {endpoint_id} (PostgreSQL v{pg_version}) on timeline {timeline_id} ...");
-
-                let ep = cplane.new_endpoint(
-                    endpoint_id,
-                    tenant_id,
-                    timeline_id,
-                    pg_port,
-                    http_port,
-                    pg_version,
-                    mode,
-                    pageserver_id,
-                )?;
-                ep.start(&auth_token, safekeepers, remote_ext_config)?;
-            }
+            endpoint.reconfigure(pageserver_id)?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -849,20 +862,20 @@ fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Res
     }
 }
 
+fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
+    let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
+        NodeId(id_str.parse().context("while parsing pageserver id")?)
+    } else {
+        DEFAULT_PAGESERVER_ID
+    };
+
+    Ok(PageServerNode::from_env(
+        env,
+        env.get_pageserver_conf(node_id)?,
+    ))
+}
+
 fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageServerNode> {
-        let node_id = if let Some(id_str) = args.get_one::<String>("pageserver-id") {
-            NodeId(id_str.parse().context("while parsing pageserver id")?)
-        } else {
-            DEFAULT_PAGESERVER_ID
-        };
-
-        Ok(PageServerNode::from_env(
-            env,
-            env.get_pageserver_conf(node_id)?,
-        ))
-    }
-
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
             if let Err(e) = get_pageserver(env, subcommand_args)?
@@ -886,6 +899,20 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         }
 
         Some(("restart", subcommand_args)) => {
+            let pageserver = get_pageserver(env, subcommand_args)?;
+            //TODO what shutdown strategy should we use here?
+            if let Err(e) = pageserver.stop(false) {
+                eprintln!("pageserver stop failed: {}", e);
+                exit(1);
+            }
+
+            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+                eprintln!("pageserver start failed: {e}");
+                exit(1);
+            }
+        }
+
+        Some(("migrate", subcommand_args)) => {
             let pageserver = get_pageserver(env, subcommand_args)?;
             //TODO what shutdown strategy should we use here?
             if let Err(e) = pageserver.stop(false) {
@@ -1185,7 +1212,7 @@ fn cli() -> Command {
     let remote_ext_config_args = Arg::new("remote-ext-config")
         .long("remote-ext-config")
         .num_args(1)
-        .help("Configure the S3 bucket that we search for extensions in.")
+        .help("Configure the remote extensions storage proxy gateway to request for extensions.")
         .required(false);
 
     let lsn_arg = Arg::new("lsn")
@@ -1206,6 +1233,13 @@ fn cli() -> Command {
         .help("Force initialization even if the repository is not empty")
         .required(false);
 
+    let num_pageservers_arg = Arg::new("num-pageservers")
+        .value_parser(value_parser!(u16))
+        .long("num-pageservers")
+        .help("How many pageservers to create (default 1)")
+        .required(false)
+        .default_value("1");
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1213,6 +1247,7 @@ fn cli() -> Command {
             Command::new("init")
                 .about("Initialize a new Neon repository, preparing configs for services to start with")
                 .arg(pageserver_config_args.clone())
+                .arg(num_pageservers_arg.clone())
                 .arg(
                     Arg::new("config")
                         .long("config")
@@ -1240,6 +1275,7 @@ fn cli() -> Command {
             .subcommand(Command::new("create")
                 .about("Create a new blank timeline")
                 .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone())
                 .arg(branch_name_arg.clone())
                 .arg(pg_version_arg.clone())
             )
@@ -1283,6 +1319,10 @@ fn cli() -> Command {
             .subcommand(Command::new("config")
                 .arg(tenant_id_arg.clone())
                 .arg(Arg::new("config").short('c').num_args(1).action(ArgAction::Append).required(false)))
+            .subcommand(Command::new("migrate")
+                .about("Migrate a tenant from one pageserver to another")
+                .arg(tenant_id_arg.clone())
+                .arg(pageserver_id_arg.clone()))
         )
         .subcommand(
             Command::new("pageserver")
@@ -1357,22 +1397,19 @@ fn cli() -> Command {
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
                     .arg(endpoint_id_arg.clone())
-                    .arg(tenant_id_arg.clone())
-                    .arg(branch_name_arg.clone())
-                    .arg(timeline_id_arg.clone())
-                    .arg(lsn_arg)
-                    .arg(pg_port_arg)
-                    .arg(http_port_arg)
                     .arg(endpoint_pageserver_id_arg.clone())
-                    .arg(pg_version_arg)
-                    .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
                     .arg(remote_ext_config_args)
+                )
+                .subcommand(Command::new("reconfigure")
+                            .about("Reconfigure the endpoint")
+                            .arg(endpoint_pageserver_id_arg)
+                            .arg(endpoint_id_arg.clone())
+                            .arg(tenant_id_arg.clone())
                 )
                 .subcommand(
                     Command::new("stop")
                     .arg(endpoint_id_arg)
-                    .arg(tenant_id_arg.clone())
                     .arg(
                         Arg::new("destroy")
                             .help("Also delete data directory (now optional, should be default in future)")

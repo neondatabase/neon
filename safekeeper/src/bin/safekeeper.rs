@@ -8,6 +8,7 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use remote_storage::RemoteStorageConfig;
+use sd_notify::NotifyState;
 use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinError;
@@ -38,11 +39,11 @@ use safekeeper::{http, WAL_REMOVER_RUNTIME};
 use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
-use utils::auth::{JwtAuth, Scope};
+use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::{
     id::NodeId,
     logging::{self, LogFormat},
-    project_git_version,
+    project_build_tag, project_git_version,
     sentry_init::init_sentry,
     tcp_listener,
 };
@@ -51,6 +52,7 @@ const PID_FILE_NAME: &str = "safekeeper.pid";
 const ID_FILE_NAME: &str = "safekeeper.id";
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 const ABOUT: &str = r#"
 A fleet of safekeepers is responsible for reliably storing WAL received from
@@ -201,9 +203,11 @@ async fn main() -> anyhow::Result<()> {
     logging::init(
         LogFormat::from_config(&args.log_format)?,
         logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
     )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
+    info!("buld_tag: {BUILD_TAG}");
 
     let args_workdir = &args.datadir;
     let workdir = args_workdir.canonicalize_utf8().with_context(|| {
@@ -249,10 +253,9 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Some(path) => {
-            info!("loading http auth JWT key from {path}");
-            Some(Arc::new(
-                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-            ))
+            info!("loading http auth JWT key(s) from {path}");
+            let jwt_auth = JwtAuth::from_key_path(path).context("failed to load the auth key")?;
+            Some(Arc::new(SwappableJwtAuth::new(jwt_auth)))
         }
     };
 
@@ -423,7 +426,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .map(|res| ("WAL remover".to_owned(), res));
     tasks_handles.push(Box::pin(wal_remover_handle));
 
-    set_build_info_metric(GIT_VERSION);
+    set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // TODO: update tokio-stream, convert to real async Stream with
     // SignalStream, map it to obtain missing signal name, combine streams into
@@ -431,6 +434,12 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let mut sigquit_stream = signal(SignalKind::quit())?;
     let mut sigint_stream = signal(SignalKind::interrupt())?;
     let mut sigterm_stream = signal(SignalKind::terminate())?;
+
+    // Notify systemd that we are ready. This is important as currently loading
+    // timelines takes significant time (~30s in busy regions).
+    if let Err(e) = sd_notify::notify(true, &[NotifyState::Ready]) {
+        warn!("systemd notify failed: {:?}", e);
+    }
 
     tokio::select! {
         Some((task_name, res)) = tasks_handles.next()=> {

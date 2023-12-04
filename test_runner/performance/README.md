@@ -4,15 +4,17 @@ First make a release build. The `-s` flag silences a lot of output, and makes it
 easier to see if you have compile errors without scrolling up.
 `BUILD_TYPE=release CARGO_BUILD_FLAGS="--features=testing" make -s -j8`
 
+You may also need to run `./scripts/pysync`.
+
 Then run the tests
-`NEON_BIN=./target/release poetry run pytest test_runner/performance"`
+`DEFAULT_PG_VERSION=15 NEON_BIN=./target/release poetry run pytest test_runner/performance`
 
 Some handy pytest flags for local development:
 - `-x` tells pytest to stop on first error
 - `-s` shows test output
 - `-k` selects a test to run
 - `--timeout=0` disables our default timeout of 300s (see `setup.cfg`)
-- `--cleanup-test-ouput` cleans up after each test
+- `--preserve-database-files` to skip cleanup
 
 # What performance tests do we have and how we run them
 

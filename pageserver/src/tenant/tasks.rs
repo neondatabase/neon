@@ -12,7 +12,7 @@ use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::completion;
+use utils::{backoff, completion};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| {
@@ -86,7 +86,7 @@ pub fn start_background_loops(
     tenant: &Arc<Tenant>,
     background_jobs_can_start: Option<&completion::Barrier>,
 ) {
-    let tenant_id = tenant.tenant_id;
+    let tenant_id = tenant.tenant_shard_id.tenant_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
@@ -139,7 +139,10 @@ pub fn start_background_loops(
 /// Compaction task's main loop
 ///
 async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    let wait_duration = Duration::from_secs(2);
+    const MAX_BACKOFF_SECS: f64 = 300.0;
+    // How many errors we have seen consequtively
+    let mut error_run_count = 0;
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
@@ -176,14 +179,28 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             } else {
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
-                    error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
+                    let wait_duration = backoff::exponential_backoff_duration_seconds(
+                        error_run_count + 1,
+                        1.0,
+                        MAX_BACKOFF_SECS,
+                    );
+                    error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
+                    error!(
+                        "Compaction failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
+                    );
                     wait_duration
                 } else {
+                    error_run_count = 0;
                     period
                 }
             };
 
             warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+
+            // Perhaps we did no work and the walredo process has been idle for some time:
+            // give it a chance to shut down to avoid leaving walredo process running indefinitely.
+            tenant.walredo_mgr.maybe_quiesce(period * 10);
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -202,7 +219,10 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 /// GC task's main loop
 ///
 async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    let wait_duration = Duration::from_secs(2);
+    const MAX_BACKOFF_SECS: f64 = 300.0;
+    // How many errors we have seen consequtively
+    let mut error_run_count = 0;
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         // GC might require downloading, to find the cutoff LSN that corresponds to the
@@ -241,12 +261,22 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             } else {
                 // Run gc
                 let res = tenant
-                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx)
+                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
                     .await;
                 if let Err(e) = res {
-                    error!("Gc failed, retrying in {:?}: {e:?}", wait_duration);
+                    let wait_duration = backoff::exponential_backoff_duration_seconds(
+                        error_run_count + 1,
+                        1.0,
+                        MAX_BACKOFF_SECS,
+                    );
+                    error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
+                    error!(
+                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
+                    );
                     wait_duration
                 } else {
+                    error_run_count = 0;
                     period
                 }
             };
@@ -335,7 +365,7 @@ pub(crate) fn warn_when_period_overrun(
         // humantime does no significant digits clamping whereas Duration's debug is a bit more
         // intelligent. however it makes sense to keep the "configuration format" for period, even
         // though there's no way to output the actual config value.
-        warn!(
+        info!(
             ?elapsed,
             period = %humantime::format_duration(period),
             ?task,

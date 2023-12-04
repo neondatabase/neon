@@ -6,19 +6,15 @@
 //!   * [`s3_bucket`] uses AWS S3 bucket as an external storage
 //!   * [`azure_blob`] allows to use Azure Blob storage as an external storage
 //!
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod azure_blob;
 mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
 
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -34,12 +30,6 @@ pub use self::{
 };
 use s3_bucket::RequestKind;
 
-/// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
-/// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
-/// during start (where local and remote timelines are compared and initial sync tasks are scheduled) and timeline attach.
-/// Both cases may trigger timeline download, that might download a lot of layers. This concurrency is limited by the clients internally, if needed.
-pub const DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS: usize = 50;
-pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
@@ -129,6 +119,22 @@ impl RemotePath {
     }
 }
 
+/// We don't need callers to be able to pass arbitrary delimiters: just control
+/// whether listings will use a '/' separator or not.
+///
+/// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
+/// NoDelimiter mode will only populate `keys`.
+pub enum ListingMode {
+    WithDelimiter,
+    NoDelimiter,
+}
+
+#[derive(Default)]
+pub struct Listing {
+    pub prefixes: Vec<RemotePath>,
+    pub keys: Vec<RemotePath>,
+}
+
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
@@ -141,8 +147,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError>;
-
+    ) -> Result<Vec<RemotePath>, DownloadError> {
+        let result = self
+            .list(prefix, ListingMode::WithDelimiter)
+            .await?
+            .prefixes;
+        Ok(result)
+    }
     /// Lists all files in directory "recursively"
     /// (not really recursively, because AWS has a flat namespace)
     /// Note: This is subtely different than list_prefixes,
@@ -154,7 +165,16 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
     /// See `test_real_s3.rs` for more details.
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
+    async fn list_files(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let result = self.list(prefix, ListingMode::NoDelimiter).await?.keys;
+        Ok(result)
+    }
+
+    async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        _mode: ListingMode,
+    ) -> anyhow::Result<Listing, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -205,6 +225,9 @@ pub enum DownloadError {
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
     NotFound,
+    /// A cancellation token aborted the download, typically during
+    /// tenant detach or process shutdown.
+    Cancelled,
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -215,6 +238,7 @@ impl std::fmt::Display for DownloadError {
             DownloadError::BadInput(e) => {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
+            DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
@@ -234,6 +258,19 @@ pub enum GenericRemoteStorage {
 }
 
 impl GenericRemoteStorage {
+    pub async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+    ) -> anyhow::Result<Listing, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.list(prefix, mode).await,
+            Self::AwsS3(s) => s.list(prefix, mode).await,
+            Self::AzureBlob(s) => s.list(prefix, mode).await,
+            Self::Unreliable(s) => s.list(prefix, mode).await,
+        }
+    }
+
     // A function for listing all the files in a "directory"
     // Example:
     // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
@@ -394,10 +431,6 @@ pub struct StorageMetadata(HashMap<String, String>);
 /// External backup storage configuration, enough for creating a client for that storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteStorageConfig {
-    /// Max allowed number of concurrent sync operations between the API user and the remote storage.
-    pub max_concurrent_syncs: NonZeroUsize,
-    /// Max allowed errors before the sync task is considered failed and evicted.
-    pub max_sync_errors: NonZeroU32,
     /// The storage connection configuration.
     pub storage: RemoteStorageKind,
 }
@@ -493,18 +526,6 @@ impl RemoteStorageConfig {
 
         let use_azure = container_name.is_some() && container_region.is_some();
 
-        let max_concurrent_syncs = NonZeroUsize::new(
-            parse_optional_integer("max_concurrent_syncs", toml)?
-                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS),
-        )
-        .context("Failed to parse 'max_concurrent_syncs' as a positive integer")?;
-
-        let max_sync_errors = NonZeroU32::new(
-            parse_optional_integer("max_sync_errors", toml)?
-                .unwrap_or(DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS),
-        )
-        .context("Failed to parse 'max_sync_errors' as a positive integer")?;
-
         let default_concurrency_limit = if use_azure {
             DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
         } else {
@@ -586,11 +607,7 @@ impl RemoteStorageConfig {
             }
         };
 
-        Ok(Some(RemoteStorageConfig {
-            max_concurrent_syncs,
-            max_sync_errors,
-            storage,
-        }))
+        Ok(Some(RemoteStorageConfig { storage }))
     }
 }
 

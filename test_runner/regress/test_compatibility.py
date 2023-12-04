@@ -411,7 +411,6 @@ def check_neon_works(
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
     config.remote_storage = None
-    config.ext_remote_storage = None
     config.sk_remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
@@ -435,8 +434,11 @@ def check_neon_works(
 
     pg_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
-    cli_current.endpoint_start("main", pg_port=pg_port, http_port=http_port)
-    request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
+    cli_current.endpoint_create(
+        branch_name="main", pg_port=pg_port, http_port=http_port, endpoint_id="ep-main"
+    )
+    cli_current.endpoint_start("ep-main")
+    request.addfinalizer(lambda: cli_current.endpoint_stop("ep-main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
     pg_bin.run_capture(
@@ -449,7 +451,7 @@ def check_neon_works(
     )
 
     # Check that project can be recovered from WAL
-    # loosely based on https://github.com/neondatabase/cloud/wiki/Recovery-from-WAL
+    # loosely based on https://www.notion.so/neondatabase/Storage-Recovery-from-WAL-d92c0aac0ebf40df892b938045d7d720
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
     pageserver_port = snapshot_config["pageservers"][0]["listen_http_addr"].split(":")[-1]

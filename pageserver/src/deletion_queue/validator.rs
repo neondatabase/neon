@@ -28,6 +28,7 @@ use crate::config::PageServerConf;
 use crate::control_plane_client::ControlPlaneGenerationsApi;
 use crate::control_plane_client::RetryForeverError;
 use crate::metrics;
+use crate::virtual_file::MaybeFatalIo;
 
 use super::deleter::DeleterMessage;
 use super::DeletionHeader;
@@ -177,7 +178,14 @@ where
                 .unwrap_or(false);
 
             if valid && *validated_generation == tenant_lsn_state.generation {
-                for (_timeline_id, pending_lsn) in tenant_lsn_state.timelines {
+                for (timeline_id, pending_lsn) in tenant_lsn_state.timelines {
+                    tracing::debug!(
+                        %tenant_id,
+                        %timeline_id,
+                        current = %pending_lsn.result_slot.load(),
+                        projected = %pending_lsn.projected,
+                        "advancing validated remote_consistent_lsn",
+                    );
                     pending_lsn.result_slot.store(pending_lsn.projected);
                 }
             } else {
@@ -287,16 +295,9 @@ where
     async fn cleanup_lists(&mut self, list_paths: Vec<Utf8PathBuf>) {
         for list_path in list_paths {
             debug!("Removing deletion list {list_path}");
-
-            if let Err(e) = tokio::fs::remove_file(&list_path).await {
-                // Unexpected: we should have permissions and nothing else should
-                // be touching these files.  We will leave the file behind.  Subsequent
-                // pageservers will try and load it again: hopefully whatever storage
-                // issue (probably permissions) has been fixed by then.
-                tracing::error!("Failed to delete {list_path}: {e:#}");
-                metrics::DELETION_QUEUE.unexpected_errors.inc();
-                break;
-            }
+            tokio::fs::remove_file(&list_path)
+                .await
+                .fatal_err("remove deletion list");
         }
     }
 

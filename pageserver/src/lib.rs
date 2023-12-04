@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod auth;
 pub mod basebackup;
 pub mod config;
@@ -61,20 +63,21 @@ pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_cod
     )
     .await;
 
-    // Shut down any page service tasks.
-    timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
-        "shutdown PageRequestHandlers",
-        Duration::from_secs(1),
-    )
-    .await;
-
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
     timed(
         tenant::mgr::shutdown_all_tenants(),
         "shutdown all tenants",
         Duration::from_secs(5),
+    )
+    .await;
+
+    // Shut down any page service tasks: any in-progress work for particular timelines or tenants
+    // should already have been canclled via mgr::shutdown_all_tenants
+    timed(
+        task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
+        "shutdown PageRequestHandlers",
+        Duration::from_secs(1),
     )
     .await;
 
@@ -148,6 +151,10 @@ fn ends_with_suffix(path: &Utf8Path, suffix: &str) -> bool {
         None => false,
     }
 }
+
+// FIXME: DO NOT ADD new query methods like this, which will have a next step of parsing timelineid
+// from the directory name. Instead create type "UninitMark(TimelineId)" and only parse it once
+// from the name.
 
 pub fn is_uninit_mark(path: &Utf8Path) -> bool {
     ends_with_suffix(path, TIMELINE_UNINIT_MARK_SUFFIX)

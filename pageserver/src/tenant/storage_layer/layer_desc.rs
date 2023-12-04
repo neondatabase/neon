@@ -1,23 +1,23 @@
-use anyhow::Result;
 use core::fmt::Display;
+use pageserver_api::shard::TenantShardId;
 use std::ops::Range;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::{id::TimelineId, lsn::Lsn};
 
-use crate::{context::RequestContext, repository::Key};
+use crate::repository::Key;
 
 use super::{DeltaFileName, ImageFileName, LayerFileName};
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use utils::id::TenantId;
 
 /// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
 /// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct PersistentLayerDesc {
-    pub tenant_id: TenantId,
+    pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
     /// Range of keys that this layer covers
     pub key_range: Range<Key>,
@@ -57,7 +57,7 @@ impl PersistentLayerDesc {
     #[cfg(test)]
     pub fn new_test(key_range: Range<Key>) -> Self {
         Self {
-            tenant_id: TenantId::generate(),
+            tenant_shard_id: TenantShardId::unsharded(TenantId::generate()),
             timeline_id: TimelineId::generate(),
             key_range,
             lsn_range: Lsn(0)..Lsn(1),
@@ -67,14 +67,14 @@ impl PersistentLayerDesc {
     }
 
     pub fn new_img(
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         key_range: Range<Key>,
         lsn: Lsn,
         file_size: u64,
     ) -> Self {
         Self {
-            tenant_id,
+            tenant_shard_id,
             timeline_id,
             key_range,
             lsn_range: Self::image_layer_lsn_range(lsn),
@@ -84,19 +84,39 @@ impl PersistentLayerDesc {
     }
 
     pub fn new_delta(
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         key_range: Range<Key>,
         lsn_range: Range<Lsn>,
         file_size: u64,
     ) -> Self {
         Self {
-            tenant_id,
+            tenant_shard_id,
             timeline_id,
             key_range,
             lsn_range,
             is_delta: true,
             file_size,
+        }
+    }
+
+    pub fn from_filename(
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        filename: LayerFileName,
+        file_size: u64,
+    ) -> Self {
+        match filename {
+            LayerFileName::Image(i) => {
+                Self::new_img(tenant_shard_id, timeline_id, i.key_range, i.lsn, file_size)
+            }
+            LayerFileName::Delta(d) => Self::new_delta(
+                tenant_shard_id,
+                timeline_id,
+                d.key_range,
+                d.lsn_range,
+                file_size,
+            ),
         }
     }
 
@@ -157,10 +177,6 @@ impl PersistentLayerDesc {
         self.timeline_id
     }
 
-    pub fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
     /// Does this layer only contain some data for the key-range (incremental),
     /// or does it contain a version of every page? This is important to know
     /// for garbage collecting old layers: an incremental layer depends on
@@ -173,21 +189,31 @@ impl PersistentLayerDesc {
         self.is_delta
     }
 
-    pub fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        println!(
-            "----- layer for ten {} tli {} keys {}-{} lsn {}-{} is_delta {} is_incremental {} size {} ----",
-            self.tenant_id,
-            self.timeline_id,
-            self.key_range.start,
-            self.key_range.end,
-            self.lsn_range.start,
-            self.lsn_range.end,
-            self.is_delta,
-            self.is_incremental(),
-            self.file_size,
-        );
-
-        Ok(())
+    pub fn dump(&self) {
+        if self.is_delta {
+            println!(
+                "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} is_incremental {} size {} ----",
+                self.tenant_shard_id,
+                self.timeline_id,
+                self.key_range.start,
+                self.key_range.end,
+                self.lsn_range.start,
+                self.lsn_range.end,
+                self.is_incremental(),
+                self.file_size,
+            );
+        } else {
+            println!(
+                "----- image layer for ten {} tli {} key {}-{} at {} is_incremental {} size {} ----",
+                self.tenant_shard_id,
+                self.timeline_id,
+                self.key_range.start,
+                self.key_range.end,
+                self.image_layer_lsn(),
+                self.is_incremental(),
+                self.file_size
+            );
+        }
     }
 
     pub fn file_size(&self) -> u64 {

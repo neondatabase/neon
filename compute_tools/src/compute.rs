@@ -25,7 +25,7 @@ use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
-use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
+use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
 use crate::pg_helpers::*;
@@ -59,8 +59,8 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
-    ///  the S3 bucket that we search for extensions in
-    pub ext_remote_storage: Option<GenericRemoteStorage>,
+    /// the address of extension storage proxy gateway
+    pub ext_remote_storage: Option<String>,
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
@@ -698,6 +698,7 @@ impl ComputeNode {
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, &mut client, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
+        handle_extension_neon(&mut client)?;
         create_availability_check_data(&mut client)?;
 
         // 'Close' connection
@@ -710,8 +711,12 @@ impl ComputeNode {
     // `pg_ctl` for start / stop, so this just seems much easier to do as we already
     // have opened connection to Postgres and superuser access.
     #[instrument(skip_all)]
-    fn pg_reload_conf(&self, client: &mut Client) -> Result<()> {
-        client.simple_query("SELECT pg_reload_conf()")?;
+    fn pg_reload_conf(&self) -> Result<()> {
+        let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
+        Command::new(pgctl_bin)
+            .args(["reload", "-D", &self.pgdata])
+            .output()
+            .expect("cannot run pg_ctl process");
         Ok(())
     }
 
@@ -723,10 +728,15 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
+        let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+        config::write_postgres_conf(&postgresql_conf_path, &spec, None)?;
+        // temporarily reset max_cluster_size in config
+        // to avoid the possibility of hitting the limit, while we are reconfiguring:
+        // creating new extensions, roles, etc...
+        config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
+        self.pg_reload_conf()?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
-        self.pg_reload_conf(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
         // Disable DDL forwarding because control plane already knows about these roles/databases.
@@ -738,10 +748,15 @@ impl ComputeNode {
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
             handle_grants(&spec, &mut client, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
+            handle_extension_neon(&mut client)?;
         }
 
         // 'Close' connection
         drop(client);
+
+        // reset max_cluster_size in config back to original value and reload config
+        config::compute_ctl_temp_override_remove(pgdata_path)?;
+        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -803,7 +818,17 @@ impl ComputeNode {
 
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
+            let pgdata_path = Path::new(&self.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
+            config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
+            self.pg_reload_conf()?;
+
             self.apply_config(&compute_state)?;
+
+            config::compute_ctl_temp_override_remove(pgdata_path)?;
+            self.pg_reload_conf()?;
         }
 
         let startup_end_time = Utc::now();
@@ -951,12 +976,12 @@ LIMIT 100",
         real_ext_name: String,
         ext_path: RemotePath,
     ) -> Result<u64, DownloadError> {
-        let remote_storage = self
-            .ext_remote_storage
-            .as_ref()
-            .ok_or(DownloadError::BadInput(anyhow::anyhow!(
-                "Remote extensions storage is not configured",
-            )))?;
+        let ext_remote_storage =
+            self.ext_remote_storage
+                .as_ref()
+                .ok_or(DownloadError::BadInput(anyhow::anyhow!(
+                    "Remote extensions storage is not configured",
+                )))?;
 
         let ext_archive_name = ext_path.object_name().expect("bad path");
 
@@ -1012,7 +1037,7 @@ LIMIT 100",
         let download_size = extension_server::download_extension(
             &real_ext_name,
             &ext_path,
-            remote_storage,
+            ext_remote_storage,
             &self.pgbin,
         )
         .await

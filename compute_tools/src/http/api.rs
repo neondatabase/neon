@@ -123,7 +123,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        // download extension files from S3 on demand
+        // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
             info!("req.uri {:?}", req.uri());
@@ -227,7 +227,7 @@ async fn handle_configure_request(
 
         let parsed_spec = match ParsedSpec::try_from(spec) {
             Ok(ps) => ps,
-            Err(msg) => return Err((msg, StatusCode::PRECONDITION_FAILED)),
+            Err(msg) => return Err((msg, StatusCode::BAD_REQUEST)),
         };
 
         // XXX: wrap state update under lock in code blocks. Otherwise,

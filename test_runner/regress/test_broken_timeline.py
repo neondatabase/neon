@@ -15,17 +15,18 @@ from fixtures.types import TenantId, TimelineId
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
+def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*Failed to load delta layer.*",
+            ".*layer loading failed:.*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
             ".*failed to load metadata.*",
             ".*load failed.*load local timeline.*",
+            ".*layer loading failed permanently: load layer: .*",
         ]
     )
 
@@ -69,25 +70,20 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.start()
 
-    # Tenant 0 should still work
+    # Un-damaged tenant works
     pg0.start()
     assert pg0.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
-    # But all others are broken
-
-    # First timeline would not get loaded into pageserver due to corrupt metadata file
-    with pytest.raises(
-        Exception, match=f"Tenant {tenant1} will not become active. Current state: Broken"
-    ) as err:
-        pg1.start()
-    log.info(
-        f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
-    )
+    # Tenant with corrupt local metadata works: remote storage is authoritative for metadata
+    pg1.start()
+    assert pg1.safe_psql("SELECT COUNT(*) FROM t")[0][0] == 100
 
     # Second timeline will fail during basebackup, because the local layer file is corrupt.
     # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
-    with pytest.raises(Exception, match="Failed to load delta layer") as err:
+    #
+    # This will change when we implement checksums for layers
+    with pytest.raises(Exception, match="layer loading failed:") as err:
         pg2.start()
     log.info(
         f"As expected, compute startup failed for timeline {tenant2}/{timeline2} with corrupt layers: {err}"
@@ -133,8 +129,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
         _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
 
     # Restart the page server
-    env.pageserver.stop(immediate=True)
-    env.pageserver.start()
+    env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
@@ -146,6 +141,66 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     assert (
         timeline_dirs == initial_timeline_dirs
     ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+
+# The "exit" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
+@pytest.mark.parametrize("exit_or_return", ["return", "exit"])
+def test_timeline_init_break_before_checkpoint_recreate(
+    neon_env_builder: NeonEnvBuilder, exit_or_return: str
+):
+    env = neon_env_builder.init_configs()
+    env.start()
+    pageserver_http = env.pageserver.http_client()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
+            ".*Timeline got dropped without initializing, cleaning its files.*",
+            ".*Failed to load index_part from remote storage, failed creation?.*",
+        ]
+    )
+
+    pageserver_http.tenant_create(env.initial_tenant)
+    tenant_id = env.initial_tenant
+
+    timelines_dir = env.pageserver.timeline_dir(tenant_id)
+    old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
+
+    # Some fixed timeline ID (like control plane does)
+    timeline_id = TimelineId("1080243c1f76fe3c5147266663c9860b")
+
+    # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
+    failpoint = "before-checkpoint-new-timeline"
+    pattern = failpoint
+    if exit_or_return == "exit":
+        # in reality a read error happens, but there are automatic retries which now fail because pageserver is dead
+        pattern = "Connection aborted."
+
+    pageserver_http.configure_failpoints((failpoint, exit_or_return))
+    with pytest.raises(Exception, match=pattern):
+        _ = pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id)
+
+    # Restart the page server (with the failpoint disabled)
+    env.pageserver.restart(immediate=True)
+
+    # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
+    new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    assert (
+        new_tenant_timelines == old_tenant_timelines
+    ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+
+    timeline_dirs = [d for d in timelines_dir.iterdir()]
+    assert (
+        timeline_dirs == initial_timeline_dirs
+    ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+    # creating the branch should have worked now
+    new_timeline_id = TimelineId(
+        pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id)["timeline_id"]
+    )
+
+    assert timeline_id == new_timeline_id
 
 
 def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilder):

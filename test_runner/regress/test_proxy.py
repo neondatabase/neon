@@ -1,5 +1,7 @@
+import asyncio
 import json
 import subprocess
+import time
 from typing import Any, List, Optional, Tuple
 
 import psycopg2
@@ -8,6 +10,29 @@ import requests
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
+
+
+@pytest.mark.asyncio
+async def test_http_pool_begin_1(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    def query(*args) -> Any:
+        static_proxy.http_query(
+            "SELECT pg_sleep(10);",
+            args,
+            user="http_auth",
+            password="http",
+            expected_code=200,
+        )
+
+    query()
+    loop = asyncio.get_running_loop()
+    tasks = [loop.run_in_executor(None, query) for _ in range(10)]
+    # Wait for all the tasks to complete
+    completed, pending = await asyncio.wait(tasks)
+    # Get the results
+    results = [task.result() for task in completed]
+    print(results)
 
 
 def test_proxy_select_1(static_proxy: NeonProxy):
@@ -364,9 +389,13 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
     pid1 = get_pid(200, "http")["rows"][0]["pid"]
 
+    time.sleep(0.02)
+
     # query should be on the same connection
     rows = get_pid(200, "http")["rows"]
     assert rows == [{"pid": pid1}]
+
+    time.sleep(0.02)
 
     # incorrect password should not work
     res = get_pid(400, "foobar")
@@ -378,9 +407,13 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
     pid2 = get_pid(200, "http2")["rows"][0]["pid"]
     assert pid1 != pid2
 
+    time.sleep(0.02)
+
     # query should be on an existing connection
     pid = get_pid(200, "http2")["rows"][0]["pid"]
     assert pid in [pid1, pid2]
+
+    time.sleep(0.02)
 
     # old password should not work
     res = get_pid(400, "http")
@@ -419,6 +452,51 @@ def test_sql_over_http_pool_idle(static_proxy: NeonProxy):
         )
 
     pid1 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
+    time.sleep(0.02)
     query(200, "BEGIN")
     pid2 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
     assert pid1 != pid2
+
+
+@pytest.mark.timeout(60)
+def test_sql_over_http_pool_dos(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    static_proxy.safe_psql("CREATE TYPE foo AS ENUM ('foo')")
+
+    def query(status: int, query: str) -> Any:
+        return static_proxy.http_query(
+            query,
+            [],
+            user="http_auth",
+            password="http",
+            expected_code=status,
+        )
+
+    # query generates a million rows - should hit the 10MB reponse limit quickly
+    response = query(
+        400,
+        "select * from generate_series(1, 5000) a cross join generate_series(1, 5000) b cross join (select 'foo'::foo) c;",
+    )
+    assert "response is too large (max is 10485760 bytes)" in response["message"]
+
+
+def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    static_proxy.safe_psql("CREATE TYPE foo AS ENUM ('foo','bar','baz')")
+
+    def query(status: int, query: str) -> Any:
+        return static_proxy.http_query(
+            query,
+            [],
+            user="http_auth",
+            password="http",
+            expected_code=status,
+        )
+
+    response = query(
+        200,
+        "select array['foo'::foo, 'bar'::foo, 'baz'::foo] as data",
+    )
+    assert response["rows"][0]["data"] == ["foo", "bar", "baz"]

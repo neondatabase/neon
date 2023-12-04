@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 
-use pageserver_api::control_api::{
-    ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
+use pageserver_api::{
+    control_api::{
+        ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
+    },
+    shard::TenantShardId,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{
-    backoff,
-    generation::Generation,
-    id::{NodeId, TenantId},
-};
+use utils::{backoff, generation::Generation, id::NodeId};
 
 use crate::config::PageServerConf;
 
@@ -31,11 +30,11 @@ pub enum RetryForeverError {
 
 #[async_trait::async_trait]
 pub trait ControlPlaneGenerationsApi {
-    async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError>;
+    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError>;
     async fn validate(
         &self,
-        tenants: Vec<(TenantId, Generation)>,
-    ) -> Result<HashMap<TenantId, bool>, RetryForeverError>;
+        tenants: Vec<(TenantShardId, Generation)>,
+    ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError>;
 }
 
 impl ControlPlaneClient {
@@ -57,7 +56,10 @@ impl ControlPlaneClient {
 
         if let Some(jwt) = &conf.control_plane_api_token {
             let mut headers = hyper::HeaderMap::new();
-            headers.insert("Authorization", jwt.get_contents().parse().unwrap());
+            headers.insert(
+                "Authorization",
+                format!("Bearer {}", jwt.get_contents()).parse().unwrap(),
+            );
             client = client.default_headers(headers);
         }
 
@@ -124,7 +126,7 @@ impl ControlPlaneClient {
 #[async_trait::async_trait]
 impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response, or error out if we are shut down
-    async fn re_attach(&self) -> Result<HashMap<TenantId, Generation>, RetryForeverError> {
+    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("re-attach")
@@ -144,15 +146,15 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
         Ok(response
             .tenants
             .into_iter()
-            .map(|t| (t.id, Generation::new(t.generation)))
+            .map(|t| (t.id, Generation::new(t.gen)))
             .collect::<HashMap<_, _>>())
     }
 
     /// Block until we get a successful response, or error out if we are shut down
     async fn validate(
         &self,
-        tenants: Vec<(TenantId, Generation)>,
-    ) -> Result<HashMap<TenantId, bool>, RetryForeverError> {
+        tenants: Vec<(TenantShardId, Generation)>,
+    ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError> {
         let re_attach_path = self
             .base_url
             .join("validate")

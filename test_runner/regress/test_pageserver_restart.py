@@ -20,6 +20,8 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     endpoint = env.endpoints.create_start("main")
     pageserver_http = env.pageserver.http_client()
 
+    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
@@ -52,6 +54,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     env.pageserver.stop()
     env.pageserver.start()
 
+    # We reloaded our tenant
+    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
@@ -62,14 +67,14 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
     tenant_load_delay_ms = 5000
     env.pageserver.stop()
     env.pageserver.start(
-        extra_env_vars={"FAILPOINTS": f"before-loading-tenant=return({tenant_load_delay_ms})"}
+        extra_env_vars={"FAILPOINTS": f"before-attaching-tenant=return({tenant_load_delay_ms})"}
     )
 
-    # Check that it's in Loading state
+    # Check that it's in Attaching state
     client = env.pageserver.http_client()
     tenant_status = client.tenant_status(env.initial_tenant)
     log.info("Tenant status : %s", tenant_status)
-    assert tenant_status["state"]["slug"] == "Loading"
+    assert tenant_status["state"]["slug"] == "Attaching"
 
     # Try to read. This waits until the loading finishes, and then return normally.
     cur.execute("SELECT count(*) FROM foo")
@@ -139,7 +144,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
 # Test that repeatedly kills and restarts the page server, while the
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
-def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
+def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, build_type: str):
+    if build_type == "debug":
+        pytest.skip("times out in debug builds")
+
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 

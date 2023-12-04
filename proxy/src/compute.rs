@@ -1,8 +1,6 @@
 use crate::{
-    auth::parse_endpoint_param,
-    cancellation::CancelClosure,
-    console::errors::WakeComputeError,
-    error::{io_error, UserFacingError},
+    auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
+    error::UserFacingError, proxy::is_neon_param,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
@@ -27,12 +25,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] native_tls::Error),
-}
 
-impl From<WakeComputeError> for ConnectionError {
-    fn from(value: WakeComputeError) -> Self {
-        io_error(value).into()
-    }
+    #[error("{COULD_NOT_CONNECT}: {0}")]
+    WakeComputeError(#[from] WakeComputeError),
 }
 
 impl UserFacingError for ConnectionError {
@@ -45,6 +40,7 @@ impl UserFacingError for ConnectionError {
                 Some(err) => err.message().to_owned(),
                 None => err.to_string(),
             },
+            WakeComputeError(err) => err.to_string_client(),
             _ => COULD_NOT_CONNECT.to_owned(),
         }
     }
@@ -247,6 +243,7 @@ impl ConnCfg {
 
         // connect_raw() will not use TLS if sslmode is "disable"
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
@@ -278,7 +275,7 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     #[allow(unstable_name_collisions)]
     let options: String = params
         .options_raw()?
-        .filter(|opt| parse_endpoint_param(opt).is_none())
+        .filter(|opt| parse_endpoint_param(opt).is_none() && !is_neon_param(opt))
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 
@@ -312,6 +309,12 @@ mod tests {
         assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
 
         let params = StartupMessageParams::new([("options", "project = foo")]);
+        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+
+        let params = StartupMessageParams::new([(
+            "options",
+            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
+        )]);
         assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
     }
 }

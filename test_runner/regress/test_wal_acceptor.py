@@ -1,6 +1,5 @@
 import filecmp
 import os
-import pathlib
 import random
 import shutil
 import signal
@@ -31,6 +30,7 @@ from fixtures.neon_fixtures import (
     Safekeeper,
     SafekeeperHttpClient,
     SafekeeperPort,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -287,28 +287,42 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
     stat_before = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
-    log.info(f"statuses is {stat_before}")
+    log.info(f"statuses before insert: {stat_before}")
 
     endpoint.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
-    # force checkpoint in pageserver to advance remote_consistent_lsn
-    wait_lsn_force_checkpoint(tenant_id, timeline_id, endpoint, env.pageserver)
+    # wait for remote_consistent_lsn to reach flush_lsn, forcing it with checkpoint
+    new_rcl = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    log.info(f"new_rcl: {new_rcl}")
+    endpoint.stop()
 
     # and wait till remote_consistent_lsn propagates to all safekeepers
+    #
+    # TODO: this executes long as timeline on safekeeper is immediately
+    # deactivated once rcl reaches pageserver one, and thus we generally wait
+    # till pageserver reconnects to all safekeepers one by one here. Timeline
+    # status on safekeeper should take into account peers state as well.
     started_at = time.time()
     while True:
         stat_after = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
-        if all(
-            s_after.remote_consistent_lsn > s_before.remote_consistent_lsn
-            for s_after, s_before in zip(stat_after, stat_before)
-        ):
+        if all([s_after.remote_consistent_lsn >= new_rcl for s_after in stat_after]):
             break
         elapsed = time.time() - started_at
-        if elapsed > 20:
+        if elapsed > 30:
             raise RuntimeError(
                 f"timed out waiting {elapsed:.0f}s for remote_consistent_lsn propagation: status before {stat_before}, status current {stat_after}"
             )
         time.sleep(1)
+
+    # Ensure that safekeepers don't lose remote_consistent_lsn on restart.
+    # Control file is persisted each 5s. TODO: do that on shutdown and remove sleep.
+    time.sleep(6)
+    for sk in env.safekeepers:
+        sk.stop()
+        sk.start()
+    stat_after_restart = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
+    log.info(f"statuses after {stat_after_restart}")
+    assert all([s.remote_consistent_lsn >= new_rcl for s in stat_after_restart])
 
 
 # Test that old WAL consumed by peers and pageserver is removed from safekeepers.
@@ -639,7 +653,7 @@ class ProposerPostgres(PgProtocol):
     def __init__(
         self,
         pgdata_dir: str,
-        pg_bin,
+        pg_bin: PgBin,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         listen_addr: str,
@@ -665,7 +679,7 @@ class ProposerPostgres(PgProtocol):
     def create_dir_config(self, safekeepers: str):
         """Create dir and config for running --sync-safekeepers"""
 
-        pathlib.Path(self.pg_data_dir_path()).mkdir(exist_ok=True)
+        Path(self.pg_data_dir_path()).mkdir(exist_ok=True)
         with open(self.config_file_path(), "w") as f:
             cfg = [
                 "synchronous_standby_names = 'walproposer'\n",
@@ -691,7 +705,7 @@ class ProposerPostgres(PgProtocol):
             "PGDATA": self.pg_data_dir_path(),
         }
 
-        basepath = self.pg_bin.run_capture(command, env)
+        basepath = self.pg_bin.run_capture(command, env, with_command_header=False)
 
         log.info(f"postgres --sync-safekeepers output: {basepath}")
 
