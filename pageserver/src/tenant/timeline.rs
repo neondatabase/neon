@@ -1980,7 +1980,6 @@ impl Timeline {
         let sum = calculated_size.saturating_add_signed(added);
 
         // set the gauge value before it can be set in `update_current_logical_size`.
-        // TODO: shouldn't this simple .add(calculated_size)?
         self.metrics.current_logical_size_gauge.set(sum);
 
         self.current_logical_size
