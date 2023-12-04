@@ -141,7 +141,7 @@ we will measure the GetPage latency SLO _after_ the throttler and introduce a ne
 - histogram that records the tenants' observations of time spent waiting (one such histogram per pageserver)
 
 Further observability measures:
-- a WARN log message at frequency 1/min if the tenant/timeline/connection was throttled in that last minute.
+- an INFO log message at frequency 1/min if the tenant/timeline/connection was throttled in that last minute.
   The message will identify the tenant/timeline/connection to allow correlation with compute logs/stats.
 
 Rollout will happen as follows:
