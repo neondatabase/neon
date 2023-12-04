@@ -1411,15 +1411,15 @@ impl Default for WalRedoProcessCounters {
         )
         .unwrap();
 
-        let active_stderr_logger_tasks_finished = register_int_counter!(
-            "pageserver_active_stderr_logger_tasks_finished_total",
-            "Number of active stderr logger tasks that have finished",
+        let active_stderr_logger_tasks_started = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_started_total",
+            "Number of active walredo stderr logger tasks that have started",
         )
         .unwrap();
 
-        let active_stderr_logger_tasks_started = register_int_counter!(
-            "pageserver_active_stderr_logger_tasks_started_total",
-            "Number of active stderr logger tasks that have started",
+        let active_stderr_logger_tasks_finished = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_finished_total",
+            "Number of active walredo stderr logger tasks that have finished",
         )
         .unwrap();
 
@@ -1430,8 +1430,8 @@ impl Default for WalRedoProcessCounters {
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),
-            active_stderr_logger_tasks_finished,
             active_stderr_logger_tasks_started,
+            active_stderr_logger_tasks_finished,
         }
     }
 }
