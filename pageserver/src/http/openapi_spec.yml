@@ -1424,6 +1424,8 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
+        enable_heatmap:
+          type: boolean
     TenantConfigResponse:
       type: object
       properties:
