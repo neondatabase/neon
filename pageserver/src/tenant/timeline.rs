@@ -491,6 +491,9 @@ impl Timeline {
     /// an ancestor branch, for example, or waste a lot of cycles chasing the
     /// non-existing key.
     ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn get(
         &self,
         key: Key,
@@ -2024,7 +2027,9 @@ impl Timeline {
         receiver
     }
 
-    /// TODO: must be cancellation safe, I think it is (?)
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
@@ -2062,6 +2067,10 @@ impl Timeline {
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -2177,6 +2186,10 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     async fn get_reconstruct_data(
         &self,
         key: Key,
@@ -2425,6 +2438,9 @@ impl Timeline {
         }
     }
 
+    /// # Cancel-safety
+    ///
+    /// This method is cancellation-safe.
     async fn lookup_cached_page(
         &self,
         key: &Key,
