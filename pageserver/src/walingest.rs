@@ -2126,7 +2126,12 @@ mod tests {
             buffer
         };
 
-        let n_iterations = 1000;
+        // Allow number of iterations to be configured via env var, which is
+        // useful when using this test for benchmarking.
+        let n_iterations: usize =
+            std::env::var("NUM_TEST_ITERATIONS")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(1);
         let profiler = crate::profiling::init_profiler();
 
         for iteration in 0..n_iterations {
