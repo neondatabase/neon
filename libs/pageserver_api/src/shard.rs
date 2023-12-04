@@ -373,7 +373,7 @@ impl ShardIdentity {
 
     /// Return true if the key should be ingested by this shard
     pub fn is_key_local(&self, key: &Key) -> bool {
-        if self.count < ShardCount(2) || key_is_broadcast(key) {
+        if self.count < ShardCount(2) || (key_is_shard0(key) && self.number == ShardNumber(0)) {
             true
         } else {
             key_to_shard_number(self.count, self.stripe_size, key) == self.number
@@ -460,10 +460,9 @@ impl<'de> Deserialize<'de> for ShardIndex {
     }
 }
 
-/// Whether this key should be ingested by all shards
-fn key_is_broadcast(key: &Key) -> bool {
-    // TODO: can we be less conservative?  Starting point is to broadcast everything
-    // except for rel block keys
+/// Whether this key is always held on shard 0 (e.g. shard 0 holds all SLRU keys
+/// in order to be able to serve basebackup requests without peer communication).
+fn key_is_shard0(key: &Key) -> bool {
     !is_rel_block_key(key)
 }
 
@@ -499,7 +498,7 @@ fn hash_combine(mut a: u32, mut b: u32) -> u32 {
 /// and will be handled at higher levels when shards are split.
 fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Key) -> ShardNumber {
     // Fast path for un-sharded tenants or broadcast keys
-    if count < ShardCount(2) || key_is_broadcast(key) {
+    if count < ShardCount(2) || key_is_shard0(key) {
         return ShardNumber(0);
     }
 
