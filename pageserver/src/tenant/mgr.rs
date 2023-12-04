@@ -1125,6 +1125,20 @@ impl TenantManager {
 
         Ok(())
     }
+
+    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<Tenant>> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => map
+                .values()
+                .filter_map(|slot| {
+                    slot.get_attached()
+                        .and_then(|t| if t.is_active() { Some(t.clone()) } else { None })
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
