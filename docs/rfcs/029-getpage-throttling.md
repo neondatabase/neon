@@ -53,7 +53,7 @@ Sadly, we do not have the observability data to determine the impact of this ten
 
 However, here are some illustrative data points for the 155k period:
 The tenant was responsible for >= 99% of the GetPage traffic and, frankly, the overall activity on this Pageserver instance.
-We were serving pages at 10 GiB/s (`155k x 8 kbyte (PAGE_SZ) per second is 1.12GiB/s = 9.4Gb/s.`)
+We were serving pages at 10 Gb/s (`155k x 8 kbyte (PAGE_SZ) per second is 1.12GiB/s = 9.4Gb/s.`)
 The CPU utilization of the instance was 75% user+system.
 Pageserver page cache served 1.75M accesses/second at a hit rate of ca 90%.
 The hit rate for materialized pages was ca. 40%.
