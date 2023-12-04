@@ -2174,11 +2174,9 @@ mod tests {
                         .unwrap();
                 }
 
-                // Do operations we do on every XLogData message
-                //
-                // TODO also do status update
-                // 1. make a construct_status_update function
-                // 2. call it here
+                // Do most of the work we do on every XLogData message in
+                // walreceiver_connection.rs just to check that at the current
+                // chunk size this work doesn't matter.
                 tline.check_checkpoint_distance().await.unwrap();
                 tline.get_current_logical_size(&ctx).size_dont_care_about_accuracy();
             }
