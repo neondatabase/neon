@@ -34,7 +34,6 @@ use std::process::{Child, ChildStdin, ChildStdout, Command};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
@@ -124,7 +123,9 @@ impl PostgresRedoManager {
     /// The WAL redo is handled by a separate thread, so this just sends a request
     /// to the thread and waits for response.
     ///
-    /// CANCEL SAFETY: NOT CANCEL SAFE.
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn request_redo(
         &self,
         key: Key,
@@ -157,7 +158,6 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
-                    .await
                 };
                 img = Some(result?);
 
@@ -178,7 +178,6 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
-            .await
         }
     }
 }
@@ -216,7 +215,7 @@ impl PostgresRedoManager {
     /// Process one request for WAL redo using wal-redo postgres
     ///
     #[allow(clippy::too_many_arguments)]
-    async fn apply_batch_postgres(
+    fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
@@ -332,12 +331,7 @@ impl PostgresRedoManager {
                 // than we can SIGKILL & `wait` for them to exit. By doing it the way we do here,
                 // we limit this risk of run-away to at most $num_runtimes * $num_executor_threads.
                 // This probably needs revisiting at some later point.
-                let mut wait_done = proc.stderr_logger_task_done.clone();
                 drop(proc);
-                wait_done
-                    .wait_for(|v| *v)
-                    .await
-                    .expect("we use scopeguard to ensure we always send `true` to the channel before dropping the sender");
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
             }
@@ -649,8 +643,6 @@ struct WalRedoProcess {
     child: Option<NoLeakChild>,
     stdout: Mutex<ProcessOutput>,
     stdin: Mutex<ProcessInput>,
-    stderr_logger_cancel: CancellationToken,
-    stderr_logger_task_done: tokio::sync::watch::Receiver<bool>,
     /// Counter to separate same sized walredo inputs failing at the same millisecond.
     #[cfg(feature = "testing")]
     dump_sequence: AtomicUsize,
@@ -699,6 +691,8 @@ impl WalRedoProcess {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
+        let stderr = tokio::process::ChildStderr::from_std(stderr)
+            .context("convert to tokio::ChildStderr")?;
         macro_rules! set_nonblock_or_log_err {
             ($file:ident) => {{
                 let res = set_nonblock($file.as_raw_fd());
@@ -710,69 +704,45 @@ impl WalRedoProcess {
         }
         set_nonblock_or_log_err!(stdin)?;
         set_nonblock_or_log_err!(stdout)?;
-        set_nonblock_or_log_err!(stderr)?;
-
-        let mut stderr = tokio::io::unix::AsyncFd::new(stderr).context("AsyncFd::with_interest")?;
 
         // all fallible operations post-spawn are complete, so get rid of the guard
         let child = scopeguard::ScopeGuard::into_inner(child);
 
-        let stderr_logger_cancel = CancellationToken::new();
-        let (stderr_logger_task_done_tx, stderr_logger_task_done_rx) =
-            tokio::sync::watch::channel(false);
-        tokio::spawn({
-            let stderr_logger_cancel = stderr_logger_cancel.clone();
+        tokio::spawn(
             async move {
                 scopeguard::defer! {
                     debug!("wal-redo-postgres stderr_logger_task finished");
-                    let _ = stderr_logger_task_done_tx.send(true);
+                    crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_finished.inc();
                 }
                 debug!("wal-redo-postgres stderr_logger_task started");
-                loop {
-                    // NB: we purposefully don't do a select! for the cancellation here.
-                    // The cancellation would likely cause us to miss stderr messages.
-                    // We can rely on this to return from .await because when we SIGKILL
-                    // the child, the writing end of the stderr pipe gets closed.
-                    match stderr.readable_mut().await {
-                        Ok(mut guard) => {
-                            let mut errbuf = [0; 16384];
-                            let res = guard.try_io(|fd| {
-                                use std::io::Read;
-                                fd.get_mut().read(&mut errbuf)
-                            });
-                            match res {
-                                Ok(Ok(0)) => {
-                                    // it closed the stderr pipe
-                                    break;
-                                }
-                                Ok(Ok(n)) => {
-                                    // The message might not be split correctly into lines here. But this is
-                                    // good enough, the important thing is to get the message to the log.
-                                    let output = String::from_utf8_lossy(&errbuf[0..n]).to_string();
-                                    error!(output, "received output");
-                                },
-                                Ok(Err(e)) => {
-                                    error!(error = ?e, "read() error, waiting for cancellation");
-                                    stderr_logger_cancel.cancelled().await;
-                                    error!(error = ?e, "read() error, cancellation complete");
-                                    break;
-                                }
-                                Err(e) => {
-                                    let _e: tokio::io::unix::TryIoError = e;
-                                    // the read() returned WouldBlock, that's expected
-                                }
-                            }
+                crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_started.inc();
+
+                use tokio::io::AsyncBufReadExt;
+                let mut stderr_lines = tokio::io::BufReader::new(stderr);
+                let mut buf = Vec::new();
+                let res = loop {
+                    buf.clear();
+                    // TODO we don't trust the process to cap its stderr length.
+                    // Currently it can do unbounded Vec allocation.
+                    match stderr_lines.read_until(b'\n', &mut buf).await {
+                        Ok(0) => break Ok(()), // eof
+                        Ok(num_bytes) => {
+                            let output = String::from_utf8_lossy(&buf[..num_bytes]);
+                            error!(%output, "received output");
                         }
                         Err(e) => {
-                            error!(error = ?e, "read() error, waiting for cancellation");
-                            stderr_logger_cancel.cancelled().await;
-                            error!(error = ?e, "read() error, cancellation complete");
-                            break;
+                            break Err(e);
                         }
+                    }
+                };
+                match res {
+                    Ok(()) => (),
+                    Err(e) => {
+                        error!(error=?e, "failed to read from walredo stderr");
                     }
                 }
             }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), tenant_id = %tenant_id, %pg_version))
-        });
+        );
 
         Ok(Self {
             conf,
@@ -787,8 +757,6 @@ impl WalRedoProcess {
                 pending_responses: VecDeque::new(),
                 n_processed_responses: 0,
             }),
-            stderr_logger_cancel,
-            stderr_logger_task_done: stderr_logger_task_done_rx,
             #[cfg(feature = "testing")]
             dump_sequence: AtomicUsize::default(),
         })
@@ -1029,7 +997,6 @@ impl Drop for WalRedoProcess {
             .take()
             .expect("we only do this once")
             .kill_and_wait(WalRedoKillCause::WalRedoProcessDrop);
-        self.stderr_logger_cancel.cancel();
         // no way to wait for stderr_logger_task from Drop because that is async only
     }
 }

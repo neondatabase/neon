@@ -1385,6 +1385,8 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) active_stderr_logger_tasks_started: IntCounter,
+    pub(crate) active_stderr_logger_tasks_finished: IntCounter,
 }
 
 #[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
@@ -1408,6 +1410,19 @@ impl Default for WalRedoProcessCounters {
             &["cause"],
         )
         .unwrap();
+
+        let active_stderr_logger_tasks_started = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_started_total",
+            "Number of active walredo stderr logger tasks that have started",
+        )
+        .unwrap();
+
+        let active_stderr_logger_tasks_finished = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_finished_total",
+            "Number of active walredo stderr logger tasks that have finished",
+        )
+        .unwrap();
+
         Self {
             started,
             killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
@@ -1415,6 +1430,8 @@ impl Default for WalRedoProcessCounters {
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),
+            active_stderr_logger_tasks_started,
+            active_stderr_logger_tasks_finished,
         }
     }
 }
