@@ -468,12 +468,6 @@ fn start_pageserver(
 
             scopeguard::ScopeGuard::into_inner(guard);
 
-            let guard = scopeguard::guard_on_success((), |_| {
-                tracing::info!("Cancelled before initial logical sizes completed")
-            });
-
-            scopeguard::ScopeGuard::into_inner(guard);
-
             // allow background jobs to start: we either completed prior stages, or they reached timeout
             // and were skipped.  It is important that we do not let them block background jobs indefinitely,
             // because things like consumption metrics for billing are blocked by this barrier.

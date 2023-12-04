@@ -26,7 +26,13 @@ pub(super) struct LogicalSize {
         u64,
         crate::metrics::initial_logical_size::FinishedCalculationGuard,
     )>,
-    pub cancel_wait_for_background_loop_concurrency_limit_semaphore: OnceCell<CancellationToken>,
+
+    /// Cancellation for the best-effort logical size calculation.
+    ///
+    /// The token is kept in a once-cell so that we can error out if a higher priority
+    /// request comes in *before* we have started the normal logical size calculation.
+    pub(crate) cancel_wait_for_background_loop_concurrency_limit_semaphore:
+        OnceCell<CancellationToken>,
 
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     pub initial_part_end: Option<Lsn>,

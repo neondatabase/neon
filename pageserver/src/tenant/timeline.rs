@@ -1828,7 +1828,10 @@ impl Timeline {
         };
 
         let cancel_wait_for_background_loop_concurrency_limit_semaphore = CancellationToken::new();
-        self.current_logical_size.cancel_wait_for_background_loop_concurrency_limit_semaphore.set(cancel_wait_for_background_loop_concurrency_limit_semaphore.clone()).expect("initial logical size calculation task must be spawned exactly once per Timeline object");
+        let token = cancel_wait_for_background_loop_concurrency_limit_semaphore.clone();
+        self.current_logical_size
+            .cancel_wait_for_background_loop_concurrency_limit_semaphore.set(token)
+            .expect("initial logical size calculation task must be spawned exactly once per Timeline object");
 
         let self_clone = Arc::clone(self);
         let background_ctx = ctx.detached_child(
