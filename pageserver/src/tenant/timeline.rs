@@ -20,23 +20,27 @@ use pageserver_api::{
     },
     shard::TenantShardId,
 };
+use rand::Rng;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::{
     runtime::Handle,
-    sync::{oneshot, watch, TryAcquireError},
+    sync::{oneshot, watch},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{id::TenantTimelineId, sync::gate::Gate};
 
-use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
+use std::{
+    cmp::{max, min, Ordering},
+    ops::ControlFlow,
+};
 
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
@@ -298,13 +302,6 @@ pub struct Timeline {
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
-    /// Barrier to wait before doing initial logical size calculation. Used only during startup.
-    initial_logical_size_can_start: Option<completion::Barrier>,
-
-    /// Completion shared between all timelines loaded during startup; used to delay heavier
-    /// background tasks until some logical sizes have been calculated.
-    initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
-
     /// Load or creation time information about the disk_consistent_lsn and when the loading
     /// happened. Used for consumption metrics.
     pub(crate) loaded_at: (Lsn, SystemTime),
@@ -453,6 +450,11 @@ pub enum LogicalSizeCalculationCause {
     TenantSizeHandler,
 }
 
+pub enum GetLogicalSizePriority {
+    User,
+    Background,
+}
+
 #[derive(enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
@@ -489,6 +491,9 @@ impl Timeline {
     /// an ancestor branch, for example, or waste a lot of cycles chasing the
     /// non-existing key.
     ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn get(
         &self,
         key: Key,
@@ -849,46 +854,6 @@ impl Timeline {
         }
     }
 
-    /// Retrieve current logical size of the timeline.
-    ///
-    /// The size could be lagging behind the actual number, in case
-    /// the initial size calculation has not been run (gets triggered on the first size access).
-    ///
-    /// return size and boolean flag that shows if the size is exact
-    pub(crate) fn get_current_logical_size(
-        self: &Arc<Self>,
-        ctx: &RequestContext,
-    ) -> logical_size::CurrentLogicalSize {
-        let current_size = self.current_logical_size.current_size();
-        debug!("Current size: {current_size:?}");
-
-        if let (CurrentLogicalSize::Approximate(_), Some(initial_part_end)) =
-            (current_size, self.current_logical_size.initial_part_end)
-        {
-            self.try_spawn_size_init_task(initial_part_end, ctx);
-        }
-
-        if let CurrentLogicalSize::Approximate(_) = &current_size {
-            if ctx.task_kind() == TaskKind::WalReceiverConnectionHandler {
-                let first = self
-                    .current_logical_size
-                    .did_return_approximate_to_walreceiver
-                    .compare_exchange(
-                        false,
-                        true,
-                        AtomicOrdering::Relaxed,
-                        AtomicOrdering::Relaxed,
-                    )
-                    .is_ok();
-                if first {
-                    crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE.inc();
-                }
-            }
-        }
-
-        current_size
-    }
-
     /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
     /// the in-memory layer, and initiate flushing it if so.
     ///
@@ -938,6 +903,7 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
+        self.spawn_initial_logical_size_computation_task(ctx);
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(background_jobs_can_start);
@@ -1051,17 +1017,6 @@ impl Timeline {
                 error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
-                if matches!(
-                    new_state,
-                    TimelineState::Stopping | TimelineState::Broken { .. }
-                ) {
-                    // drop the completion guard, if any; it might be holding off the completion
-                    // forever needlessly
-                    self.initial_logical_size_attempt
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take();
-                }
                 self.state.send_replace(new_state);
             }
         }
@@ -1383,8 +1338,6 @@ impl Timeline {
         walredo_mgr: Arc<super::WalRedoManager>,
         resources: TimelineResources,
         pg_version: u32,
-        initial_logical_size_can_start: Option<completion::Barrier>,
-        initial_logical_size_attempt: Option<completion::Completion>,
         state: TimelineState,
         cancel: CancellationToken,
     ) -> Arc<Self> {
@@ -1484,8 +1437,6 @@ impl Timeline {
                 ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
-                initial_logical_size_can_start,
-                initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
                 cancel,
                 gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
 
@@ -1797,39 +1748,91 @@ impl Timeline {
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
-        let state = self.current_state();
-        if matches!(
-            state,
-            TimelineState::Broken { .. } | TimelineState::Stopping
-        ) {
-            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-            return;
+    /// Retrieve current logical size of the timeline.
+    ///
+    /// The size could be lagging behind the actual number, in case
+    /// the initial size calculation has not been run (gets triggered on the first size access).
+    ///
+    /// return size and boolean flag that shows if the size is exact
+    pub(crate) fn get_current_logical_size(
+        self: &Arc<Self>,
+        priority: GetLogicalSizePriority,
+        ctx: &RequestContext,
+    ) -> logical_size::CurrentLogicalSize {
+        let current_size = self.current_logical_size.current_size();
+        debug!("Current size: {current_size:?}");
+
+        match (current_size.accuracy(), priority) {
+            (logical_size::Accuracy::Exact, _) => (), // nothing to do
+            (logical_size::Accuracy::Approximate, GetLogicalSizePriority::Background) => {
+                // background task will eventually deliver an exact value, we're in no rush
+            }
+            (logical_size::Accuracy::Approximate, GetLogicalSizePriority::User) => {
+                // background task is not ready, but user is asking for it now;
+                // => make the background task skip the line
+                // (The alternative would be to calculate the size here, but,
+                //  it can actually take a long time if the user has a lot of rels.
+                //  And we'll inevitable need it again; So, let the background task do the work.)
+                match self
+                    .current_logical_size
+                    .cancel_wait_for_background_loop_concurrency_limit_semaphore
+                    .get()
+                {
+                    Some(cancel) => cancel.cancel(),
+                    None => {
+                        let state = self.current_state();
+                        if matches!(
+                            state,
+                            TimelineState::Broken { .. } | TimelineState::Stopping
+                        ) {
+
+                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                            // Don't make noise.
+                        } else {
+                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                        }
+                    }
+                };
+            }
         }
 
-        let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
-            .try_acquire_owned()
-        {
-            Ok(permit) => permit,
-            Err(TryAcquireError::NoPermits) => {
-                // computation already ongoing or finished with success
-                return;
+        if let CurrentLogicalSize::Approximate(_) = &current_size {
+            if ctx.task_kind() == TaskKind::WalReceiverConnectionHandler {
+                let first = self
+                    .current_logical_size
+                    .did_return_approximate_to_walreceiver
+                    .compare_exchange(
+                        false,
+                        true,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                    )
+                    .is_ok();
+                if first {
+                    crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE.inc();
+                }
             }
-            Err(TryAcquireError::Closed) => unreachable!("we never call close"),
-        };
-        debug_assert!(self
-            .current_logical_size
-            .initial_logical_size
-            .get()
-            .is_none());
+        }
 
-        info!(
-            "spawning logical size computation from context of task kind {:?}",
-            ctx.task_kind()
-        );
-        let causing_task_kind = ctx.task_kind();
-        // We need to start the computation task.
-        // It gets a separate context since it will outlive the request that called this function.
+        current_size
+    }
+
+    fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &RequestContext) {
+        let Some(initial_part_end) = self.current_logical_size.initial_part_end else {
+            // nothing to do for freshly created timelines;
+            assert_eq!(
+                self.current_logical_size.current_size().accuracy(),
+                logical_size::Accuracy::Exact,
+            );
+            return;
+        };
+
+        let cancel_wait_for_background_loop_concurrency_limit_semaphore = CancellationToken::new();
+        let token = cancel_wait_for_background_loop_concurrency_limit_semaphore.clone();
+        self.current_logical_size
+            .cancel_wait_for_background_loop_concurrency_limit_semaphore.set(token)
+            .expect("initial logical size calculation task must be spawned exactly once per Timeline object");
+
         let self_clone = Arc::clone(self);
         let background_ctx = ctx.detached_child(
             TaskKind::InitialLogicalSizeCalculation,
@@ -1844,96 +1847,152 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
-
                 let cancel = task_mgr::shutdown_token();
+                self_clone
+                    .initial_logical_size_calculation_task(
+                        initial_part_end,
+                        cancel_wait_for_background_loop_concurrency_limit_semaphore,
+                        cancel,
+                        background_ctx,
+                    )
+                    .await;
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_shard_id.tenant_id, timeline_id=%self.timeline_id)),
+        );
+    }
 
-                // in case we were created during pageserver initialization, wait for
-                // initialization to complete before proceeding. startup time init runs on the same
-                // runtime.
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()) => {}
+    async fn initial_logical_size_calculation_task(
+        self: Arc<Self>,
+        initial_part_end: Lsn,
+        skip_concurrency_limiter: CancellationToken,
+        cancel: CancellationToken,
+        background_ctx: RequestContext,
+    ) {
+        enum BackgroundCalculationError {
+            Cancelled,
+            Other(anyhow::Error),
+        }
+
+        let try_once = |attempt: usize| {
+            let background_ctx = &background_ctx;
+            let self_ref = &self;
+            let skip_concurrency_limiter = &skip_concurrency_limiter;
+            async move {
+                let cancel = task_mgr::shutdown_token();
+                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit(
+                    BackgroundLoopKind::InitialLogicalSizeCalculation,
+                    background_ctx,
+                    &cancel,
+                );
+
+                use crate::metrics::initial_logical_size::StartCircumstances;
+                let (_maybe_permit, circumstances) = tokio::select! {
+                    res = wait_for_permit => {
+                        match res {
+                            Ok(permit) => (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit),
+                            Err(RateLimitError::Cancelled) => {
+                                return Err(BackgroundCalculationError::Cancelled);
+                            }
+                        }
+                    }
+                    () = skip_concurrency_limiter.cancelled() => {
+                        // Some action that is part of a end user interaction requested logical size
+                        // => break out of the rate limit
+                        // TODO: ideally we'd not run on BackgroundRuntime but the requester's runtime;
+                        // but then again what happens if they cancel; also, we should just be using
+                        // one runtime across the entire process, so, let's leave this for now.
+                        (None, StartCircumstances::SkippedConcurrencyLimiter)
+                    }
                 };
 
-
-
-                // hold off background tasks from starting until all timelines get to try at least
-                // once initial logical size calculation; though retry will rarely be useful.
-                // holding off is done because heavier tasks execute blockingly on the same
-                // runtime.
-                //
-                // dropping this at every outcome is probably better than trying to cling on to it,
-                // delay will be terminated by a timeout regardless.
-                let completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
-
-                let metrics_guard = match &completion {
-                    Some(_) => crate::metrics::initial_logical_size::START_CALCULATION.first(Some(causing_task_kind)),
-                    None => crate::metrics::initial_logical_size::START_CALCULATION.retry(Some(causing_task_kind)),
+                let metrics_guard = if attempt == 1 {
+                    crate::metrics::initial_logical_size::START_CALCULATION.first(circumstances)
+                } else {
+                    crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
                 };
 
-                let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx)
+                match self_ref
+                    .logical_size_calculation_task(
+                        initial_part_end,
+                        LogicalSizeCalculationCause::Initial,
+                        background_ctx,
+                    )
                     .await
                 {
-                    Ok(s) => s,
+                    Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
                     Err(CalculateLogicalSizeError::Cancelled) => {
-                        // Don't make noise, this is a common task.
-                        // In the unlikely case that there is another call to this function, we'll retry
-                        // because initial_logical_size is still None.
-                        info!("initial size calculation cancelled, likely timeline delete / tenant detach");
-                        return Ok(());
+                        Err(BackgroundCalculationError::Cancelled)
                     }
                     Err(CalculateLogicalSizeError::Other(err)) => {
-                        if let Some(e @ PageReconstructError::AncestorStopping(_)) =
+                        if let Some(PageReconstructError::AncestorStopping(_)) =
                             err.root_cause().downcast_ref()
                         {
-                            // This can happen if the timeline parent timeline switches to
-                            // Stopping state while we're still calculating the initial
-                            // timeline size for the child, for example if the tenant is
-                            // being detached or the pageserver is shut down. Like with
-                            // CalculateLogicalSizeError::Cancelled, don't make noise.
-                            info!("initial size calculation failed because the timeline or its ancestor is Stopping, likely because the tenant is being detached: {e:#}");
-                            return Ok(());
+                            Err(BackgroundCalculationError::Cancelled)
+                        } else {
+                            Err(BackgroundCalculationError::Other(err))
                         }
-                        return Err(err.context("Failed to calculate logical size"));
-                    }
-                };
-
-                // we cannot query current_logical_size.current_size() to know the current
-                // *negative* value, only truncated to u64.
-                let added = self_clone
-                    .current_logical_size
-                    .size_added_after_initial
-                    .load(AtomicOrdering::Relaxed);
-
-                let sum = calculated_size.saturating_add_signed(added);
-
-                // set the gauge value before it can be set in `update_current_logical_size`.
-                self_clone.metrics.current_logical_size_gauge.set(sum);
-
-                match self_clone
-                    .current_logical_size
-                    .initial_logical_size
-                    .set((calculated_size, metrics_guard.calculation_result_saved()))
-                {
-                    Ok(()) => (),
-                    Err(_what_we_just_attempted_to_set) => {
-                        let (existing_size, _) = self_clone
-                            .current_logical_size
-                            .initial_logical_size
-                            .get()
-                            .expect("once_cell set was lost, then get failed, impossible.");
-                        // This shouldn't happen because the semaphore is initialized with 1.
-                        // But if it happens, just complain & report success so there are no further retries.
-                        error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing")
                     }
                 }
-                // now that `initial_logical_size.is_some()`, reduce permit count to 0
-                // so that we prevent future callers from spawning this task
-                permit.forget();
-                Ok(())
-            }.in_current_span(),
-        );
+            }
+        };
+
+        let retrying = async {
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+
+                match try_once(attempt).await {
+                    Ok(res) => return ControlFlow::Continue(res),
+                    Err(BackgroundCalculationError::Cancelled) => return ControlFlow::Break(()),
+                    Err(BackgroundCalculationError::Other(e)) => {
+                        warn!(attempt, "initial size calculation failed: {e:?}");
+                        // exponential back-off doesn't make sense at these long intervals;
+                        // use fixed retry interval with generous jitter instead
+                        let sleep_duration = Duration::from_secs(
+                            u64::try_from(
+                                // 1hour base
+                                (60_i64 * 60_i64)
+                                    // 10min jitter
+                                    + rand::thread_rng().gen_range(-10 * 60..10 * 60),
+                            )
+                            .expect("10min < 1hour"),
+                        );
+                        tokio::time::sleep(sleep_duration).await;
+                    }
+                }
+            }
+        };
+
+        let (calculated_size, metrics_guard) = tokio::select! {
+            res = retrying  => {
+                match res {
+                    ControlFlow::Continue(calculated_size) => calculated_size,
+                    ControlFlow::Break(()) => return,
+                }
+            }
+            _ = cancel.cancelled() => {
+                return;
+            }
+        };
+
+        // we cannot query current_logical_size.current_size() to know the current
+        // *negative* value, only truncated to u64.
+        let added = self
+            .current_logical_size
+            .size_added_after_initial
+            .load(AtomicOrdering::Relaxed);
+
+        let sum = calculated_size.saturating_add_signed(added);
+
+        // set the gauge value before it can be set in `update_current_logical_size`.
+        self.metrics.current_logical_size_gauge.set(sum);
+
+        self.current_logical_size
+            .initial_logical_size
+            .set((calculated_size, metrics_guard.calculation_result_saved()))
+            .ok()
+            .expect("only this task sets it");
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
@@ -1971,6 +2030,9 @@ impl Timeline {
         receiver
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
@@ -2008,6 +2070,10 @@ impl Timeline {
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -2123,6 +2189,10 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     async fn get_reconstruct_data(
         &self,
         key: Key,
@@ -2371,6 +2441,9 @@ impl Timeline {
         }
     }
 
+    /// # Cancel-safety
+    ///
+    /// This method is cancellation-safe.
     async fn lookup_cached_page(
         &self,
         key: &Key,

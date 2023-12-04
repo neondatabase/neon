@@ -384,7 +384,7 @@ def test_download_remote_layers_api(
     env.pageserver.allowed_errors.extend(
         [
             ".*download failed: downloading evicted layer file failed.*",
-            f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
+            f".*initial_size_calculation.*{tenant_id}.*{timeline_id}.*initial size calculation failed: downloading evicted layer file failed",
         ]
     )
 

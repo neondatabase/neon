@@ -282,6 +282,10 @@ impl Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn list_rels(
         &self,
         spcnode: Oid,
@@ -630,6 +634,10 @@ impl Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,

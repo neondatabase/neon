@@ -338,7 +338,8 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size = timeline.get_current_logical_size(ctx);
+    let current_logical_size =
+        timeline.get_current_logical_size(tenant::timeline::GetLogicalSizePriority::User, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline

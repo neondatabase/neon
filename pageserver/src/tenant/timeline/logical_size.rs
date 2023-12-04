@@ -1,11 +1,10 @@
 use anyhow::Context;
-use once_cell::sync::OnceCell;
 
-use tokio::sync::Semaphore;
+use once_cell::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 use utils::lsn::Lsn;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
-use std::sync::Arc;
 
 /// Internal structure to hold all data needed for logical size calculation.
 ///
@@ -28,8 +27,12 @@ pub(super) struct LogicalSize {
         crate::metrics::initial_logical_size::FinishedCalculationGuard,
     )>,
 
-    /// Semaphore to track ongoing calculation of `initial_logical_size`.
-    pub initial_size_computation: Arc<tokio::sync::Semaphore>,
+    /// Cancellation for the best-effort logical size calculation.
+    ///
+    /// The token is kept in a once-cell so that we can error out if a higher priority
+    /// request comes in *before* we have started the normal logical size calculation.
+    pub(crate) cancel_wait_for_background_loop_concurrency_limit_semaphore:
+        OnceCell<CancellationToken>,
 
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     pub initial_part_end: Option<Lsn>,
@@ -72,7 +75,7 @@ pub(crate) enum CurrentLogicalSize {
     Exact(Exact),
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Accuracy {
     Approximate,
     Exact,
@@ -115,11 +118,10 @@ impl LogicalSize {
         Self {
             initial_logical_size: OnceCell::with_value((0, {
                 crate::metrics::initial_logical_size::START_CALCULATION
-                    .first(None)
+                    .first(crate::metrics::initial_logical_size::StartCircumstances::EmptyInitial)
                     .calculation_result_saved()
             })),
-            //  initial_logical_size already computed, so, don't admit any calculations
-            initial_size_computation: Arc::new(Semaphore::new(0)),
+            cancel_wait_for_background_loop_concurrency_limit_semaphore: OnceCell::new(),
             initial_part_end: None,
             size_added_after_initial: AtomicI64::new(0),
             did_return_approximate_to_walreceiver: AtomicBool::new(false),
@@ -129,7 +131,7 @@ impl LogicalSize {
     pub(super) fn deferred_initial(compute_to: Lsn) -> Self {
         Self {
             initial_logical_size: OnceCell::new(),
-            initial_size_computation: Arc::new(Semaphore::new(1)),
+            cancel_wait_for_background_loop_concurrency_limit_semaphore: OnceCell::new(),
             initial_part_end: Some(compute_to),
             size_added_after_initial: AtomicI64::new(0),
             did_return_approximate_to_walreceiver: AtomicBool::new(false),

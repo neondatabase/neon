@@ -472,7 +472,6 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        init_order: Option<&InitializationOrder>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -482,7 +481,6 @@ impl Tenant {
             &metadata,
             ancestor.clone(),
             resources,
-            init_order,
             CreateTimelineCause::Load,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
@@ -683,10 +681,6 @@ impl Tenant {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
-                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
-                    let _ = init_order
-                        .as_mut()
-                        .and_then(|x| x.initial_logical_size_attempt.take());
                     let background_jobs_can_start =
                         init_order.as_ref().map(|x| &x.background_jobs_can_start);
                     if let Some(background) = background_jobs_can_start {
@@ -700,7 +694,6 @@ impl Tenant {
                         &tenant_clone,
                         preload,
                         tenants,
-                        init_order,
                         &ctx,
                     )
                     .await
@@ -713,7 +706,7 @@ impl Tenant {
                     }
                 }
 
-                match tenant_clone.attach(init_order, preload, &ctx).await {
+                match tenant_clone.attach(preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
@@ -776,7 +769,6 @@ impl Tenant {
     ///
     async fn attach(
         self: &Arc<Tenant>,
-        init_order: Option<InitializationOrder>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -789,7 +781,7 @@ impl Tenant {
             None => {
                 // Deprecated dev mode: load from local disk state instead of remote storage
                 // https://github.com/neondatabase/neon/issues/5624
-                return self.load_local(init_order, ctx).await;
+                return self.load_local(ctx).await;
             }
         };
 
@@ -884,7 +876,6 @@ impl Tenant {
                 &index_part.metadata,
                 Some(remote_timeline_client),
                 self.deletion_queue_client.clone(),
-                None,
             )
             .await
             .context("resume_deletion")
@@ -1009,10 +1000,6 @@ impl Tenant {
             None
         };
 
-        // we can load remote timelines during init, but they are assumed to be so rare that
-        // initialization order is not passed to here.
-        let init_order = None;
-
         // timeline loading after attach expects to find metadata file for each metadata
         save_metadata(
             self.conf,
@@ -1030,7 +1017,6 @@ impl Tenant {
             Some(index_part),
             remote_metadata,
             ancestor,
-            init_order,
             ctx,
         )
         .await
@@ -1272,11 +1258,7 @@ impl Tenant {
     /// files on disk. Used at pageserver startup.
     ///
     /// No background tasks are started as part of this routine.
-    async fn load_local(
-        self: &Arc<Tenant>,
-        init_order: Option<InitializationOrder>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    async fn load_local(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
@@ -1302,7 +1284,7 @@ impl Tenant {
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
             if let Err(e) = self
-                .load_local_timeline(timeline_id, local_metadata, init_order.as_ref(), ctx, false)
+                .load_local_timeline(timeline_id, local_metadata, ctx, false)
                 .await
             {
                 match e {
@@ -1336,13 +1318,7 @@ impl Tenant {
                 }
                 Some(local_metadata) => {
                     if let Err(e) = self
-                        .load_local_timeline(
-                            timeline_id,
-                            local_metadata,
-                            init_order.as_ref(),
-                            ctx,
-                            true,
-                        )
+                        .load_local_timeline(timeline_id, local_metadata, ctx, true)
                         .await
                     {
                         match e {
@@ -1370,12 +1346,11 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, init_order, ctx))]
+    #[instrument(skip(self, local_metadata, ctx))]
     async fn load_local_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
-        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
         found_delete_mark: bool,
     ) -> Result<(), LoadLocalTimelineError> {
@@ -1392,7 +1367,6 @@ impl Tenant {
                 &local_metadata,
                 None,
                 self.deletion_queue_client.clone(),
-                init_order,
             )
             .await
             .context("resume deletion")
@@ -1409,17 +1383,9 @@ impl Tenant {
             None
         };
 
-        self.timeline_init_and_sync(
-            timeline_id,
-            resources,
-            None,
-            local_metadata,
-            ancestor,
-            init_order,
-            ctx,
-        )
-        .await
-        .map_err(LoadLocalTimelineError::Load)
+        self.timeline_init_and_sync(timeline_id, resources, None, local_metadata, ancestor, ctx)
+            .await
+            .map_err(LoadLocalTimelineError::Load)
     }
 
     pub(crate) fn tenant_id(&self) -> TenantId {
@@ -2314,7 +2280,6 @@ impl Tenant {
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
-        init_order: Option<&InitializationOrder>,
         cause: CreateTimelineCause,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
@@ -2329,9 +2294,6 @@ impl Tenant {
             CreateTimelineCause::Delete => TimelineState::Stopping,
         };
 
-        let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
-        let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
-
         let pg_version = new_metadata.pg_version();
 
         let timeline = Timeline::new(
@@ -2345,8 +2307,6 @@ impl Tenant {
             Arc::clone(&self.walredo_mgr),
             resources,
             pg_version,
-            initial_logical_size_can_start.cloned(),
-            initial_logical_size_attempt.cloned().flatten(),
             state,
             self.cancel.child_token(),
         );
@@ -3168,7 +3128,6 @@ impl Tenant {
                 new_metadata,
                 ancestor,
                 resources,
-                None,
                 CreateTimelineCause::Load,
             )
             .context("Failed to create timeline data structure")?;
@@ -3843,7 +3802,7 @@ pub(crate) mod harness {
             match mode {
                 LoadMode::Local => {
                     tenant
-                        .load_local(None, ctx)
+                        .load_local(ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                 }
@@ -3853,7 +3812,7 @@ pub(crate) mod harness {
                         .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                     tenant
-                        .attach(None, Some(preload), ctx)
+                        .attach(Some(preload), ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                 }
