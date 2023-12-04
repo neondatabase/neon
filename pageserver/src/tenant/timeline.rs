@@ -801,7 +801,12 @@ impl Timeline {
                     .access_stats_behavior(AccessStatsBehavior::Skip)
                     .build();
 
-                // 2. Create new image layers for partitions that have been modified
+                // 2. Compact
+                let timer = self.metrics.compact_time_histo.start_timer();
+                self.compact_level0(target_file_size, ctx).await?;
+                timer.stop_and_record();
+
+                // 3. Create new image layers for partitions that have been modified
                 // "enough".
                 let layers = self
                     .create_image_layers(&partitioning, lsn, false, &image_ctx)
@@ -812,11 +817,6 @@ impl Timeline {
                         remote_client.schedule_layer_file_upload(layer)?;
                     }
                 }
-
-                // 3. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size, ctx).await?;
-                timer.stop_and_record();
 
                 if let Some(remote_client) = &self.remote_client {
                     // should any new image layer been created, not uploading index_part will
