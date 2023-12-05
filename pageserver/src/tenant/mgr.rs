@@ -1138,12 +1138,14 @@ impl TenantManager {
             }
         }
 
+        let shard_identity = config.shard;
         let tenant = tenant_spawn(
             self.conf,
             tenant_shard_id,
             &tenant_path,
             self.resources.clone(),
             AttachedTenantConf::try_from(config)?,
+            shard_identity,
             None,
             self.tenants,
             SpawnMode::Normal,
