@@ -159,13 +159,17 @@ impl TenantsMap {
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must
     /// resolve this to a fully qualified TenantShardId.
-    fn resolve_shard(&self, tenant_id: &TenantId, mode: ShardSelector) -> Option<TenantShardId> {
+    fn resolve_shard(
+        &self,
+        tenant_id: &TenantId,
+        selector: ShardSelector,
+    ) -> Option<TenantShardId> {
         let mut want_shard = None;
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
-                    match mode {
+                    match selector {
                         ShardSelector::First => return Some(*slot.0),
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
                             return Some(*slot.0)
@@ -1161,7 +1165,7 @@ pub(crate) enum GetActiveTenantError {
 /// then wait for up to `timeout` (minus however long we waited for the slot).
 pub(crate) async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
-    resolve_mode: ShardSelector,
+    shard_selector: ShardSelector,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
@@ -1177,7 +1181,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
         let locked = TENANTS.read().unwrap();
 
         // Resolve TenantId to TenantShardId
-        let tenant_shard_id = locked.resolve_shard(&tenant_id, resolve_mode).ok_or(
+        let tenant_shard_id = locked.resolve_shard(&tenant_id, shard_selector).ok_or(
             GetActiveTenantError::NotFound(GetTenantError::NotFound(tenant_id)),
         )?;
 

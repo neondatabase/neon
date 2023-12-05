@@ -990,11 +990,11 @@ impl PageServerHandler {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        mode: ShardSelector,
+        selector: ShardSelector,
     ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
         let tenant = get_active_tenant_with_timeout(
             tenant_id,
-            mode,
+            selector,
             ACTIVE_TENANT_TIMEOUT,
             &task_mgr::shutdown_token(),
         )
