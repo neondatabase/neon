@@ -13,6 +13,7 @@ use crate::repository::*;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
+use pageserver_api::key::is_rel_block_key;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -1322,7 +1323,7 @@ impl<'a> DatadirModification<'a> {
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::new();
         for (key, value) in self.pending_updates.drain() {
-            if is_rel_block_key(key) || is_slru_block_key(key) {
+            if is_rel_block_key(&key) || is_slru_block_key(key) {
                 // This bails out on first error without modifying pending_updates.
                 // That's Ok, cf this function's doc comment.
                 writer.put(key, self.lsn, &value, ctx).await?;
@@ -1578,7 +1579,7 @@ fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
     }
 }
 
-fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
+pub(crate) fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x00,
         field2: rel.spcnode,
@@ -1775,10 +1776,6 @@ pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
         ),
         _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
     })
-}
-
-fn is_rel_block_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0
 }
 
 pub fn is_rel_fsm_block_key(key: Key) -> bool {

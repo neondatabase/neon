@@ -19,6 +19,7 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models::TimelineState;
+use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -235,6 +236,9 @@ pub struct Tenant {
     tenant_conf: Arc<RwLock<AttachedTenantConf>>,
 
     tenant_shard_id: TenantShardId,
+
+    // The detailed sharding information, beyond the number/count in tenant_shard_id
+    shard_identity: ShardIdentity,
 
     /// The remote storage generation, used to protect S3 objects from split-brain.
     /// Does not change over the lifetime of the [`Tenant`] object.
@@ -568,6 +572,7 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
+        shard_identity: ShardIdentity,
         init_order: Option<InitializationOrder>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
@@ -589,6 +594,7 @@ impl Tenant {
             TenantState::Attaching,
             conf,
             attached_conf,
+            shard_identity,
             wal_redo_manager,
             tenant_shard_id,
             remote_storage.clone(),
@@ -1040,6 +1046,9 @@ impl Tenant {
             },
             conf,
             AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
+            // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
+            // to occupy the slot for this TenantShardId.
+            ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
             wal_redo_manager,
             tenant_shard_id,
             None,
@@ -2304,6 +2313,7 @@ impl Tenant {
             new_timeline_id,
             self.tenant_shard_id,
             self.generation,
+            self.shard_identity,
             Arc::clone(&self.walredo_mgr),
             resources,
             pg_version,
@@ -2321,6 +2331,7 @@ impl Tenant {
         state: TenantState,
         conf: &'static PageServerConf,
         attached_conf: AttachedTenantConf,
+        shard_identity: ShardIdentity,
         walredo_mgr: Arc<WalRedoManager>,
         tenant_shard_id: TenantShardId,
         remote_storage: Option<GenericRemoteStorage>,
@@ -2382,6 +2393,7 @@ impl Tenant {
 
         Tenant {
             tenant_shard_id,
+            shard_identity,
             generation: attached_conf.location.generation,
             conf,
             // using now here is good enough approximation to catch tenants with really long
@@ -3793,6 +3805,8 @@ pub(crate) mod harness {
                     self.generation,
                 ))
                 .unwrap(),
+                // This is a legacy/test code path: sharding isn't supported here.
+                ShardIdentity::unsharded(),
                 walredo_mgr,
                 self.tenant_shard_id,
                 Some(self.remote_storage.clone()),

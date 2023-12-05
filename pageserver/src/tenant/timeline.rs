@@ -18,7 +18,7 @@ use pageserver_api::{
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
         TimelineState,
     },
-    shard::TenantShardId,
+    shard::{ShardIdentity, TenantShardId},
 };
 use rand::Rng;
 use serde_with::serde_as;
@@ -166,6 +166,10 @@ pub struct Timeline {
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     pub(crate) generation: Generation,
+
+    /// The detailed sharding information from our parent Tenant.  This enables us to map keys
+    /// to shards, and is constant through the lifetime of this Timeline.
+    shard_identity: ShardIdentity,
 
     pub pg_version: u32,
 
@@ -1335,6 +1339,7 @@ impl Timeline {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         generation: Generation,
+        shard_identity: ShardIdentity,
         walredo_mgr: Arc<super::WalRedoManager>,
         resources: TimelineResources,
         pg_version: u32,
@@ -1364,6 +1369,7 @@ impl Timeline {
                 timeline_id,
                 tenant_shard_id,
                 generation,
+                shard_identity,
                 pg_version,
                 layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
                 wanted_image_layers: Mutex::new(None),
@@ -2476,6 +2482,10 @@ impl Timeline {
             )
         })?;
         Ok(Arc::clone(ancestor))
+    }
+
+    pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
+        &self.shard_identity
     }
 
     ///
