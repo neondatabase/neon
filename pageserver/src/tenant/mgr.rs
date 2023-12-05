@@ -515,6 +515,12 @@ pub async fn init_tenant_mgr(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
+        // The /timelines/ subdirectory of a tenant usually already exists,
+        // but to avoid requiring tenant dir creators to create it atomically
+        // with the directory creation (which involves fsyncs), we ensure its
+        // existence here.
+        tokio::fs::create_dir_all(conf.timelines_path(&tenant_shard_id)).await?;
+
         match tenant_spawn(
             conf,
             tenant_shard_id,
