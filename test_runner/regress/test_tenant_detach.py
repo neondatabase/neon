@@ -62,10 +62,7 @@ class ReattachMode(str, enum.Enum):
     "mode",
     [ReattachMode.REATTACH_EXPLICIT, ReattachMode.REATTACH_RESET, ReattachMode.REATTACH_RESET_DROP],
 )
-def test_tenant_reattach(
-    neon_env_builder: NeonEnvBuilder,
-    mode:str
-):
+def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
