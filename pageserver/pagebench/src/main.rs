@@ -1,5 +1,7 @@
 use clap::Parser;
 
+pub(crate) mod util;
+
 mod getpage_latest_lsn;
 
 /// Component-level performance test for pageserver.

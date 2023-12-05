@@ -1,5 +1,3 @@
-mod tenant_timeline_id;
-
 use anyhow::Context;
 use pageserver::client::page_service::RelTagBlockNo;
 use pageserver::pgdatadir_mapping::{is_rel_block_key, key_to_rel_block};
@@ -20,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use self::tenant_timeline_id::TenantTimelineId;
+use crate::util::tenant_timeline_id::TenantTimelineId;
 
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
