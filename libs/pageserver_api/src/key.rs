@@ -141,7 +141,6 @@ impl Key {
     }
 }
 
-
 impl std::str::FromStr for Key {
     type Err = anyhow::Error;
 

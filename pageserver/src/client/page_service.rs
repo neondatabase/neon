@@ -1,9 +1,13 @@
 use std::pin::Pin;
 
 use futures::SinkExt;
-use pageserver_api::{models::{
-    PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-}, reltag::RelTag};
+use pageserver_api::{
+    models::{
+        PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest,
+        PagestreamGetPageResponse,
+    },
+    reltag::RelTag,
+};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
