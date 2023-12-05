@@ -205,7 +205,7 @@ async fn timed<Fut: std::future::Future>(
     match tokio::time::timeout(warn_at, &mut fut).await {
         Ok(ret) => {
             tracing::info!(
-                task = name,
+                stage = name,
                 elapsed_ms = started.elapsed().as_millis(),
                 "completed"
             );
@@ -213,7 +213,7 @@ async fn timed<Fut: std::future::Future>(
         }
         Err(_) => {
             tracing::info!(
-                task = name,
+                stage = name,
                 elapsed_ms = started.elapsed().as_millis(),
                 "still waiting, taking longer than expected..."
             );
@@ -222,7 +222,7 @@ async fn timed<Fut: std::future::Future>(
 
             // this has a global allowed_errors
             tracing::warn!(
-                task = name,
+                stage = name,
                 elapsed_ms = started.elapsed().as_millis(),
                 "completed, took longer than expected"
             );
