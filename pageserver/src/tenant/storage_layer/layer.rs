@@ -1403,7 +1403,7 @@ impl From<ResidentLayer> for Layer {
 
 use metrics::IntCounter;
 
-struct LayerImplMetrics {
+pub(crate) struct LayerImplMetrics {
     started_evictions: IntCounter,
     completed_evictions: IntCounter,
     cancelled_evictions: enum_map::EnumMap<EvictionCancelled, IntCounter>,
@@ -1634,5 +1634,5 @@ impl RareEvent {
     }
 }
 
-static LAYER_IMPL_METRICS: once_cell::sync::Lazy<LayerImplMetrics> =
+pub(crate) static LAYER_IMPL_METRICS: once_cell::sync::Lazy<LayerImplMetrics> =
     once_cell::sync::Lazy::new(LayerImplMetrics::default);
