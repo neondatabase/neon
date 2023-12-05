@@ -1035,13 +1035,12 @@ impl TenantManager {
     ) -> anyhow::Result<()> {
         let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
         let Some(old_slot) = slot_guard.get_old_value() else {
-            tracing::info!("Tenant not found when trying to reset");
-            return Ok(());
+            anyhow::bail!("Tenant not found when trying to reset");
         };
 
         let Some(tenant) = old_slot.get_attached() else {
             slot_guard.revert();
-            anyhow::bail!("Tenant is not attached")
+            anyhow::bail!("Tenant is not in attached state");
         };
 
         let (_guard, progress) = utils::completion::channel();
