@@ -376,13 +376,14 @@ async fn client(
 ) {
     start_work_barrier.wait().await;
 
-    let mut client = pageserver::client::page_service::Client::new(
-        args.page_service_connstring.clone(),
-        timeline.tenant_id,
-        timeline.timeline_id,
-    )
-    .await
-    .unwrap();
+    let client =
+        pageserver::client::page_service::Client::new(args.page_service_connstring.clone())
+            .await
+            .unwrap();
+    let mut client = client
+        .pagestream(timeline.tenant_id, timeline.timeline_id)
+        .await
+        .unwrap();
 
     while let Some((key, lsn)) = work.recv().await {
         let start = Instant::now();
