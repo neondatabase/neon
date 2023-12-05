@@ -1066,12 +1066,18 @@ impl TenantManager {
 
         if drop_cache {
             tracing::info!("Dropping local file cache");
-            tokio::fs::remove_dir_all(&timelines_path).await?;
-        }
 
-        unsafe_create_dir_all(&timelines_path)
-            .await
-            .with_context(|| format!("Creating {timelines_path}"))?;
+            match tokio::fs::read_dir(&timelines_path).await {
+                Err(e) => {
+                    tracing::warn!("Failed to list timelines while dropping cache: {}", e);
+                }
+                Ok(mut entries) => {
+                    while let Some(entry) = entries.next_entry().await? {
+                        tokio::fs::remove_dir_all(entry.path()).await?;
+                    }
+                }
+            }
+        }
 
         let tenant = tenant_spawn(
             self.conf,
