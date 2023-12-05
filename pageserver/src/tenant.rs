@@ -2503,7 +2503,7 @@ impl Tenant {
             }
         }
 
-        info!("persisting tenantconf to {config_path}");
+        debug!("persisting tenantconf to {config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
@@ -2538,7 +2538,7 @@ impl Tenant {
         target_config_path: &Utf8Path,
         tenant_conf: &TenantConfOpt,
     ) -> anyhow::Result<()> {
-        info!("persisting tenantconf to {target_config_path}");
+        debug!("persisting tenantconf to {target_config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
