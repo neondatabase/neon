@@ -914,9 +914,14 @@ where
         Ok(())
     }
 
-    /// Persist control file to disk, called only after timeline creation (bootstrap).
-    pub async fn persist(&mut self) -> Result<()> {
-        self.persist_control_file(self.state.clone()).await
+    /// Persist in-memory state of control file to disk.
+    //
+    // TODO: passing inmem_remote_consistent_lsn everywhere is ugly, better
+    // separate state completely and give Arc to all those who need it.
+    pub async fn persist_inmem(&mut self, inmem_remote_consistent_lsn: Lsn) -> Result<()> {
+        let mut state = self.state.clone();
+        state.remote_consistent_lsn = inmem_remote_consistent_lsn;
+        self.persist_control_file(state).await
     }
 
     /// Persist in-memory state to the disk, taking other data from state.
@@ -930,7 +935,7 @@ where
 
     /// Persist control file if there is something to save and enough time
     /// passed after the last save.
-    pub async fn maybe_persist_control_file(
+    pub async fn maybe_persist_inmem_control_file(
         &mut self,
         inmem_remote_consistent_lsn: Lsn,
     ) -> Result<()> {
@@ -943,9 +948,7 @@ where
             || self.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
             || inmem_remote_consistent_lsn > self.state.remote_consistent_lsn;
         if need_persist {
-            let mut state = self.state.clone();
-            state.remote_consistent_lsn = inmem_remote_consistent_lsn;
-            self.persist_control_file(state).await?;
+            self.persist_inmem(inmem_remote_consistent_lsn).await?;
             trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
         }
         Ok(())
@@ -1064,8 +1067,6 @@ where
 
         if sync_control_file {
             let mut state = self.state.clone();
-            // Note: we could make remote_consistent_lsn update in cf common by
-            // storing Arc to walsenders in Safekeeper.
             state.remote_consistent_lsn = new_remote_consistent_lsn;
             self.persist_control_file(state).await?;
         }
