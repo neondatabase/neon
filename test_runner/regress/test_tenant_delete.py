@@ -23,7 +23,7 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
     wait_until_tenant_state,
 )
-from fixtures.remote_storage import RemoteStorageKind, s3_storage
+from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
 from fixtures.types import TenantId
 from fixtures.utils import run_pg_bench_small, wait_until
 
@@ -139,11 +139,28 @@ FAILPOINTS_BEFORE_BACKGROUND = [
 ]
 
 
-@pytest.mark.parametrize("failpoint", FAILPOINTS)
+def combinations():
+    result = []
+
+    remotes = available_s3_storages()
+
+    for remote_storage_kind in remotes:
+        for delete_failpoint in FAILPOINTS:
+            # Simulate failures for only one type of remote storage
+            # to avoid log pollution and make tests run faster
+            if remote_storage_kind is RemoteStorageKind.MOCK_S3:
+                simulate_failures = True
+            else:
+                simulate_failures = False
+            result.append((remote_storage_kind, delete_failpoint, simulate_failures))
+    return result
+
+
 @pytest.mark.parametrize("check", list(Check))
-@pytest.mark.parametrize("simulate_failures", [True, False])
+@pytest.mark.parametrize("remote_storage_kind, failpoint, simulate_failures", combinations())
 def test_delete_tenant_exercise_crash_safety_failpoints(
     neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
     failpoint: str,
     simulate_failures: bool,
     check: Check,
@@ -152,7 +169,6 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     if simulate_failures:
         neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
