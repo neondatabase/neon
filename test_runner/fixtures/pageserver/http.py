@@ -260,6 +260,14 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
         self.verbose_error(res)
 
+    def tenant_reset(self, tenant_id: TenantId, drop_cache: bool):
+        params = {}
+        if drop_cache:
+            params["drop_cache"] = "true"
+
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/reset", params=params)
+        self.verbose_error(res)
+
     def tenant_delete(self, tenant_id: TenantId):
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         self.verbose_error(res)

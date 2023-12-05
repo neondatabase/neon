@@ -1038,6 +1038,81 @@ impl TenantManager {
 
         Ok(())
     }
+
+    /// Resetting a tenant is equivalent to detaching it, then attaching it again with the same
+    /// LocationConf that was last used to attach it.  Optionally, the local file cache may be
+    /// dropped before re-attaching.
+    ///
+    /// This is not part of a tenant's normal lifecycle: it is used for debug/support, in situations
+    /// where an issue is identified that would go away with a restart of the tenant.
+    ///
+    /// This does not have any special "force" shutdown of a tenant: it relies on the tenant's tasks
+    /// to respect the cancellation tokens used in normal shutdown().
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %drop_cache))]
+    pub(crate) async fn reset_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+        drop_cache: bool,
+        ctx: RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let Some(old_slot) = slot_guard.get_old_value() else {
+            anyhow::bail!("Tenant not found when trying to reset");
+        };
+
+        let Some(tenant) = old_slot.get_attached() else {
+            slot_guard.revert();
+            anyhow::bail!("Tenant is not in attached state");
+        };
+
+        let (_guard, progress) = utils::completion::channel();
+        match tenant.shutdown(progress, false).await {
+            Ok(()) => {
+                slot_guard.drop_old_value()?;
+            }
+            Err(_barrier) => {
+                slot_guard.revert();
+                anyhow::bail!("Cannot reset Tenant, already shutting down");
+            }
+        }
+
+        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+        let timelines_path = self.conf.timelines_path(&tenant_shard_id);
+        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+
+        if drop_cache {
+            tracing::info!("Dropping local file cache");
+
+            match tokio::fs::read_dir(&timelines_path).await {
+                Err(e) => {
+                    tracing::warn!("Failed to list timelines while dropping cache: {}", e);
+                }
+                Ok(mut entries) => {
+                    while let Some(entry) = entries.next_entry().await? {
+                        tokio::fs::remove_dir_all(entry.path()).await?;
+                    }
+                }
+            }
+        }
+
+        let shard_identity = config.shard;
+        let tenant = tenant_spawn(
+            self.conf,
+            tenant_shard_id,
+            &tenant_path,
+            self.resources.clone(),
+            AttachedTenantConf::try_from(config)?,
+            shard_identity,
+            None,
+            self.tenants,
+            SpawnMode::Normal,
+            &ctx,
+        )?;
+
+        slot_guard.upsert(TenantSlot::Attached(tenant))?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1246,8 +1321,7 @@ pub(crate) async fn delete_tenant(
     // See https://github.com/neondatabase/neon/issues/5080
 
     // TODO(sharding): make delete API sharding-aware
-    let mut slot_guard =
-        tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+    let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
 
     // unwrap is safe because we used MustExist mode when acquiring
     let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
@@ -1574,9 +1648,10 @@ pub enum TenantSlotUpsertError {
     MapState(#[from] TenantMapError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum TenantSlotDropError {
     /// It is only legal to drop a TenantSlot if its contents are fully shut down
+    #[error("Tenant was not shut down")]
     NotShutdown,
 }
 
@@ -1636,9 +1711,9 @@ impl SlotGuard {
         }
     }
 
-    /// Take any value that was present in the slot before we acquired ownership
+    /// Get any value that was present in the slot before we acquired ownership
     /// of it: in state transitions, this will be the old state.
-    fn get_old_value(&mut self) -> &Option<TenantSlot> {
+    fn get_old_value(&self) -> &Option<TenantSlot> {
         &self.old_value
     }
 

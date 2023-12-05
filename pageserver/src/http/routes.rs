@@ -709,6 +709,26 @@ async fn tenant_detach_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn tenant_reset_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let drop_cache: Option<bool> = parse_query_param(&request, "drop_cache")?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
+    state
+        .tenant_manager
+        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn tenant_load_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -1827,6 +1847,9 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_id/detach", |r| {
             api_handler(r, tenant_detach_handler)
+        })
+        .post("/v1/tenant/:tenant_shard_id/reset", |r| {
+            api_handler(r, tenant_reset_handler)
         })
         .post("/v1/tenant/:tenant_id/load", |r| {
             api_handler(r, tenant_load_handler)
