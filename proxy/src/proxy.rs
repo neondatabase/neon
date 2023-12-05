@@ -134,9 +134,9 @@ pub static ALLOWED_IPS_BY_CACHE_OUTCOME: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "semaphore_control_plane_token_acquire_seconds",
+        "proxy_control_plane_token_acquire_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        // largest bucket = 3^16 * 0.00005ms = 2.15s
+        // largest bucket = 3^16 * 0.05ms = 2.15s
         exponential_buckets(0.00005, 3.0, 16).unwrap(),
     )
     .unwrap()
