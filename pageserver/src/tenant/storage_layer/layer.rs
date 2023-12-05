@@ -222,8 +222,8 @@ impl Layer {
     ///
     /// [gc]: [`RemoteTimelineClient::schedule_gc_update`]
     /// [compaction]: [`RemoteTimelineClient::schedule_compaction_update`]
-    pub(crate) fn garbage_collect_on_drop(&self) {
-        self.0.garbage_collect_on_drop();
+    pub(crate) fn delete_on_drop(&self) {
+        self.0.delete_on_drop();
     }
 
     /// Return data needed to reconstruct given page at LSN.
@@ -327,10 +327,10 @@ impl Layer {
         Ok(())
     }
 
-    /// Waits until this layer has been dropped (and if needed, local garbage collection and remote
+    /// Waits until this layer has been dropped (and if needed, local file deletion and remote
     /// deletion scheduling has completed).
     ///
-    /// Does not start garbage collection, use [`Self::garbage_collect_on_drop`] for that
+    /// Does not start local deletion, use [`Self::delete_on_drop`] for that
     /// separatedly.
     #[cfg(feature = "testing")]
     pub(crate) fn wait_drop(&self) -> impl std::future::Future<Output = ()> + 'static {
@@ -419,8 +419,8 @@ struct LayerInner {
     /// Initialization and deinitialization are done while holding a permit.
     inner: heavier_once_cell::OnceCell<ResidentOrWantedEvicted>,
 
-    /// Do we want to garbage collect this when `LayerInner` is dropped
-    wanted_garbage_collected: AtomicBool,
+    /// Do we want to delete locally and remotely this when `LayerInner` is dropped
+    wanted_deleted: AtomicBool,
 
     /// Do we want to evict this layer as soon as possible? After being set to `true`, all accesses
     /// will try to downgrade [`ResidentOrWantedEvicted`], which will eventually trigger
@@ -434,10 +434,6 @@ struct LayerInner {
     version: AtomicUsize,
 
     /// Allow subscribing to when the layer actually gets evicted.
-    ///
-    /// If in future we need to implement "wait until layer instances are gone and done", carrying
-    /// this over to the gc spawn_blocking from LayerInner::drop will do the trick, and adding a
-    /// method for "wait_gc" which will wait to this being closed.
     status: tokio::sync::broadcast::Sender<Status>,
 
     /// Counter for exponential backoff with the download
@@ -479,7 +475,7 @@ enum Status {
 
 impl Drop for LayerInner {
     fn drop(&mut self) {
-        if !*self.wanted_garbage_collected.get_mut() {
+        if !*self.wanted_deleted.get_mut() {
             // should we try to evict if the last wish was for eviction?
             // feels like there's some hazard of overcrowding near shutdown near by, but we don't
             // run drops during shutdown (yet)
@@ -513,7 +509,7 @@ impl Drop for LayerInner {
                     false
                 }
                 Err(e) => {
-                    tracing::error!("failed to remove garbage collected layer: {e}");
+                    tracing::error!("failed to remove wanted deleted layer: {e}");
                     LAYER_IMPL_METRICS.inc_delete_removes_failed();
                     false
                 }
@@ -579,7 +575,7 @@ impl LayerInner {
             timeline: Arc::downgrade(timeline),
             have_remote_client: timeline.remote_client.is_some(),
             access_stats,
-            wanted_garbage_collected: AtomicBool::new(false),
+            wanted_deleted: AtomicBool::new(false),
             wanted_evicted: AtomicBool::new(false),
             inner,
             version: AtomicUsize::new(version),
@@ -590,13 +586,10 @@ impl LayerInner {
         }
     }
 
-    fn garbage_collect_on_drop(&self) {
-        let res = self.wanted_garbage_collected.compare_exchange(
-            false,
-            true,
-            Ordering::Release,
-            Ordering::Relaxed,
-        );
+    fn delete_on_drop(&self) {
+        let res =
+            self.wanted_deleted
+                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed);
 
         if res.is_ok() {
             LAYER_IMPL_METRICS.inc_started_deletes();
@@ -997,12 +990,15 @@ impl LayerInner {
 
     /// `DownloadedLayer` is being dropped, so it calls this method.
     fn on_downloaded_layer_drop(self: Arc<LayerInner>, version: usize) {
-        let gc = self.wanted_garbage_collected.load(Ordering::Acquire);
+        let delete = self.wanted_deleted.load(Ordering::Acquire);
         let evict = self.wanted_evicted.load(Ordering::Acquire);
         let can_evict = self.have_remote_client;
 
-        if gc {
-            // do nothing now, only in LayerInner::drop
+        if delete {
+            // do nothing now, only in LayerInner::drop -- this was originally implemented because
+            // we could had already scheduled the deletion at the time.
+            //
+            // FIXME: this is not true anymore, we can safely evict wanted deleted files.
         } else if can_evict && evict {
             let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
@@ -1017,7 +1013,7 @@ impl LayerInner {
             crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
                 let _g = span.entered();
 
-                // if LayerInner is already dropped here, do nothing because the garbage collection
+                // if LayerInner is already dropped here, do nothing because the delete on drop
                 // has already ran while we were in queue
                 let Some(this) = this.upgrade() else {
                     LAYER_IMPL_METRICS.inc_eviction_cancelled(EvictionCancelled::LayerGone);
@@ -1455,18 +1451,18 @@ impl Default for LayerImplMetrics {
 
         let started_deletes = metrics::register_int_counter!(
             "pageserver_layer_started_deletes",
-            "Garbage collections pending in the Layer implementation"
+            "Deletions on drop pending in the Layer implementation"
         )
         .unwrap();
         let completed_deletes = metrics::register_int_counter!(
             "pageserver_layer_completed_deletes",
-            "Garbage collections completed in the Layer implementation"
+            "Deletions on drop completed in the Layer implementation"
         )
         .unwrap();
 
         let failed_deletes = metrics::register_int_counter_vec!(
             "pageserver_layer_failed_deletes_count",
-            "Different reasons for garbage collections to have failed",
+            "Different reasons for deletions on drop to have failed",
             &["reason"]
         )
         .unwrap();
@@ -1535,7 +1531,7 @@ impl LayerImplMetrics {
     /// Counted separatedly from failed layer deletes because we will complete the layer deletion
     /// attempt regardless of failure to delete local file.
     fn inc_delete_removes_failed(&self) {
-        self.rare_counters[RareEvent::GcRemoveFailed].inc();
+        self.rare_counters[RareEvent::RemoveOnDropFailed].inc();
     }
 
     /// Expected rare because requires a race with `evict_blocking` and `get_or_maybe_download`.
@@ -1622,7 +1618,7 @@ impl DeleteFailed {
 
 #[derive(enum_map::Enum)]
 enum RareEvent {
-    GcRemoveFailed,
+    RemoveOnDropFailed,
     RetriedGetOrMaybeDownload,
     DownloadFailedWithoutRequester,
     UpgradedWantedEvicted,
@@ -1636,7 +1632,7 @@ impl RareEvent {
         use RareEvent::*;
 
         match self {
-            GcRemoveFailed => "gc_remove_failed",
+            RemoveOnDropFailed => "remove_on_drop_failed",
             RetriedGetOrMaybeDownload => "retried_gomd",
             DownloadFailedWithoutRequester => "download_failed_without",
             UpgradedWantedEvicted => "raced_wanted_evicted",
