@@ -1048,7 +1048,7 @@ impl Tenant {
             AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
             // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
             // to occupy the slot for this TenantShardId.
-            ShardIdentity::unsharded(),
+            ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
             wal_redo_manager,
             tenant_shard_id,
             None,
