@@ -342,7 +342,7 @@ impl ShardIdentity {
         }
     }
 
-    /// A broken instance is only used for [`crate::tenant::TenantState::Broken`] tenants,
+    /// A broken instance is only used for [`pageserver::tenant::TenantState::Broken`] tenants,
     /// which are constructed in code paths that don't have access to proper configuration.
     ///
     /// A ShardIdentity in this state may not be used for anything, and should not be persisted.
