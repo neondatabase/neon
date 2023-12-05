@@ -182,8 +182,8 @@ async fn main_impl(
 
     // discover targets
     let mut timelines: Vec<TenantTimelineId> = Vec::new();
-    if false {
-        timelines = timelines.clone();
+    if args.targets.is_some() {
+        timelines = args.targets.clone().unwrap();
     } else {
         let tenants: Vec<TenantId> = mgmt_api_client
             .list_tenants()
