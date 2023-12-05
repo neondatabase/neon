@@ -46,6 +46,7 @@ from pytest import FixtureRequest
 #    export DEFAULT_PG_VERSION=15
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #
 #    # Build previous version of binaries and create a data snapshot:
 #    rm -rf pg_install target
@@ -59,8 +60,7 @@ from pytest import FixtureRequest
 #    CARGO_BUILD_FLAGS="--features=testing" make -s -j`nproc`
 #
 #    # Run backward compatibility test
-#    COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION} \
-#       ./scripts/pytest -k test_backward_compatibility
+#    ./scripts/pytest -k test_backward_compatibility
 #
 #
 # How to run `test_forward_compatibility` locally:
@@ -68,6 +68,8 @@ from pytest import FixtureRequest
 #    export DEFAULT_PG_VERSION=15
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
+#    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
+#    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
 #
 #    # Build previous version of binaries and store them somewhere:
 #    rm -rf pg_install target
@@ -84,9 +86,7 @@ from pytest import FixtureRequest
 #    ./scripts/pytest -k test_create_snapshot
 #
 #    # Run forward compatibility test
-#    COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE} \
-#    COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install \
-#       ./scripts/pytest -k test_forward_compatibility
+#    ./scripts/pytest -k test_forward_compatibility
 #
 
 check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
