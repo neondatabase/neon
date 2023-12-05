@@ -270,49 +270,6 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
     Lazy::new(|| std::sync::RwLock::new(TenantsMap::Initializing));
 
-/// Create a directory, including parents.  This does no fsyncs and makes
-/// no guarantees about the persistence of the resulting metadata: for
-/// use when creating dirs for use as cache.
-async fn unsafe_create_dir_all(path: &Utf8PathBuf) -> std::io::Result<()> {
-    let mut dirs_to_create = Vec::new();
-    let mut path: &Utf8Path = path.as_ref();
-
-    // Figure out which directories we need to create.
-    loop {
-        let meta = tokio::fs::metadata(path).await;
-        match meta {
-            Ok(metadata) if metadata.is_dir() => break,
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!("non-directory found in path: {path}"),
-                ));
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-
-        dirs_to_create.push(path);
-
-        match path.parent() {
-            Some(parent) => path = parent,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("can't find parent of path '{path}'"),
-                ));
-            }
-        }
-    }
-
-    // Create directories from parent to child.
-    for &path in dirs_to_create.iter().rev() {
-        tokio::fs::create_dir(path).await?;
-    }
-
-    Ok(())
-}
-
 /// The TenantManager is responsible for storing and mutating the collection of all tenants
 /// that this pageserver process has state for.  Every Tenant and SecondaryTenant instance
 /// lives inside the TenantManager.
@@ -1035,7 +992,7 @@ impl TenantManager {
             LocationMode::Secondary(_) => {
                 // Directory doesn't need to be fsync'd because if we crash it can
                 // safely be recreated next time this tenant location is configured.
-                unsafe_create_dir_all(&tenant_path)
+                tokio::fs::create_dir_all(&tenant_path)
                     .await
                     .with_context(|| format!("Creating {tenant_path}"))?;
 
@@ -1051,7 +1008,7 @@ impl TenantManager {
                 // Directory doesn't need to be fsync'd because we do not depend on
                 // it to exist after crashes: it may be recreated when tenant is
                 // re-attached, see https://github.com/neondatabase/neon/issues/5550
-                unsafe_create_dir_all(&timelines_path)
+                tokio::fs::create_dir_all(&tenant_path)
                     .await
                     .with_context(|| format!("Creating {timelines_path}"))?;
 
