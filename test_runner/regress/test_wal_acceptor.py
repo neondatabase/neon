@@ -298,17 +298,21 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
 
     # and wait till remote_consistent_lsn propagates to all safekeepers
     #
-    # TODO: this executes long as timeline on safekeeper is immediately
-    # deactivated once rcl reaches pageserver one, and thus we generally wait
-    # till pageserver reconnects to all safekeepers one by one here. Timeline
-    # status on safekeeper should take into account peers state as well.
+    # This timeout is long: safekeepers learn about remote_consistent_lsn updates when a pageserver
+    # connects, receives a PrimaryKeepAlive, and sends a PageserverFeedback.  So the timeout has to encompass:
+    # - pageserver deletion_queue to validate + publish the remote_consistent_lsn
+    # - pageserver to reconnect to all safekeepers one by one, with multi-second delays between
+    #
+    # TODO: timeline status on safekeeper should take into account peers state as well.
+    rcl_propagate_secs = 60
+
     started_at = time.time()
     while True:
         stat_after = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
         if all([s_after.remote_consistent_lsn >= new_rcl for s_after in stat_after]):
             break
         elapsed = time.time() - started_at
-        if elapsed > 30:
+        if elapsed > rcl_propagate_secs:
             raise RuntimeError(
                 f"timed out waiting {elapsed:.0f}s for remote_consistent_lsn propagation: status before {stat_before}, status current {stat_after}"
             )
