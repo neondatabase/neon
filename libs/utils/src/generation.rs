@@ -152,3 +152,16 @@ impl Debug for Generation {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn generation_gt() {
+        // Important that a None generation compares less than a valid one, during upgrades from
+        // pre-generation systems.
+        assert!(Generation::none() < Generation::new(0));
+        assert!(Generation::none() < Generation::new(1));
+    }
+}

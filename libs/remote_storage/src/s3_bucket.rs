@@ -378,7 +378,7 @@ impl RemoteStorage for S3Bucket {
             let empty = Vec::new();
             let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
 
-            tracing::info!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+            tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
 
             for object in keys {
                 let object_path = object.key().expect("response does not contain a key");

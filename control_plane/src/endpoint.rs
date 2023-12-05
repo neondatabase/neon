@@ -519,6 +519,7 @@ impl Endpoint {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
+            features: vec![],
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
