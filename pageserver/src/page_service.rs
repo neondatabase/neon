@@ -820,7 +820,10 @@ impl PageServerHandler {
                 .await?
         } else {
             // The Tenant shard we looked up at connection start does not hold this particular
-            // key: look for other shards in this tenant.
+            // key: look for other shards in this tenant.  This scenario occurs if a pageserver
+            // has multiple shards for the same tenant.
+            //
+            // TODO: optimize this (https://github.com/neondatabase/neon/pull/6037)
             let timeline = match self
                 .get_active_tenant_timeline(
                     timeline.tenant_shard_id.tenant_id,
