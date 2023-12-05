@@ -1,4 +1,5 @@
 import asyncio
+import enum
 import random
 import time
 from threading import Thread
@@ -50,9 +51,20 @@ def do_gc_target(
         log.info("gc http thread returning")
 
 
+class ReattachMode(str, enum.Enum):
+    REATTACH_EXPLICIT = "explicit"
+    REATTACH_RESET = "reset"
+    REATTACH_RESET_DROP = "reset"
+
+
 # Basic detach and re-attach test
+@pytest.mark.parametrize(
+    "mode",
+    [ReattachMode.REATTACH_EXPLICIT, ReattachMode.REATTACH_RESET, ReattachMode.REATTACH_RESET_DROP],
+)
 def test_tenant_reattach(
     neon_env_builder: NeonEnvBuilder,
+    mode:str
 ):
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
@@ -95,8 +107,15 @@ def test_tenant_reattach(
         ps_metrics.query_one("pageserver_last_record_lsn", filter=tenant_metric_filter).value
     )
 
-    pageserver_http.tenant_detach(tenant_id)
-    pageserver_http.tenant_attach(tenant_id)
+    if mode == ReattachMode.REATTACH_EXPLICIT:
+        # Explicitly detach then attach the tenant as two separate API calls
+        pageserver_http.tenant_detach(tenant_id)
+        pageserver_http.tenant_attach(tenant_id)
+    elif mode in (ReattachMode.REATTACH_RESET, ReattachMode.REATTACH_RESET_DROP):
+        # Use the reset API to detach/attach in one shot
+        pageserver_http.tenant_reset(tenant_id, mode == ReattachMode.REATTACH_RESET_DROP)
+    else:
+        raise NotImplementedError(mode)
 
     time.sleep(1)  # for metrics propagation
 

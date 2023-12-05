@@ -21,7 +21,6 @@ use crate::{
         },
         CreateTimelineCause, DeleteTimelineError, Tenant,
     },
-    InitializationOrder,
 };
 
 use super::{Timeline, TimelineResources};
@@ -407,7 +406,6 @@ impl DeleteTimelineFlow {
         local_metadata: &TimelineMetadata,
         remote_client: Option<RemoteTimelineClient>,
         deletion_queue_client: DeletionQueueClient,
-        init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
@@ -420,7 +418,6 @@ impl DeleteTimelineFlow {
                     remote_client,
                     deletion_queue_client,
                 },
-                init_order,
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,

@@ -146,6 +146,72 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
         time.sleep(polling_interval)
 
 
+def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota_on_startup")
+
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+
+    endpoint_main = env.endpoints.create(
+        "test_timeline_size_quota_on_startup",
+        # Set small limit for the test
+        config_lines=["neon.max_cluster_size=30MB"],
+    )
+    endpoint_main.start()
+
+    log.info("postgres is running on 'test_timeline_size_quota_on_startup' branch")
+
+    with closing(endpoint_main.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE foo (t text)")
+
+            # Insert many rows. This query must fail because of space limit
+            try:
+                for _i in range(5000):
+                    cur.execute(
+                        """
+                        INSERT INTO foo
+                            SELECT 'long string to consume some space' || g
+                            FROM generate_series(1, 100) g
+                    """
+                    )
+
+                # If we get here, the timeline size limit failed
+                log.error("Query unexpectedly succeeded")
+                raise AssertionError()
+
+            except psycopg2.errors.DiskFull as err:
+                log.info(f"Query expectedly failed with: {err}")
+
+    # Restart endpoint that reached the limit to ensure that it doesn't fail on startup
+    # i.e. the size limit is not enforced during startup.
+    endpoint_main.stop()
+    # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
+    # which is needed for neon.pg_cluster_size() to work
+    endpoint_main.respec(skip_pg_catalog_updates=False)
+    endpoint_main.start()
+
+    # ensure that the limit is enforced after startup
+    with closing(endpoint_main.connect()) as conn:
+        with conn.cursor() as cur:
+            # This query must fail because of space limit
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO foo
+                        SELECT 'long string to consume some space' || g
+                        FROM generate_series(1, 100000) g
+                """
+                )
+                # If we get here, the timeline size limit failed
+                log.error("Query unexpectedly succeeded")
+                raise AssertionError()
+
+            except psycopg2.errors.DiskFull as err:
+                log.info(f"Query expectedly failed with: {err}")
+
+
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()

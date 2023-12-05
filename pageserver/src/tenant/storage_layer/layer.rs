@@ -230,6 +230,10 @@ impl Layer {
     ///
     /// It is up to the caller to collect more data from the previous layer and
     /// perform WAL redo, if necessary.
+    ///
+    /// # Cancellation-Safety
+    ///
+    /// This method is cancellation-safe.
     pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,

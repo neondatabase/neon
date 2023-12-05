@@ -407,16 +407,14 @@ pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
 
-    use crate::task_mgr::TaskKind;
-
     pub(crate) struct StartCalculation(IntCounterVec);
     pub(crate) static START_CALCULATION: Lazy<StartCalculation> = Lazy::new(|| {
         StartCalculation(
             register_int_counter_vec!(
                 "pageserver_initial_logical_size_start_calculation",
                 "Incremented each time we start an initial logical size calculation attempt. \
-                 The `task_kind` label is for the task kind that caused this attempt.",
-                &["attempt", "task_kind"]
+                 The `circumstances` label provides some additional details.",
+                &["attempt", "circumstances"]
             )
             .unwrap(),
         )
@@ -464,19 +462,24 @@ pub(crate) mod initial_logical_size {
         inc_drop_calculation: Option<IntCounter>,
     }
 
+    #[derive(strum_macros::IntoStaticStr)]
+    pub(crate) enum StartCircumstances {
+        EmptyInitial,
+        SkippedConcurrencyLimiter,
+        AfterBackgroundTasksRateLimit,
+    }
+
     impl StartCalculation {
-        pub(crate) fn first(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
-            let task_kind_label: &'static str =
-                causing_task_kind.map(|k| k.into()).unwrap_or_default();
-            self.0.with_label_values(&["first", task_kind_label]);
+        pub(crate) fn first(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0.with_label_values(&["first", circumstances_label]);
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
             }
         }
-        pub(crate) fn retry(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
-            let task_kind_label: &'static str =
-                causing_task_kind.map(|k| k.into()).unwrap_or_default();
-            self.0.with_label_values(&["retry", task_kind_label]);
+        pub(crate) fn retry(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0.with_label_values(&["retry", circumstances_label]);
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
             }
@@ -511,24 +514,16 @@ pub(crate) mod initial_logical_size {
         }
     }
 
-    pub(crate) struct Calls {
-        pub(crate) approximate: IntCounter,
-        pub(crate) exact: IntCounter,
-    }
-
-    pub(crate) static CALLS: Lazy<Calls> = Lazy::new(|| {
-        let vec = register_int_counter_vec!(
-            "pageserver_initial_logical_size_calls",
-            "Incremented each time some code asks for incremental logical size.\
-             The label records the accuracy of the result.",
-            &["accuracy"]
-        )
-        .unwrap();
-        Calls {
-            approximate: vec.with_label_values(&["approximate"]),
-            exact: vec.with_label_values(&["exact"]),
-        }
-    });
+    // context: https://github.com/neondatabase/neon/issues/5963
+    pub(crate) static TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE: Lazy<IntCounter> =
+        Lazy::new(|| {
+            register_int_counter!(
+                "pageserver_initial_logical_size_timelines_where_walreceiver_got_approximate_size",
+                "Counter for the following event: walreceiver calls\
+                 Timeline::get_current_logical_size() and it returns `Approximate` for the first time."
+            )
+            .unwrap()
+        });
 }
 
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
@@ -1393,6 +1388,8 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) active_stderr_logger_tasks_started: IntCounter,
+    pub(crate) active_stderr_logger_tasks_finished: IntCounter,
 }
 
 #[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
@@ -1416,6 +1413,19 @@ impl Default for WalRedoProcessCounters {
             &["cause"],
         )
         .unwrap();
+
+        let active_stderr_logger_tasks_started = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_started_total",
+            "Number of active walredo stderr logger tasks that have started",
+        )
+        .unwrap();
+
+        let active_stderr_logger_tasks_finished = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_finished_total",
+            "Number of active walredo stderr logger tasks that have finished",
+        )
+        .unwrap();
+
         Self {
             started,
             killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
@@ -1423,6 +1433,8 @@ impl Default for WalRedoProcessCounters {
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),
+            active_stderr_logger_tasks_started,
+            active_stderr_logger_tasks_finished,
         }
     }
 }

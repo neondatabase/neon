@@ -338,13 +338,8 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size = match timeline.get_current_logical_size(ctx) {
-        Ok((size, _)) => Some(size),
-        Err(err) => {
-            error!("Timeline info creation failed to get current logical size: {err:?}");
-            None
-        }
-    };
+    let current_logical_size =
+        timeline.get_current_logical_size(tenant::timeline::GetLogicalSizePriority::User, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -368,7 +363,11 @@ async fn build_timeline_info_common(
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-        current_logical_size,
+        current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
+        current_logical_size_is_accurate: match current_logical_size.accuracy() {
+            tenant::timeline::logical_size::Accuracy::Approximate => false,
+            tenant::timeline::logical_size::Accuracy::Exact => true,
+        },
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
@@ -706,6 +705,26 @@ async fn tenant_detach_handler(
     )
     .instrument(info_span!("tenant_detach", %tenant_id))
     .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn tenant_reset_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let drop_cache: Option<bool> = parse_query_param(&request, "drop_cache")?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
+    state
+        .tenant_manager
+        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1828,6 +1847,9 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_id/detach", |r| {
             api_handler(r, tenant_detach_handler)
+        })
+        .post("/v1/tenant/:tenant_shard_id/reset", |r| {
+            api_handler(r, tenant_reset_handler)
         })
         .post("/v1/tenant/:tenant_id/load", |r| {
             api_handler(r, tenant_load_handler)

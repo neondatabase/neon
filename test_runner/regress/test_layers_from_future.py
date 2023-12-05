@@ -49,7 +49,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         "compaction_period": "0s",  # we want to control when compaction runs
         "checkpoint_timeout": "24h",  # something we won't reach
         "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
-        "image_creation_threshold": f"{image_creation_threshold}",
+        "image_creation_threshold": "100",  # we want to control when image is created
         "compaction_threshold": f"{l0_l1_threshold}",
         "compaction_target_size": f"{128 * (1024**3)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
     }
@@ -124,6 +124,10 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     ), "sanity check for what above loop is supposed to do"
 
     # create the image layer from the future
+    ps_http.patch_tenant_config_client_side(
+        tenant_id, {"image_creation_threshold": image_creation_threshold}, None
+    )
+    assert ps_http.tenant_config(tenant_id).effective_config["image_creation_threshold"] == 1
     ps_http.timeline_compact(tenant_id, timeline_id, force_repartition=True)
     assert (
         len(
