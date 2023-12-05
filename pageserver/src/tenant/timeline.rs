@@ -474,7 +474,7 @@ impl Timeline {
             .map(|ancestor| ancestor.timeline_id)
     }
 
-    /// Lock and get timeline's GC cuttof
+    /// Lock and get timeline's GC cutoff
     pub fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read()
     }
@@ -3961,7 +3961,7 @@ impl Timeline {
         // for details. This will block until the old value is no longer in use.
         //
         // The GC cutoff should only ever move forwards.
-        {
+        let waitlist = {
             let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
             ensure!(
                 *write_guard <= new_gc_cutoff,
@@ -3969,8 +3969,9 @@ impl Timeline {
                 *write_guard,
                 new_gc_cutoff
             );
-            write_guard.store_and_unlock(new_gc_cutoff).wait();
-        }
+            write_guard.store_and_unlock(new_gc_cutoff)
+        };
+        waitlist.wait().await;
 
         info!("GC starting");
 
