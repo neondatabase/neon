@@ -1552,7 +1552,7 @@ impl LayerImplMetrics {
         self.rare_counters[RareEvent::UpgradedWantedEvicted].inc();
     }
 
-    /// These are only expected for [`Self::inc_download_completed_without_requester`] amount when
+    /// These are only expected for [`Self::inc_init_cancelled`] amount when
     /// running with remote storage.
     fn inc_init_needed_no_download(&self) {
         self.rare_counters[RareEvent::InitWithoutDownload].inc();
