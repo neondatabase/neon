@@ -842,6 +842,8 @@ impl PageServerHandler {
                     // so that it can block until its config is updated: this error is expected in the case
                     // that the Tenant's shards' placements are being updated and the client hasn't been
                     // informed yet.
+                    //
+                    // https://github.com/neondatabase/neon/issues/6038
                     return Err(anyhow::anyhow!("Request routed to wrong shard"));
                 }
                 Err(e) => return Err(e.into()),
