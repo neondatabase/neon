@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use enumset::EnumSet;
@@ -337,13 +338,7 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size = match timeline.get_current_logical_size(ctx) {
-        Ok((size, _)) => Some(size),
-        Err(err) => {
-            error!("Timeline info creation failed to get current logical size: {err:?}");
-            None
-        }
-    };
+    let current_logical_size = timeline.get_current_logical_size(ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -356,7 +351,8 @@ async fn build_timeline_info_common(
     let walreceiver_status = timeline.walreceiver_status();
 
     let info = TimelineInfo {
-        tenant_id: timeline.tenant_id,
+        // TODO(sharding): add a shard_id field, or make tenant_id into a tenant_shard_id
+        tenant_id: timeline.tenant_shard_id.tenant_id,
         timeline_id: timeline.timeline_id,
         ancestor_timeline_id,
         ancestor_lsn,
@@ -366,7 +362,11 @@ async fn build_timeline_info_common(
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
-        current_logical_size,
+        current_logical_size: current_logical_size.size_dont_care_about_accuracy(),
+        current_logical_size_is_accurate: match current_logical_size.accuracy() {
+            tenant::timeline::logical_size::Accuracy::Approximate => false,
+            tenant::timeline::logical_size::Accuracy::Exact => true,
+        },
         current_physical_size,
         current_logical_size_non_incremental: None,
         timeline_dir_layer_file_size_sum: None,
@@ -439,6 +439,7 @@ async fn timeline_create_handler(
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+            request_data.existing_initdb_timeline_id,
             state.broker_client.clone(),
             &ctx,
         )
@@ -1157,6 +1158,7 @@ async fn put_tenant_location_config_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
 
     let request_data: TenantLocationConfigRequest = json_request(&mut request).await?;
+    let flush = parse_query_param(&request, "flush_ms")?.map(Duration::from_millis);
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
@@ -1189,7 +1191,7 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, &ctx)
+        .upsert_location(tenant_shard_id, location_conf, flush, &ctx)
         .await
         // TODO: badrequest assumes the caller was asking for something unreasonable, but in
         // principle we might have hit something like concurrent API calls to the same tenant,

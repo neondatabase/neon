@@ -3,6 +3,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::{
     HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use pageserver_api::shard::ShardIndex;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -81,7 +82,7 @@ impl Layer {
         metadata: LayerFileMetadata,
     ) -> Self {
         let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_id,
+            timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
             metadata.file_size(),
@@ -96,6 +97,7 @@ impl Layer {
             desc,
             None,
             metadata.generation,
+            metadata.shard,
         )));
 
         debug_assert!(owner.0.needs_download_blocking().unwrap().is_some());
@@ -111,7 +113,7 @@ impl Layer {
         metadata: LayerFileMetadata,
     ) -> ResidentLayer {
         let desc = PersistentLayerDesc::from_filename(
-            timeline.tenant_id,
+            timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
             metadata.file_size(),
@@ -136,6 +138,7 @@ impl Layer {
                 desc,
                 Some(inner),
                 metadata.generation,
+                metadata.shard,
             )
         }));
 
@@ -179,6 +182,7 @@ impl Layer {
                 desc,
                 Some(inner),
                 timeline.generation,
+                timeline.get_shard_index(),
             )
         }));
 
@@ -322,6 +326,24 @@ impl Layer {
 
         Ok(())
     }
+
+    /// Waits until this layer has been dropped (and if needed, local garbage collection and remote
+    /// deletion scheduling has completed).
+    ///
+    /// Does not start garbage collection, use [`Self::garbage_collect_on_drop`] for that
+    /// separatedly.
+    #[cfg(feature = "testing")]
+    pub(crate) fn wait_drop(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let mut rx = self.0.status.subscribe();
+
+        async move {
+            loop {
+                if let Err(tokio::sync::broadcast::error::RecvError::Closed) = rx.recv().await {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
@@ -426,6 +448,15 @@ struct LayerInner {
     /// For loaded layers (resident or evicted) this comes from [`LayerFileMetadata::generation`],
     /// for created layers from [`Timeline::generation`].
     generation: Generation,
+
+    /// The shard of this Layer.
+    ///
+    /// For layers created in this process, this will always be the [`ShardIndex`] of the
+    /// current `ShardIdentity`` (TODO: add link once it's introduced).
+    ///
+    /// For loaded layers, this may be some other value if the tenant has undergone
+    /// a shard split since the layer was originally written.
+    shard: ShardIndex,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -455,16 +486,20 @@ impl Drop for LayerInner {
             return;
         }
 
-        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_id, timeline_id = %self.layer_desc().timeline_id);
+        let span = tracing::info_span!(parent: None, "layer_gc", tenant_id = %self.layer_desc().tenant_shard_id.tenant_id, shard_id=%self.layer_desc().tenant_shard_id.shard_slug(), timeline_id = %self.layer_desc().timeline_id);
 
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().filename();
-        let gen = self.generation;
         let file_size = self.layer_desc().file_size;
         let timeline = self.timeline.clone();
+        let meta = self.metadata();
+        let status = self.status.clone();
 
         crate::task_mgr::BACKGROUND_RUNTIME.spawn_blocking(move || {
             let _g = span.entered();
+
+            // carry this until we are finished for [`Layer::wait_drop`] support
+            let _status = status;
 
             let removed = match std::fs::remove_file(path) {
                 Ok(()) => true,
@@ -489,7 +524,7 @@ impl Drop for LayerInner {
                     timeline.metrics.resident_physical_size_sub(file_size);
                 }
                 if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, gen)]);
+                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
                     if let Err(e) = res {
                         // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
@@ -523,9 +558,10 @@ impl LayerInner {
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
+        shard: ShardIndex,
     ) -> Self {
         let path = conf
-            .timeline_path(&timeline.tenant_id, &timeline.timeline_id)
+            .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id)
             .join(desc.filename().to_string());
 
         let (inner, version) = if let Some(inner) = downloaded {
@@ -550,6 +586,7 @@ impl LayerInner {
             status: tokio::sync::broadcast::channel(1).0,
             consecutive_failures: AtomicUsize::new(0),
             generation,
+            shard,
         }
     }
 
@@ -795,7 +832,7 @@ impl LayerInner {
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_id),
+            Some(self.desc.tenant_shard_id.tenant_id),
             Some(self.desc.timeline_id),
             &task_name,
             false,
@@ -960,7 +997,7 @@ impl LayerInner {
         if gc {
             // do nothing now, only in LayerInner::drop
         } else if can_evict && evict {
-            let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_id, timeline_id = %self.desc.timeline_id, layer=%self, %version);
+            let span = tracing::info_span!(parent: None, "layer_evict", tenant_id = %self.desc.tenant_shard_id.tenant_id, shard_id = %self.desc.tenant_shard_id.shard_slug(), timeline_id = %self.desc.timeline_id, layer=%self, %version);
 
             // downgrade for queueing, in case there's a tear down already ongoing we should not
             // hold it alive.
@@ -1077,7 +1114,7 @@ impl LayerInner {
     }
 
     fn metadata(&self) -> LayerFileMetadata {
-        LayerFileMetadata::new(self.desc.file_size, self.generation)
+        LayerFileMetadata::new(self.desc.file_size, self.generation, self.shard)
     }
 }
 
@@ -1192,7 +1229,7 @@ impl DownloadedLayer {
 
             let res = if owner.desc.is_delta {
                 let summary = Some(delta_layer::Summary::expected(
-                    owner.desc.tenant_id,
+                    owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
@@ -1203,7 +1240,7 @@ impl DownloadedLayer {
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
-                    owner.desc.tenant_id,
+                    owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
                     owner.desc.key_range.clone(),
                     lsn,
@@ -1401,6 +1438,7 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
+        // reminder: this will be pageserver_layer_gcs_count_total with "_total" suffix
         let gcs = metrics::register_int_counter_vec!(
             "pageserver_layer_gcs_count",
             "Garbage collections started and completed in the Layer implementation",

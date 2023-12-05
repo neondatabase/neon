@@ -55,7 +55,7 @@ pub mod timed_lru {
     /// * Whenever a new entry is inserted, the least recently accessed one is evicted.
     ///   The cache also keeps track of entry's insertion time (`created_at`) and TTL (`expires_at`).
     ///
-    /// * When the entry is about to be retrieved, we check its expiration timestamp.
+    /// * If `update_ttl_on_retrieval` is `true`. When the entry is about to be retrieved, we check its expiration timestamp.
     ///   If the entry has expired, we remove it from the cache; Otherwise we bump the
     ///   expiration timestamp (e.g. +5mins) and change its place in LRU list to prolong
     ///   its existence.
@@ -79,6 +79,8 @@ pub mod timed_lru {
 
         /// Default time-to-live of a single entry.
         ttl: Duration,
+
+        update_ttl_on_retrieval: bool,
     }
 
     impl<K: Hash + Eq, V> Cache for TimedLru<K, V> {
@@ -99,11 +101,17 @@ pub mod timed_lru {
 
     impl<K: Hash + Eq, V> TimedLru<K, V> {
         /// Construct a new LRU cache with timed entries.
-        pub fn new(name: &'static str, capacity: usize, ttl: Duration) -> Self {
+        pub fn new(
+            name: &'static str,
+            capacity: usize,
+            ttl: Duration,
+            update_ttl_on_retrieval: bool,
+        ) -> Self {
             Self {
                 name,
                 cache: LruCache::new(capacity).into(),
                 ttl,
+                update_ttl_on_retrieval,
             }
         }
 
@@ -165,7 +173,9 @@ pub mod timed_lru {
             let (created_at, expires_at) = (entry.created_at, entry.expires_at);
 
             // Update the deadline and the entry's position in the LRU list.
-            raw_entry.get_mut().expires_at = deadline;
+            if self.update_ttl_on_retrieval {
+                raw_entry.get_mut().expires_at = deadline;
+            }
             raw_entry.to_back();
 
             drop(cache); // drop lock before logging

@@ -323,7 +323,7 @@ async fn do_delete(
             let delete_request = s3_client
                 .delete_objects()
                 .bucket(bucket_name)
-                .delete(Delete::builder().set_objects(Some(request_keys)).build());
+                .delete(Delete::builder().set_objects(Some(request_keys)).build()?);
             delete_request
                 .send()
                 .await

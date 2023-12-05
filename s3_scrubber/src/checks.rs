@@ -94,11 +94,10 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         != index_part.get_disk_consistent_lsn()
                     {
                         result.errors.push(format!(
-                                    "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
-                                    index_part.metadata.disk_consistent_lsn(),
-                                    index_part.get_disk_consistent_lsn(),
-
-                                ))
+                            "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
+                            index_part.metadata.disk_consistent_lsn(),
+                            index_part.get_disk_consistent_lsn(),
+                        ))
                     }
 
                     if index_part.layer_metadata.is_empty() {
@@ -109,8 +108,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                     for (layer, metadata) in index_part.layer_metadata {
                         if metadata.file_size == 0 {
                             result.errors.push(format!(
-                                            "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
-                                        ))
+                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer.file_name(),
+                            ))
                         }
 
                         let layer_map_key = (layer, metadata.generation);
@@ -136,7 +135,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             // a new generation that didn't upload an index yet.
                             //
                             // Even so, a layer that is not referenced by the index could just
-                            // be something enqueued for deletion, so while this check is valid 
+                            // be something enqueued for deletion, so while this check is valid
                             // for indicating that a layer is garbage, it is not an indicator
                             // of a problem.
                             gen < &index_part_generation)
@@ -251,10 +250,7 @@ pub(crate) async fn list_timeline_blobs(
     pin_mut!(stream);
     while let Some(obj) = stream.next().await {
         let obj = obj?;
-        let key = match obj.key() {
-            Some(k) => k,
-            None => continue,
-        };
+        let key = obj.key();
 
         let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
         match blob_name {
@@ -287,7 +283,7 @@ pub(crate) async fn list_timeline_blobs(
     let (index_part_object, index_part_generation) = match index_parts
         .iter()
         .filter_map(|k| {
-            let key = k.key().unwrap();
+            let key = k.key();
             // Stripping the index key to the last part, because RemotePath doesn't
             // like absolute paths, and depending on prefix_in_bucket it's possible
             // for the keys we read back to start with a slash.
@@ -308,8 +304,7 @@ pub(crate) async fn list_timeline_blobs(
         errors.push("S3 list response got no index_part.json file".to_string());
     }
 
-    if let Some(index_part_object_key) = index_part_object.as_ref().and_then(|object| object.key())
-    {
+    if let Some(index_part_object_key) = index_part_object.as_ref().map(|object| object.key()) {
         let index_part_bytes = download_object_with_retries(
             s3_client,
             &timeline_dir_target.bucket_name,

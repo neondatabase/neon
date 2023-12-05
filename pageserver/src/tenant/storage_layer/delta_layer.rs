@@ -42,6 +42,7 @@ use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::models::LayerAccessKind;
+use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -69,13 +70,13 @@ use super::{AsLayerDesc, LayerAccessStats, PersistentLayerDesc, ResidentLayer};
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Summary {
     /// Magic value to identify this as a neon delta file. Always DELTA_FILE_MAGIC.
-    magic: u16,
-    format_version: u16,
+    pub magic: u16,
+    pub format_version: u16,
 
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    key_range: Range<Key>,
-    lsn_range: Range<Lsn>,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub key_range: Range<Key>,
+    pub lsn_range: Range<Lsn>,
 
     /// Block number where the 'index' part of the file begins.
     pub index_start_blk: u32,
@@ -86,7 +87,7 @@ pub struct Summary {
 impl From<&DeltaLayer> for Summary {
     fn from(layer: &DeltaLayer) -> Self {
         Self::expected(
-            layer.desc.tenant_id,
+            layer.desc.tenant_shard_id.tenant_id,
             layer.desc.timeline_id,
             layer.desc.key_range.clone(),
             layer.desc.lsn_range.clone(),
@@ -248,7 +249,7 @@ impl DeltaLayer {
 
     fn temp_path_for(
         conf: &PageServerConf,
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         key_start: Key,
         lsn_range: &Range<Lsn>,
@@ -259,14 +260,15 @@ impl DeltaLayer {
             .map(char::from)
             .collect();
 
-        conf.timeline_path(tenant_id, timeline_id).join(format!(
-            "{}-XXX__{:016X}-{:016X}.{}.{}",
-            key_start,
-            u64::from(lsn_range.start),
-            u64::from(lsn_range.end),
-            rand_string,
-            TEMP_FILE_SUFFIX,
-        ))
+        conf.timeline_path(tenant_shard_id, timeline_id)
+            .join(format!(
+                "{}-XXX__{:016X}-{:016X}.{}.{}",
+                key_start,
+                u64::from(lsn_range.start),
+                u64::from(lsn_range.end),
+                rand_string,
+                TEMP_FILE_SUFFIX,
+            ))
     }
 
     ///
@@ -318,10 +320,14 @@ impl DeltaLayer {
             .metadata()
             .context("get file metadata to determine size")?;
 
+        // TODO(sharding): we must get the TenantShardId from the path instead of reading the Summary.
+        // we should also validate the path against the Summary, as both should contain the same tenant, timeline, key, lsn.
+        let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
+
         Ok(DeltaLayer {
             path: path.to_path_buf(),
             desc: PersistentLayerDesc::new_delta(
-                summary.tenant_id,
+                tenant_shard_id,
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn_range,
@@ -353,7 +359,7 @@ struct DeltaLayerWriterInner {
     conf: &'static PageServerConf,
     pub path: Utf8PathBuf,
     timeline_id: TimelineId,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
 
     key_start: Key,
     lsn_range: Range<Lsn>,
@@ -370,7 +376,7 @@ impl DeltaLayerWriterInner {
     async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
     ) -> anyhow::Result<Self> {
@@ -380,7 +386,8 @@ impl DeltaLayerWriterInner {
         //
         // Note: This overwrites any existing file. There shouldn't be any.
         // FIXME: throw an error instead?
-        let path = DeltaLayer::temp_path_for(conf, &tenant_id, &timeline_id, key_start, &lsn_range);
+        let path =
+            DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
         let mut file = VirtualFile::create(&path).await?;
         // make room for the header block
@@ -395,7 +402,7 @@ impl DeltaLayerWriterInner {
             conf,
             path,
             timeline_id,
-            tenant_id,
+            tenant_shard_id,
             key_start,
             lsn_range,
             tree: tree_builder,
@@ -457,7 +464,7 @@ impl DeltaLayerWriterInner {
         let summary = Summary {
             magic: DELTA_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenant_id: self.tenant_id,
+            tenant_id: self.tenant_shard_id.tenant_id,
             timeline_id: self.timeline_id,
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
@@ -498,7 +505,7 @@ impl DeltaLayerWriterInner {
         // set inner.file here. The first read will have to re-open it.
 
         let desc = PersistentLayerDesc::new_delta(
-            self.tenant_id,
+            self.tenant_shard_id,
             self.timeline_id,
             self.key_start..key_end,
             self.lsn_range.clone(),
@@ -549,14 +556,20 @@ impl DeltaLayerWriter {
     pub async fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             inner: Some(
-                DeltaLayerWriterInner::new(conf, timeline_id, tenant_id, key_start, lsn_range)
-                    .await?,
+                DeltaLayerWriterInner::new(
+                    conf,
+                    timeline_id,
+                    tenant_shard_id,
+                    key_start,
+                    lsn_range,
+                )
+                .await?,
             ),
         })
     }
@@ -608,6 +621,61 @@ impl Drop for DeltaLayerWriter {
             let vfile = inner.blob_writer.into_inner_no_flush();
             vfile.remove();
         }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RewriteSummaryError {
+    #[error("magic mismatch")]
+    MagicMismatch,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<std::io::Error> for RewriteSummaryError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Other(anyhow::anyhow!(e))
+    }
+}
+
+impl DeltaLayer {
+    pub async fn rewrite_summary<F>(
+        path: &Utf8Path,
+        rewrite: F,
+        ctx: &RequestContext,
+    ) -> Result<(), RewriteSummaryError>
+    where
+        F: Fn(Summary) -> Summary,
+    {
+        let file = VirtualFile::open_with_options(
+            path,
+            &*std::fs::OpenOptions::new().read(true).write(true),
+        )
+        .await
+        .with_context(|| format!("Failed to open file '{}'", path))?;
+        let file = FileBlockReader::new(file);
+        let summary_blk = file.read_blk(0, ctx).await?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref()).context("deserialize")?;
+        let mut file = file.file;
+        if actual_summary.magic != DELTA_FILE_MAGIC {
+            return Err(RewriteSummaryError::MagicMismatch);
+        }
+
+        let new_summary = rewrite(actual_summary);
+
+        let mut buf = smallvec::SmallVec::<[u8; PAGE_SZ]>::new();
+        Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
+        if buf.spilled() {
+            // The code in DeltaLayerWriterInner just warn!()s for this.
+            // It should probably error out as well.
+            return Err(RewriteSummaryError::Other(anyhow::anyhow!(
+                "Used more than one page size for summary buffer: {}",
+                buf.len()
+            )));
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&buf).await?;
+        Ok(())
     }
 }
 

@@ -86,7 +86,7 @@ pub fn start_background_loops(
     tenant: &Arc<Tenant>,
     background_jobs_can_start: Option<&completion::Barrier>,
 ) {
-    let tenant_id = tenant.tenant_id;
+    let tenant_id = tenant.tenant_shard_id.tenant_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,

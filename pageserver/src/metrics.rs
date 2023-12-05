@@ -7,6 +7,7 @@ use metrics::{
     HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
@@ -401,6 +402,126 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define current logical size metric")
 });
+
+pub(crate) mod initial_logical_size {
+    use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    use crate::task_mgr::TaskKind;
+
+    pub(crate) struct StartCalculation(IntCounterVec);
+    pub(crate) static START_CALCULATION: Lazy<StartCalculation> = Lazy::new(|| {
+        StartCalculation(
+            register_int_counter_vec!(
+                "pageserver_initial_logical_size_start_calculation",
+                "Incremented each time we start an initial logical size calculation attempt. \
+                 The `task_kind` label is for the task kind that caused this attempt.",
+                &["attempt", "task_kind"]
+            )
+            .unwrap(),
+        )
+    });
+
+    struct DropCalculation {
+        first: IntCounter,
+        retry: IntCounter,
+    }
+
+    static DROP_CALCULATION: Lazy<DropCalculation> = Lazy::new(|| {
+        let vec = register_int_counter_vec!(
+            "pageserver_initial_logical_size_drop_calculation",
+            "Incremented each time we abort a started size calculation attmpt.",
+            &["attempt"]
+        )
+        .unwrap();
+        DropCalculation {
+            first: vec.with_label_values(&["first"]),
+            retry: vec.with_label_values(&["retry"]),
+        }
+    });
+
+    pub(crate) struct Calculated {
+        pub(crate) births: IntCounter,
+        pub(crate) deaths: IntCounter,
+    }
+
+    pub(crate) static CALCULATED: Lazy<Calculated> = Lazy::new(|| Calculated {
+        births: register_int_counter!(
+            "pageserver_initial_logical_size_finish_calculation",
+            "Incremented every time we finish calculation of initial logical size.\
+             If everything is working well, this should happen at most once per Timeline object."
+        )
+        .unwrap(),
+        deaths: register_int_counter!(
+            "pageserver_initial_logical_size_drop_finished_calculation",
+            "Incremented when we drop a finished initial logical size calculation result.\
+             Mainly useful to turn pageserver_initial_logical_size_finish_calculation into a gauge."
+        )
+        .unwrap(),
+    });
+
+    pub(crate) struct OngoingCalculationGuard {
+        inc_drop_calculation: Option<IntCounter>,
+    }
+
+    impl StartCalculation {
+        pub(crate) fn first(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
+            let task_kind_label: &'static str =
+                causing_task_kind.map(|k| k.into()).unwrap_or_default();
+            self.0.with_label_values(&["first", task_kind_label]);
+            OngoingCalculationGuard {
+                inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
+            }
+        }
+        pub(crate) fn retry(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
+            let task_kind_label: &'static str =
+                causing_task_kind.map(|k| k.into()).unwrap_or_default();
+            self.0.with_label_values(&["retry", task_kind_label]);
+            OngoingCalculationGuard {
+                inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
+            }
+        }
+    }
+
+    impl Drop for OngoingCalculationGuard {
+        fn drop(&mut self) {
+            if let Some(counter) = self.inc_drop_calculation.take() {
+                counter.inc();
+            }
+        }
+    }
+
+    impl OngoingCalculationGuard {
+        pub(crate) fn calculation_result_saved(mut self) -> FinishedCalculationGuard {
+            drop(self.inc_drop_calculation.take());
+            CALCULATED.births.inc();
+            FinishedCalculationGuard {
+                inc_on_drop: CALCULATED.deaths.clone(),
+            }
+        }
+    }
+
+    pub(crate) struct FinishedCalculationGuard {
+        inc_on_drop: IntCounter,
+    }
+
+    impl Drop for FinishedCalculationGuard {
+        fn drop(&mut self) {
+            self.inc_on_drop.inc();
+        }
+    }
+
+    // context: https://github.com/neondatabase/neon/issues/5963
+    pub(crate) static TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE: Lazy<IntCounter> =
+        Lazy::new(|| {
+            register_int_counter!(
+                "pageserver_initial_logical_size_timelines_where_walreceiver_got_approximate_size",
+                "Counter for the following event: walreceiver calls\
+                 Timeline::get_current_logical_size() and it returns `Approximate` for the first time."
+            )
+            .unwrap()
+        });
+}
 
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
@@ -1252,6 +1373,15 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_process_launch_duration",
+        "Histogram of the duration of successful WalRedoProcess::launch calls",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
@@ -1571,9 +1701,9 @@ pub struct RemoteTimelineClientMetrics {
 }
 
 impl RemoteTimelineClientMetrics {
-    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+    pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         RemoteTimelineClientMetrics {
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_shard_id.tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
@@ -1961,6 +2091,7 @@ pub fn preinitialize_metrics() {
         &WAL_REDO_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
+        &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
     ]
     .into_iter()
     .for_each(|h| {

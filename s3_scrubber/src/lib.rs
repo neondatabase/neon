@@ -16,6 +16,7 @@ use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
 use aws_config::sso::SsoCredentialsProvider;
+use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::{Client, Config};
 
@@ -245,6 +246,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
     };
 
     let mut builder = Config::builder()
+        .behavior_version(BehaviorVersion::v2023_11_09())
         .region(bucket_region)
         .credentials_provider(credentials_provider);
 
