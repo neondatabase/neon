@@ -667,6 +667,10 @@ impl LayerInner {
                 // disable any scheduled but not yet running eviction deletions for this
                 let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
+                // count cancellations, which currently remain largely unexpected
+                let init_cancelled =
+                    scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
+
                 // no need to make the evict_and_wait wait for the actual download to complete
                 drop(self.status.send(Status::Downloaded));
 
@@ -674,6 +678,8 @@ impl LayerInner {
                     .timeline
                     .upgrade()
                     .ok_or_else(|| DownloadError::TimelineShutdown)?;
+
+                // FIXME: grab a gate
 
                 let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
@@ -734,6 +740,8 @@ impl LayerInner {
                 if waiters > 0 {
                     tracing::info!(waiters, "completing the on-demand download for other tasks");
                 }
+
+                scopeguard::ScopeGuard::into_inner(init_cancelled);
 
                 Ok((ResidentOrWantedEvicted::Resident(res), permit))
             };
@@ -863,14 +871,13 @@ impl LayerInner {
                     match res {
                         (Ok(()), _) => {
                             // our caller is cancellation safe so this is fine; if someone
-                            // else requests the layer, they'll find it already downloaded
-                            // or redownload.
+                            // else requests the layer, they'll find it already downloaded.
                             //
-                            // however, could be that we should consider marking the layer
-                            // for eviction? alas, cannot: because only DownloadedLayer
-                            // will handle that.
-                            tracing::info!("layer file download completed after requester had cancelled");
-                            LAYER_IMPL_METRICS.inc_download_completed_without_requester();
+                            // See counter [`LayerImplMetrics::inc_init_needed_no_download`]
+                            //
+                            // FIXME(#6028): however, could be that we should consider marking the
+                            // layer for eviction? alas, cannot: because only DownloadedLayer will
+                            // handle that.
                         },
                         (Err(e), _) => {
                             // our caller is cancellation safe, but we might be racing with
@@ -1413,6 +1420,7 @@ pub(crate) struct LayerImplMetrics {
     failed_deletes: enum_map::EnumMap<DeleteFailed, IntCounter>,
 
     rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
+    inits_cancelled: metrics::core::GenericCounter<metrics::core::AtomicU64>,
 }
 
 impl Default for LayerImplMetrics {
@@ -1482,6 +1490,12 @@ impl Default for LayerImplMetrics {
             rare_counters.with_label_values(&[s])
         }));
 
+        let inits_cancelled = metrics::register_int_counter!(
+            "pageserver_layer_inits_cancelled_count",
+            "Times Layer initialization was cancelled",
+        )
+        .unwrap();
+
         Self {
             started_evictions,
             completed_evictions,
@@ -1492,6 +1506,7 @@ impl Default for LayerImplMetrics {
             failed_deletes,
 
             rare_counters,
+            inits_cancelled,
         }
     }
 }
@@ -1529,12 +1544,7 @@ impl LayerImplMetrics {
         self.rare_counters[RareEvent::RetriedGetOrMaybeDownload].inc();
     }
 
-    /// Expected rare because cancellations are unexpected
-    fn inc_download_completed_without_requester(&self) {
-        self.rare_counters[RareEvent::DownloadFailedWithoutRequester].inc();
-    }
-
-    /// Expected rare because cancellations are unexpected
+    /// Expected rare because cancellations are unexpected, and failures are unexpected
     fn inc_download_failed_without_requester(&self) {
         self.rare_counters[RareEvent::DownloadFailedWithoutRequester].inc();
     }
@@ -1560,6 +1570,10 @@ impl LayerImplMetrics {
 
     fn inc_broadcast_lagged(&self) {
         self.rare_counters[RareEvent::EvictAndWaitLagged].inc();
+    }
+
+    fn inc_init_cancelled(&self) {
+        self.inits_cancelled.inc()
     }
 }
 
