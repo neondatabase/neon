@@ -1532,14 +1532,13 @@ impl LayerImplMetrics {
         self.failed_deletes[reason].inc();
     }
 
-    /// Counted separatedly from failed gcs because we will complete the gc attempt regardless of
-    /// failure to delete local file.
+    /// Counted separatedly from failed layer deletes because we will complete the layer deletion
+    /// attempt regardless of failure to delete local file.
     fn inc_delete_removes_failed(&self) {
         self.rare_counters[RareEvent::GcRemoveFailed].inc();
     }
 
-    /// Expected rare because requires a race with `evict_blocking` and
-    /// `get_or_maybe_download`.
+    /// Expected rare because requires a race with `evict_blocking` and `get_or_maybe_download`.
     fn inc_retried_get_or_maybe_download(&self) {
         self.rare_counters[RareEvent::RetriedGetOrMaybeDownload].inc();
     }
