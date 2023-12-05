@@ -303,6 +303,8 @@ pub struct ShardStripeSize(pub u32);
 pub struct ShardLayout(u8);
 
 const LAYOUT_V1: ShardLayout = ShardLayout(1);
+/// ShardIdentity uses a magic layout value to indicate if it is unusable
+const LAYOUT_BROKEN: ShardLayout = ShardLayout(255);
 
 /// Default stripe size in pages: 256MiB divided by 8kiB page size.
 const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
@@ -311,10 +313,10 @@ const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 /// to resolve a key to a shard, and then check whether that shard is ==self.
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardIdentity {
-    pub layout: ShardLayout,
     pub number: ShardNumber,
     pub count: ShardCount,
-    pub stripe_size: ShardStripeSize,
+    stripe_size: ShardStripeSize,
+    layout: ShardLayout,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
@@ -336,6 +338,22 @@ impl ShardIdentity {
             number: ShardNumber(0),
             count: ShardCount(0),
             layout: LAYOUT_V1,
+            stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+
+    /// A broken instance is only used for [`crate::tenant::TenantState::Broken`] tenants,
+    /// which are constructed in code paths that don't have access to proper configuration.
+    ///
+    /// A ShardIdentity in this state may not be used for anything, and should not be persisted.
+    /// Enforcement is via assertions, to avoid making our interface fallible for this
+    /// edge case: it is the Tenant's responsibility to avoid trying to do any I/O when in a broken
+    /// state, and by extension to avoid trying to do any page->shard resolution.
+    pub fn broken(number: ShardNumber, count: ShardCount) -> Self {
+        Self {
+            number,
+            count,
+            layout: LAYOUT_BROKEN,
             stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
@@ -367,12 +385,18 @@ impl ShardIdentity {
         }
     }
 
+    fn is_broken(&self) -> bool {
+        self.layout == LAYOUT_BROKEN
+    }
+
     pub fn get_shard_number(&self, key: &Key) -> ShardNumber {
+        assert!(!self.is_broken());
         key_to_shard_number(self.count, self.stripe_size, key)
     }
 
     /// Return true if the key should be ingested by this shard
     pub fn is_key_local(&self, key: &Key) -> bool {
+        assert!(!self.is_broken());
         if self.count < ShardCount(2) || (key_is_shard0(key) && self.number == ShardNumber(0)) {
             true
         } else {
