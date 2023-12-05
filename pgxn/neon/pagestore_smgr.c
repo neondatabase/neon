@@ -275,6 +275,26 @@ static inline void prefetch_set_unused(uint64 ring_index);
 static XLogRecPtr neon_get_request_lsn(bool *latest, NRelFileInfo rinfo,
 									   ForkNumber forknum, BlockNumber blkno);
 
+
+#define INITIAL_EXPONENTIAL_BACKOFF_DELAY 1000
+#define EXPONENTIAL_BACKOFF_EXPONENT 2
+#define MAX_EXPONENTIAL_BACKOFF_DELAY (1000*1000)
+
+static void
+InitExponentialBackoff(long *delay)
+{
+	*delay = INITIAL_EXPONENTIAL_BACKOFF_DELAY;
+}
+
+static void
+PerformExponentialBackoff(long *delay)
+{
+	pg_usleep(*delay);
+	*delay *= EXPONENTIAL_BACKOFF_EXPONENT;
+	if(*delay >= MAX_EXPONENTIAL_BACKOFF_DELAY)
+		*delay = MAX_EXPONENTIAL_BACKOFF_DELAY;
+}
+
 static bool
 compact_prefetch_buffers(void)
 {
@@ -662,6 +682,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		.forknum = slot->buftag.forkNum,
 		.blkno = slot->buftag.blockNum,
 	};
+        long backoff_delay_us;
 
 	if (force_lsn && force_latest)
 	{
@@ -704,7 +725,11 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
 
-	while (!page_server->send((NeonRequest *) &request));
+	InitExponentialBackoff(&backoff_delay_us);
+	while (!page_server->send((NeonRequest *) &request))
+	{
+		PerformExponentialBackoff(&backoff_delay_us);
+	}
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
