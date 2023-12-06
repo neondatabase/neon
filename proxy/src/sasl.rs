@@ -30,6 +30,9 @@ pub enum Error {
     #[error("Bad client message: {0}")]
     BadClientMessage(&'static str),
 
+    #[error("Internal error: missing digest")]
+    MissingBinding,
+
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -38,8 +41,7 @@ impl UserFacingError for Error {
     fn to_string_client(&self) -> String {
         use Error::*;
         match self {
-            // TODO: add support for channel binding
-            ChannelBindingFailed(_) => "channel binding is not supported yet".to_string(),
+            ChannelBindingFailed(m) => m.to_string(),
             ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
             _ => "authentication protocol violation".to_string(),
         }
