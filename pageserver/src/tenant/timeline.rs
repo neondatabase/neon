@@ -498,6 +498,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
+    #[instrument(skip_all, fields(%key, %lsn), level = tracing::Level::DEBUG)]
     pub async fn get(
         &self,
         key: Key,
@@ -2198,6 +2199,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
+    #[instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn get_reconstruct_data(
         &self,
         key: Key,

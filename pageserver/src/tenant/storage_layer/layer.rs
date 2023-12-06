@@ -234,6 +234,7 @@ impl Layer {
     /// # Cancellation-Safety
     ///
     /// This method is cancellation-safe.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,
