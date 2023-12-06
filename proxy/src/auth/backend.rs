@@ -236,37 +236,17 @@ fn validate(
         }
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
-            use crate::sasl::{Mechanism, Step};
             use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
-
-            let mut exchange = crate::scram::Exchange::new(
+            let sasl_client = ScramSha256::new(&password, ChannelBinding::unsupported());
+            let outcome = crate::scram::exchange(
                 &scram_secret,
-                rand::random,
+                sasl_client,
                 crate::config::TlsServerEndPoint::Undefined,
-            );
-            let mut sasl_client = ScramSha256::new(&password, ChannelBinding::unsupported());
+            )?;
 
-            let client_first = std::str::from_utf8(sasl_client.message()).unwrap();
-            exchange = match exchange.exchange(client_first)? {
-                Step::Continue(exchange, message) => {
-                    sasl_client.update(message.as_bytes()).unwrap();
-                    exchange
-                }
-                Step::Success(_, _) => panic!("expected continue, got success"),
-                Step::Failure(reason) => {
-                    info!("auth backend failed with an error: {reason}");
-                    return Err(auth::AuthError::auth_failed(info.user));
-                }
-            };
-
-            let client_final = std::str::from_utf8(sasl_client.message()).unwrap();
-            let client_key = match exchange.exchange(client_final)? {
-                Step::Success(keys, message) => {
-                    sasl_client.finish(message.as_bytes()).unwrap();
-                    keys
-                }
-                Step::Continue(_, _) => panic!("expected success, got continue"),
-                Step::Failure(reason) => {
+            let client_key = match outcome {
+                crate::sasl::Outcome::Success(client_key) => client_key,
+                crate::sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
                     return Err(auth::AuthError::auth_failed(info.user));
                 }
