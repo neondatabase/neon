@@ -205,7 +205,7 @@ pub(crate) async fn upload_remote_data(
 
 pub(crate) fn ensure_logging_ready() {
     LOGGING_DONE.get_or_init(|| {
-        utils::logging::init(
+        let _ = utils::logging::init(
             utils::logging::LogFormat::Test,
             utils::logging::TracingErrorLayerEnablement::Disabled,
             utils::logging::Output::Stdout,
