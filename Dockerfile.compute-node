@@ -393,7 +393,9 @@ RUN case "${PG_VERSION}" in \
         export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
         ;; \
       *) \
-        echo "TimescaleDB not supported on this PostgreSQL version. See https://github.com/timescale/timescaledb/issues/5752" && exit 0;; \
+        export TIMESCALEDB_VERSION=2.13.0 \
+        export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
+        ;; \
     esac && \
     apt-get update && \
     apt-get install -y cmake && \
