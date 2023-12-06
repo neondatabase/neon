@@ -142,8 +142,8 @@ impl<V> Deref for RcuReadGuard<V> {
 ///
 /// Write guard returned by `write`
 ///
-/// NB: Holding this guard blocks all concurrent `read` and `write` calls, so
-/// it should only be held for a short duration!
+/// NB: Holding this guard blocks all concurrent `read` and `write` calls, so it should only be
+/// held for a short duration!
 ///
 /// Calling [`Self::store_and_unlock`] consumes the guard, making new reads and new writes possible
 /// again.
