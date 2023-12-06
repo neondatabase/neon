@@ -5,7 +5,7 @@ use utils::lsn::Lsn;
 use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 use utils::id::TenantId;
 use utils::logging;
 
@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -378,7 +378,19 @@ async fn client(
             .unwrap();
 
         use futures::StreamExt;
-        copy_out_stream.for_each(|_| async move { () }).await;
+        let size = Arc::new(AtomicUsize::new(0));
+        copy_out_stream
+            .for_each({
+                |r| {
+                    let size = Arc::clone(&size);
+                    async move {
+                        let size = Arc::clone(&size);
+                        size.fetch_add(r.unwrap().len(), Ordering::Relaxed);
+                    }
+                }
+            })
+            .await;
+        debug!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {
