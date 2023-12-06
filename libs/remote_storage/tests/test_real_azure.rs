@@ -274,7 +274,7 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
 
 fn ensure_logging_ready() {
     LOGGING_DONE.get_or_init(|| {
-        utils::logging::init(
+        let _ = utils::logging::init(
             utils::logging::LogFormat::Test,
             utils::logging::TracingErrorLayerEnablement::Disabled,
             utils::logging::Output::Stdout,
