@@ -60,6 +60,8 @@ const_format.workspace = true
 # to use tokio channels as streams, this is faster to compile than async_stream
 # why is it only here? no other crate should use it, streams are rarely needed.
 tokio-stream = { version = "0.1.14" }
+tracing-chrome = "0.7.1"
+tracing-flame = "0.2.0"
 
 serde_path_to_error.workspace = true
 

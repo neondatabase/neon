@@ -171,7 +171,7 @@ fn main() -> anyhow::Result<()> {
 async fn async_main() -> anyhow::Result<()> {
     let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
 
-    logging::init(
+    let _guard = logging::init(
         LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
         logging::Output::Stdout,
