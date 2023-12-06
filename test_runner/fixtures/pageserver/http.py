@@ -212,7 +212,7 @@ class PageserverHttpClient(requests.Session):
     def tenant_create(
         self,
         new_tenant_id: TenantId,
-        conf: None | Dict[str, Any] = None,
+        conf: Optional[Dict[str, Any]] = None,
         generation: Optional[int] = None,
     ) -> TenantId:
         if conf is not None:
