@@ -468,6 +468,7 @@ impl Timeline {
     /// an ancestor branch, for example, or waste a lot of cycles chasing the
     /// non-existing key.
     ///
+    #[instrument(skip_all, fields(%key, %lsn), level = tracing::Level::DEBUG)]
     pub async fn get(
         &self,
         key: Key,
@@ -2044,6 +2045,7 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
+    #[instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn get_reconstruct_data(
         &self,
         key: Key,

@@ -20,12 +20,14 @@ use std::io::{Error, ErrorKind};
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
+    #[tracing::instrument(skip_all, fields(%offset), level = tracing::Level::DEBUG)]
     pub async fn read_blob(
         &self,
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = Vec::new();
+        tracing::debug!("reading blob");
         self.read_blob_into_buf(offset, &mut buf, ctx).await?;
         Ok(buf)
     }

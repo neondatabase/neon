@@ -141,6 +141,7 @@ impl<'a> BlockCursor<'a> {
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     #[inline(always)]
+    #[tracing::instrument(skip_all, level = tracing::Level::DEBUG)]
     pub async fn read_blk(
         &self,
         blknum: u32,
