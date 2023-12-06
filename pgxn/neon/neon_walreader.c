@@ -377,6 +377,12 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 		state->req_progress += to_copy;
 		if (state->req_progress == state->req_len)
 		{
+			XLogSegNo	next_segno;
+			XLogSegNo	req_segno;
+
+			XLByteToSeg(state->req_lsn, req_segno, state->segcxt.ws_segsize);
+			XLByteToSeg(state->rem_lsn, next_segno, state->segcxt.ws_segsize);
+
 			/*
 			 * Request completed. If there is a chance of serving next one
 			 * locally, close the connection.
@@ -384,21 +390,16 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			if (state->req_lsn < state->available_lsn &&
 				state->rem_lsn >= state->available_lsn)
 			{
-				nwr_log(LOG, "closing remote connection as available_lsn %X/%X crossed and next read is likely to be served locally",
-						LSN_FORMAT_ARGS(state->available_lsn));
+				nwr_log(LOG, "closing remote connection as available_lsn %X/%X crossed and next read at %X/%X is likely to be served locally",
+						LSN_FORMAT_ARGS(state->available_lsn), LSN_FORMAT_ARGS(state->rem_lsn));
 				NeonWALReaderResetRemote(state);
 			}
-			else if (XLogSegmentOffset(state->rem_lsn, wal_segment_size) == 0)
+			else if (state->rem_lsn >= state->available_lsn && next_segno > req_segno &&
+			         is_wal_segment_exists(next_segno, state->segcxt.ws_segsize, tli))
 			{
-				XLogSegNo	segno;
-
-				XLByteToSeg(state->rem_lsn, segno, state->segcxt.ws_segsize);
-				if (is_wal_segment_exists(segno, state->segcxt.ws_segsize, tli))
-				{
-					nwr_log(LOG, "closing remote connection as WAL file at next lsn %X/%X exists",
-							LSN_FORMAT_ARGS(state->rem_lsn));
-					NeonWALReaderResetRemote(state);
-				}
+				nwr_log(LOG, "closing remote connection as WAL file at next lsn %X/%X exists",
+						LSN_FORMAT_ARGS(state->rem_lsn));
+				NeonWALReaderResetRemote(state);
 			}
 			state->req_lsn = InvalidXLogRecPtr;
 			state->req_len = 0;
