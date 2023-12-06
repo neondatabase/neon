@@ -3034,6 +3034,7 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
+ "tracing-chrome",
  "tracing-subscriber",
  "url",
  "utils",
@@ -5271,6 +5272,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-chrome"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "496b3cd5447f7ff527bbbf19b071ad542a000adf297d4127078b4dfdb931f41a"
+dependencies = [
+ "serde_json",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-core"
 version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5557,6 +5569,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-chrome",
  "tracing-error",
  "tracing-subscriber",
  "url",

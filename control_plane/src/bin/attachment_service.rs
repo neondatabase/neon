@@ -283,7 +283,7 @@ fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, 
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    logging::init(
+    let _guard = logging::init(
         LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
         logging::Output::Stdout,

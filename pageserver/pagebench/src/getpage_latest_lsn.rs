@@ -137,7 +137,7 @@ thread_local! {
 }
 
 pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    logging::init(
+    let _guard = logging::init(
         logging::LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
         logging::Output::Stderr,

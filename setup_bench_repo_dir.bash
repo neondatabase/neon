@@ -20,6 +20,8 @@ sudo mount --bind /mnt/bench_repo_dir bench_repo_dir
 
 mkdir /mnt/test_output
 
+mkdir /mnt/many_tenants
+
 echo run the following commands
 
 cat <<EOF
