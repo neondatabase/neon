@@ -145,7 +145,7 @@ impl<V> Deref for RcuReadGuard<V> {
 /// NB: Holding this guard blocks all concurrent `read` and `write` calls, so
 /// it should only be held for a short duration!
 ///
-/// Calling `store` consumes the guard, making new reads and new writes possible
+/// Calling [`Self::store_and_unlock`] consumes the guard, making new reads and new writes possible
 /// again.
 ///
 pub struct RcuWriteGuard<'a, V> {
