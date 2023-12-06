@@ -273,9 +273,24 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     timeline_id = env.initial_timeline
     pg_version = env.pg_version
 
-    shutil.rmtree(repo_dir / "local_fs_remote_storage")
+    # Delete all files from local_fs_remote_storage except initdb.tar.zst,
+    # the file is required for `timeline_create` with `existing_initdb_timeline_id`.
+    #
+    # TODO: switch to Path.walk() in Python 3.12
+    # for dirpath, _dirnames, filenames in (repo_dir / "local_fs_remote_storage").walk():
+    for dirpath, _dirnames, filenames in os.walk(repo_dir / "local_fs_remote_storage"):
+        for filename in filenames:
+            if filename != "initdb.tar.zst":
+                (Path(dirpath) / filename).unlink()
+
     timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
-    pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
+    pageserver_http.timeline_create(
+        pg_version=pg_version,
+        tenant_id=tenant_id,
+        new_timeline_id=timeline_id,
+        existing_initdb_timeline_id=timeline_id,
+    )
+
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
