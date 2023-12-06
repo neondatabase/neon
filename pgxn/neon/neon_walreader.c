@@ -315,7 +315,7 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			NeonWALReaderResetRemote(state);
 			return NEON_WALREAD_ERROR;
 		}
-		nwr_log(LOG, "continuing remote read at req_lsn=%X/%X len=%zu, req_progress=%zu",
+		nwr_log(DEBUG5, "continuing remote read at req_lsn=%X/%X len=%zu, req_progress=%zu",
 				LSN_FORMAT_ARGS(startptr),
 				count,
 				state->req_progress);
@@ -326,7 +326,7 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 		state->req_lsn = startptr;
 		state->req_len = count;
 		state->req_progress = 0;
-		nwr_log(LOG, "starting remote read req_lsn=%X/%X len=%zu",
+		nwr_log(DEBUG5, "starting remote read req_lsn=%X/%X len=%zu",
 				LSN_FORMAT_ARGS(startptr),
 				count);
 	}
@@ -482,7 +482,7 @@ NeonWALReaderReadMsg(NeonWALReader *state)
 					state->rem_lsn = start_lsn;
 					state->wal_rem_len = (Size) (s.len - s.cursor);
 					state->wal_ptr = (char *) pq_getmsgbytes(&s, s.len - s.cursor);
-					nwr_log(LOG, "received WAL msg at %X/%X len %zu",
+					nwr_log(DEBUG5, "received WAL msg at %X/%X len %zu",
 							LSN_FORMAT_ARGS(state->rem_lsn), state->wal_rem_len);
 
 					return NEON_WALREAD_SUCCESS;

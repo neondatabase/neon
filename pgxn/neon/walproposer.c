@@ -1320,7 +1320,7 @@ SendAppendRequests(Safekeeper *sk)
 			req = &sk->appendRequest;
 			PrepareAppendRequest(sk->wp, &sk->appendRequest, sk->streamingAt, endLsn);
 
-			walprop_log(LOG, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
+			walprop_log(DEBUG5, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
 						req->endLsn - req->beginLsn,
 						LSN_FORMAT_ARGS(req->beginLsn),
 						LSN_FORMAT_ARGS(req->endLsn),
