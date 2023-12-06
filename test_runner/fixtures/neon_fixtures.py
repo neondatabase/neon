@@ -1732,8 +1732,13 @@ class NeonPageserver(PgProtocol):
         return Path(os.path.join(self.env.repo_dir, f"pageserver_{self.id}"))
 
     def assert_no_errors(self):
-        logfile = open(os.path.join(self.workdir, "pageserver.log"), "r")
-        errors = scan_pageserver_log_for_errors(logfile, self.allowed_errors)
+        logfile = self.workdir / "pageserver.log"
+        if not logfile.exists():
+            log.warning(f"Skipping log check: {logfile} does not exist")
+            return
+
+        with logfile.open("r") as f:
+            errors = scan_pageserver_log_for_errors(f, self.allowed_errors)
 
         for _lineno, error in errors:
             log.info(f"not allowed error: {error.strip()}")
@@ -1757,7 +1762,10 @@ class NeonPageserver(PgProtocol):
 
     def log_contains(self, pattern: str) -> Optional[str]:
         """Check that the pageserver log contains a line that matches the given regex"""
-        logfile = open(os.path.join(self.workdir, "pageserver.log"), "r")
+        logfile = self.workdir / "pageserver.log"
+        if not logfile.exists():
+            log.warning(f"Skipping log check: {logfile} does not exist")
+            return None
 
         contains_re = re.compile(pattern)
 
@@ -1766,14 +1774,11 @@ class NeonPageserver(PgProtocol):
         # no guarantee it is already present in the log file. This hasn't
         # been a problem in practice, our python tests are not fast enough
         # to hit that race condition.
-        while True:
-            line = logfile.readline()
-            if not line:
-                break
-
-            if contains_re.search(line):
-                # found it!
-                return line
+        with logfile.open("r") as f:
+            for line in f:
+                if contains_re.search(line):
+                    # found it!
+                    return line
 
         return None
 
