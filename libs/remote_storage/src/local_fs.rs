@@ -393,6 +393,27 @@ impl RemoteStorage for LocalFs {
         }
         Ok(())
     }
+
+    async fn copy_object(&self, src: &RemotePath, dst: &RemotePath) -> anyhow::Result<()> {
+        let src_path = src.with_base(&self.storage_root);
+        let dst_path = dst.with_base(&self.storage_root);
+
+        // If the destination file already exists, we need to delete it first.
+        if dst_path.exists() {
+            fs::remove_file(&dst_path).await?;
+        }
+
+        // Copy the file.
+        fs::copy(&src_path, &dst_path).await?;
+
+        // Copy the metadata.
+        let metadata_path = storage_metadata_path(&src_path);
+        if metadata_path.exists() {
+            fs::copy(&metadata_path, storage_metadata_path(&dst_path)).await?;
+        }
+
+        Ok(())
+    }
 }
 
 fn storage_metadata_path(original_path: &Utf8Path) -> Utf8PathBuf {
