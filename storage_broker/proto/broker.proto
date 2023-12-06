@@ -8,6 +8,14 @@ service BrokerService {
     // Subscribe to safekeeper updates.
     rpc SubscribeSafekeeperInfo(SubscribeSafekeeperInfoRequest) returns (stream SafekeeperTimelineInfo) {};
 
+    // Subscribe to discovery requests.
+    rpc SubscribeDiscovery(SubscribeDiscoveryRequest) returns (stream DiscoveryRequest) {};
+
+    // TODO: make a single method for all subscriptions
+
+    // Send a discovery request.
+    rpc SendDiscovery(DiscoveryRequest) returns (google.protobuf.Empty) {};
+
     // Publish safekeeper updates.
     rpc PublishSafekeeperInfo(stream SafekeeperTimelineInfo) returns (google.protobuf.Empty) {};
 }
@@ -42,9 +50,18 @@ message SafekeeperTimelineInfo {
     string http_connstr = 13;
     // Availability zone of a safekeeper.
     optional string availability_zone = 11;
+    bool is_discovery = 14;
 }
 
 message TenantTimelineId {
     bytes tenant_id = 1;
     bytes timeline_id = 2;
+}
+
+message SubscribeDiscoveryRequest {
+    // TODO: this is a temp struct
+}
+
+message DiscoveryRequest {
+    TenantTimelineId tenant_timeline_id = 1;
 }
