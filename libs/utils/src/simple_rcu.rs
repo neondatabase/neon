@@ -42,7 +42,7 @@
 #![warn(missing_docs)]
 
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::sync::{RwLock, RwLockWriteGuard};
 
 use tokio::sync::watch;
@@ -74,9 +74,8 @@ struct RcuCell<V> {
     /// RcuCell has been dropped, i.e. until the old value is no longer in use.
     ///
     /// We never send anything to this, we just need to hold onto it so that the
-    /// Receivers will be notified when it's dropped. But because it's not Sync,
-    /// we need a Mutex on it.
-    watch: Mutex<watch::Sender<()>>,
+    /// Receivers will be notified when it's dropped.
+    watch: watch::Sender<()>,
 }
 
 impl<V> RcuCell<V> {
@@ -84,7 +83,7 @@ impl<V> RcuCell<V> {
         let (watch_sender, _) = watch::channel(());
         RcuCell {
             value,
-            watch: Mutex::new(watch_sender),
+            watch: watch_sender,
         }
     }
 }
@@ -142,10 +141,10 @@ impl<V> Deref for RcuReadGuard<V> {
 ///
 /// Write guard returned by `write`
 ///
-/// NB: Holding this guard blocks all concurrent `read` and `write` calls, so
-/// it should only be held for a short duration!
+/// NB: Holding this guard blocks all concurrent `read` and `write` calls, so it should only be
+/// held for a short duration!
 ///
-/// Calling `store` consumes the guard, making new reads and new writes possible
+/// Calling [`Self::store_and_unlock`] consumes the guard, making new reads and new writes possible
 /// again.
 ///
 pub struct RcuWriteGuard<'a, V> {
@@ -180,7 +179,7 @@ impl<'a, V> RcuWriteGuard<'a, V> {
             // the watches for any that do.
             self.inner.old_cells.retain(|weak| {
                 if let Some(cell) = weak.upgrade() {
-                    watches.push(cell.watch.lock().unwrap().subscribe());
+                    watches.push(cell.watch.subscribe());
                     true
                 } else {
                     false
