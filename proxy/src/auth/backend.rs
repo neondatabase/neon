@@ -230,7 +230,7 @@ fn validate(
 ) -> auth::Result<ComputeCredentialKeys> {
     match secret {
         #[cfg(feature = "testing")]
-        AuthSecret::Md5(md5) => {
+        AuthSecret::Md5(_) => {
             // test only
             Ok(ComputeCredentialKeys::Password(password))
         }
