@@ -373,6 +373,7 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 		state->rem_lsn += to_copy;
 		if (state->wal_rem_len == 0)
 			state->wal_ptr = NULL;	/* freed by libpqwalproposer */
+		buf += to_copy;
 		state->req_progress += to_copy;
 		if (state->req_progress == state->req_len)
 		{
