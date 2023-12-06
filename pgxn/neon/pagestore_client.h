@@ -58,6 +58,9 @@ typedef struct
 #define neon_log(tag, fmt, ...) ereport(tag,                                  \
 										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
 										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
+#define neon_shard_log(shard_no, tag, fmt, ...) ereport(tag,	\
+														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
+														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
 
 /*
  * supertype of all the Neon*Request structs below

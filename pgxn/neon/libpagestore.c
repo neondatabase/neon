@@ -263,7 +263,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
-				 errmsg(NEON_TAG "could not establish connection to pageserver"),
+				 errmsg(NEON_TAG "[shard %d] could not establish connection to pageserver", shard_no),
 				 errdetail_internal("%s", msg)));
 		return false;
 	}
@@ -272,7 +272,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	if (ret != 1)
 	{
 		PQfinish(conn);
-		neon_log(elevel, "could not send pagestream command to pageserver");
+		neon_shard_log(shard_no, elevel, "could not send pagestream command to pageserver");
 		return false;
 	}
 
@@ -303,14 +303,14 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				PQfinish(conn);
 				FreeWaitEventSet(wes);
 
-				neon_log(elevel, "could not complete handshake with pageserver: %s",
-						 msg);
+				neon_shard_log(shard_no, elevel, "could not complete handshake with pageserver: %s",
+							   msg);
 				return false;
 			}
 		}
 	}
 
-	neon_log(LOG, "libpagestore: connected to '%s'", connstr);
+	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s'", connstr);
 	page_servers[shard_no].conn = conn;
 	page_servers[shard_no].wes = wes;
 	max_attached_shard_no = Max(shard_no+1, max_attached_shard_no);
@@ -346,7 +346,7 @@ retry:
 			{
 				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
-				neon_log(LOG, "could not get response from pageserver: %s", msg);
+				neon_shard_log(shard_no, LOG, "could not get response from pageserver: %s", msg);
 				pfree(msg);
 				return -1;
 			}
@@ -371,7 +371,7 @@ pageserver_disconnect(shardno_t shard_no)
 	 */
 	if (page_servers[shard_no].conn)
 	{
-		neon_log(LOG, "dropping connection to page server due to error");
+		neon_shard_log(shard_no, LOG, "dropping connection to page server due to error");
 		PQfinish(page_servers[shard_no].conn);
 		page_servers[shard_no].conn = NULL;
 
@@ -393,7 +393,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	/* If the connection was lost for some reason, reconnect */
 	if (pageserver_conn && PQstatus(pageserver_conn) == CONNECTION_BAD)
 	{
-		neon_log(LOG, "pageserver_send disconnect bad connection");
+		neon_shard_log(shard_no, LOG, "pageserver_send disconnect bad connection");
 		pageserver_disconnect(shard_no);
 	}
 
@@ -433,7 +433,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 		pageserver_disconnect(shard_no);
-		neon_log(LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
+		neon_shard_log(shard_no, LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
 		pfree(msg);
 		pfree(req_buff.data);
 		return false;
@@ -445,7 +445,7 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	{
 		char	   *msg = nm_to_string((NeonMessage *) request);
 
-		neon_log(PageStoreTrace, "sent request: %s", msg);
+		neon_shard_log(shard_no, PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
 	return true;
@@ -477,13 +477,13 @@ pageserver_receive(shardno_t shard_no)
 			{
 				char	   *msg = nm_to_string((NeonMessage *) resp);
 
-				neon_log(PageStoreTrace, "got response: %s", msg);
+				neon_shard_log(shard_no, PageStoreTrace, "got response: %s", msg);
 				pfree(msg);
 			}
 		}
 		else if (rc == -1)
 		{
-			neon_log(LOG, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
+			neon_shard_log(shard_no, LOG, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
 			pageserver_disconnect(shard_no);
 			resp = NULL;
 		}
@@ -492,17 +492,17 @@ pageserver_receive(shardno_t shard_no)
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 			pageserver_disconnect(shard_no);
-			neon_log(ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
+			neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
 		}
 		else
 		{
 			pageserver_disconnect(shard_no);
-			neon_log(ERROR, "pageserver_receive disconnect because unexpected PQgetCopyData return value: %d", rc);
+			neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect because unexpected PQgetCopyData return value: %d", rc);
 		}
 	}
 	PG_CATCH();
 	{
-		neon_log(LOG, "pageserver_receive disconnect due to caught exception");
+		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect due to caught exception");
 		pageserver_disconnect(shard_no);
 		PG_RE_THROW();
 	}
@@ -518,7 +518,7 @@ pageserver_flush(shardno_t shard_no)
 	PGconn* pageserver_conn = page_servers[shard_no].conn;
 	if (!pageserver_conn)
 	{
-		neon_log(WARNING, "Tried to flush while disconnected");
+		neon_shard_log(shard_no, WARNING, "Tried to flush while disconnected");
 	}
 	else
 	{
@@ -527,7 +527,7 @@ pageserver_flush(shardno_t shard_no)
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 			pageserver_disconnect(shard_no);
-			neon_log(LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
+			neon_shard_log(shard_no, LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
 			pfree(msg);
 			return false;
 		}
@@ -572,12 +572,12 @@ AssignPageserverConnstring(const char *newval, void *extra)
 				break; /* trailing comma */
 			if (i >= MAX_SHARDS)
 			{
-				elog(LOG, "Too many shards");
+				neon_log(LOG, "Too many shards");
 				return;
 			}
 			if (connstr_len >= MAX_PS_CONNSTR_LEN)
 			{
-				elog(LOG, "Connection  string too long");
+				neon_log(LOG, "Connection  string too long");
 				return;
 			}
 			if (i >= shard_map->n_shards ||
@@ -596,7 +596,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 
 		if (i == 0)
 		{
-			elog(LOG, "No shards were specified");
+			neon_log(LOG, "No shards were specified");
 			return;
 		}
 		if (shard_map_changed)
