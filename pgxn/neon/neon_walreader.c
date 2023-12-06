@@ -407,9 +407,6 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			return NEON_WALREAD_SUCCESS;
 		}
 	}
-
-	snprintf(state->err_msg, sizeof(state->err_msg), "remote read failed: not implemented");
-	return NEON_WALREAD_ERROR;
 }
 
 /*
@@ -579,7 +576,7 @@ NeonWALReaderEvents(NeonWALReader *state)
 			return WL_SOCKET_READABLE;
 		default:
 			Assert(false);
-			break;
+			return 0;			/* make compiler happy */
 	}
 }
 
@@ -697,7 +694,7 @@ neon_wal_segment_open(NeonWALReader *state, XLogSegNo nextSegNo,
 	char		path[MAXPGPATH];
 
 	XLogFilePath(path, tli, nextSegNo, state->segcxt.ws_segsize);
-	walprop_log(LOG, "opening %s", path);
+	nwr_log(LOG, "opening %s", path);
 	state->seg.ws_file = BasicOpenFile(path, O_RDONLY | PG_BINARY);
 	if (state->seg.ws_file >= 0)
 		return true;
