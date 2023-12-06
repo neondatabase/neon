@@ -83,6 +83,7 @@ use std::{
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
+use tracing::instrument;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -252,6 +253,9 @@ pub struct PageCache {
     next_evict_slot: AtomicUsize,
 
     size_metrics: &'static PageCacheSizeMetrics,
+
+    find_victim_waiters:
+        nostarve_queue::Queue<(usize, tokio::sync::RwLockWriteGuard<'static, SlotInner>)>,
 }
 
 struct PinnedSlotsPermit(tokio::sync::OwnedSemaphorePermit);
@@ -430,8 +434,9 @@ impl PageCache {
     ///
     /// Store an image of the given page in the cache.
     ///
+    #[cfg_attr(test, instrument(skip_all, level = "trace", fields(%key, %lsn)))]
     pub async fn memorize_materialized_page(
-        &self,
+        &'static self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         key: Key,
@@ -522,8 +527,9 @@ impl PageCache {
 
     // Section 1.2: Public interface functions for working with immutable file pages.
 
+    #[cfg_attr(test, instrument(skip_all, level = "trace", fields(?file_id, ?blkno)))]
     pub async fn read_immutable_buf(
-        &self,
+        &'static self,
         file_id: FileId,
         blkno: u32,
         ctx: &RequestContext,
@@ -629,7 +635,7 @@ impl PageCache {
     /// ```
     ///
     async fn lock_for_read(
-        &self,
+        &'static self,
         cache_key: &mut CacheKey,
         ctx: &RequestContext,
     ) -> anyhow::Result<ReadBufResult> {
@@ -851,10 +857,15 @@ impl PageCache {
     ///
     /// On return, the slot is empty and write-locked.
     async fn find_victim(
-        &self,
+        &'static self,
         _permit_witness: &PinnedSlotsPermit,
     ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
-        let iter_limit = self.slots.len() * 10;
+        let nostarve_position = self.find_victim_waiters.begin()
+            .expect("we initialize the nostarve queue to the same size as the slots semaphore, and the caller is presenting a permit");
+
+        let span = tracing::info_span!("find_victim", ?nostarve_position);
+        let _enter = span.enter();
+
         let mut iters = 0;
         loop {
             iters += 1;
@@ -866,41 +877,8 @@ impl PageCache {
                 let mut inner = match slot.inner.try_write() {
                     Ok(inner) => inner,
                     Err(_err) => {
-                        if iters > iter_limit {
-                            // NB: Even with the permits, there's no hard guarantee that we will find a slot with
-                            // any particular number of iterations: other threads might race ahead and acquire and
-                            // release pins just as we're scanning the array.
-                            //
-                            // Imagine that nslots is 2, and as starting point, usage_count==1 on all
-                            // slots. There are two threads running concurrently, A and B. A has just
-                            // acquired the permit from the semaphore.
-                            //
-                            //   A: Look at slot 1. Its usage_count == 1, so decrement it to zero, and continue the search
-                            //   B: Acquire permit.
-                            //   B: Look at slot 2, decrement its usage_count to zero and continue the search
-                            //   B: Look at slot 1. Its usage_count is zero, so pin it and bump up its usage_count to 1.
-                            //   B: Release pin and permit again
-                            //   B: Acquire permit.
-                            //   B: Look at slot 2. Its usage_count is zero, so pin it and bump up its usage_count to 1.
-                            //   B: Release pin and permit again
-                            //
-                            // Now we're back in the starting situation that both slots have
-                            // usage_count 1, but A has now been through one iteration of the
-                            // find_victim() loop. This can repeat indefinitely and on each
-                            // iteration, A's iteration count increases by one.
-                            //
-                            // So, even though the semaphore for the permits is fair, the victim search
-                            // itself happens in parallel and is not fair.
-                            // Hence even with a permit, a task can theoretically be starved.
-                            // To avoid this, we'd need tokio to give priority to tasks that are holding
-                            // permits for longer.
-                            // Note that just yielding to tokio during iteration without such
-                            // priority boosting is likely counter-productive. We'd just give more opportunities
-                            // for B to bump usage count, further starving A.
-                            crate::metrics::page_cache_errors_inc(
-                                crate::metrics::PageCacheErrorKind::EvictIterLimit,
-                            );
-                            anyhow::bail!("exceeded evict iter limit");
+                        if iters > self.slots.len() * (MAX_USAGE_COUNT as usize) {
+                            unreachable!("find_victim_waiters prevents starvation");
                         }
                         continue;
                     }
@@ -911,7 +889,8 @@ impl PageCache {
                     inner.key = None;
                 }
                 crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
-                return Ok((slot_idx, inner));
+
+                return Ok(nostarve_position.complete_and_wait((slot_idx, inner)).await);
             }
         }
     }
@@ -955,6 +934,7 @@ impl PageCache {
             next_evict_slot: AtomicUsize::new(0),
             size_metrics,
             pinned_slots: Arc::new(tokio::sync::Semaphore::new(num_pages)),
+            find_victim_waiters: ::nostarve_queue::Queue::new(num_pages),
         }
     }
 }
