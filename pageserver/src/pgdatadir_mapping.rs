@@ -14,6 +14,7 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_i
 use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
+use lz4_flex;
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
@@ -992,7 +993,15 @@ impl<'a> DatadirModification<'a> {
         img: Bytes,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
-        self.put(rel_block_to_key(rel, blknum), Value::Image(img));
+        let compressed = lz4_flex::block::compress(&img);
+        if compressed.len() < img.len() {
+            self.put(
+                rel_block_to_key(rel, blknum),
+                Value::CompressedImage(Bytes::from(compressed)),
+            );
+        } else {
+            self.put(rel_block_to_key(rel, blknum), Value::Image(img));
+        }
         Ok(())
     }
 
@@ -1597,6 +1606,10 @@ impl<'a> DatadirModification<'a> {
             if let Some((_, value)) = values.last() {
                 return if let Value::Image(img) = value {
                     Ok(img.clone())
+                } else if let Value::CompressedImage(img) = value {
+                    let decompressed = lz4_flex::block::decompress(&img, BLCKSZ as usize)
+                        .map_err(|msg| PageReconstructError::Other(anyhow::anyhow!(msg)))?;
+                    Ok(Bytes::from(decompressed))
                 } else {
                     // Currently, we never need to read back a WAL record that we
                     // inserted in the same "transaction". All the metadata updates

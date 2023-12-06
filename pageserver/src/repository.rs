@@ -13,6 +13,8 @@ pub use pageserver_api::key::{Key, KEY_SIZE};
 pub enum Value {
     /// An Image value contains a full copy of the value
     Image(Bytes),
+    /// An compressed page image contains a full copy of the page
+    CompressedImage(Bytes),
     /// A WalRecord value contains a WAL record that needs to be
     /// replayed get the full value. Replaying the WAL record
     /// might need a previous version of the value (if will_init()
@@ -22,12 +24,17 @@ pub enum Value {
 
 impl Value {
     pub fn is_image(&self) -> bool {
-        matches!(self, Value::Image(_))
+        match self {
+            Value::Image(_) => true,
+            Value::CompressedImage(_) => true,
+            Value::WalRecord(_) => false,
+        }
     }
 
     pub fn will_init(&self) -> bool {
         match self {
             Value::Image(_) => true,
+            Value::CompressedImage(_) => true,
             Value::WalRecord(rec) => rec.will_init(),
         }
     }
