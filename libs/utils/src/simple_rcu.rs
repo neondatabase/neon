@@ -42,7 +42,7 @@
 #![warn(missing_docs)]
 
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::sync::{RwLock, RwLockWriteGuard};
 
 use tokio::sync::watch;
@@ -76,7 +76,7 @@ struct RcuCell<V> {
     /// We never send anything to this, we just need to hold onto it so that the
     /// Receivers will be notified when it's dropped. But because it's not Sync,
     /// we need a Mutex on it.
-    watch: Mutex<watch::Sender<()>>,
+    watch: watch::Sender<()>,
 }
 
 impl<V> RcuCell<V> {
@@ -84,7 +84,7 @@ impl<V> RcuCell<V> {
         let (watch_sender, _) = watch::channel(());
         RcuCell {
             value,
-            watch: Mutex::new(watch_sender),
+            watch: watch_sender,
         }
     }
 }
@@ -180,7 +180,7 @@ impl<'a, V> RcuWriteGuard<'a, V> {
             // the watches for any that do.
             self.inner.old_cells.retain(|weak| {
                 if let Some(cell) = weak.upgrade() {
-                    watches.push(cell.watch.lock().unwrap().subscribe());
+                    watches.push(cell.watch.subscribe());
                     true
                 } else {
                     false
