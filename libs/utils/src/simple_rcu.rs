@@ -36,7 +36,7 @@
 //!
 //! // Concurrent reads and writes are now possible again. Wait for all the readers
 //! // that still observe the old value to finish.
-//! waitlist.wait();
+//! waitlist.wait().await;
 //! ```
 //!
 #![warn(missing_docs)]
