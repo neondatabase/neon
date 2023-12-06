@@ -123,12 +123,9 @@ class LocalFsStorage:
         if generation is None:
             generation = self.timeline_latest_generation(tenant_id, timeline_id)
 
-        if generation is None:
-            filename = local_name
-        else:
-            filename = f"{local_name}-{generation:08x}"
+        assert generation is not None, "Cannot calculate remote layer path without generation"
 
-        # Assume this is a simple test that uploads in just one generation
+        filename = f"{local_name}-{generation:08x}"
         return self.timeline_path(tenant_id, timeline_id) / filename
 
     def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
