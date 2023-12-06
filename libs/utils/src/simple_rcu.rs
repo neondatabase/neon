@@ -74,8 +74,7 @@ struct RcuCell<V> {
     /// RcuCell has been dropped, i.e. until the old value is no longer in use.
     ///
     /// We never send anything to this, we just need to hold onto it so that the
-    /// Receivers will be notified when it's dropped. But because it's not Sync,
-    /// we need a Mutex on it.
+    /// Receivers will be notified when it's dropped.
     watch: watch::Sender<()>,
 }
 
