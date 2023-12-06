@@ -1,7 +1,6 @@
 import sys
 import tarfile
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +11,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     VanillaPostgres,
 )
+from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import LocalFsStorage
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -128,10 +128,7 @@ def test_wal_restore_initdb(
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
 
 
-def test_wal_restore_http(
-    neon_env_builder: NeonEnvBuilder,
-    test_output_dir: Path,
-):
+def test_wal_restore_http(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
@@ -145,15 +142,7 @@ def test_wal_restore_http(
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    test_output_dir / "initdb.tar.zst"
-
-    (env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / "initdb.tar.zst")
-
-    ps_client.timeline_delete(tenant_id, timeline_id)
-    time.sleep(2)
-
-    # verify that it is indeed deleted
-    # TODO
+    timeline_delete_wait_completed(ps_client, tenant_id, timeline_id)
 
     # issue the restoration command
     ps_client.timeline_create(
