@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver
-from fixtures.remote_storage import RemoteStorageKind
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
@@ -330,3 +330,46 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
 
     workload.churn_rows(64, pageserver_b.id)
     workload.validate(pageserver_b.id)
+
+
+def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
+    """
+    Test the sequence of location states that are used in a live migration.
+    """
+    env = neon_env_builder.init_start()  # initial_tenant_conf=TENANT_CONF)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Write some data so that we have some layers
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageservers[0].id)
+
+    # Write some layers and upload a heatmap
+    workload.write_rows(256, env.pageservers[0].id)
+    env.pageserver.http_client().tenant_heatmap_upload(tenant_id)
+
+    def validate_heatmap(heatmap):
+        assert len(heatmap["timelines"]) == 1
+        assert heatmap["timelines"][0]["timeline_id"] == str(timeline_id)
+        assert len(heatmap["timelines"][0]["layers"]) > 0
+        layers = heatmap["timelines"][0]["layers"]
+
+        # Each layer appears at most once
+        assert len(set(layer["name"] for layer in layers)) == len(layers)
+
+    # Download and inspect the heatmap that the pageserver uploaded
+    heatmap_first = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    log.info(f"Read back heatmap: {heatmap_first}")
+    validate_heatmap(heatmap_first)
+
+    # Do some more I/O to generate more layers
+    workload.churn_rows(64, env.pageservers[0].id)
+    env.pageserver.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Ensure that another heatmap upload includes the new layers
+    heatmap_second = env.pageserver_remote_storage.heatmap_content(tenant_id)
+    log.info(f"Read back heatmap: {heatmap_second}")
+    assert heatmap_second != heatmap_first
+    validate_heatmap(heatmap_second)
