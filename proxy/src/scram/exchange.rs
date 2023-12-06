@@ -85,8 +85,8 @@ pub fn exchange(
     let client_first = std::str::from_utf8(client.message())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let sent = match init.transition(secret, &tls_server_end_point, client_first)? {
-        Continue(sent, msg) => {
-            client.update(msg.as_bytes())?;
+        Continue(sent, server_first) => {
+            client.update(server_first.as_bytes())?;
             sent
         }
         Success(x, _) => match x {},
@@ -96,8 +96,8 @@ pub fn exchange(
     let client_final = std::str::from_utf8(client.message())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let keys = match sent.transition(secret, &tls_server_end_point, client_final)? {
-        Success(keys, msg) => {
-            client.update(msg.as_bytes())?;
+        Success(keys, server_final) => {
+            client.finish(server_final.as_bytes())?;
             keys
         }
         Continue(x, _) => match x {},
