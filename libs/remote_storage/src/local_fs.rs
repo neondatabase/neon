@@ -103,7 +103,12 @@ impl LocalFs {
         // S3 object list prefixes can be arbitrary strings, but when reading
         // the local filesystem we need a directory to start calling read_dir on.
         let mut initial_dir = full_path.clone();
-        while initial_dir != Utf8PathBuf::default() {
+        loop {
+            // Did we make it to the root?
+            if initial_dir.parent().is_none() {
+                anyhow::bail!("list_files: failed to find valid ancestor dir for {full_path}");
+            }
+
             match fs::metadata(initial_dir.clone()).await {
                 Ok(meta) if meta.is_dir() => {
                     // We found a directory, break
@@ -121,10 +126,6 @@ impl LocalFs {
                     // Unexpected I/O error
                     anyhow::bail!(e)
                 }
-            }
-
-            if initial_dir.parent().is_none() {
-                anyhow::bail!("list_files: failed to find valid ancestor dir for {full_path}");
             }
         }
         // Note that Utf8PathBuf starts_with only considers full path segments, but
