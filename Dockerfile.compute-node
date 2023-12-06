@@ -387,10 +387,20 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 ARG PG_VERSION
 ENV PATH "/usr/local/pgsql/bin:$PATH"
 
-RUN apt-get update && \
+RUN case "${PG_VERSION}" in \
+      "v14" | "v15") \
+        export TIMESCALEDB_VERSION=2.10.1 \
+        export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
+        ;; \
+      *) \
+        export TIMESCALEDB_VERSION=2.13.0 \
+        export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
+        ;; \
+    esac && \
+    apt-get update && \
     apt-get install -y cmake && \
-    wget https://github.com/timescale/timescaledb/archive/refs/tags/2.13.0.tar.gz -O timescaledb.tar.gz && \
-    echo "584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d timescaledb.tar.gz" | sha256sum --check && \
+    wget https://github.com/timescale/timescaledb/archive/refs/tags/${TIMESCALEDB_VERSION}.tar.gz -O timescaledb.tar.gz && \
+    echo "${TIMESCALEDB_CHECKSUM} timescaledb.tar.gz" | sha256sum --check && \
     mkdir timescaledb-src && cd timescaledb-src && tar xvzf ../timescaledb.tar.gz --strip-components=1 -C . && \
     ./bootstrap -DSEND_TELEMETRY_DEFAULT:BOOL=OFF -DUSE_TELEMETRY:BOOL=OFF -DAPACHE_ONLY:BOOL=ON -DCMAKE_BUILD_TYPE=Release && \
     cd build && \
