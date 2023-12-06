@@ -42,6 +42,7 @@ pub enum BackendType<'a, T> {
     /// Current Cloud API (V2).
     Console(Cow<'a, console::provider::neon::Api>, T),
     /// Local mock of Cloud API (V2).
+    #[cfg(feature = "testing")]
     Postgres(Cow<'a, console::provider::mock::Api>, T),
     /// Authentication via a web browser.
     Link(Cow<'a, url::ApiUrl>),
@@ -60,6 +61,7 @@ impl std::fmt::Display for BackendType<'_, ()> {
         use BackendType::*;
         match self {
             Console(endpoint, _) => fmt.debug_tuple("Console").field(&endpoint.url()).finish(),
+            #[cfg(feature = "testing")]
             Postgres(endpoint, _) => fmt.debug_tuple("Postgres").field(&endpoint.url()).finish(),
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
             #[cfg(test)]
@@ -75,6 +77,7 @@ impl<T> BackendType<'_, T> {
         use BackendType::*;
         match self {
             Console(c, x) => Console(Cow::Borrowed(c), x),
+            #[cfg(feature = "testing")]
             Postgres(c, x) => Postgres(Cow::Borrowed(c), x),
             Link(c) => Link(Cow::Borrowed(c)),
             #[cfg(test)]
@@ -91,6 +94,7 @@ impl<'a, T> BackendType<'a, T> {
         use BackendType::*;
         match self {
             Console(c, x) => Console(c, f(x)),
+            #[cfg(feature = "testing")]
             Postgres(c, x) => Postgres(c, f(x)),
             Link(c) => Link(c),
             #[cfg(test)]
@@ -106,6 +110,7 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
         use BackendType::*;
         match self {
             Console(c, x) => x.map(|x| Console(c, x)),
+            #[cfg(feature = "testing")]
             Postgres(c, x) => x.map(|x| Postgres(c, x)),
             Link(c) => Ok(Link(c)),
             #[cfg(test)]
@@ -114,9 +119,9 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
-pub struct ComputeCredentials<'a> {
+pub struct ComputeCredentials<'a, T> {
     pub info: ComputeUserInfo<'a>,
-    pub keys: ComputeCredentialKeys,
+    pub keys: T,
 }
 
 pub struct ComputeUserInfoNoEndpoint<'a> {
@@ -131,6 +136,7 @@ pub struct ComputeUserInfo<'a> {
 }
 
 pub enum ComputeCredentialKeys {
+    #[cfg(feature = "testing")]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
 }
@@ -162,7 +168,7 @@ async fn auth_quirks_creds<'a>(
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<ComputeCredentials<'a>> {
+) -> auth::Result<ComputeCredentials<'a, ComputeCredentialKeys>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -193,10 +199,10 @@ async fn auth_quirks_creds<'a>(
         AuthSecret::Scram(scram::ServerSecret::mock(info.inner.user, rand::random()))
     });
 
-    if let Some(success) = maybe_success {
+    if let Some(password) = maybe_success {
         return Ok(ComputeCredentials {
+            keys: validate(client, &info.inner, password, secret)?,
             info,
-            keys: success,
         });
     }
 
@@ -204,11 +210,79 @@ async fn auth_quirks_creds<'a>(
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
         // Password will be checked by the compute node later.
-        return hacks::cleartext_hack(info, client, latency_timer).await;
+        let ComputeCredentials { info, keys } =
+            hacks::cleartext_hack(info, client, latency_timer).await?;
+        return Ok(ComputeCredentials {
+            keys: validate(client, &info.inner, keys, secret)?,
+            info,
+        });
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
     classic::authenticate(info, client, config, latency_timer, secret).await
+}
+
+fn validate(
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    info: &ComputeUserInfoNoEndpoint,
+    password: Vec<u8>,
+    secret: AuthSecret,
+) -> auth::Result<ComputeCredentialKeys> {
+    match secret {
+        #[cfg(feature = "testing")]
+        AuthSecret::Md5(md5) => {
+            // test only
+            Ok(ComputeCredentialKeys::Password(password))
+        }
+        // perform scram authentication as both client and server to validate the keys
+        AuthSecret::Scram(scram_secret) => {
+            use crate::sasl::{Mechanism, Step};
+            use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+
+            let mut exchange = crate::scram::Exchange::new(
+                &scram_secret,
+                rand::random,
+                crate::config::TlsServerEndPoint::Undefined,
+            );
+            let mut sasl_client = ScramSha256::new(&password, ChannelBinding::unsupported());
+
+            let client_first = std::str::from_utf8(sasl_client.message()).unwrap();
+            exchange = match exchange.exchange(client_first)? {
+                Step::Continue(exchange, message) => {
+                    sasl_client.update(message.as_bytes()).unwrap();
+                    exchange
+                }
+                Step::Success(_, _) => panic!("expected continue, got success"),
+                Step::Failure(reason) => {
+                    info!("auth backend failed with an error: {reason}");
+                    return Err(auth::AuthError::auth_failed(info.user));
+                }
+            };
+
+            let client_final = std::str::from_utf8(sasl_client.message()).unwrap();
+            let client_key = match exchange.exchange(client_final)? {
+                Step::Success(keys, message) => {
+                    sasl_client.finish(message.as_bytes()).unwrap();
+                    keys
+                }
+                Step::Continue(_, _) => panic!("expected success, got continue"),
+                Step::Failure(reason) => {
+                    info!("auth backend failed with an error: {reason}");
+                    return Err(auth::AuthError::auth_failed(info.user));
+                }
+            };
+
+            // we have authenticated the password
+            client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
+
+            let keys = crate::compute::ScramKeys {
+                client_key: client_key.as_bytes(),
+                server_key: scram_secret.server_key.as_bytes(),
+            };
+
+            Ok(ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(keys)))
+        }
+    }
 }
 
 /// True to its name, this function encapsulates our current auth trade-offs.
@@ -253,6 +327,7 @@ async fn auth_quirks<'a>(
     };
 
     match compute_credentials.keys {
+        #[cfg(feature = "testing")]
         ComputeCredentialKeys::Password(password) => node.config.password(password),
         ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
     };
@@ -267,6 +342,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
 
         match self {
             Console(_, creds) => creds.project.clone(),
+            #[cfg(feature = "testing")]
             Postgres(_, creds) => creds.project.clone(),
             Link(_) => Some("link".to_owned()),
             #[cfg(test)]
@@ -280,6 +356,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
 
         match self {
             Console(_, creds) => creds.user,
+            #[cfg(feature = "testing")]
             Postgres(_, creds) => creds.user,
             Link(_) => "link",
             #[cfg(test)]
@@ -319,6 +396,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                 .await?;
                 (success.0, BackendType::Console(api, success.1))
             }
+            #[cfg(feature = "testing")]
             Postgres(api, creds) => {
                 info!(
                     user = creds.user,
@@ -368,6 +446,7 @@ impl BackendType<'_, ComputeUserInfo<'_>> {
         use BackendType::*;
         match self {
             Console(api, creds) => api.get_allowed_ips(extra, creds).await,
+            #[cfg(feature = "testing")]
             Postgres(api, creds) => api.get_allowed_ips(extra, creds).await,
             Link(_) => Ok(Arc::new(vec![])),
             #[cfg(test)]
@@ -385,6 +464,7 @@ impl BackendType<'_, ComputeUserInfo<'_>> {
 
         match self {
             Console(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
+            #[cfg(feature = "testing")]
             Postgres(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
             Link(_) => Ok(None),
             #[cfg(test)]

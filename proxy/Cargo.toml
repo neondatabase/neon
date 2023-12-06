@@ -69,6 +69,7 @@ webpki-roots.workspace = true
 x509-parser.workspace = true
 native-tls.workspace = true
 postgres-native-tls.workspace = true
+postgres-protocol.workspace = true
 smol_str.workspace = true
 
 workspace_hack.workspace = true
@@ -78,4 +79,3 @@ tokio-util.workspace = true
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
-postgres-protocol.workspace = true

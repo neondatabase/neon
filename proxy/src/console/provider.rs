@@ -1,3 +1,4 @@
+#[cfg(feature = "testing")]
 pub mod mock;
 pub mod neon;
 
@@ -205,6 +206,7 @@ pub struct ConsoleReqExtra<'a> {
 
 /// Auth secret which is managed by the cloud.
 pub enum AuthSecret {
+    #[cfg(feature = "testing")]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 

@@ -696,6 +696,7 @@ where
     let node_info = loop {
         let wake_res = match creds {
             auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+            #[cfg(feature = "testing")]
             auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),

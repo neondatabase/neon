@@ -18,9 +18,10 @@ pub(super) async fn authenticate<'a>(
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<'a>> {
+) -> auth::Result<ComputeCredentials<'a, ComputeCredentialKeys>> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
+        #[cfg(feature = "testing")]
         AuthSecret::Md5(_) => {
             info!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
