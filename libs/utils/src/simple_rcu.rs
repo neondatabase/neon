@@ -26,6 +26,7 @@
 //! Increment the value by one, and wait for old readers to finish:
 //!
 //! ```
+//! # async fn dox() {
 //! # let rcu = utils::simple_rcu::Rcu::new(1);
 //! let write_guard = rcu.lock_for_write();
 //!
@@ -37,6 +38,7 @@
 //! // Concurrent reads and writes are now possible again. Wait for all the readers
 //! // that still observe the old value to finish.
 //! waitlist.wait().await;
+//! # }
 //! ```
 //!
 #![warn(missing_docs)]
