@@ -1,10 +1,11 @@
 #[cfg(test)]
 mod reliable_copy_test {
     use anyhow::Result;
+    use slowsim::executor;
     use slowsim::network::{Delay, NetworkOptions};
     use slowsim::proto::ReplCell;
     use slowsim::sync::{Mutex, Park};
-    use slowsim::world::{NodeId, World};
+    use slowsim::world::{NodeId, World, NetEvent};
     use slowsim::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
     use std::sync::Arc;
     use tracing::info;
@@ -35,12 +36,12 @@ mod reliable_copy_test {
         }
 
         fn flush(&mut self) -> Result<()> {
-            Park::yield_thread();
+            executor::yield_me(0);
             self.state.lock().flush()
         }
 
         fn write(&mut self, t: T) {
-            Park::yield_thread();
+            executor::yield_me(0);
             self.state.lock().write(t);
         }
     }
@@ -72,22 +73,41 @@ mod reliable_copy_test {
     pub fn run_server(os: NodeOs, mut storage: Box<dyn Storage<u32>>) {
         info!("started server");
 
-        let epoll = os.epoll();
+        let node_events = os.node_events();
+        let mut epoll_vec = vec![node_events.clone()];
+        let mut sockets = vec![];
+
         loop {
-            let event = epoll.recv();
+            let index = executor::epoll_chans(&epoll_vec, -1).unwrap();
+
+            if index == 0 {
+                let node_event = node_events.must_recv();
+                info!("got node event: {:?}", event);
+                match node_event {
+                    NodeEvent::Accept(tcp) => {
+                        tcp.send(AnyMessage::Just32(storage.flush_pos()));
+                        epoll_vec.push(tcp.recv_chan());
+                        sockets.push(tcp);
+                    }
+                    _ => {},
+                }
+                continue;
+            }
+
+            let recv_chan = sockets[index-1].recv_chan();
+            let socket = &sockets[index-1];
+
+            let event = recv_chan.must_recv();
             info!("got event: {:?}", event);
             match event {
-                NodeEvent::Message((AnyMessage::ReplCell(cell), tcp)) => {
+                NetEvent::Message(AnyMessage::ReplCell(cell)) => {
                     if cell.seqno != storage.flush_pos() {
                         info!("got out of order data: {:?}", cell);
                         continue;
                     }
                     storage.write(cell.value);
                     storage.flush().unwrap();
-                    tcp.send(AnyMessage::Just32(storage.flush_pos()));
-                }
-                NodeEvent::Accept(tcp) => {
-                    tcp.send(AnyMessage::Just32(storage.flush_pos()));
+                    socket.send(AnyMessage::Just32(storage.flush_pos()));
                 }
                 _ => {}
             }
@@ -98,10 +118,11 @@ mod reliable_copy_test {
     pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
         info!("started client");
 
-        let epoll = os.epoll();
+        // let epoll = os.epoll();
         let mut delivered = 0;
 
         let mut sock = os.open_tcp(dst);
+        let mut recv_chan = sock.recv_chan();
 
         while delivered < data.len() {
             let num = &data[delivered];
@@ -109,16 +130,17 @@ mod reliable_copy_test {
             sock.send(AnyMessage::ReplCell(num.clone()));
 
             // loop {
-            let event = epoll.recv();
+            let event = recv_chan.recv();
             match event {
-                NodeEvent::Message((AnyMessage::Just32(flush_pos), _)) => {
+                NetEvent::Message((AnyMessage::Just32(flush_pos), _)) => {
                     if flush_pos == 1 + delivered as u32 {
                         delivered += 1;
                     }
                 }
-                NodeEvent::Closed(_) => {
+                NetEvent::Closed => {
                     info!("connection closed, reestablishing");
                     sock = os.open_tcp(dst);
+                    recv_chan = sock.recv_chan();
                 }
                 _ => {}
             }
@@ -160,7 +182,7 @@ mod reliable_copy_test {
         for seed in 0..20 {
             let u32_data: [u32; 5] = [1, 2, 3, 4, 5];
             let data = u32_to_cells(&u32_data, 1);
-            let world = Arc::new(World::new(seed, Arc::new(network.clone()), None));
+            let world = Arc::new(World::new(seed, Arc::new(network.clone())));
 
             start_simulation(Options {
                 world,

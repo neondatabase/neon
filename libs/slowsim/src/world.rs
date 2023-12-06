@@ -10,6 +10,8 @@ use std::{
 };
 use tracing::{debug, error, trace};
 
+use crate::executor::Runtime;
+
 use super::{
     chan::Chan,
     network::{NetworkOptions, VirtualConnection, TCP},
@@ -45,21 +47,20 @@ pub struct World {
     /// Network options.
     network_options: Arc<NetworkOptions>,
 
-    /// Optional function to initialize nodes right after thread creation.
-    nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>,
-
     /// Internal event log.
     events: Mutex<Vec<SEvent>>,
 
     /// Connections.
     connections: Mutex<Vec<Arc<VirtualConnection>>>,
+
+    /// Tmp executor.
+    tmp_runtime: Mutex<Runtime>,
 }
 
 impl World {
     pub fn new(
         seed: u64,
         network_options: Arc<NetworkOptions>,
-        nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>,
     ) -> World {
         World {
             nodes: Mutex::new(Vec::new()),
@@ -69,9 +70,9 @@ impl World {
             timing: Mutex::new(Timing::new()),
             connection_counter: AtomicU64::new(0),
             network_options,
-            nodes_init,
             events: Mutex::new(Vec::new()),
             connections: Mutex::new(Vec::new()),
+            tmp_runtime: Mutex::new(Runtime::new()),
         }
     }
 
@@ -339,7 +340,6 @@ pub struct Node {
     status: Mutex<NodeStatus>,
     waiting_park: Mutex<Arc<Park>>,
     world: Arc<World>,
-    join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub rng: Mutex<StdRng>,
     /// Every node can set a result string, which can be read by the test.
     pub result: Mutex<(i32, String)>,
@@ -365,7 +365,6 @@ impl Node {
             status: Mutex::new(NodeStatus::NotStarted),
             waiting_park: Mutex::new(Park::new(false)),
             world,
-            join_handle: Mutex::new(None),
             rng: Mutex::new(rng),
             result: Mutex::new((-1, String::new())),
             crash_token: AtomicBool::new(false),
@@ -377,7 +376,7 @@ impl Node {
         let node = self.clone();
         let world = self.world.clone();
         world.wait_group.add(1);
-        let join_handle = std::thread::spawn(move || {
+        self.world.tmp_runtime.lock().spawn(move || {
             CURRENT_NODE.with(|current_node| {
                 *current_node.borrow_mut() = Some(node.clone());
             });
@@ -396,13 +395,6 @@ impl Node {
             drop(status);
 
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                // park the current thread, [`launch`] will wait until it's parked
-                Park::yield_thread();
-
-                if let Some(nodes_init) = world.nodes_init.as_ref() {
-                    nodes_init(NodeOs::new(world.clone(), node.clone()));
-                }
-
                 f(NodeOs::new(world, node.clone()));
             }));
             match res {
@@ -424,7 +416,6 @@ impl Node {
             let mut status = node.status.lock();
             *status = NodeStatus::Finished;
         });
-        *self.join_handle.lock() = Some(join_handle);
 
         // we need to wait for the thread to park, to assure that threads
         // are parked in deterministic order
@@ -546,11 +537,13 @@ impl Node {
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
     Accept(TCP),
-    Closed(TCP),
-    Message((AnyMessage, TCP)),
     Internal(AnyMessage),
-    WakeTimeout(u64),
-    // TODO: close?
+}
+
+#[derive(Clone, Debug)]
+pub enum NetEvent {
+    Message(AnyMessage),
+    Closed,
 }
 
 #[derive(Debug)]

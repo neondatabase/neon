@@ -77,7 +77,7 @@ impl TestConfig {
     }
 
     pub fn start(&self, seed: u64) -> Test {
-        let world = Arc::new(World::new(seed, Arc::new(self.network.clone()), None));
+        let world = Arc::new(World::new(seed, Arc::new(self.network.clone())));
         world.register_world();
 
         if let Some(clock) = &self.clock {

@@ -1,14 +1,18 @@
-use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, sync::Arc};
+use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, sync::{Arc, atomic::{AtomicU64, AtomicU32}}, ops::DerefMut};
+
+use parking_lot::Mutex;
+
+use crate::executor::ThreadContext;
 
 use super::{chan::Chan, network::VirtualConnection};
 
-pub struct Timing {
+pub(crate) struct Timing {
     /// Current world's time.
-    current_time: u64,
+    current_time: AtomicU64,
     /// Pending timers.
-    timers: BinaryHeap<Pending>,
+    queue: Mutex<BinaryHeap<Pending>>,
     /// Global nonce.
-    nonce: u32,
+    nonce: AtomicU32,
 }
 
 impl Default for Timing {
@@ -18,69 +22,64 @@ impl Default for Timing {
 }
 
 impl Timing {
-    pub fn new() -> Timing {
+    pub(crate) fn new() -> Timing {
         Timing {
-            current_time: 0,
-            timers: BinaryHeap::new(),
-            nonce: 0,
+            current_time: AtomicU64::new(0),
+            queue: Mutex::new(BinaryHeap::new()),
+            nonce: AtomicU32::new(0),
         }
     }
 
     /// Return the current world's time.
-    pub fn now(&self) -> u64 {
+    pub(crate) fn now(&self) -> u64 {
         self.current_time
     }
 
     /// Tick-tock the global clock. Return the event ready to be processed
     /// or move the clock forward and then return the event.
-    pub fn step(&mut self) -> Option<Pending> {
-        if self.timers.is_empty() {
+    pub(crate) fn step(&self) -> Option<Arc<ThreadContext>> {
+        let mut queue = self.queue.lock();
+
+        if queue.is_empty() {
             // no future events
             return None;
         }
 
-        if !self.is_event_ready() {
-            let next_time = self.timers.peek().unwrap().time;
-            self.current_time = next_time;
-            assert!(self.is_event_ready());
+        if !self.is_event_ready(queue.deref_mut()) {
+            let next_time = queue.peek().unwrap().time;
+            self.current_time.store(next_time, std::sync::atomic::Ordering::SeqCst);
+            assert!(self.is_event_ready(queue.deref_mut()));
         }
 
-        self.timers.pop()
+        self.queue.pop()
     }
 
-    /// TODO: write docs
-    pub fn schedule_future(&mut self, ms: u64, event: Box<dyn Event + Send + Sync>) {
+    pub(crate) fn schedule_wakeup(&mut self, ms: u64, wake_context: Arc<ThreadContext>) {
         self.nonce += 1;
-        let nonce = self.nonce;
-        self.timers.push(Pending {
+        let nonce = self.nonce.load(std::sync::atomic::Ordering::SeqCst);
+        self.queue.lock().push(Pending {
             time: self.current_time + ms,
             nonce,
-            event,
+            wake_context,
         })
     }
 
     /// Return true if there is a ready event.
-    fn is_event_ready(&self) -> bool {
-        self.timers
+    fn is_event_ready(&self, queue: &mut BinaryHeap<Pending>) -> bool {
+        queue
             .peek()
             .map_or(false, |x| x.time <= self.current_time)
     }
 
-    pub fn clear(&mut self) {
-        self.timers.clear();
+    pub(crate) fn clear(&mut self) {
+        self.queue.clear();
     }
 }
 
-pub struct Pending {
-    pub time: u64,
-    pub nonce: u32,
-    pub event: Box<dyn Event + Send + Sync>,
-}
-
-impl Pending {
-    pub fn process(&self) {
-        self.event.process();
-    }
+struct Pending {
+    time: u64,
+    nonce: u32,
+    wake_context: Arc<ThreadContext>,
 }
 
 // BinaryHeap is a max-heap, and we want a min-heap. Reverse the ordering here
@@ -104,58 +103,3 @@ impl PartialEq for Pending {
 }
 
 impl Eq for Pending {}
-
-pub trait Event: Debug {
-    fn process(&self);
-}
-
-pub struct SendMessageEvent<T: Debug + Clone> {
-    chan: Chan<T>,
-    msg: T,
-}
-
-impl<T: Debug + Clone> SendMessageEvent<T> {
-    pub fn new(chan: Chan<T>, msg: T) -> Box<SendMessageEvent<T>> {
-        Box::new(SendMessageEvent { chan, msg })
-    }
-}
-
-impl<T: Debug + Clone> Event for SendMessageEvent<T> {
-    fn process(&self) {
-        self.chan.send(self.msg.clone());
-    }
-}
-
-impl<T: Debug + Clone> Debug for SendMessageEvent<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO: add more context about receiver channel
-        f.debug_struct("SendMessageEvent")
-            .field("msg", &self.msg)
-            .finish()
-    }
-}
-
-pub struct NetworkEvent(pub Arc<VirtualConnection>);
-
-impl Event for NetworkEvent {
-    fn process(&self) {
-        self.0.process();
-    }
-}
-
-impl Debug for NetworkEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Network")
-            .field("conn", &self.0.connection_id)
-            .field("node[0]", &self.0.nodes[0].id)
-            .field("node[1]", &self.0.nodes[1].id)
-            .finish()
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct EmptyEvent;
-
-impl Event for EmptyEvent {
-    fn process(&self) {}
-}
