@@ -12,6 +12,7 @@ use utils::logging;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,8 +24,10 @@ use crate::util::tenant_timeline_id::TenantTimelineId;
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
-    #[clap(long, default_value = "postgres://postgres@localhost:64000")]
-    page_service_connstring: String,
+    #[clap(long, default_value = "localhost:64000")]
+    page_service_host_port: String,
+    #[clap(long)]
+    pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
     #[clap(long, default_value = "1.0")]
@@ -167,7 +170,7 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
 
 struct Target {
     timeline: TenantTimelineId,
-    timeline_lsn: Lsn,
+    lsn_range: Option<Range<Lsn>>,
 }
 
 async fn main_impl(
@@ -178,6 +181,7 @@ async fn main_impl(
 
     let mgmt_api_client = Arc::new(pageserver::client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
+        args.pageserver_jwt.as_deref(),
     ));
 
     // discover targets
@@ -219,17 +223,15 @@ async fn main_impl(
     let mut js = JoinSet::new();
     for timeline in &timelines {
         js.spawn({
-            let mgmt_api_client = Arc::clone(&mgmt_api_client);
             let timeline = *timeline;
+            let info = mgmt_api_client
+                .timeline_info(timeline.tenant_id, timeline.timeline_id)
+                .await
+                .unwrap();
             async move {
-                let partitioning = mgmt_api_client
-                    .keyspace(timeline.tenant_id, timeline.timeline_id)
-                    .await?;
-                let timeline_lsn = partitioning.at_lsn;
-
                 anyhow::Ok(Target {
                     timeline,
-                    timeline_lsn,
+                    lsn_range: Some(info.last_record_lsn..(info.last_record_lsn + 1)),
                 })
             }
         });
@@ -271,7 +273,7 @@ async fn main_impl(
     let mut work_senders = HashMap::new();
     let mut tasks = Vec::new();
     for tl in &timelines {
-        let (sender, receiver) = tokio::sync::mpsc::channel(10); // TODO: not sure what the implications of this are
+        let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
         tasks.push(tokio::spawn(client(
             args,
@@ -286,14 +288,21 @@ async fn main_impl(
     let work_sender = async move {
         start_work_barrier.wait().await;
         loop {
-            let (target, gzip) = {
+            let (timeline, work) = {
                 let mut rng = rand::thread_rng();
                 let target = all_targets.choose(&mut rng).unwrap();
-                (target, rng.gen_bool(args.gzip_probability))
+                let lsn = target.lsn_range.clone().map(|r| rng.gen_range(r));
+                (
+                    target.timeline,
+                    Work {
+                        lsn,
+                        gzip: rng.gen_bool(args.gzip_probability),
+                    },
+                )
             };
-            let sender = work_senders.get(&target.timeline).unwrap();
+            let sender = work_senders.get(&timeline).unwrap();
             // TODO: what if this blocks?
-            sender.send((target.timeline_lsn, gzip)).await.ok().unwrap();
+            sender.send(work).await.ok().unwrap();
         }
     };
 
@@ -330,29 +339,38 @@ async fn main_impl(
     anyhow::Ok(())
 }
 
+#[derive(Copy, Clone)]
+struct Work {
+    lsn: Option<Lsn>,
+    gzip: bool,
+}
+
 #[instrument(skip_all)]
 async fn client(
     args: &'static Args,
     timeline: TenantTimelineId,
     start_work_barrier: Arc<Barrier>,
-    mut work: tokio::sync::mpsc::Receiver<(Lsn, bool)>,
+    mut work: tokio::sync::mpsc::Receiver<Work>,
     all_work_done_barrier: Arc<Barrier>,
     live_stats: Arc<LiveStats>,
 ) {
     start_work_barrier.wait().await;
 
     let client =
-        pageserver::client::page_service::Client::new(args.page_service_connstring.clone())
-            .await
-            .unwrap();
+        pageserver::client::page_service::Client::new(crate::util::connstring::connstring(
+            &args.page_service_host_port,
+            args.pageserver_jwt.as_deref(),
+        ))
+        .await
+        .unwrap();
 
-    while let Some((lsn, gzip)) = work.recv().await {
+    while let Some(Work { lsn, gzip }) = work.recv().await {
         let start = Instant::now();
         let copy_out_stream = client
             .basebackup(&BasebackupRequest {
                 tenant_id: timeline.tenant_id,
                 timeline_id: timeline.timeline_id,
-                lsn: Some(lsn),
+                lsn,
                 gzip,
             })
             .await

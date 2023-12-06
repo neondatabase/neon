@@ -186,6 +186,7 @@ async fn main_impl(
 
     let mgmt_api_client = Arc::new(pageserver::client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
+        None, // TODO: support jwt in args
     ));
 
     // discover targets
