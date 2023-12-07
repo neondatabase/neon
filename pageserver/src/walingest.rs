@@ -488,7 +488,7 @@ impl WalIngest {
                     decompressed_img_len,
                 )
                 .map_err(|msg| PageReconstructError::Other(anyhow::anyhow!(msg)))?;
-                assert!(decompressed.len() == decompressed_img_len);
+                assert_eq!(decompressed.len(), decompressed_img_len);
                 image.extend_from_slice(&decompressed);
             } else {
                 image.extend_from_slice(&decoded.record[img_offs..img_offs + img_len]);
