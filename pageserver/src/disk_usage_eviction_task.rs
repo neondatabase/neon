@@ -42,7 +42,6 @@
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime},
 };
