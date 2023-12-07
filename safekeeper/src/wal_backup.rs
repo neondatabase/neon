@@ -35,6 +35,9 @@ use once_cell::sync::OnceCell;
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 
+/// Default buffer size when interfacing with [`tokio::fs::File`].
+const BUFFER_SIZE: usize = 32 * 1024;
+
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
 async fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
@@ -498,7 +501,7 @@ async fn backup_object(
         .await
         .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
 
-    let file = tokio_util::io::ReaderStream::with_capacity(file, 8 * 1024);
+    let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
 
     storage.upload_storage_object(file, size, target_file).await
 }
@@ -524,7 +527,7 @@ pub async fn read_object(
 
     let reader = tokio_util::io::StreamReader::new(download.download_stream);
 
-    let reader = tokio::io::BufReader::with_capacity(8 * 1024, reader);
+    let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
 
     Ok(Box::pin(reader))
 }

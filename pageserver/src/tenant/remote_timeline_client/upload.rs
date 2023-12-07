@@ -105,7 +105,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     let fs_size = usize::try_from(fs_size)
         .with_context(|| format!("convert {source_path:?} size {fs_size} usize"))?;
 
-    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, 8 * 1024);
+    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
     storage
         .upload(reader, fs_size, &storage_path, None)
