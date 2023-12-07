@@ -1176,7 +1176,7 @@ pub(crate) struct WalIngestMetrics {
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
     records_received: register_int_counter!(
         "pageserver_wal_ingest_records_received",
-        "Number of WAL records received from safekeeper"
+        "Number of WAL records received from safekeepers"
     )
     .expect("failed to define a metric"),
     records_committed: register_int_counter!(
