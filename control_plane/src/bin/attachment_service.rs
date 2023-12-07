@@ -257,6 +257,21 @@ async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiErr
     )
 }
 
+async fn handle_tenant_create(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let inspect_req = json_request::<InspectRequest>(&mut req).await?;
+
+    let state = get_state(&req).inner.clone();
+    let locked = state.write().await;
+    let tenant_state = locked.tenants.get(&inspect_req.tenant_shard_id);
+
+    json_response(
+        StatusCode::OK,
+        InspectResponse {
+            attachment: tenant_state.and_then(|s| s.pageserver.map(|ps| (s.generation, ps))),
+        },
+    )
+}
+
 fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, ApiError> {
     endpoint::make_router()
         .data(Arc::new(State::new(persistent_state)))
@@ -264,6 +279,9 @@ fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, 
         .post("/validate", |r| request_span(r, handle_validate))
         .post("/attach-hook", |r| request_span(r, handle_attach_hook))
         .post("/inspect", |r| request_span(r, handle_inspect))
+        .post("/tenant/:tenant_id", |r| {
+            request_span(r, handle_tenant_create)
+        })
 }
 
 #[tokio::main]
