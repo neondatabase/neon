@@ -2999,7 +2999,6 @@ impl Tenant {
                     }
                 })
                 .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
-            if initdb_tar_zst_path.exists() {}
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
