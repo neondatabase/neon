@@ -124,7 +124,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
             .strip_suffix(&[0])
             .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
-        let outcome = validate_password_and_exchange(self.stream, password, self.state.0)?;
+        let outcome = validate_password_and_exchange(password, self.state.0)?;
 
         if let sasl::Outcome::Success(_) = &outcome {
             self.stream.write_message_noflush(&Be::AuthenticationOk)?;
@@ -168,7 +168,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 }
 
 pub(super) fn validate_password_and_exchange(
-    client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     password: &[u8],
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
@@ -194,9 +193,6 @@ pub(super) fn validate_password_and_exchange(
                 sasl::Outcome::Success(client_key) => client_key,
                 sasl::Outcome::Failure(reason) => return Ok(sasl::Outcome::Failure(reason)),
             };
-
-            // we have authenticated the password
-            client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
 
             let keys = crate::compute::ScramKeys {
                 client_key: client_key.as_bytes(),

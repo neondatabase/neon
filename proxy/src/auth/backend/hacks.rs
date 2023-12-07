@@ -44,7 +44,8 @@ pub async fn authenticate_cleartext(
 }
 
 /// Workaround for clients which don't provide an endpoint (project) name.
-/// Very similar to [`cleartext_hack`], but there's a specific password format.
+/// Similar to [`authenticate_cleartext`], but there's a specific password format,
+/// and passwords are not yet validated (we don't know how to validate them!)
 pub async fn password_hack_no_authentication(
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,

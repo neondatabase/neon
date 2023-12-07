@@ -204,7 +204,7 @@ async fn auth_quirks(
     });
 
     if let Some(password) = unauthenticated_password {
-        let auth_outcome = validate_password_and_exchange(client, &password, secret)?;
+        let auth_outcome = validate_password_and_exchange(&password, secret)?;
         let keys = match auth_outcome {
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
