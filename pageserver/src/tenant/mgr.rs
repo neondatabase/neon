@@ -980,7 +980,7 @@ impl TenantManager {
                 // Directory doesn't need to be fsync'd because we do not depend on
                 // it to exist after crashes: it may be recreated when tenant is
                 // re-attached, see https://github.com/neondatabase/neon/issues/5550
-                tokio::fs::create_dir_all(&tenant_path)
+                tokio::fs::create_dir_all(&timelines_path)
                     .await
                     .with_context(|| format!("Creating {timelines_path}"))?;
 
