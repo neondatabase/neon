@@ -314,7 +314,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     assert not config_path.exists(), "detach did not remove config file"
 
-    http_client.tenant_attach(tenant_id)
+    env.pageserver.tenant_attach(tenant_id)
     wait_until(
         number_of_iterations=5,
         interval=1,

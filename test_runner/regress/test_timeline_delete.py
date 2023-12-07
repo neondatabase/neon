@@ -396,7 +396,7 @@ def test_timeline_resurrection_on_attach(
     ##### Second start, restore the data and ensure that we see only timeline that wasnt deleted
     env.pageserver.start()
 
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=10, period=0.5)
 
@@ -897,7 +897,7 @@ def test_timeline_delete_resumed_on_attach(
     env.pageserver.start()
 
     # now we call attach
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     # delete should be resumed
     wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id, iterations=iterations)

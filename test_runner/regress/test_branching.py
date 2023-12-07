@@ -158,7 +158,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
     # pause all uploads
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     initial_branch = "initial_branch"
 
@@ -200,7 +200,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
     # pause all uploads
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     def start_creating_timeline():
         with pytest.raises(RequestException):
@@ -257,7 +257,7 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
 
     # pause all uploads
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     def start_creating_timeline():
         ps_http.timeline_create(
@@ -343,8 +343,7 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
     )
     ps_http = env.pageserver.http_client()
 
-    # pause all uploads
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     # Create a timeline whose creation will succeed.  The tenant will need at least one
     # timeline to be loadable.
@@ -397,7 +396,7 @@ def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvB
     )
     ps_http = env.pageserver.http_client()
 
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
     ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline)
 
     # pause all uploads

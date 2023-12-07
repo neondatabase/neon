@@ -149,19 +149,28 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         f"got layer from the future: lsn={future_layer.lsn} disk_consistent_lsn={ip.disk_consistent_lsn} last_record_lsn={last_record_lsn}"
     )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
-    future_layer_path = env.pageserver_remote_storage.layer_path(
-        tenant_id, timeline_id, future_layer
+    future_layer_path = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, future_layer.to_str()
     )
     log.info(f"future layer path: {future_layer_path}")
     pre_stat = future_layer_path.stat()
     time.sleep(1.1)  # so that we can use change in pre_stat.st_mtime to detect overwrites
 
+    def get_generation_number():
+        assert env.attachment_service is not None
+        attachment = env.attachment_service.inspect(tenant_id)
+        assert attachment is not None
+        return attachment[0]
+
     # force removal of layers from the future
     tenant_conf = ps_http.tenant_config(tenant_id)
-    ps_http.tenant_detach(tenant_id)
+    generation_before_detach = get_generation_number()
+    env.pageserver.tenant_detach(tenant_id)
     failpoint_name = "before-delete-layer-pausable"
+
     ps_http.configure_failpoints((failpoint_name, "pause"))
-    ps_http.tenant_attach(tenant_id, tenant_conf.tenant_specific_overrides)
+    env.pageserver.tenant_attach(tenant_id, tenant_conf.tenant_specific_overrides)
+    generation_after_reattach = get_generation_number()
     wait_until_tenant_active(ps_http, tenant_id)
 
     # Ensure the IndexPart upload that unlinks the layer file finishes, i.e., doesn't clog the queue.
@@ -177,6 +186,10 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         assert env.pageserver.log_contains(f".*{tenant_id}.*at failpoint.*{failpoint_name}")
 
     wait_until(10, 0.5, delete_at_pause_point)
+    future_layer_path = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, future_layer.to_str(), generation=generation_before_detach
+    )
+    log.info(f"future layer path: {future_layer_path}")
     assert future_layer_path.exists()
 
     # wait for re-ingestion of the WAL from safekeepers into the in-memory layer
@@ -215,12 +228,17 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     # Examine the resulting S3 state.
     log.info("integrity-check the remote storage")
     ip = get_index_part()
-    for layer_file_name in ip.layer_metadata.keys():
-        layer_path = env.pageserver_remote_storage.layer_path(
-            tenant_id, timeline_id, layer_file_name
+    for layer_file_name, layer_metadata in ip.layer_metadata.items():
+        log.info(f"Layer metadata {layer_file_name.to_str()}: {layer_metadata}")
+        layer_path = env.pageserver_remote_storage.remote_layer_path(
+            tenant_id, timeline_id, layer_file_name.to_str(), layer_metadata.generation
         )
         assert layer_path.exists(), f"{layer_file_name.to_str()}"
 
     log.info("assert that the overwritten layer won")
+    future_layer_path = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, future_layer.to_str(), generation=generation_after_reattach
+    )
     final_stat = future_layer_path.stat()
+    log.info(f"future layer path: {future_layer_path}")
     assert final_stat.st_mtime != pre_stat.st_mtime

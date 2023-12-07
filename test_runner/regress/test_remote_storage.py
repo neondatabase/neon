@@ -23,7 +23,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import (
-    TIMELINE_INDEX_PART_FILE_NAME,
     LocalFsStorage,
     RemoteStorageKind,
     available_remote_storages,
@@ -350,6 +349,13 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
+    # We are about to forcibly drop local dirs.  Attachment service will increment generation in re-attach before
+    # we later increment when actually attaching it again, leading to skipping a generation and potentially getting
+    # these warnings if there was a durable but un-executed deletion list at time of restart.
+    env.pageserver.allowed_errors.extend(
+        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
+    )
+
     dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
@@ -648,7 +654,7 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
     ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
 
     client.tenant_detach(env.initial_tenant)
-    client.tenant_attach(env.initial_tenant)
+    env.pageserver.tenant_attach(env.initial_tenant)
     wait_until_tenant_state(client, env.initial_tenant, "Active", 5)
 
     timelines_after_detach = set(
@@ -758,10 +764,11 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
-        assert (
-            new_branch_on_remote_storage / TIMELINE_INDEX_PART_FILE_NAME
+        assert env.pageserver_remote_storage.index_path(
+            env.initial_tenant, new_branch_timeline_id
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
+        barrier.abort()
         create_thread.join()
 
 

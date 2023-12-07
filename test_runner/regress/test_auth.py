@@ -60,14 +60,14 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         assert_client_authorized(env, invalid_tenant_http_client)
 
     # create tenant using management token
-    pageserver_http_client.tenant_create(TenantId.generate())
+    env.pageserver.tenant_create(TenantId.generate(), auth_token=pageserver_token)
 
     # fail to create tenant using tenant token
     with pytest.raises(
         PageserverApiException,
         match="Forbidden: JWT authentication error",
     ):
-        tenant_http_client.tenant_create(TenantId.generate())
+        env.pageserver.tenant_create(TenantId.generate(), auth_token=tenant_token)
 
 
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
