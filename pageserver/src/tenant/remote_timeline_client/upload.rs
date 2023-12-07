@@ -125,7 +125,8 @@ pub(crate) async fn upload_initdb_dir(
     tracing::trace!("uploading initdb dir");
 
     let size = initdb_dir.len();
-    let bytes = tokio::io::BufReader::new(std::io::Cursor::new(initdb_dir));
+
+    let bytes = futures::stream::once(futures::future::ready(Ok(initdb_dir)));
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     storage
