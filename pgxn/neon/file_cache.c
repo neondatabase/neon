@@ -219,12 +219,12 @@ lfc_shmem_startup(void)
 		lfc_lock = (LWLockId) GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
-		lfc_hash = ShmemInitHash("lfc_hash",
 
 		/*
 		 * lfc_size+1 because we add new element to hash table before eviction
 		 * of victim
 		 */
+		lfc_hash = ShmemInitHash("lfc_hash",
 								 lfc_size + 1, lfc_size + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
@@ -576,11 +576,10 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  * If cache is full then evict some other page.
  */
 void
-			lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 #if PG_MAJORVERSION_NUM < 16
-					  char *buffer)
+lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, char *buffer)
 #else
-					  const void *buffer)
+lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void *buffer)
 #endif
 {
 	BufferTag	tag;
@@ -626,13 +625,19 @@ void
 	{
 		/*
 		 * We have two choices if all cache pages are pinned (i.e. used in IO
-		 * operations): 1. Wait until some of this operation is completed and
-		 * pages is unpinned 2. Allocate one more chunk, so that specified
-		 * cache size is more recommendation than hard limit. As far as
-		 * probability of such event (that all pages are pinned) is considered
-		 * to be very very small: there are should be very large number of
-		 * concurrent IO operations and them are limited by max_connections,
-		 * we prefer not to complicate code and use second approach.
+		 * operations):
+		 *
+		 * 1) Wait until some of this operation is completed and pages is
+		 * unpinned.
+		 *
+		 * 2) Allocate one more chunk, so that specified cache size is more
+		 * recommendation than hard limit.
+		 *
+		 * As far as probability of such event (that all pages are pinned) is
+		 * considered to be very very small: there are should be very large
+		 * number of concurrent IO operations and them are limited by
+		 * max_connections, we prefer not to complicate code and use second
+		 * approach.
 		 */
 		if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
 		{
