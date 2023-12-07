@@ -1352,9 +1352,8 @@ neon_init(void)
 	if (MyPState != NULL)
 		return;
 
-	prfs_size = offsetof(PrefetchState, prf_buffer) + (
-													   sizeof(PrefetchRequest) * readahead_buffer_size
-		);
+	prfs_size = offsetof(PrefetchState, prf_buffer) +
+		sizeof(PrefetchRequest) * readahead_buffer_size;
 
 	MyPState = MemoryContextAllocZero(TopMemoryContext, prfs_size);
 
@@ -1901,7 +1900,6 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
-	BufferTag	tag;
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 
 	switch (reln->smgr_relpersistence)
@@ -1921,11 +1919,12 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
 		return false;
 
-	tag = (BufferTag)
+	BufferTag	tag =
 	{
 		.forkNum = forknum,
-			.blockNum = blocknum
+		.blockNum = blocknum
 	};
+
 	CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
 
 	ring_index = prefetch_register_buffer(tag, NULL, NULL);
@@ -1989,15 +1988,13 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	NeonResponse *resp;
-	BufferTag	buftag;
 	uint64		ring_index;
 	PrfHashEntry *entry;
 	PrefetchRequest *slot;
-
-	buftag = (BufferTag)
+	BufferTag	buftag =
 	{
 		.forkNum = forkNum,
-			.blockNum = blkno,
+		.blockNum = blkno,
 	};
 
 	CopyNRelFileInfoToBufTag(buftag, rinfo);
@@ -2120,11 +2117,10 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  *	neon_read() -- Read the specified block from a relation.
  */
 void
-			neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #if PG_MAJORVERSION_NUM < 16
-					  char *buffer)
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, char *buffer)
 #else
-					  void *buffer)
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer)
 #endif
 {
 	bool		latest;
@@ -2259,11 +2255,10 @@ hexdump_page(char *page)
  *		use mdextend().
  */
 void
-			neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 #if PG_MAJORVERSION_NUM < 16
-					   char *buffer, bool skipFsync)
+neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool skipFsync)
 #else
-					   const void *buffer, bool skipFsync)
+neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const void *buffer, bool skipFsync)
 #endif
 {
 	XLogRecPtr	lsn;

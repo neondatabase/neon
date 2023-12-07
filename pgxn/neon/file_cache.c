@@ -219,12 +219,12 @@ lfc_shmem_startup(void)
 		lfc_lock = (LWLockId) GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
-		lfc_hash = ShmemInitHash("lfc_hash",
 
 		/*
 		 * lfc_size+1 because we add new element to hash table before eviction
 		 * of victim
 		 */
+		lfc_hash = ShmemInitHash("lfc_hash",
 								 lfc_size + 1, lfc_size + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
