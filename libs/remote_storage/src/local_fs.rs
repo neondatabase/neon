@@ -7,7 +7,9 @@
 use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin};
 
 use anyhow::{bail, ensure, Context};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+use futures::stream::Stream;
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -220,7 +222,7 @@ impl RemoteStorage for LocalFs {
 
     async fn upload(
         &self,
-        data: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync,
+        data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -531,7 +533,7 @@ mod fs_tests {
         let storage = create_storage()?;
 
         let id = RemotePath::new(Utf8Path::new("dummy"))?;
-        let content = bytes::Bytes::from_static(b"12345");
+        let content = Bytes::from_static(b"12345");
         let content = move || futures::stream::once(futures::future::ready(Ok(content.clone())));
 
         // Check that you get an error if the size parameter doesn't match the actual
