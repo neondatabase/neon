@@ -962,12 +962,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             allow_self_signed_compute,
         } = self;
 
-        let console_options = neon_options(params);
-
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
-            options: console_options.as_deref(),
+            options: neon_options(params),
         };
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
@@ -1027,13 +1025,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     }
 }
 
-pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
+pub fn neon_options(params: &StartupMessageParams) -> Option<Vec<(String, String)>> {
     #[allow(unstable_name_collisions)]
-    let options: String = params
+    let options: Vec<(String, String)> = params
         .options_raw()?
-        .filter(|opt| is_neon_param(opt))
-        .sorted() // we sort it to use as cache key
-        .intersperse(" ") // TODO: use impl from std once it's stabilized
+        .filter_map(|opt| neon_option(opt))
         .collect();
 
     // Don't even bother with empty options.
@@ -1044,9 +1040,24 @@ pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
     Some(options)
 }
 
-pub fn is_neon_param(bytes: &str) -> bool {
-    static RE: OnceCell<Regex> = OnceCell::new();
-    RE.get_or_init(|| Regex::new(r"^neon_\w+:").unwrap());
+pub fn neon_options_str(params: &StartupMessageParams) -> Option<String> {
+    neon_options(params).map(|options| {
+        #[allow(unstable_name_collisions)]
+        options
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .sorted() // we sort it to use as cache key
+            .intersperse(" ".to_owned())
+            .collect()
+    })
+}
 
-    RE.get().unwrap().is_match(bytes)
+pub fn neon_option(bytes: &str) -> Option<(String, String)> {
+    static RE: OnceCell<Regex> = OnceCell::new();
+    RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
+
+    let cap = RE.get().unwrap().captures(bytes)?;
+    let k = cap.get(1)?.as_str().to_owned();
+    let v = cap.get(2)?.as_str().to_owned();
+    Some((k, v))
 }

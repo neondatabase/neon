@@ -3,7 +3,7 @@
 use crate::{
     auth::password_hack::parse_endpoint_param,
     error::UserFacingError,
-    proxy::{neon_options, NUM_CONNECTION_ACCEPTED_BY_SNI},
+    proxy::{neon_options_str, NUM_CONNECTION_ACCEPTED_BY_SNI},
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -140,7 +140,7 @@ impl ClientCredentials {
         let cache_key = format!(
             "{}{}",
             project.as_deref().unwrap_or(""),
-            neon_options(params).unwrap_or("".to_string())
+            neon_options_str(params).unwrap_or("".to_string())
         )
         .into();
 
