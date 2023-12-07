@@ -380,7 +380,6 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
         Poll::Ready(res)
     }
 
-    // Provided method
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
     }
