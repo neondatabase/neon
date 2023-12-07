@@ -774,6 +774,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 )]
 pub(crate) enum StorageIoOperation {
     Open,
+    OpenAfterReplace,
     Close,
     CloseByReplace,
     Read,
@@ -787,6 +788,7 @@ impl StorageIoOperation {
     pub fn as_str(&self) -> &'static str {
         match self {
             StorageIoOperation::Open => "open",
+            StorageIoOperation::OpenAfterReplace => "open-after-replace",
             StorageIoOperation::Close => "close",
             StorageIoOperation::CloseByReplace => "close-by-replace",
             StorageIoOperation::Read => "read",
@@ -840,7 +842,6 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
-
 #[derive(Debug)]
 struct GlobalAndPerTimelineHistogram {
     global: Histogram,

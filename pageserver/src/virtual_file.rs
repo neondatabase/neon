@@ -288,6 +288,9 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot();
 
+        // NB: there is also StorageIoOperation::OpenAfterReplace which is for the case
+        // where our caller doesn't get to use the returned VirtualFile before its
+        // slot gets re-used by someone else.
         let file = STORAGE_IO_TIME_METRIC
             .get(StorageIoOperation::Open)
             .observe_closure_duration(|| open_options.open(path))?;
@@ -311,6 +314,9 @@ impl VirtualFile {
             timeline_id,
         };
 
+        // TODO: Under pressure, it's likely the slot will get re-used and
+        // the underlying file closed before they get around to using it.
+        // => https://github.com/neondatabase/neon/issues/6065
         slot_guard.file.replace(file);
 
         Ok(vfile)
@@ -421,9 +427,12 @@ impl VirtualFile {
         // now locked in write-mode. Find a free slot to put it in.
         let (handle, mut slot_guard) = open_files.find_victim_slot();
 
-        // Open the physical file
+        // Re-open the physical file.
+        // NB: we use StorageIoOperation::OpenAferReplace for this to distinguish this
+        // case from StorageIoOperation::Open. This helps with identifying thrashing
+        // of the virtual file descriptor cache.
         let file = STORAGE_IO_TIME_METRIC
-            .get(StorageIoOperation::Open)
+            .get(StorageIoOperation::OpenAfterReplace)
             .observe_closure_duration(|| self.open_options.open(&self.path))?;
 
         // Perform the requested operation on it
