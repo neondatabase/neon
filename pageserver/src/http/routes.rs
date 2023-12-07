@@ -1619,7 +1619,7 @@ async fn disk_usage_eviction_run(
 
     info!(?res, "disk_usage_eviction_task_iteration_impl finished");
 
-    let res = res.map_err(|e| ApiError::InternalServerError(e))?;
+    let res = res.map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, res)
 }
