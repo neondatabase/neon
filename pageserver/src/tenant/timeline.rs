@@ -2460,13 +2460,7 @@ impl Timeline {
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
         let (lsn, read_guard) = cache
-            .lookup_materialized_page(
-                self.tenant_shard_id.tenant_id,
-                self.timeline_id,
-                key,
-                lsn,
-                ctx,
-            )
+            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
@@ -4206,7 +4200,7 @@ impl Timeline {
                     let cache = page_cache::get();
                     if let Err(e) = cache
                         .memorize_materialized_page(
-                            self.tenant_shard_id.tenant_id,
+                            self.tenant_shard_id,
                             self.timeline_id,
                             key,
                             last_rec_lsn,
