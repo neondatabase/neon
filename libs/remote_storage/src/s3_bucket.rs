@@ -4,9 +4,14 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::{borrow::Cow, sync::Arc};
+use std::{
+    borrow::Cow,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use anyhow::Context;
+use anyhow::Context as _;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
@@ -28,6 +33,8 @@ use aws_smithy_async::rt::sleep::TokioSleep;
 
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use bytes::Bytes;
+use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
 use tokio::io::{self, AsyncRead};
@@ -259,8 +266,8 @@ impl<S: AsyncRead> RatelimitedAsyncRead<S> {
 
 impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.project();
@@ -296,8 +303,8 @@ impl<S: AsyncRead> TimedDownload<S> {
 
 impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.project();
@@ -402,7 +409,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
