@@ -124,7 +124,7 @@ pub(crate) async fn upload_initdb_dir(
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading initdb dir");
 
-    let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, 32 * 1024);
+    let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     storage

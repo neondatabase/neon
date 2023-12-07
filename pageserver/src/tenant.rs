@@ -2983,7 +2983,8 @@ impl Tenant {
                 )
                 .await
                 .context("download initdb tar")?;
-            let buf_read = BufReader::with_capacity(32 * 1024, initdb_tar_zst);
+            let buf_read =
+                BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
             import_datadir::extract_tar_zst(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
