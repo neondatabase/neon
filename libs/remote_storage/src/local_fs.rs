@@ -819,7 +819,6 @@ mod fs_tests {
                 )
             })?;
 
-        // readerstream is also a buffer
         let file = tokio_util::io::ReaderStream::new(file);
 
         storage.upload(file, size, &relative_path, metadata).await?;
