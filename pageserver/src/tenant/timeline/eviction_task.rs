@@ -343,7 +343,7 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_shard_id.tenant_id, true) {
+        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_shard_id, true) {
             Ok(t) => t,
             Err(_) => {
                 return ControlFlow::Break(());

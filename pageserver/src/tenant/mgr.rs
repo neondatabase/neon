@@ -822,14 +822,16 @@ pub(crate) async fn set_new_tenant_config(
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
 ) -> Result<(), SetNewTenantConfigError> {
+    // Legacy API: does not support sharding
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
     info!("configuring tenant {tenant_id}");
-    let tenant = get_tenant(tenant_id, true)?;
+    let tenant = get_tenant(tenant_shard_id, true)?;
 
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
         .await
@@ -1143,13 +1145,10 @@ pub(crate) enum GetTenantError {
 ///
 /// This method is cancel-safe.
 pub(crate) fn get_tenant(
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
     let locked = TENANTS.read().unwrap();
-
-    // TODO(sharding): make all callers of get_tenant shard-aware
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
 
     let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)?;
 
@@ -1162,14 +1161,18 @@ pub(crate) fn get_tenant(
             TenantState::Active => Ok(Arc::clone(tenant)),
             _ => {
                 if active_only {
-                    Err(GetTenantError::NotActive(tenant_id))
+                    Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
                 } else {
                     Ok(Arc::clone(tenant))
                 }
             }
         },
-        Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_id)),
-        None | Some(TenantSlot::Secondary) => Err(GetTenantError::NotFound(tenant_id)),
+        Some(TenantSlot::InProgress(_)) => {
+            Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+        }
+        None | Some(TenantSlot::Secondary) => {
+            Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
+        }
     }
 }
 
@@ -1542,7 +1545,8 @@ pub(crate) enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
+pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, TenantMapListError>
+{
     let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1550,12 +1554,10 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, Tenan
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((id, tenant.current_state())),
+            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
             TenantSlot::Secondary => None,
             TenantSlot::InProgress(_) => None,
         })
-        // TODO(sharding): make callers of this function shard-aware
-        .map(|(k, v)| (k.tenant_id, v))
         .collect())
 }
 
@@ -2089,21 +2091,20 @@ use {
 };
 
 pub(crate) async fn immediate_gc(
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
     cancel: CancellationToken,
     ctx: &RequestContext,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
     let guard = TENANTS.read().unwrap();
-    let tenant = guard
-        .get(&tenant_id)
-        .map(Arc::clone)
-        .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(|e| ApiError::NotFound(e.into()))?;
 
-    // TODO(sharding): make callers of this function shard-aware
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    // TODO(sharding): make TenantsMap::get sharding-aware
+    let tenant = guard
+        .get(&tenant_shard_id.tenant_id)
+        .map(Arc::clone)
+        .with_context(|| format!("tenant {tenant_shard_id}"))
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
     // Use tenant's pitr setting
@@ -2118,7 +2119,7 @@ pub(crate) async fn immediate_gc(
         TaskKind::GarbageCollector,
         Some(tenant_shard_id),
         Some(timeline_id),
-        &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
+        &format!("timeline_gc_handler garbage collection run for tenant {tenant_shard_id} timeline {timeline_id}"),
         false,
         async move {
             fail::fail_point!("immediate_gc_task_pre");

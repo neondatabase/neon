@@ -269,12 +269,18 @@ async fn calculate_synthetic_size_worker(
             }
         };
 
-        for (tenant_id, tenant_state) in tenants {
+        for (tenant_shard_id, tenant_state) in tenants {
             if tenant_state != TenantState::Active {
                 continue;
             }
 
-            if let Ok(tenant) = mgr::get_tenant(tenant_id, true) {
+            if !tenant_shard_id.is_zero() {
+                // We only send consumption metrics from shard 0, so don't waste time calculating
+                // synthetic size on other shards.
+                continue;
+            }
+
+            if let Ok(tenant) = mgr::get_tenant(tenant_shard_id, true) {
                 // TODO should we use concurrent_background_tasks_rate_limit() here, like the other background tasks?
                 // We can put in some prioritization for consumption metrics.
                 // Same for the loop that fetches computed metrics.
@@ -286,7 +292,9 @@ async fn calculate_synthetic_size_worker(
                     {
                         return Ok(());
                     }
-                    error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
+                    error!(
+                        "failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}"
+                    );
                 }
             }
         }

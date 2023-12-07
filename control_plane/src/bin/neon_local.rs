@@ -168,7 +168,7 @@ fn print_timelines_tree(
                     info: t.clone(),
                     children: BTreeSet::new(),
                     name: timeline_name_mappings
-                        .remove(&TenantTimelineId::new(t.tenant_id, t.timeline_id)),
+                        .remove(&TenantTimelineId::new(t.tenant_id.tenant_id, t.timeline_id)),
                 },
             )
         })
