@@ -356,7 +356,8 @@ typedef struct Safekeeper
 
 
 	/* postgres-specific fields */
-	#ifndef WALPROPOSER_LIB
+#ifndef WALPROPOSER_LIB
+
 	/*
 	 * postgres protocol connection to the WAL acceptor
 	 *
@@ -374,17 +375,18 @@ typedef struct Safekeeper
 	 * Position in wait event set. Equal to -1 if no event
 	 */
 	int			eventPos;
-	#endif
+#endif
 
 
 	/* WalProposer library specifics */
-	#ifdef WALPROPOSER_LIB
+#ifdef WALPROPOSER_LIB
+
 	/*
 	 * Buffer for incoming messages. Usually Rust vector is stored here.
 	 * Caller is responsible for freeing the buffer.
 	 */
 	StringInfoData inbuf;
-	#endif
+#endif
 } Safekeeper;
 
 /* Re-exported PostgresPollingStatusType */
@@ -472,7 +474,7 @@ typedef struct walproposer_api
 	WalProposerConnStatusType (*conn_status) (Safekeeper *sk);
 
 	/* Start the connection, aka PQconnectStart. */
-	void (*conn_connect_start) (Safekeeper *sk);
+	void		(*conn_connect_start) (Safekeeper *sk);
 
 	/* Poll an asynchronous connection, aka PQconnectPoll. */
 	WalProposerConnectPollStatusType (*conn_connect_poll) (Safekeeper *sk);
@@ -490,7 +492,7 @@ typedef struct walproposer_api
 	void		(*conn_finish) (Safekeeper *sk);
 
 	/*
-	 * Try to read CopyData message from the safekeeper, aka PQgetCopyData. 
+	 * Try to read CopyData message from the safekeeper, aka PQgetCopyData.
 	 *
 	 * On success, the data is placed in *buf. It is valid until the next call
 	 * to this function.
@@ -510,7 +512,7 @@ typedef struct walproposer_api
 	void		(*wal_read) (Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count);
 
 	/* Allocate WAL reader. */
-	void (*wal_reader_allocate) (Safekeeper *sk);
+	void		(*wal_reader_allocate) (Safekeeper *sk);
 
 	/* Deallocate event set. */
 	void		(*free_event_set) (WalProposer *wp);
@@ -572,7 +574,7 @@ typedef struct walproposer_api
 	/*
 	 * Called right after the proposer was elected, but before it started
 	 * recovery and sent ProposerElected message to the safekeepers.
-	 * 
+	 *
 	 * Used by logical replication to update truncateLsn.
 	 */
 	void		(*after_election) (WalProposer *wp);
@@ -626,10 +628,10 @@ typedef struct WalProposerConfig
 	uint64		systemId;
 
 	/* Will be passed to safekeepers in greet request. */
-	TimeLineID  pgTimeline;
+	TimeLineID	pgTimeline;
 
 #ifdef WALPROPOSER_LIB
-	void *callback_data;
+	void	   *callback_data;
 #endif
 } WalProposerConfig;
 
@@ -710,10 +712,11 @@ extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
 
 
-#define WPEVENT		1337	/* special log level for walproposer internal events */
+#define WPEVENT		1337		/* special log level for walproposer internal
+								 * events */
 
 #ifdef WALPROPOSER_LIB
-void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt, ...);
+void		WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...);
 #define walprop_log(elevel, ...) WalProposerLibLog(wp, elevel, __VA_ARGS__)
 #else
 #define walprop_log(elevel, ...) elog(elevel, __VA_ARGS__)
