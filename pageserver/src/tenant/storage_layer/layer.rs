@@ -398,7 +398,7 @@ impl ResidentOrWantedEvicted {
 }
 
 struct LayerInner {
-    /// Only needed to check ondemand_download_behavior_treat_error_as_warn and in [`Self::build_local_path`]
+    /// Only needed to check ondemand_download_behavior_treat_error_as_warn and in [`Self::local_path_from_id`]
     conf: &'static PageServerConf,
 
     desc: PersistentLayerDesc,
