@@ -3,7 +3,8 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use pageserver_api::key::Key;
-use pageserver_api::shard::{ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -758,12 +759,20 @@ pub(crate) async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_shard_id: TenantShardId,
+    shard_params: ShardParameters,
     generation: Generation,
     resources: TenantSharedResources,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
+
     info!("Creating tenant at location {location_conf:?}");
+
+    if shard_params.count.0 > 1 {
+        return Err(TenantMapInsertError::Other(anyhow::anyhow!(
+            "Only single-shard tenant creations may be serviced directly by a pageserver"
+        )));
+    }
 
     let slot_guard =
         tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
@@ -799,6 +808,8 @@ pub(crate) enum SetNewTenantConfigError {
     GetTenant(#[from] GetTenantError),
     #[error(transparent)]
     Persist(anyhow::Error),
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 pub(crate) async fn set_new_tenant_config(
@@ -812,10 +823,21 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
+    if tenant.tenant_shard_id().shard_count > ShardCount(0) {
+        // Note that we use ShardParameters::default below.
+        return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
+            "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
+        )));
+    }
+
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
-    let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
+    let location_conf = LocationConf::attached_single(
+        new_tenant_conf,
+        tenant.generation,
+        &ShardParameters::default(),
+    );
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
         .await
@@ -1662,10 +1684,11 @@ pub(crate) async fn attach_tenant(
 ) -> Result<(), TenantMapInsertError> {
     // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    let shard_params = ShardParameters::default();
 
     let slot_guard =
         tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
     let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_shard_id).await?;
     // TODO: tenant directory remains on disk if we bail out from here on.
     //       See https://github.com/neondatabase/neon/issues/4233

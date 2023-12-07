@@ -258,7 +258,7 @@ impl From<SetNewTenantConfigError> for ApiError {
             SetNewTenantConfigError::GetTenant(tid) => {
                 ApiError::NotFound(anyhow!("tenant {}", tid).into())
             }
-            e @ SetNewTenantConfigError::Persist(_) => {
+            e @ (SetNewTenantConfigError::Persist(_) | SetNewTenantConfigError::Other(_)) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
             }
         }
@@ -1152,6 +1152,7 @@ async fn tenant_create_handler(
         state.conf,
         tenant_conf,
         target_tenant_id,
+        request_data.shard_parameters,
         generation,
         state.tenant_resources(),
         &ctx,
