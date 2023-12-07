@@ -272,14 +272,8 @@ impl Stream for ByteStreamAsStream {
         self.project().inner.poll_next(cx).map_err(|x| x.into())
     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let (min, max) = self.inner.size_hint();
-
-        (
-            usize::try_from(min).unwrap_or(usize::MAX),
-            max.map(|max| usize::try_from(max).unwrap_or(usize::MAX)),
-        )
-    }
+    // cannot implement size_hint because inner.size_hint is remaining size in bytes, which makes
+    // sense and Stream::size_hint does not really
 }
 
 pin_project_lite::pin_project! {
