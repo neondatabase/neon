@@ -841,6 +841,12 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) mod virtual_file_descriptor_cache {
+
+    pub(crate) static FD_RESIDENCE_DURATION
+
+}
+
 #[derive(Debug)]
 struct GlobalAndPerTimelineHistogram {
     global: Histogram,

@@ -104,7 +104,12 @@ struct SlotInner {
     tag: u64,
 
     /// the underlying file
-    file: Option<File>,
+    file: Option<FileInSlot>,
+}
+
+struct FileInSlot {
+    file: File,
+    inserted_at: Instant,
 }
 
 impl OpenFiles {
@@ -154,12 +159,17 @@ impl OpenFiles {
         // We now have the victim slot locked. If it was in use previously, close the
         // old file.
         //
-        if let Some(old_file) = slot_guard.file.take() {
+        if let Some(FileInSlot { file, inserted_at }) = slot_guard.file.take() {
             // the normal path of dropping VirtualFile uses `Close`, use `CloseByReplace` here to
             // distinguish the two.
+            let start = Instant::new();
+            drop(file);
+            let end = Instant::new();
             STORAGE_IO_TIME_METRIC
                 .get(StorageIoOperation::CloseByReplace)
-                .observe_closure_duration(|| drop(old_file));
+                .observe(end.duration_since(start));
+            crate::metrics::virtual_file_descriptor_cache::observe_fd_residence_duration(inserted_at.duration_since(end))
+
         }
 
         // Prepare the slot for reuse and return it
@@ -257,20 +267,23 @@ impl<T> MaybeFatalIo<T> for std::io::Result<T> {
 /// where "support" means that we measure wall clock time.
 macro_rules! observe_duration {
     ($op:expr, $($body:tt)*) => {{
-        let instant = Instant::now();
+        let start = Instant::now();
         let result = $($body)*;
-        let elapsed = instant.elapsed().as_secs_f64();
+        let end = Instant::now();
+        let elapsed = end.duration_since(start).as_secs_f64();
         STORAGE_IO_TIME_METRIC
             .get($op)
             .observe(elapsed);
-        result
+        (result, end)
     }}
 }
 
 macro_rules! with_file {
     ($this:expr, $op:expr, | $ident:ident | $($body:tt)*) => {{
         let $ident = $this.lock_file().await?;
-        observe_duration!($op, $($body)*)
+        let (res, _) = observe_duration!($op, $($body)*);
+        $ident.
+        res
     }};
 }
 
@@ -312,7 +325,16 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
-        let file = observe_duration!(StorageIoOperation::Open, open_options.open(path))?;
+        let (res, done_ts) = observe_duration!(StorageIoOperation::Open, open_options.open(path));
+        let file = res?;
+
+        // TODO: Under pressure, it's likely the slot will get re-used and
+        // the underlying file closed before they get around to using it.
+        // => https://github.com/neondatabase/neon/issues/6065
+        slot_guard.file.replace(FileInSlot {
+            file,
+            inserted_at: done_ts,
+        });
 
         // Strip all options other than read and write.
         //
@@ -332,8 +354,6 @@ impl VirtualFile {
             tenant_id,
             timeline_id,
         };
-
-        slot_guard.file.replace(file);
 
         Ok(vfile)
     }
@@ -442,11 +462,16 @@ impl VirtualFile {
         let (handle, mut slot_guard) = open_files.find_victim_slot().await;
 
         // Open the physical file
-        let file = observe_duration!(StorageIoOperation::Open, self.open_options.open(&self.path))?;
+        let (res, done_ts) =
+            observe_duration!(StorageIoOperation::Open, self.open_options.open(&self.path));
+        let file = res?;
 
         // Store the File in the slot and update the handle in the VirtualFile
         // to point to it.
-        slot_guard.file.replace(file);
+        slot_guard.file.replace(FileInSlot {
+            file,
+            inserted_at: done_ts,
+        });
 
         *handle_guard = handle;
 
@@ -589,7 +614,7 @@ impl<'a> AsRef<File> for FileGuard<'a> {
     fn as_ref(&self) -> &File {
         // This unwrap is safe because we only create `FileGuard`s
         // if we know that the file is Some.
-        self.slot_guard.file.as_ref().unwrap()
+        &self.slot_guard.file.as_ref().unwrap().file
     }
 }
 
@@ -632,7 +657,7 @@ impl Drop for VirtualFile {
                 slot.recently_used.store(false, Ordering::Relaxed);
                 // there is also the `CloseByReplace` operation for closes done on eviction for
                 // comparison.
-                if let Some(fd) = slot_guard.file.take() {
+                if let Some(FileInSlot { file, inserted_at }) = slot_guard.file.take() {
                     STORAGE_IO_TIME_METRIC
                         .get(StorageIoOperation::Close)
                         .observe_closure_duration(|| drop(fd));
