@@ -345,7 +345,7 @@ impl<'a> BackendType<'a, ClientCredentials> {
             #[cfg(feature = "testing")]
             Postgres(api, creds) => {
                 info!(
-                    user = creds.user,
+                    user = &*creds.user,
                     project = creds.project(),
                     "performing authentication using a local postgres instance"
                 );

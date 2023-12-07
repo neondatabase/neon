@@ -47,7 +47,7 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        creds: &ComputeUserInfo<'_>,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let (secret, allowed_ips) = async {
             // Perhaps we could persist this connection, but then we'd have to
@@ -60,7 +60,7 @@ impl Api {
             let secret = match get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
-                &[&creds.inner.user],
+                &[&&*creds.inner.user],
                 "rolpassword",
             )
             .await?

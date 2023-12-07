@@ -177,7 +177,7 @@ pub(super) fn validate_password_and_exchange(
         AuthSecret::Md5(_) => {
             // test only
             Ok(sasl::Outcome::Success(ComputeCredentialKeys::Password(
-                password,
+                password.to_owned(),
             )))
         }
         // perform scram authentication as both client and server to validate the keys
