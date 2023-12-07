@@ -548,7 +548,7 @@ impl DeleteTenantFlow {
                 // we encounter an InProgress marker, yield the barrier it contains and wait on it.
                 let barrier = {
                     let mut locked = tenants.write().unwrap();
-                    let removed = locked.remove(&tenant.tenant_shard_id.tenant_id);
+                    let removed = locked.remove(tenant.tenant_shard_id);
 
                     // FIXME: we should not be modifying this from outside of mgr.rs.
                     // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)

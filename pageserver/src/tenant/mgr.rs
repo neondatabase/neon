@@ -98,33 +98,6 @@ pub(crate) enum TenantsMap {
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
 }
 
-/// Helper for mapping shard-unaware functions to a sharding-aware map
-/// TODO(sharding): all users of this must be made shard-aware.
-fn exactly_one_or_none<'a>(
-    map: &'a BTreeMap<TenantShardId, TenantSlot>,
-    tenant_id: &TenantId,
-) -> Option<(&'a TenantShardId, &'a TenantSlot)> {
-    let mut slots = map.range(TenantShardId::tenant_range(*tenant_id));
-
-    // Retrieve the first two slots in the range: if both are populated, we must panic because the caller
-    // needs a shard-naive view of the world in which only one slot can exist for a TenantId at a time.
-    let slot_a = slots.next();
-    let slot_b = slots.next();
-    match (slot_a, slot_b) {
-        (None, None) => None,
-        (Some(slot), None) => {
-            // Exactly one matching slot
-            Some(slot)
-        }
-        (Some(_slot_a), Some(_slot_b)) => {
-            // Multiple shards for this tenant: cannot handle this yet.
-            // TODO(sharding): callers of get() should be shard-aware.
-            todo!("Attaching multiple shards in teh same tenant to the same pageserver")
-        }
-        (None, Some(_)) => unreachable!(),
-    }
-}
-
 pub(crate) enum TenantsMapRemoveResult {
     Occupied(TenantSlot),
     Vacant,
@@ -147,12 +120,11 @@ impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
     /// None is returned.
-    pub(crate) fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
+    pub(crate) fn get(&self, tenant_shard_id: &TenantShardId) -> Option<&Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                // TODO(sharding): callers of get() should be shard-aware.
-                exactly_one_or_none(m, tenant_id).and_then(|(_, slot)| slot.get_attached())
+                m.get(tenant_shard_id).and_then(|slot| slot.get_attached())
             }
         }
     }
@@ -204,25 +176,19 @@ impl TenantsMap {
     ///
     /// The normal way to remove a tenant is using a SlotGuard, which will gracefully remove the guarded
     /// slot if the enclosed tenant is shutdown.
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> TenantsMapRemoveResult {
+    pub(crate) fn remove(&mut self, tenant_shard_id: TenantShardId) -> TenantsMapRemoveResult {
         use std::collections::btree_map::Entry;
         match self {
             TenantsMap::Initializing => TenantsMapRemoveResult::Vacant,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                let key = exactly_one_or_none(m, tenant_id).map(|(k, _)| *k);
-                match key {
-                    Some(key) => match m.entry(key) {
-                        Entry::Occupied(entry) => match entry.get() {
-                            TenantSlot::InProgress(barrier) => {
-                                TenantsMapRemoveResult::InProgress(barrier.clone())
-                            }
-                            _ => TenantsMapRemoveResult::Occupied(entry.remove()),
-                        },
-                        Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
-                    },
-                    None => TenantsMapRemoveResult::Vacant,
-                }
-            }
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => match m.entry(tenant_shard_id) {
+                Entry::Occupied(entry) => match entry.get() {
+                    TenantSlot::InProgress(barrier) => {
+                        TenantsMapRemoveResult::InProgress(barrier.clone())
+                    }
+                    _ => TenantsMapRemoveResult::Occupied(entry.remove()),
+                },
+                Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
+            },
         }
     }
 
@@ -2099,9 +2065,8 @@ pub(crate) async fn immediate_gc(
 ) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
     let guard = TENANTS.read().unwrap();
 
-    // TODO(sharding): make TenantsMap::get sharding-aware
     let tenant = guard
-        .get(&tenant_shard_id.tenant_id)
+        .get(&tenant_shard_id)
         .map(Arc::clone)
         .with_context(|| format!("tenant {tenant_shard_id}"))
         .map_err(|e| ApiError::NotFound(e.into()))?;
