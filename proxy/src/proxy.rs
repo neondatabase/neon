@@ -1027,10 +1027,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
 pub fn neon_options(params: &StartupMessageParams) -> Option<Vec<(String, String)>> {
     #[allow(unstable_name_collisions)]
-    let options: Vec<(String, String)> = params
-        .options_raw()?
-        .filter_map(|opt| neon_option(opt))
-        .collect();
+    let options: Vec<(String, String)> = params.options_raw()?.filter_map(neon_option).collect();
 
     // Don't even bother with empty options.
     if options.is_empty() {
