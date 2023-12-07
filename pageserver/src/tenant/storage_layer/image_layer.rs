@@ -47,6 +47,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use pageserver_api::keyspace::KeySpace;
 use lz4_flex;
+use pageserver_api::key::is_rel_data_key;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::BLCKSZ;
