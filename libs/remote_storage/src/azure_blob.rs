@@ -318,7 +318,13 @@ impl RemoteStorage for AzureBlobStorage {
 }
 
 pin_project_lite::pin_project! {
-    /// Hack to work around not being able to stream easier with azure sdk.
+    /// Hack to work around not being able to stream once with azure sdk.
+    ///
+    /// Azure sdk clones streams around with the assumption that they are like
+    /// `Arc<tokio::fs::File>` (except not supporting tokio), however our streams are not like
+    /// that. For example for an `index_part.json` we just have a single chunk of [`Bytes`]
+    /// representing the whole serialized vec. It could be trivially cloneable and "semi-trivially"
+    /// seekable, but we can also just re-try the request easier.
     #[project = NonSeekableStreamProj]
     enum NonSeekableStream<S> {
         /// A stream wrappers initial form.
