@@ -2094,6 +2094,8 @@ pub fn preinitialize_metrics() {
     // Tenant manager stats
     Lazy::force(&TENANT_MANAGER);
 
+    Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
+
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
         .into_iter()
