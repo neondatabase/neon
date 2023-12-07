@@ -284,5 +284,5 @@ async fn handle_client(
     let client = tokio::net::TcpStream::connect(destination).await?;
 
     let metrics_aux: MetricsAuxInfo = Default::default();
-    proxy::proxy::proxy_pass(tls_stream, client, &metrics_aux).await
+    proxy::proxy::proxy_pass(tls_stream, client, metrics_aux).await
 }

@@ -308,8 +308,10 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         )
 
     timeline_dir = env.pageserver.timeline_dir(env.initial_tenant, timeline_id)
+
     # Check local is empty
-    assert not timeline_dir.exists()
+    assert (not timeline_dir.exists()) or len(os.listdir(timeline_dir)) == 0
+
     # Check no delete mark present
     assert not (timeline_dir.parent / f"{timeline_id}.___deleted").exists()
 
@@ -394,7 +396,7 @@ def test_timeline_resurrection_on_attach(
     ##### Second start, restore the data and ensure that we see only timeline that wasnt deleted
     env.pageserver.start()
 
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=10, period=0.5)
 
@@ -895,7 +897,7 @@ def test_timeline_delete_resumed_on_attach(
     env.pageserver.start()
 
     # now we call attach
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     # delete should be resumed
     wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id, iterations=iterations)

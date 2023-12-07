@@ -1,8 +1,9 @@
 use anyhow::{bail, ensure, Context, Result};
+use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{AtomicLsn, Lsn},
 };
 
@@ -73,7 +74,7 @@ impl LayerManager {
         last_record_lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
 
@@ -109,7 +110,8 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn).await?;
+            let new_layer =
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
@@ -190,7 +192,6 @@ impl LayerManager {
     /// Called when compaction is completed.
     pub(crate) fn finish_compact_l0(
         &mut self,
-        layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         compact_from: &[Layer],
         compact_to: &[ResidentLayer],
         metrics: &TimelineMetrics,
@@ -201,25 +202,16 @@ impl LayerManager {
             metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         for l in compact_from {
-            Self::delete_historic_layer(layer_removal_cs, l, &mut updates, &mut self.layer_fmgr);
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
     }
 
-    /// Called when garbage collect the timeline. Returns a guard that will apply the updates to the layer map.
-    pub(crate) fn finish_gc_timeline(
-        &mut self,
-        layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
-        gc_layers: Vec<Layer>,
-    ) {
+    /// Called when garbage collect has selected the layers to be removed.
+    pub(crate) fn finish_gc_timeline(&mut self, gc_layers: &[Layer]) {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
-            Self::delete_historic_layer(
-                layer_removal_cs,
-                &doomed_layer,
-                &mut updates,
-                &mut self.layer_fmgr,
-            );
+            Self::delete_historic_layer(doomed_layer, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush()
     }
@@ -238,7 +230,6 @@ impl LayerManager {
     /// Remote storage is not affected by this operation.
     fn delete_historic_layer(
         // we cannot remove layers otherwise, since gc and compaction will race
-        _layer_removal_cs: &Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: &Layer,
         updates: &mut BatchedUpdates<'_>,
         mapping: &mut LayerFileManager<Layer>,
@@ -252,7 +243,7 @@ impl LayerManager {
         //      map index without actually rebuilding the index.
         updates.remove_historic(desc);
         mapping.remove(layer);
-        layer.garbage_collect_on_drop();
+        layer.delete_on_drop();
     }
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {

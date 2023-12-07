@@ -1,8 +1,8 @@
-use crate::context::RequestContext;
-use anyhow::Context;
+use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogicalSize};
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
+use pageserver_api::shard::ShardNumber;
 use std::{sync::Arc, time::SystemTime};
 use utils::{
     id::{TenantId, TimelineId},
@@ -229,6 +229,11 @@ where
     while let Some((tenant_id, tenant)) = tenants.next().await {
         let mut tenant_resident_size = 0;
 
+        // Sharded tenants report all consumption metrics from shard zero
+        if tenant.tenant_shard_id().shard_number != ShardNumber(0) {
+            continue;
+        }
+
         for timeline in tenant.list_timelines() {
             let timeline_id = timeline.timeline_id;
 
@@ -351,14 +356,17 @@ impl TimelineSnapshot {
             let last_record_lsn = t.get_last_record_lsn();
 
             let current_exact_logical_size = {
-                let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_id, timeline_id = %t.timeline_id);
-                let res = span
-                    .in_scope(|| t.get_current_logical_size(ctx))
-                    .context("get_current_logical_size");
-                match res? {
+                let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
+                let size = span.in_scope(|| {
+                    t.get_current_logical_size(
+                        crate::tenant::timeline::GetLogicalSizePriority::Background,
+                        ctx,
+                    )
+                });
+                match size {
                     // Only send timeline logical size when it is fully calculated.
-                    (size, is_exact) if is_exact => Some(size),
-                    (_, _) => None,
+                    CurrentLogicalSize::Exact(ref size) => Some(size.into()),
+                    CurrentLogicalSize::Approximate(_) => None,
                 }
             };
 

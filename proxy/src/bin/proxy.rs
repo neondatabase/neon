@@ -1,8 +1,11 @@
 use futures::future::Either;
 use proxy::auth;
 use proxy::config::AuthenticationConfig;
+use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::console;
+use proxy::console::provider::AllowedIpsCache;
+use proxy::console::provider::NodeInfoCache;
 use proxy::http;
 use proxy::rate_limiter::RateLimiterConfig;
 use proxy::usage_metrics;
@@ -90,6 +93,9 @@ struct ProxyCliArgs {
     /// timeout for http connections
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     sql_over_http_timeout: tokio::time::Duration,
+    /// Whether the SQL over http pool is opt-in
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    sql_over_http_pool_opt_in: bool,
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
@@ -97,7 +103,7 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
     /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
     #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
@@ -110,6 +116,12 @@ struct ProxyCliArgs {
     initial_limit: usize,
     #[clap(flatten)]
     aimd_config: proxy::rate_limiter::AimdConfig,
+    /// cache for `allowed_ips` (use `size=0` to disable)
+    #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
+    allowed_ips_cache: String,
+    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    disable_ip_check_for_http: bool,
 }
 
 #[tokio::main]
@@ -238,11 +250,24 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
-            let config::CacheOptions { size, ttl } = args.wake_compute_cache.parse()?;
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let allowed_ips_cache_config: CacheOptions = args.allowed_ips_cache.parse()?;
 
-            info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!("Using AllowedIpsCache (wake_compute) with options={allowed_ips_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                node_info: console::caches::NodeInfoCache::new("node_info_cache", size, ttl),
+                node_info: NodeInfoCache::new(
+                    "node_info_cache",
+                    wake_compute_cache_config.size,
+                    wake_compute_cache_config.ttl,
+                    true,
+                ),
+                allowed_ips: AllowedIpsCache::new(
+                    "allowed_ips_cache",
+                    allowed_ips_cache_config.size,
+                    allowed_ips_cache_config.ttl,
+                    false,
+                ),
             }));
 
             let config::WakeComputeLockOptions {
@@ -275,7 +300,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
     let http_config = HttpConfig {
-        sql_over_http_timeout: args.sql_over_http_timeout,
+        timeout: args.sql_over_http_timeout,
+        pool_opt_in: args.sql_over_http_pool_opt_in,
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
@@ -288,6 +314,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
+        disable_ip_check_for_http: args.disable_ip_check_for_http,
     }));
 
     Ok(config)

@@ -93,5 +93,25 @@ pub fn write_postgres_conf(
         writeln!(file, "neon.extension_server_port={}", port)?;
     }
 
+    // This is essential to keep this line at the end of the file,
+    // because it is intended to override any settings above.
+    writeln!(file, "include_if_exists = 'compute_ctl_temp_override.conf'")?;
+
+    Ok(())
+}
+
+/// create file compute_ctl_temp_override.conf in pgdata_dir
+/// add provided options to this file
+pub fn compute_ctl_temp_override_create(pgdata_path: &Path, options: &str) -> Result<()> {
+    let path = pgdata_path.join("compute_ctl_temp_override.conf");
+    let mut file = File::create(path)?;
+    write!(file, "{}", options)?;
+    Ok(())
+}
+
+/// remove file compute_ctl_temp_override.conf in pgdata_dir
+pub fn compute_ctl_temp_override_remove(pgdata_path: &Path) -> Result<()> {
+    let path = pgdata_path.join("compute_ctl_temp_override.conf");
+    std::fs::remove_file(path)?;
     Ok(())
 }

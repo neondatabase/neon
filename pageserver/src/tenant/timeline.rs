@@ -2,7 +2,7 @@ pub mod delete;
 mod eviction_task;
 mod init;
 pub mod layer_manager;
-mod logical_size;
+pub(crate) mod logical_size;
 pub mod span;
 pub mod uninit;
 mod walreceiver;
@@ -13,26 +13,34 @@ use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::models::{
-    DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo, TimelineState,
+use pageserver_api::{
+    models::{
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
+        TimelineState,
+    },
+    shard::{ShardIdentity, TenantShardId},
 };
+use rand::Rng;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::{
     runtime::Handle,
-    sync::{oneshot, watch, TryAcquireError},
+    sync::{oneshot, watch},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{id::TenantTimelineId, sync::gate::Gate};
 
-use std::cmp::{max, min, Ordering};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
+use std::{
+    cmp::{max, min, Ordering},
+    ops::ControlFlow,
+};
 
 use crate::context::{
     AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
@@ -62,6 +70,7 @@ use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
 use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
 use pageserver_api::reltag::RelTag;
+use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
@@ -148,7 +157,7 @@ pub struct Timeline {
 
     myself: Weak<Self>,
 
-    pub tenant_id: TenantId,
+    pub(crate) tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
 
     /// The generation of the tenant that instantiated us: this is used for safety when writing remote objects.
@@ -157,6 +166,10 @@ pub struct Timeline {
     /// This duplicates the generation stored in LocationConf, but that structure is mutable:
     /// this copy enforces the invariant that generatio doesn't change during a Tenant's lifetime.
     pub(crate) generation: Generation,
+
+    /// The detailed sharding information from our parent Tenant.  This enables us to map keys
+    /// to shards, and is constant through the lifetime of this Timeline.
+    shard_identity: ShardIdentity,
 
     pub pg_version: u32,
 
@@ -250,14 +263,6 @@ pub struct Timeline {
     /// to be notified when layer flushing has finished, subscribe to the layer_flush_done channel
     layer_flush_done_tx: tokio::sync::watch::Sender<(u64, Result<(), FlushLayerError>)>,
 
-    /// Layer removal lock.
-    /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
-    /// This lock is acquired in [`Timeline::gc`] and [`Timeline::compact`].
-    /// This is an `Arc<Mutex>` lock because we need an owned
-    /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
-    /// Note that [`DeleteTimelineFlow`] uses `delete_progress` field.
-    pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
-
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
 
@@ -301,13 +306,6 @@ pub struct Timeline {
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
-    /// Barrier to wait before doing initial logical size calculation. Used only during startup.
-    initial_logical_size_can_start: Option<completion::Barrier>,
-
-    /// Completion shared between all timelines loaded during startup; used to delay heavier
-    /// background tasks until some logical sizes have been calculated.
-    initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
-
     /// Load or creation time information about the disk_consistent_lsn and when the loading
     /// happened. Used for consumption metrics.
     pub(crate) loaded_at: (Lsn, SystemTime),
@@ -318,6 +316,24 @@ pub struct Timeline {
     /// Cancellation token scoped to this timeline: anything doing long-running work relating
     /// to the timeline should drop out when this token fires.
     pub(crate) cancel: CancellationToken,
+
+    /// Make sure we only have one running compaction at a time in tests.
+    ///
+    /// Must only be taken in two places:
+    /// - [`Timeline::compact`] (this file)
+    /// - [`delete::delete_local_layer_files`]
+    ///
+    /// Timeline deletion will acquire both compaction and gc locks in whatever order.
+    compaction_lock: tokio::sync::Mutex<()>,
+
+    /// Make sure we only have one running gc at a time.
+    ///
+    /// Must only be taken in two places:
+    /// - [`Timeline::gc`] (this file)
+    /// - [`delete::delete_local_layer_files`]
+    ///
+    /// Timeline deletion will acquire both compaction and gc locks in whatever order.
+    gc_lock: tokio::sync::Mutex<()>,
 }
 
 pub struct WalReceiverInfo {
@@ -438,6 +454,11 @@ pub enum LogicalSizeCalculationCause {
     TenantSizeHandler,
 }
 
+pub enum GetLogicalSizePriority {
+    User,
+    Background,
+}
+
 #[derive(enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
@@ -457,7 +478,7 @@ impl Timeline {
             .map(|ancestor| ancestor.timeline_id)
     }
 
-    /// Lock and get timeline's GC cuttof
+    /// Lock and get timeline's GC cutoff
     pub fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read()
     }
@@ -474,6 +495,9 @@ impl Timeline {
     /// an ancestor branch, for example, or waste a lot of cycles chasing the
     /// non-existing key.
     ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn get(
         &self,
         key: Key,
@@ -690,7 +714,7 @@ impl Timeline {
     }
 
     /// Flush to disk all data that was written with the put_* functions
-    #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
         self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
@@ -703,6 +727,8 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        let _g = self.compaction_lock.lock().await;
+
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
         let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
@@ -757,7 +783,7 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
+
         // Is the timeline being deleted?
         if self.is_stopping() {
             trace!("Dropping out of compaction on timeline shutdown");
@@ -784,7 +810,12 @@ impl Timeline {
                     .access_stats_behavior(AccessStatsBehavior::Skip)
                     .build();
 
-                // 2. Create new image layers for partitions that have been modified
+                // 2. Compact
+                let timer = self.metrics.compact_time_histo.start_timer();
+                self.compact_level0(target_file_size, ctx).await?;
+                timer.stop_and_record();
+
+                // 3. Create new image layers for partitions that have been modified
                 // "enough".
                 let layers = self
                     .create_image_layers(&partitioning, lsn, false, &image_ctx)
@@ -795,12 +826,6 @@ impl Timeline {
                         remote_client.schedule_layer_file_upload(layer)?;
                     }
                 }
-
-                // 3. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(layer_removal_cs.clone(), target_file_size, ctx)
-                    .await?;
-                timer.stop_and_record();
 
                 if let Some(remote_client) = &self.remote_client {
                     // should any new image layer been created, not uploading index_part will
@@ -831,31 +856,6 @@ impl Timeline {
             tl: self,
             _write_guard: self.write_lock.lock().await,
         }
-    }
-
-    /// Retrieve current logical size of the timeline.
-    ///
-    /// The size could be lagging behind the actual number, in case
-    /// the initial size calculation has not been run (gets triggered on the first size access).
-    ///
-    /// return size and boolean flag that shows if the size is exact
-    pub fn get_current_logical_size(
-        self: &Arc<Self>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<(u64, bool)> {
-        let current_size = self.current_logical_size.current_size()?;
-        debug!("Current size: {current_size:?}");
-
-        let mut is_exact = true;
-        let size = current_size.size();
-        if let (CurrentLogicalSize::Approximate(_), Some(initial_part_end)) =
-            (current_size, self.current_logical_size.initial_part_end)
-        {
-            is_exact = false;
-            self.try_spawn_size_init_task(initial_part_end, ctx);
-        }
-
-        Ok((size, is_exact))
     }
 
     /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
@@ -907,6 +907,7 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
+        self.spawn_initial_logical_size_computation_task(ctx);
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(background_jobs_can_start);
@@ -925,7 +926,7 @@ impl Timeline {
         tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
         )
         .await;
@@ -945,7 +946,7 @@ impl Timeline {
                     // what is problematic is the shutting down of RemoteTimelineClient, because
                     // obviously it does not make sense to stop while we wait for it, but what
                     // about corner cases like s3 suddenly hanging up?
-                    if let Err(e) = client.wait_completion().await {
+                    if let Err(e) = client.shutdown().await {
                         // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
                         // we have some extra WAL replay to do next time the timeline starts.
                         warn!("failed to flush to remote storage: {e:#}");
@@ -976,7 +977,7 @@ impl Timeline {
         // Shut down the layer flush task before the remote client, as one depends on the other
         task_mgr::shutdown_tasks(
             Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
         )
         .await;
@@ -994,7 +995,12 @@ impl Timeline {
 
         tracing::debug!("Waiting for tasks...");
 
-        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
+        task_mgr::shutdown_tasks(
+            None,
+            Some(self.tenant_shard_id.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
@@ -1015,17 +1021,6 @@ impl Timeline {
                 error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
-                if matches!(
-                    new_state,
-                    TimelineState::Stopping | TimelineState::Broken { .. }
-                ) {
-                    // drop the completion guard, if any; it might be holding off the completion
-                    // forever needlessly
-                    self.initial_logical_size_attempt
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take();
-                }
                 self.state.send_replace(new_state);
             }
         }
@@ -1113,7 +1108,7 @@ impl Timeline {
         }
     }
 
-    #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
+    #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name).await else {
             return Ok(None);
@@ -1200,16 +1195,6 @@ impl Timeline {
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Layer],
     ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        // ensure that the layers have finished uploading
-        // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
-        remote_client
-            .wait_completion()
-            .await
-            .context("wait for layer upload ops to complete")?;
-
-        // now lock out layer removal (compaction, gc, timeline deletion)
-        let _layer_removal_guard = self.layer_removal_cs.lock().await;
-
         {
             // to avoid racing with detach and delete_timeline
             let state = self.current_state();
@@ -1328,7 +1313,11 @@ impl Timeline {
                 &self.tenant_conf.read().unwrap().tenant_conf,
                 &self.conf.default_tenant_conf,
             );
-            let tenant_id_str = self.tenant_id.to_string();
+
+            // TODO(sharding): make evictions state shard aware
+            // (https://github.com/neondatabase/neon/issues/5953)
+            let tenant_id_str = self.tenant_shard_id.tenant_id.to_string();
+
             let timeline_id_str = self.timeline_id.to_string();
             self.metrics
                 .evictions_with_low_residence_duration
@@ -1348,13 +1337,12 @@ impl Timeline {
         metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         generation: Generation,
+        shard_identity: ShardIdentity,
         walredo_mgr: Arc<super::WalRedoManager>,
         resources: TimelineResources,
         pg_version: u32,
-        initial_logical_size_can_start: Option<completion::Barrier>,
-        initial_logical_size_attempt: Option<completion::Completion>,
         state: TimelineState,
         cancel: CancellationToken,
     ) -> Arc<Self> {
@@ -1379,8 +1367,9 @@ impl Timeline {
                 tenant_conf,
                 myself: myself.clone(),
                 timeline_id,
-                tenant_id,
+                tenant_shard_id,
                 generation,
+                shard_identity,
                 pg_version,
                 layers: Arc::new(tokio::sync::RwLock::new(LayerManager::create())),
                 wanted_image_layers: Mutex::new(None),
@@ -1406,7 +1395,7 @@ impl Timeline {
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(
-                    &tenant_id,
+                    &tenant_shard_id.tenant_id,
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
@@ -1420,7 +1409,6 @@ impl Timeline {
                 layer_flush_done_tx,
 
                 write_lock: tokio::sync::Mutex::new(()),
-                layer_removal_cs: Default::default(),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
                     retain_lsns: Vec::new(),
@@ -1455,10 +1443,11 @@ impl Timeline {
                 ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
 
-                initial_logical_size_can_start,
-                initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
                 cancel,
-                gate: Gate::new(format!("Timeline<{tenant_id}/{timeline_id}>")),
+                gate: Gate::new(format!("Timeline<{tenant_shard_id}/{timeline_id}>")),
+
+                compaction_lock: tokio::sync::Mutex::default(),
+                gc_lock: tokio::sync::Mutex::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -1471,20 +1460,24 @@ impl Timeline {
     }
 
     pub(super) fn maybe_spawn_flush_loop(self: &Arc<Self>) {
+        let Ok(guard) = self.gate.enter() else {
+            info!("cannot start flush loop when the timeline gate has already been closed");
+            return;
+        };
         let mut flush_loop_state = self.flush_loop_state.lock().unwrap();
         match *flush_loop_state {
             FlushLoopState::NotStarted => (),
             FlushLoopState::Running { .. } => {
                 info!(
                     "skipping attempt to start flush_loop twice {}/{}",
-                    self.tenant_id, self.timeline_id
+                    self.tenant_shard_id, self.timeline_id
                 );
                 return;
             }
             FlushLoopState::Exited => {
                 warn!(
                     "ignoring attempt to restart exited flush_loop {}/{}",
-                    self.tenant_id, self.timeline_id
+                    self.tenant_shard_id, self.timeline_id
                 );
                 return;
             }
@@ -1503,11 +1496,12 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "layer flush task",
             false,
             async move {
+                let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
@@ -1515,7 +1509,7 @@ impl Timeline {
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))
+            .instrument(info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))
         );
     }
 
@@ -1530,7 +1524,7 @@ impl Timeline {
     ) {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
-            self.timeline_id, self.tenant_id
+            self.timeline_id, self.tenant_shard_id
         );
 
         let tenant_conf_guard = self.tenant_conf.read().unwrap();
@@ -1591,12 +1585,15 @@ impl Timeline {
 
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk
-        let timeline_path = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+        let timeline_path = self
+            .conf
+            .timeline_path(&self.tenant_shard_id, &self.timeline_id);
         let conf = self.conf;
         let span = tracing::Span::current();
 
         // Copy to move into the task we're about to spawn
         let generation = self.generation;
+        let shard = self.get_shard_index();
         let this = self.myself.upgrade().expect("&self method holds the arc");
 
         let (loaded_layers, needs_cleanup, total_physical_size) = tokio::task::spawn_blocking({
@@ -1645,6 +1642,7 @@ impl Timeline {
                     index_part.as_ref(),
                     disk_consistent_lsn,
                     generation,
+                    shard,
                 );
 
                 let mut loaded_layers = Vec::new();
@@ -1756,38 +1754,91 @@ impl Timeline {
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
-        let state = self.current_state();
-        if matches!(
-            state,
-            TimelineState::Broken { .. } | TimelineState::Stopping
-        ) {
-            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-            return;
+    /// Retrieve current logical size of the timeline.
+    ///
+    /// The size could be lagging behind the actual number, in case
+    /// the initial size calculation has not been run (gets triggered on the first size access).
+    ///
+    /// return size and boolean flag that shows if the size is exact
+    pub(crate) fn get_current_logical_size(
+        self: &Arc<Self>,
+        priority: GetLogicalSizePriority,
+        ctx: &RequestContext,
+    ) -> logical_size::CurrentLogicalSize {
+        let current_size = self.current_logical_size.current_size();
+        debug!("Current size: {current_size:?}");
+
+        match (current_size.accuracy(), priority) {
+            (logical_size::Accuracy::Exact, _) => (), // nothing to do
+            (logical_size::Accuracy::Approximate, GetLogicalSizePriority::Background) => {
+                // background task will eventually deliver an exact value, we're in no rush
+            }
+            (logical_size::Accuracy::Approximate, GetLogicalSizePriority::User) => {
+                // background task is not ready, but user is asking for it now;
+                // => make the background task skip the line
+                // (The alternative would be to calculate the size here, but,
+                //  it can actually take a long time if the user has a lot of rels.
+                //  And we'll inevitable need it again; So, let the background task do the work.)
+                match self
+                    .current_logical_size
+                    .cancel_wait_for_background_loop_concurrency_limit_semaphore
+                    .get()
+                {
+                    Some(cancel) => cancel.cancel(),
+                    None => {
+                        let state = self.current_state();
+                        if matches!(
+                            state,
+                            TimelineState::Broken { .. } | TimelineState::Stopping
+                        ) {
+
+                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                            // Don't make noise.
+                        } else {
+                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                        }
+                    }
+                };
+            }
         }
 
-        let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
-            .try_acquire_owned()
-        {
-            Ok(permit) => permit,
-            Err(TryAcquireError::NoPermits) => {
-                // computation already ongoing or finished with success
-                return;
+        if let CurrentLogicalSize::Approximate(_) = &current_size {
+            if ctx.task_kind() == TaskKind::WalReceiverConnectionHandler {
+                let first = self
+                    .current_logical_size
+                    .did_return_approximate_to_walreceiver
+                    .compare_exchange(
+                        false,
+                        true,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                    )
+                    .is_ok();
+                if first {
+                    crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE.inc();
+                }
             }
-            Err(TryAcquireError::Closed) => unreachable!("we never call close"),
-        };
-        debug_assert!(self
-            .current_logical_size
-            .initial_logical_size
-            .get()
-            .is_none());
+        }
 
-        info!(
-            "spawning logical size computation from context of task kind {:?}",
-            ctx.task_kind()
-        );
-        // We need to start the computation task.
-        // It gets a separate context since it will outlive the request that called this function.
+        current_size
+    }
+
+    fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &RequestContext) {
+        let Some(initial_part_end) = self.current_logical_size.initial_part_end else {
+            // nothing to do for freshly created timelines;
+            assert_eq!(
+                self.current_logical_size.current_size().accuracy(),
+                logical_size::Accuracy::Exact,
+            );
+            return;
+        };
+
+        let cancel_wait_for_background_loop_concurrency_limit_semaphore = CancellationToken::new();
+        let token = cancel_wait_for_background_loop_concurrency_limit_semaphore.clone();
+        self.current_logical_size
+            .cancel_wait_for_background_loop_concurrency_limit_semaphore.set(token)
+            .expect("initial logical size calculation task must be spawned exactly once per Timeline object");
+
         let self_clone = Arc::clone(self);
         let background_ctx = ctx.detached_child(
             TaskKind::InitialLogicalSizeCalculation,
@@ -1796,95 +1847,158 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "initial size calculation",
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
-
                 let cancel = task_mgr::shutdown_token();
+                self_clone
+                    .initial_logical_size_calculation_task(
+                        initial_part_end,
+                        cancel_wait_for_background_loop_concurrency_limit_semaphore,
+                        cancel,
+                        background_ctx,
+                    )
+                    .await;
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "initial_size_calculation", tenant_id=%self.tenant_shard_id.tenant_id, timeline_id=%self.timeline_id)),
+        );
+    }
 
-                // in case we were created during pageserver initialization, wait for
-                // initialization to complete before proceeding. startup time init runs on the same
-                // runtime.
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()); },
-                    _ = completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()) => {}
+    async fn initial_logical_size_calculation_task(
+        self: Arc<Self>,
+        initial_part_end: Lsn,
+        skip_concurrency_limiter: CancellationToken,
+        cancel: CancellationToken,
+        background_ctx: RequestContext,
+    ) {
+        enum BackgroundCalculationError {
+            Cancelled,
+            Other(anyhow::Error),
+        }
+
+        let try_once = |attempt: usize| {
+            let background_ctx = &background_ctx;
+            let self_ref = &self;
+            let skip_concurrency_limiter = &skip_concurrency_limiter;
+            async move {
+                let cancel = task_mgr::shutdown_token();
+                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit(
+                    BackgroundLoopKind::InitialLogicalSizeCalculation,
+                    background_ctx,
+                    &cancel,
+                );
+
+                use crate::metrics::initial_logical_size::StartCircumstances;
+                let (_maybe_permit, circumstances) = tokio::select! {
+                    res = wait_for_permit => {
+                        match res {
+                            Ok(permit) => (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit),
+                            Err(RateLimitError::Cancelled) => {
+                                return Err(BackgroundCalculationError::Cancelled);
+                            }
+                        }
+                    }
+                    () = skip_concurrency_limiter.cancelled() => {
+                        // Some action that is part of a end user interaction requested logical size
+                        // => break out of the rate limit
+                        // TODO: ideally we'd not run on BackgroundRuntime but the requester's runtime;
+                        // but then again what happens if they cancel; also, we should just be using
+                        // one runtime across the entire process, so, let's leave this for now.
+                        (None, StartCircumstances::SkippedConcurrencyLimiter)
+                    }
                 };
 
-                // hold off background tasks from starting until all timelines get to try at least
-                // once initial logical size calculation; though retry will rarely be useful.
-                // holding off is done because heavier tasks execute blockingly on the same
-                // runtime.
-                //
-                // dropping this at every outcome is probably better than trying to cling on to it,
-                // delay will be terminated by a timeout regardless.
-                let _completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
+                let metrics_guard = if attempt == 1 {
+                    crate::metrics::initial_logical_size::START_CALCULATION.first(circumstances)
+                } else {
+                    crate::metrics::initial_logical_size::START_CALCULATION.retry(circumstances)
+                };
 
-                let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx)
+                match self_ref
+                    .logical_size_calculation_task(
+                        initial_part_end,
+                        LogicalSizeCalculationCause::Initial,
+                        background_ctx,
+                    )
                     .await
                 {
-                    Ok(s) => s,
+                    Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
                     Err(CalculateLogicalSizeError::Cancelled) => {
-                        // Don't make noise, this is a common task.
-                        // In the unlikely case that there is another call to this function, we'll retry
-                        // because initial_logical_size is still None.
-                        info!("initial size calculation cancelled, likely timeline delete / tenant detach");
-                        return Ok(());
+                        Err(BackgroundCalculationError::Cancelled)
                     }
                     Err(CalculateLogicalSizeError::Other(err)) => {
-                        if let Some(e @ PageReconstructError::AncestorStopping(_)) =
+                        if let Some(PageReconstructError::AncestorStopping(_)) =
                             err.root_cause().downcast_ref()
                         {
-                            // This can happen if the timeline parent timeline switches to
-                            // Stopping state while we're still calculating the initial
-                            // timeline size for the child, for example if the tenant is
-                            // being detached or the pageserver is shut down. Like with
-                            // CalculateLogicalSizeError::Cancelled, don't make noise.
-                            info!("initial size calculation failed because the timeline or its ancestor is Stopping, likely because the tenant is being detached: {e:#}");
-                            return Ok(());
+                            Err(BackgroundCalculationError::Cancelled)
+                        } else {
+                            Err(BackgroundCalculationError::Other(err))
                         }
-                        return Err(err.context("Failed to calculate logical size"));
-                    }
-                };
-
-                // we cannot query current_logical_size.current_size() to know the current
-                // *negative* value, only truncated to u64.
-                let added = self_clone
-                    .current_logical_size
-                    .size_added_after_initial
-                    .load(AtomicOrdering::Relaxed);
-
-                let sum = calculated_size.saturating_add_signed(added);
-
-                // set the gauge value before it can be set in `update_current_logical_size`.
-                self_clone.metrics.current_logical_size_gauge.set(sum);
-
-                match self_clone
-                    .current_logical_size
-                    .initial_logical_size
-                    .set(calculated_size)
-                {
-                    Ok(()) => (),
-                    Err(_what_we_just_attempted_to_set) => {
-                        let existing_size = self_clone
-                            .current_logical_size
-                            .initial_logical_size
-                            .get()
-                            .expect("once_cell set was lost, then get failed, impossible.");
-                        // This shouldn't happen because the semaphore is initialized with 1.
-                        // But if it happens, just complain & report success so there are no further retries.
-                        error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing")
                     }
                 }
-                // now that `initial_logical_size.is_some()`, reduce permit count to 0
-                // so that we prevent future callers from spawning this task
-                permit.forget();
-                Ok(())
-            }.in_current_span(),
-        );
+            }
+        };
+
+        let retrying = async {
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+
+                match try_once(attempt).await {
+                    Ok(res) => return ControlFlow::Continue(res),
+                    Err(BackgroundCalculationError::Cancelled) => return ControlFlow::Break(()),
+                    Err(BackgroundCalculationError::Other(e)) => {
+                        warn!(attempt, "initial size calculation failed: {e:?}");
+                        // exponential back-off doesn't make sense at these long intervals;
+                        // use fixed retry interval with generous jitter instead
+                        let sleep_duration = Duration::from_secs(
+                            u64::try_from(
+                                // 1hour base
+                                (60_i64 * 60_i64)
+                                    // 10min jitter
+                                    + rand::thread_rng().gen_range(-10 * 60..10 * 60),
+                            )
+                            .expect("10min < 1hour"),
+                        );
+                        tokio::time::sleep(sleep_duration).await;
+                    }
+                }
+            }
+        };
+
+        let (calculated_size, metrics_guard) = tokio::select! {
+            res = retrying  => {
+                match res {
+                    ControlFlow::Continue(calculated_size) => calculated_size,
+                    ControlFlow::Break(()) => return,
+                }
+            }
+            _ = cancel.cancelled() => {
+                return;
+            }
+        };
+
+        // we cannot query current_logical_size.current_size() to know the current
+        // *negative* value, only truncated to u64.
+        let added = self
+            .current_logical_size
+            .size_added_after_initial
+            .load(AtomicOrdering::Relaxed);
+
+        let sum = calculated_size.saturating_add_signed(added);
+
+        // set the gauge value before it can be set in `update_current_logical_size`.
+        self.metrics.current_logical_size_gauge.set(sum);
+
+        self.current_logical_size
+            .initial_logical_size
+            .set((calculated_size, metrics_guard.calculation_result_saved()))
+            .ok()
+            .expect("only this task sets it");
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
@@ -1906,7 +2020,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
             false,
@@ -1922,6 +2036,9 @@ impl Timeline {
         receiver
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
@@ -1959,6 +2076,10 @@ impl Timeline {
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -1982,7 +2103,7 @@ impl Timeline {
         fail::fail_point!("timeline-calculate-logical-size-check-dir-exists", |_| {
             if !self
                 .conf
-                .metadata_path(&self.tenant_id, &self.timeline_id)
+                .metadata_path(&self.tenant_shard_id, &self.timeline_id)
                 .exists()
             {
                 error!("timeline-calculate-logical-size-pre metadata file does not exist")
@@ -2023,16 +2144,14 @@ impl Timeline {
         // one value while current_logical_size is set to the
         // other.
         match logical_size.current_size() {
-            Ok(CurrentLogicalSize::Exact(new_current_size)) => self
+            CurrentLogicalSize::Exact(ref new_current_size) => self
                 .metrics
                 .current_logical_size_gauge
-                .set(new_current_size),
-            Ok(CurrentLogicalSize::Approximate(_)) => {
+                .set(new_current_size.into()),
+            CurrentLogicalSize::Approximate(_) => {
                 // don't update the gauge yet, this allows us not to update the gauge back and
                 // forth between the initial size calculation task.
             }
-            // this is overflow
-            Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
     }
 
@@ -2076,6 +2195,10 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     async fn get_reconstruct_data(
         &self,
         key: Key,
@@ -2324,6 +2447,9 @@ impl Timeline {
         }
     }
 
+    /// # Cancel-safety
+    ///
+    /// This method is cancellation-safe.
     async fn lookup_cached_page(
         &self,
         key: &Key,
@@ -2335,7 +2461,13 @@ impl Timeline {
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
         let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn, ctx)
+            .lookup_materialized_page(
+                self.tenant_shard_id.tenant_id,
+                self.timeline_id,
+                key,
+                lsn,
+                ctx,
+            )
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
@@ -2352,6 +2484,10 @@ impl Timeline {
         Ok(Arc::clone(ancestor))
     }
 
+    pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
+        &self.shard_identity
+    }
+
     ///
     /// Get a handle to the latest layer for appending.
     ///
@@ -2363,7 +2499,7 @@ impl Timeline {
                 self.get_last_record_lsn(),
                 self.conf,
                 self.timeline_id,
-                self.tenant_id,
+                self.tenant_shard_id,
             )
             .await?;
         Ok(layer)
@@ -2529,7 +2665,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id, layer=%frozen_layer))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -2650,9 +2786,14 @@ impl Timeline {
 
         // If we updated our disk_consistent_lsn, persist the updated metadata to local disk.
         if let Some(metadata) = metadata {
-            save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
-                .await
-                .context("save_metadata")?;
+            save_metadata(
+                self.conf,
+                &self.tenant_shard_id,
+                &self.timeline_id,
+                &metadata,
+            )
+            .await
+            .context("save_metadata")?;
         }
         Ok(())
     }
@@ -2716,9 +2857,14 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         let metadata = self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
 
-        save_metadata(self.conf, &self.tenant_id, &self.timeline_id, &metadata)
-            .await
-            .context("save_metadata")?;
+        save_metadata(
+            self.conf,
+            &self.tenant_shard_id,
+            &self.timeline_id,
+            &metadata,
+        )
+        .await
+        .context("save_metadata")?;
 
         Ok(())
     }
@@ -2766,7 +2912,7 @@ impl Timeline {
                 par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
-                    .timeline_path(&self_clone.tenant_id, &self_clone.timeline_id)])
+                    .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id)])
                 .context("fsync of timeline dir")?;
 
                 anyhow::Ok(new_delta)
@@ -2922,7 +3068,7 @@ impl Timeline {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
-                    self.tenant_id,
+                    self.tenant_shard_id,
                     &img_range,
                     lsn,
                 )
@@ -2995,9 +3141,11 @@ impl Timeline {
             .await
             .context("fsync of newly created layer files")?;
 
-        par_fsync::par_fsync_async(&[self.conf.timeline_path(&self.tenant_id, &self.timeline_id)])
-            .await
-            .context("fsync of timeline dir")?;
+        par_fsync::par_fsync_async(&[self
+            .conf
+            .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
+        .await
+        .context("fsync of timeline dir")?;
 
         let mut guard = self.layers.write().await;
 
@@ -3147,13 +3295,8 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 
 impl Timeline {
     /// Level0 files first phase of compaction, explained in the [`Self::compact`] comment.
-    ///
-    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
-    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
-    /// start of level0 files compaction, the on-demand download should be revisited as well.
     async fn compact_level0_phase1(
         self: &Arc<Self>,
-        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
@@ -3240,8 +3383,6 @@ impl Timeline {
         let mut prev_lsn_end = first_level0_delta.layer_desc().lsn_range.end;
         let mut deltas_to_compact = Vec::with_capacity(level0_deltas.len());
 
-        // FIXME: downloading while holding layer_removal_cs is not great, but we will remove that
-        // soon
         deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
@@ -3490,7 +3631,7 @@ impl Timeline {
                     DeltaLayerWriter::new(
                         self.conf,
                         self.timeline_id,
-                        self.tenant_id,
+                        self.tenant_shard_id,
                         key,
                         if dup_end_lsn.is_valid() {
                             // this is a layer containing slice of values of the same key
@@ -3551,7 +3692,9 @@ impl Timeline {
                 .await
                 .context("fsync all new layers")?;
 
-            let timeline_dir = self.conf.timeline_path(&self.tenant_id, &self.timeline_id);
+            let timeline_dir = self
+                .conf
+                .timeline_path(&self.tenant_shard_id, &self.timeline_id);
 
             par_fsync::par_fsync_async(&[timeline_dir])
                 .await
@@ -3591,7 +3734,6 @@ impl Timeline {
     ///
     async fn compact_level0(
         self: &Arc<Self>,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
@@ -3603,7 +3745,7 @@ impl Timeline {
             let ctx = ctx.attached_child();
             let mut stats = CompactLevel0Phase1StatsBuilder {
                 version: Some(2),
-                tenant_id: Some(self.tenant_id),
+                tenant_id: Some(self.tenant_shard_id.tenant_id),
                 timeline_id: Some(self.timeline_id),
                 ..Default::default()
             };
@@ -3613,32 +3755,14 @@ impl Timeline {
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-            let layer_removal_cs = layer_removal_cs.clone();
-            self.compact_level0_phase1(
-                layer_removal_cs,
-                phase1_layers_locked,
-                stats,
-                target_file_size,
-                &ctx,
-            )
-            .instrument(phase1_span)
-            .await?
+            self.compact_level0_phase1(phase1_layers_locked, stats, target_file_size, &ctx)
+                .instrument(phase1_span)
+                .await?
         };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
             return Ok(());
-        }
-
-        // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See remote_timeline_client module level comment on consistency.
-        // Do it here because we don't want to hold self.layers.write() while waiting.
-        if let Some(remote_client) = &self.remote_client {
-            debug!("waiting for upload ops to complete");
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for layer upload ops to complete")?;
         }
 
         let mut guard = self.layers.write().await;
@@ -3672,12 +3796,7 @@ impl Timeline {
         };
 
         // deletion will happen later, the layer file manager calls garbage_collect_on_drop
-        guard.finish_compact_l0(
-            &layer_removal_cs,
-            &remove_layers,
-            &insert_layers,
-            &self.metrics,
-        );
+        guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
         if let Some(remote_client) = self.remote_client.as_ref() {
             remote_client.schedule_compaction_update(&remove_layers, &new_layers)?;
@@ -3788,19 +3907,17 @@ impl Timeline {
         Ok(())
     }
 
-    ///
     /// Garbage collect layer files on a timeline that are no longer needed.
     ///
     /// Currently, we don't make any attempt at removing unneeded page versions
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
-    ///
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+        let _g = self.gc_lock.lock().await;
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
 
-        let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
         if self.is_stopping() {
             anyhow::bail!("timeline is Stopping");
@@ -3818,13 +3935,7 @@ impl Timeline {
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
         let res = self
-            .gc_timeline(
-                layer_removal_cs.clone(),
-                horizon_cutoff,
-                pitr_cutoff,
-                retain_lsns,
-                new_gc_cutoff,
-            )
+            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
             .instrument(
                 info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
@@ -3838,7 +3949,6 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
@@ -3861,7 +3971,7 @@ impl Timeline {
         // for details. This will block until the old value is no longer in use.
         //
         // The GC cutoff should only ever move forwards.
-        {
+        let waitlist = {
             let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
             ensure!(
                 *write_guard <= new_gc_cutoff,
@@ -3869,23 +3979,13 @@ impl Timeline {
                 *write_guard,
                 new_gc_cutoff
             );
-            write_guard.store_and_unlock(new_gc_cutoff).wait();
-        }
+            write_guard.store_and_unlock(new_gc_cutoff)
+        };
+        waitlist.wait().await;
 
         info!("GC starting");
 
         debug!("retain_lsns: {:?}", retain_lsns);
-
-        // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See storage_sync module level comment on consistency.
-        // Do it here because we don't want to hold self.layers.write() while waiting.
-        if let Some(remote_client) = &self.remote_client {
-            debug!("waiting for upload ops to complete");
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for layer upload ops to complete")?;
-        }
 
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers = KeySpaceRandomAccum::default();
@@ -4002,6 +4102,11 @@ impl Timeline {
             //
             // This does not in fact have any effect as we no longer consider local metadata unless
             // running without remote storage.
+            //
+            // This unconditionally schedules also an index_part.json update, even though, we will
+            // be doing one a bit later with the unlinked gc'd layers.
+            //
+            // TODO: remove when implementing <https://github.com/neondatabase/neon/issues/4099>.
             self.update_metadata_file(self.disk_consistent_lsn.load(), None)
                 .await?;
 
@@ -4016,10 +4121,15 @@ impl Timeline {
                 remote_client.schedule_gc_update(&gc_layers)?;
             }
 
-            guard.finish_gc_timeline(&layer_removal_cs, gc_layers);
+            guard.finish_gc_timeline(&gc_layers);
 
             if result.layers_removed != 0 {
                 fail_point!("after-timeline-gc-removed-layers");
+            }
+
+            #[cfg(feature = "testing")]
+            {
+                result.doomed_layers = gc_layers;
             }
         }
 
@@ -4032,9 +4142,7 @@ impl Timeline {
         Ok(result)
     }
 
-    ///
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
-    ///
     async fn reconstruct_value(
         &self,
         key: Key,
@@ -4099,7 +4207,7 @@ impl Timeline {
                     let cache = page_cache::get();
                     if let Err(e) = cache
                         .memorize_materialized_page(
-                            self.tenant_id,
+                            self.tenant_shard_id.tenant_id,
                             self.timeline_id,
                             key,
                             last_rec_lsn,
@@ -4143,7 +4251,7 @@ impl Timeline {
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id.tenant_id),
             Some(self.timeline_id),
             "download all remote layers task",
             false,
@@ -4165,7 +4273,7 @@ impl Timeline {
                 };
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))
+            .instrument(info_span!(parent: None, "download_all_remote_layers", tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))
         );
 
         let initial_info = DownloadRemoteLayersTaskInfo {
@@ -4362,6 +4470,13 @@ impl Timeline {
         DiskUsageEvictionInfo {
             max_layer_size,
             resident_layers,
+        }
+    }
+
+    pub(crate) fn get_shard_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_number: self.tenant_shard_id.shard_number,
+            shard_count: self.tenant_shard_id.shard_count,
         }
     }
 }

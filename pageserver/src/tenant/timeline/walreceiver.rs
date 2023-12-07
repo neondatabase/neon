@@ -71,7 +71,7 @@ impl WalReceiver {
         mut broker_client: BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Self {
-        let tenant_id = timeline.tenant_id;
+        let tenant_id = timeline.tenant_shard_id.tenant_id;
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);

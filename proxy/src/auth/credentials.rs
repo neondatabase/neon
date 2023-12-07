@@ -7,9 +7,12 @@ use crate::{
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    net::{IpAddr, SocketAddr},
+};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub enum ClientCredsParseError {
@@ -44,6 +47,7 @@ pub struct ClientCredentials<'a> {
     pub project: Option<String>,
 
     pub cache_key: String,
+    pub peer_addr: SocketAddr,
 }
 
 impl ClientCredentials<'_> {
@@ -54,19 +58,11 @@ impl ClientCredentials<'_> {
 }
 
 impl<'a> ClientCredentials<'a> {
-    #[cfg(test)]
-    pub fn new_noop() -> Self {
-        ClientCredentials {
-            user: "",
-            project: None,
-            cache_key: "".to_string(),
-        }
-    }
-
     pub fn parse(
         params: &'a StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<HashSet<String>>,
+        peer_addr: SocketAddr,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
@@ -153,7 +149,56 @@ impl<'a> ClientCredentials<'a> {
             user,
             project,
             cache_key,
+            peer_addr,
         })
+    }
+}
+
+pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<String>) -> bool {
+    if ip_list.is_empty() {
+        return true;
+    }
+    for ip in ip_list {
+        // We expect that all ip addresses from control plane are correct.
+        // However, if some of them are broken, we still can check the others.
+        match parse_ip_pattern(ip) {
+            Ok(pattern) => {
+                if check_ip(peer_addr, &pattern) {
+                    return true;
+                }
+            }
+            Err(err) => warn!("Cannot parse ip: {}; err: {}", ip, err),
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum IpPattern {
+    Subnet(ipnet::IpNet),
+    Range(IpAddr, IpAddr),
+    Single(IpAddr),
+}
+
+fn parse_ip_pattern(pattern: &str) -> anyhow::Result<IpPattern> {
+    if pattern.contains('/') {
+        let subnet: ipnet::IpNet = pattern.parse()?;
+        return Ok(IpPattern::Subnet(subnet));
+    }
+    if let Some((start, end)) = pattern.split_once('-') {
+        let start: IpAddr = start.parse()?;
+        let end: IpAddr = end.parse()?;
+        return Ok(IpPattern::Range(start, end));
+    }
+    let addr: IpAddr = pattern.parse()?;
+    Ok(IpPattern::Single(addr))
+}
+
+fn check_ip(ip: &IpAddr, pattern: &IpPattern) -> bool {
+    match pattern {
+        IpPattern::Subnet(subnet) => subnet.contains(ip),
+        IpPattern::Range(start, end) => start <= ip && ip <= end,
+        IpPattern::Single(addr) => addr == ip,
     }
 }
 
@@ -176,8 +221,8 @@ mod tests {
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
-
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -191,8 +236,8 @@ mod tests {
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
-
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -206,7 +251,8 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
         assert_eq!(creds.cache_key, "foo");
@@ -221,7 +267,8 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
@@ -235,7 +282,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
@@ -252,7 +300,8 @@ mod tests {
             ),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert!(creds.project.is_none());
 
@@ -266,7 +315,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert!(creds.project.is_none());
 
@@ -280,7 +330,8 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
 
@@ -293,12 +344,14 @@ mod tests {
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
-        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
-        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         Ok(())
@@ -312,7 +365,9 @@ mod tests {
         let sni = Some("second.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let err = ClientCredentials::parse(&options, sni, common_names).expect_err("should fail");
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let err = ClientCredentials::parse(&options, sni, common_names, peer_addr)
+            .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -329,7 +384,9 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
-        let err = ClientCredentials::parse(&options, sni, common_names).expect_err("should fail");
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let err = ClientCredentials::parse(&options, sni, common_names, peer_addr)
+            .expect_err("should fail");
         match err {
             UnknownCommonName { cn } => {
                 assert_eq!(cn, "localhost");
@@ -347,13 +404,101 @@ mod tests {
 
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
-        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("project"));
         assert_eq!(
             creds.cache_key,
             "projectneon_endpoint_type:read_write neon_lsn:0/2"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_peer_addr_is_in_list() {
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        assert!(check_peer_addr_is_in_list(&peer_addr, &vec![]));
+        assert!(check_peer_addr_is_in_list(
+            &peer_addr,
+            &vec!["127.0.0.1".into()]
+        ));
+        assert!(!check_peer_addr_is_in_list(
+            &peer_addr,
+            &vec!["8.8.8.8".into()]
+        ));
+        // If there is an incorrect address, it will be skipped.
+        assert!(check_peer_addr_is_in_list(
+            &peer_addr,
+            &vec!["88.8.8".into(), "127.0.0.1".into()]
+        ));
+    }
+    #[test]
+    fn test_parse_ip_v4() -> anyhow::Result<()> {
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        // Ok
+        assert_eq!(parse_ip_pattern("127.0.0.1")?, IpPattern::Single(peer_addr));
+        assert_eq!(
+            parse_ip_pattern("127.0.0.1/31")?,
+            IpPattern::Subnet(ipnet::IpNet::new(peer_addr, 31)?)
+        );
+        assert_eq!(
+            parse_ip_pattern("0.0.0.0-200.0.1.2")?,
+            IpPattern::Range(IpAddr::from([0, 0, 0, 0]), IpAddr::from([200, 0, 1, 2]))
+        );
+
+        // Error
+        assert!(parse_ip_pattern("300.0.1.2").is_err());
+        assert!(parse_ip_pattern("30.1.2").is_err());
+        assert!(parse_ip_pattern("127.0.0.1/33").is_err());
+        assert!(parse_ip_pattern("127.0.0.1-127.0.3").is_err());
+        assert!(parse_ip_pattern("1234.0.0.1-127.0.3.0").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_ipv4() -> anyhow::Result<()> {
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
+        let peer_addr_next = IpAddr::from([127, 0, 0, 2]);
+        let peer_addr_prev = IpAddr::from([127, 0, 0, 0]);
+        // Success
+        assert!(check_ip(&peer_addr, &IpPattern::Single(peer_addr)));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Subnet(ipnet::IpNet::new(peer_addr_prev, 31)?)
+        ));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Subnet(ipnet::IpNet::new(peer_addr_next, 30)?)
+        ));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Range(IpAddr::from([0, 0, 0, 0]), IpAddr::from([200, 0, 1, 2]))
+        ));
+        assert!(check_ip(
+            &peer_addr,
+            &IpPattern::Range(peer_addr, peer_addr)
+        ));
+
+        // Not success
+        assert!(!check_ip(&peer_addr, &IpPattern::Single(peer_addr_prev)));
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Subnet(ipnet::IpNet::new(peer_addr_next, 31)?)
+        ));
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Range(IpAddr::from([0, 0, 0, 0]), peer_addr_prev)
+        ));
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Range(peer_addr_next, IpAddr::from([128, 0, 0, 0]))
+        ));
+        // There is no check that for range start <= end. But it's fine as long as for all this cases the result is false.
+        assert!(!check_ip(
+            &peer_addr,
+            &IpPattern::Range(peer_addr, peer_addr_prev)
+        ));
         Ok(())
     }
 }

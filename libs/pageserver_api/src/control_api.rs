@@ -4,7 +4,9 @@
 //! See docs/rfcs/025-generation-numbers.md
 
 use serde::{Deserialize, Serialize};
-use utils::id::{NodeId, TenantId};
+use utils::id::NodeId;
+
+use crate::shard::TenantShardId;
 
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachRequest {
@@ -13,7 +15,7 @@ pub struct ReAttachRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachResponseTenant {
-    pub id: TenantId,
+    pub id: TenantShardId,
     pub gen: u32,
 }
 
@@ -24,7 +26,7 @@ pub struct ReAttachResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct ValidateRequestTenant {
-    pub id: TenantId,
+    pub id: TenantShardId,
     pub gen: u32,
 }
 
@@ -40,6 +42,6 @@ pub struct ValidateResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct ValidateResponseTenant {
-    pub id: TenantId,
+    pub id: TenantShardId,
     pub valid: bool,
 }

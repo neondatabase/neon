@@ -455,7 +455,7 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
-        self.enable_generations = False
+        self.enable_generations = True
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
 
@@ -1414,34 +1414,19 @@ class NeonCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
-        pg_port: int,
-        http_port: int,
         safekeepers: Optional[List[int]] = None,
-        tenant_id: Optional[TenantId] = None,
-        lsn: Optional[Lsn] = None,
-        branch_name: Optional[str] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "start",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
-            "--pg-version",
-            self.env.pg_version,
         ]
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
-        if lsn is not None:
-            args.append(f"--lsn={lsn}")
-        args.extend(["--pg-port", str(pg_port)])
-        args.extend(["--http-port", str(http_port)])
 
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
-        if branch_name is not None:
-            args.extend(["--branch-name", branch_name])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if pageserver_id is not None:
@@ -1468,15 +1453,12 @@ class NeonCli(AbstractNeonCli):
     def endpoint_stop(
         self,
         endpoint_id: str,
-        tenant_id: Optional[TenantId] = None,
         destroy=False,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "stop",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
         ]
         if destroy:
             args.append("--destroy")
@@ -1572,7 +1554,7 @@ class NeonAttachmentService:
             self.running = False
         return self
 
-    def attach_hook(self, tenant_id: TenantId, pageserver_id: int) -> int:
+    def attach_hook_issue(self, tenant_id: TenantId, pageserver_id: int) -> int:
         response = requests.post(
             f"{self.env.control_plane_api}/attach-hook",
             json={"tenant_id": str(tenant_id), "node_id": pageserver_id},
@@ -1581,6 +1563,27 @@ class NeonAttachmentService:
         gen = response.json()["gen"]
         assert isinstance(gen, int)
         return gen
+
+    def attach_hook_drop(self, tenant_id: TenantId):
+        response = requests.post(
+            f"{self.env.control_plane_api}/attach-hook",
+            json={"tenant_id": str(tenant_id), "node_id": None},
+        )
+        response.raise_for_status()
+
+    def inspect(self, tenant_id: TenantId) -> Optional[tuple[int, int]]:
+        response = requests.post(
+            f"{self.env.control_plane_api}/inspect",
+            json={"tenant_id": str(tenant_id)},
+        )
+        response.raise_for_status()
+        json = response.json()
+        log.info(f"Response: {json}")
+        if json["attachment"]:
+            # Explicit int() to make python type linter happy
+            return (int(json["attachment"][0]), int(json["attachment"][1]))
+        else:
+            return None
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -1780,13 +1783,45 @@ class NeonPageserver(PgProtocol):
         Tenant attachment passes through here to acquire a generation number before proceeding
         to call into the pageserver HTTP client.
         """
+        client = self.http_client()
+        return client.tenant_attach(
+            tenant_id, config, config_null, generation=self.maybe_get_generation(tenant_id)
+        )
+
+    def tenant_detach(self, tenant_id: TenantId):
         if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook(tenant_id, self.id)
-        else:
-            generation = None
+            self.env.attachment_service.attach_hook_drop(tenant_id)
 
         client = self.http_client()
-        return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+        return client.tenant_detach(tenant_id)
+
+    def tenant_create(
+        self,
+        tenant_id: TenantId,
+        conf: Optional[Dict[str, Any]] = None,
+        auth_token: Optional[str] = None,
+    ) -> TenantId:
+        client = self.http_client(auth_token=auth_token)
+        return client.tenant_create(
+            tenant_id, conf, generation=self.maybe_get_generation(tenant_id)
+        )
+
+    def tenant_load(self, tenant_id: TenantId):
+        client = self.http_client()
+        return client.tenant_load(tenant_id, generation=self.maybe_get_generation(tenant_id))
+
+    def maybe_get_generation(self, tenant_id: TenantId):
+        """
+        For tests that would like to use an HTTP client directly instead of using
+        the `tenant_attach` and `tenant_create` helpers here: issue a generation
+        number for a tenant.
+
+        Returns None if the attachment service is not enabled (legacy mode)
+        """
+        if self.env.attachment_service is not None:
+            return self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+        else:
+            return None
 
 
 def append_pageserver_param_overrides(
@@ -1862,7 +1897,8 @@ class PgBin:
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[str] = None,
-        **kwargs: Any,
+        with_command_header=True,
+        **popen_kwargs: Any,
     ) -> str:
         """
         Run one of the postgres binaries, with stderr and stdout redirected to a file.
@@ -1875,7 +1911,13 @@ class PgBin:
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         base_path, _, _ = subprocess_capture(
-            self.log_dir, command, env=env, cwd=cwd, check=True, **kwargs
+            self.log_dir,
+            command,
+            env=env,
+            cwd=cwd,
+            check=True,
+            with_command_header=with_command_header,
+            **popen_kwargs,
         )
         return base_path
 
@@ -2118,6 +2160,7 @@ class NeonProxy(PgProtocol):
                 # Console auth backend params
                 *["--auth-backend", "console"],
                 *["--auth-endpoint", self.endpoint],
+                *["--sql-over-http-pool-opt-in", "false"],
             ]
             if self.fixed_rate_limit is not None:
                 args += [
@@ -2393,6 +2436,10 @@ def static_proxy(
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
+    vanilla_pg.safe_psql("CREATE SCHEMA IF NOT EXISTS neon_control_plane")
+    vanilla_pg.safe_psql(
+        "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
+    )
 
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
@@ -2493,9 +2540,6 @@ class Endpoint(PgProtocol):
 
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
-            pg_port=self.pg_port,
-            http_port=self.http_port,
-            tenant_id=self.tenant_id,
             safekeepers=self.active_safekeepers,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
@@ -2575,7 +2619,7 @@ class Endpoint(PgProtocol):
         if self.running:
             assert self.endpoint_id is not None
             self.env.neon_cli.endpoint_stop(
-                self.endpoint_id, self.tenant_id, check_return_code=self.check_stop_result
+                self.endpoint_id, check_return_code=self.check_stop_result
             )
             self.running = False
 
@@ -2589,7 +2633,7 @@ class Endpoint(PgProtocol):
 
         assert self.endpoint_id is not None
         self.env.neon_cli.endpoint_stop(
-            self.endpoint_id, self.tenant_id, True, check_return_code=self.check_stop_result
+            self.endpoint_id, True, check_return_code=self.check_stop_result
         )
         self.endpoint_id = None
         self.running = False
@@ -3024,6 +3068,11 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     """Compute the working directory for an individual test."""
     test_name = request.node.name
     test_dir = top_output_dir / test_name.replace("/", "-")
+
+    # We rerun flaky tests multiple times, use a separate directory for each run.
+    if (suffix := getattr(request.node, "execution_count", None)) is not None:
+        test_dir = test_dir.parent / f"{test_dir.name}-{suffix}"
+
     log.info(f"get_test_output_dir is {test_dir}")
     # make mypy happy
     assert isinstance(test_dir, Path)

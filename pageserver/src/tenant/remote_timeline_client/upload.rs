@@ -3,6 +3,7 @@
 use anyhow::{bail, Context};
 use camino::Utf8Path;
 use fail::fail_point;
+use pageserver_api::shard::TenantShardId;
 use std::io::ErrorKind;
 use tokio::fs::{self, File};
 
@@ -23,7 +24,7 @@ use tracing::info;
 /// Serializes and uploads the given index part data to the remote storage.
 pub(super) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
-    tenant_id: &TenantId,
+    tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     generation: Generation,
     index_part: &'a IndexPart,
@@ -41,11 +42,11 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_size = index_part_bytes.len();
     let index_part_bytes = tokio::io::BufReader::new(std::io::Cursor::new(index_part_bytes));
 
-    let remote_path = remote_index_path(tenant_id, timeline_id, generation);
+    let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &remote_path)
         .await
-        .with_context(|| format!("upload index part for '{tenant_id} / {timeline_id}'"))
+        .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.

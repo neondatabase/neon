@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
+use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::{tokio::write::ZstdEncoder, zstd::CParameter, Level};
 use bytes::Bytes;
 use camino::Utf8Path;
@@ -12,7 +13,7 @@ use camino_tempfile::tempfile;
 use futures::StreamExt;
 use nix::NixPath;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_tar::Archive;
 use tokio_tar::Builder;
 use tokio_tar::HeaderMode;
@@ -669,4 +670,14 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<(File, u64)> {
         warn!("compressed {INITDB_PATH} size of {compressed_len} is above limit {INITDB_TAR_ZST_WARN_LIMIT}.");
     }
     Ok((compressed, compressed_len))
+}
+
+pub async fn extract_tar_zst(
+    pgdata_path: &Utf8Path,
+    tar_zst: impl AsyncBufRead + Unpin,
+) -> Result<()> {
+    let tar = Box::pin(ZstdDecoder::new(tar_zst));
+    let mut archive = Archive::new(tar);
+    archive.unpack(pgdata_path).await?;
+    Ok(())
 }
