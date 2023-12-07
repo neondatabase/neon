@@ -16,6 +16,7 @@ use control_plane::safekeeper::SafekeeperNode;
 use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
+use pageserver_api::shard::TenantShardId;
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -276,10 +277,10 @@ fn print_timeline(
 /// Connects to the pageserver to query this information.
 async fn get_timeline_infos(
     env: &local_env::LocalEnv,
-    tenant_id: &TenantId,
+    tenant_shard_id: &TenantShardId,
 ) -> Result<HashMap<TimelineId, TimelineInfo>> {
     Ok(get_default_pageserver(env)
-        .timeline_list(tenant_id)
+        .timeline_list(tenant_shard_id)
         .await?
         .into_iter()
         .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
@@ -297,12 +298,34 @@ fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::R
     }
 }
 
+// Helper function to parse --tenant_id option, for commands that accept a shard suffix
+fn get_tenant_shard_id(
+    sub_match: &ArgMatches,
+    env: &local_env::LocalEnv,
+) -> anyhow::Result<TenantShardId> {
+    if let Some(tenant_id_from_arguments) = parse_tenant_shard_id(sub_match).transpose() {
+        tenant_id_from_arguments
+    } else if let Some(default_id) = env.default_tenant_id {
+        Ok(TenantShardId::unsharded(default_id))
+    } else {
+        anyhow::bail!("No tenant shard id. Use --tenant-id, or set a default tenant");
+    }
+}
+
 fn parse_tenant_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TenantId>> {
     sub_match
         .get_one::<String>("tenant-id")
         .map(|tenant_id| TenantId::from_str(tenant_id))
         .transpose()
         .context("Failed to parse tenant id from the argument string")
+}
+
+fn parse_tenant_shard_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TenantShardId>> {
+    sub_match
+        .get_one::<String>("tenant-id")
+        .map(|id_str| TenantShardId::from_str(id_str))
+        .transpose()
+        .context("Failed to parse tenant shard id from the argument string")
 }
 
 fn parse_timeline_id(sub_match: &ArgMatches) -> anyhow::Result<Option<TimelineId>> {
@@ -399,12 +422,15 @@ async fn handle_tenant(
             // If tenant ID was not specified, generate one
             let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(TenantId::generate);
 
+            // TODO(sharding): create multiple shards if requested
+            let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
             let generation = if env.control_plane_api.is_some() {
                 // We must register the tenant with the attachment service, so
                 // that when the pageserver restarts, it will be re-attached.
                 let attachment_service = AttachmentService::from_env(env);
                 attachment_service
-                    .attach_hook(tenant_id, pageserver.conf.id)
+                    .attach_hook(tenant_shard_id, pageserver.conf.id)
                     .await?
             } else {
                 None
@@ -470,12 +496,12 @@ async fn handle_tenant(
             println!("tenant {tenant_id} successfully configured on the pageserver");
         }
         Some(("migrate", matches)) => {
-            let tenant_id = get_tenant_id(matches, env)?;
+            let tenant_shard_id = get_tenant_shard_id(matches, env)?;
             let new_pageserver = get_pageserver(env, matches)?;
             let new_pageserver_id = new_pageserver.conf.id;
 
-            migrate_tenant(env, tenant_id, new_pageserver).await?;
-            println!("tenant {tenant_id} migrated to {}", new_pageserver_id);
+            migrate_tenant(env, tenant_shard_id, new_pageserver).await?;
+            println!("tenant {tenant_shard_id} migrated to {}", new_pageserver_id);
         }
 
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
@@ -489,8 +515,10 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
 
     match timeline_match.subcommand() {
         Some(("list", list_match)) => {
-            let tenant_id = get_tenant_id(list_match, env)?;
-            let timelines = pageserver.timeline_list(&tenant_id).await?;
+            // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the attachment service
+            // where shard 0 is attached, and query there.
+            let tenant_shard_id = get_tenant_shard_id(list_match, env)?;
+            let timelines = pageserver.timeline_list(&tenant_shard_id).await?;
             print_timelines_tree(timelines, env.timeline_name_mappings())?;
         }
         Some(("create", create_match)) => {
@@ -635,8 +663,10 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
     match sub_name {
         "list" => {
-            let tenant_id = get_tenant_id(sub_args, env)?;
-            let timeline_infos = get_timeline_infos(env, &tenant_id)
+            // TODO(sharding): this command shouldn't have to specify a shard ID: we should ask the attachment service
+            // where shard 0 is attached, and query there.
+            let tenant_shard_id = get_tenant_shard_id(sub_args, env)?;
+            let timeline_infos = get_timeline_infos(env, &tenant_shard_id)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Failed to load timeline info: {}", e);
@@ -661,7 +691,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
             for (endpoint_id, endpoint) in cplane
                 .endpoints
                 .iter()
-                .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
+                .filter(|(_, endpoint)| endpoint.tenant_id == tenant_shard_id.tenant_id)
             {
                 let lsn_str = match endpoint.mode {
                     ComputeMode::Static(lsn) => {
@@ -680,7 +710,10 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 };
 
                 let branch_name = timeline_name_mappings
-                    .get(&TenantTimelineId::new(tenant_id, endpoint.timeline_id))
+                    .get(&TenantTimelineId::new(
+                        tenant_shard_id.tenant_id,
+                        endpoint.timeline_id,
+                    ))
                     .map(|name| name.as_str())
                     .unwrap_or("?");
 

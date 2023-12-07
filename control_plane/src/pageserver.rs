@@ -471,13 +471,13 @@ impl PageServerNode {
 
     pub async fn location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
     ) -> anyhow::Result<()> {
         Ok(self
             .http_client
-            .location_config(tenant_id, config, flush_ms)
+            .location_config(tenant_shard_id, config, flush_ms)
             .await?)
     }
 

@@ -80,9 +80,12 @@ impl Client {
 
     pub async fn list_timelines(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<Vec<pageserver_api::models::TimelineInfo>> {
-        let uri = format!("{}/v1/tenant/{tenant_id}/timeline", self.mgmt_api_endpoint);
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline",
+            self.mgmt_api_endpoint
+        );
         self.get(&uri)
             .await?
             .json()
@@ -166,14 +169,17 @@ impl Client {
 
     pub async fn location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<std::time::Duration>,
     ) -> Result<()> {
-        let req_body = TenantLocationConfigRequest { tenant_id, config };
+        let req_body = TenantLocationConfigRequest {
+            tenant_shard_id,
+            config,
+        };
         let path = format!(
             "{}/v1/tenant/{}/location_config",
-            self.mgmt_api_endpoint, tenant_id
+            self.mgmt_api_endpoint, tenant_shard_id
         );
         let path = if let Some(flush_ms) = flush_ms {
             format!("{}?flush_ms={}", path, flush_ms.as_millis())

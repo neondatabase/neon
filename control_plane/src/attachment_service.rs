@@ -1,9 +1,10 @@
 use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
 use camino::Utf8PathBuf;
+use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, process::Child};
-use utils::id::{NodeId, TenantId};
+use utils::id::NodeId;
 
 pub struct AttachmentService {
     env: LocalEnv,
@@ -16,7 +17,7 @@ const COMMAND: &str = "attachment_service";
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
-    pub tenant_id: TenantId,
+    pub tenant_shard_id: TenantShardId,
     pub node_id: Option<NodeId>,
 }
 
@@ -27,7 +28,7 @@ pub struct AttachHookResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct InspectRequest {
-    pub tenant_id: TenantId,
+    pub tenant_shard_id: TenantShardId,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,7 +88,7 @@ impl AttachmentService {
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
     pub async fn attach_hook(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         pageserver_id: NodeId,
     ) -> anyhow::Result<Option<u32>> {
         use hyper::StatusCode;
@@ -101,7 +102,7 @@ impl AttachmentService {
             .unwrap();
 
         let request = AttachHookRequest {
-            tenant_id,
+            tenant_shard_id,
             node_id: Some(pageserver_id),
         };
 
@@ -114,7 +115,7 @@ impl AttachmentService {
         Ok(response.gen)
     }
 
-    pub async fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
+    pub async fn inspect(&self, tenant_id: TenantShardId) -> anyhow::Result<Option<(u32, NodeId)>> {
         use hyper::StatusCode;
 
         let url = self
@@ -125,7 +126,7 @@ impl AttachmentService {
             .join("inspect")
             .unwrap();
 
-        let request = InspectRequest { tenant_id };
+        let request = InspectRequest { tenant_shard_id };
 
         let response = self.client.post(url).json(&request).send().await?;
         if response.status() != StatusCode::OK {

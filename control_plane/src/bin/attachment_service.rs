@@ -6,13 +6,13 @@
 ///
 use anyhow::anyhow;
 use clap::Parser;
-use hex::FromHex;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response};
 use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use utils::http::endpoint::request_span;
 use utils::logging::{self, LogFormat};
 use utils::signals::{ShutdownSignals, Signal};
@@ -24,7 +24,7 @@ use utils::{
         json::{json_request, json_response},
         RequestExt, RouterBuilder,
     },
-    id::{NodeId, TenantId},
+    id::NodeId,
     tcp_listener,
 };
 
@@ -61,39 +61,10 @@ struct TenantState {
     generation: u32,
 }
 
-fn to_hex_map<S, V>(input: &HashMap<TenantId, V>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    V: Clone + Serialize,
-{
-    let transformed = input.iter().map(|(k, v)| (hex::encode(k), v.clone()));
-
-    transformed
-        .collect::<HashMap<String, V>>()
-        .serialize(serializer)
-}
-
-fn from_hex_map<'de, D, V>(deserializer: D) -> Result<HashMap<TenantId, V>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-    V: Deserialize<'de>,
-{
-    let hex_map = HashMap::<String, V>::deserialize(deserializer)?;
-    hex_map
-        .into_iter()
-        .map(|(k, v)| {
-            TenantId::from_hex(k)
-                .map(|k| (k, v))
-                .map_err(serde::de::Error::custom)
-        })
-        .collect()
-}
-
 // Top level state available to all HTTP handlers
 #[derive(Serialize, Deserialize)]
 struct PersistentState {
-    #[serde(serialize_with = "to_hex_map", deserialize_with = "from_hex_map")]
-    tenants: HashMap<TenantId, TenantState>,
+    tenants: BTreeMap<TenantShardId, TenantState>,
 
     #[serde(skip)]
     path: PathBuf,
@@ -127,7 +98,7 @@ impl PersistentState {
             {
                 tracing::info!("Will create state file at {}", path.display());
                 Self {
-                    tenants: HashMap::new(),
+                    tenants: BTreeMap::new(),
                     path: path.to_owned(),
                 }
             }
@@ -174,8 +145,7 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
         if state.pageserver == Some(reattach_req.node_id) {
             state.generation += 1;
             response.tenants.push(ReAttachResponseTenant {
-                // TODO(sharding): make this shard-aware
-                id: TenantShardId::unsharded(*t),
+                id: *t,
                 gen: state.generation,
             });
         }
@@ -198,8 +168,7 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
     };
 
     for req_tenant in validate_req.tenants {
-        // TODO(sharding): make this shard-aware
-        if let Some(tenant_state) = locked.tenants.get(&req_tenant.id.tenant_id) {
+        if let Some(tenant_state) = locked.tenants.get(&req_tenant.id) {
             let valid = tenant_state.generation == req_tenant.gen;
             tracing::info!(
                 "handle_validate: {}(gen {}): valid={valid} (latest {})",
@@ -227,7 +196,7 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
 
     let tenant_state = locked
         .tenants
-        .entry(attach_req.tenant_id)
+        .entry(attach_req.tenant_shard_id)
         .or_insert_with(|| TenantState {
             pageserver: attach_req.node_id,
             generation: 0,
@@ -236,21 +205,21 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
     if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
         tenant_state.generation += 1;
         tracing::info!(
-            tenant_id = %attach_req.tenant_id,
+            tenant_id = %attach_req.tenant_shard_id,
             ps_id = %attaching_pageserver,
             generation = %tenant_state.generation,
             "issuing",
         );
     } else if let Some(ps_id) = tenant_state.pageserver {
         tracing::info!(
-            tenant_id = %attach_req.tenant_id,
+            tenant_id = %attach_req.tenant_shard_id,
             %ps_id,
             generation = %tenant_state.generation,
             "dropping",
         );
     } else {
         tracing::info!(
-            tenant_id = %attach_req.tenant_id,
+            tenant_id = %attach_req.tenant_shard_id,
             "no-op: tenant already has no pageserver");
     }
     tenant_state.pageserver = attach_req.node_id;
@@ -258,7 +227,7 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
 
     tracing::info!(
         "handle_attach_hook: tenant {} set generation {}, pageserver {}",
-        attach_req.tenant_id,
+        attach_req.tenant_shard_id,
         tenant_state.generation,
         attach_req.node_id.unwrap_or(utils::id::NodeId(0xfffffff))
     );
@@ -278,7 +247,7 @@ async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiErr
 
     let state = get_state(&req).inner.clone();
     let locked = state.write().await;
-    let tenant_state = locked.tenants.get(&inspect_req.tenant_id);
+    let tenant_state = locked.tenants.get(&inspect_req.tenant_shard_id);
 
     json_response(
         StatusCode::OK,

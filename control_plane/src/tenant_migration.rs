@@ -11,19 +11,17 @@ use crate::{
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
+use pageserver_api::shard::TenantShardId;
 use std::collections::HashMap;
 use std::time::Duration;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::{id::TimelineId, lsn::Lsn};
 
 /// Given an attached pageserver, retrieve the LSN for all timelines
 async fn get_lsns(
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     pageserver: &PageServerNode,
 ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
-    let timelines = pageserver.timeline_list(&tenant_id).await?;
+    let timelines = pageserver.timeline_list(&tenant_shard_id).await?;
     Ok(timelines
         .into_iter()
         .map(|t| (t.timeline_id, t.last_record_lsn))
@@ -33,12 +31,12 @@ async fn get_lsns(
 /// Wait for the timeline LSNs on `pageserver` to catch up with or overtake
 /// `baseline`.
 async fn await_lsn(
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     pageserver: &PageServerNode,
     baseline: HashMap<TimelineId, Lsn>,
 ) -> anyhow::Result<()> {
     loop {
-        let latest = match get_lsns(tenant_id, pageserver).await {
+        let latest = match get_lsns(tenant_shard_id, pageserver).await {
             Ok(l) => l,
             Err(e) => {
                 println!(
@@ -86,7 +84,7 @@ async fn await_lsn(
 ///  - reconfigure compute endpoints to point to new attached pageserver
 pub async fn migrate_tenant(
     env: &LocalEnv,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     dest_ps: PageServerNode,
 ) -> anyhow::Result<()> {
     // Get a new generation
@@ -108,7 +106,7 @@ pub async fn migrate_tenant(
         }
     }
 
-    let previous = attachment_service.inspect(tenant_id).await?;
+    let previous = attachment_service.inspect(tenant_shard_id).await?;
     let mut baseline_lsns = None;
     if let Some((generation, origin_ps_id)) = &previous {
         let origin_ps = PageServerNode::from_env(env, env.get_pageserver_conf(*origin_ps_id)?);
@@ -116,10 +114,12 @@ pub async fn migrate_tenant(
         if origin_ps_id == &dest_ps.conf.id {
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
             let gen = attachment_service
-                .attach_hook(tenant_id, dest_ps.conf.id)
+                .attach_hook(tenant_shard_id, dest_ps.conf.id)
                 .await?;
             let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-            dest_ps.location_config(tenant_id, dest_conf, None).await?;
+            dest_ps
+                .location_config(tenant_shard_id, dest_conf, None)
+                .await?;
             println!("✅ Migration complete");
             return Ok(());
         }
@@ -129,28 +129,30 @@ pub async fn migrate_tenant(
         let stale_conf =
             build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
         origin_ps
-            .location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))
+            .location_config(tenant_shard_id, stale_conf, Some(Duration::from_secs(10)))
             .await?;
 
-        baseline_lsns = Some(get_lsns(tenant_id, &origin_ps).await?);
+        baseline_lsns = Some(get_lsns(tenant_shard_id, &origin_ps).await?);
     }
 
     let gen = attachment_service
-        .attach_hook(tenant_id, dest_ps.conf.id)
+        .attach_hook(tenant_shard_id, dest_ps.conf.id)
         .await?;
     let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
-    dest_ps.location_config(tenant_id, dest_conf, None).await?;
+    dest_ps
+        .location_config(tenant_shard_id, dest_conf, None)
+        .await?;
 
     if let Some(baseline) = baseline_lsns {
         println!("🕑 Waiting for LSN to catch up...");
-        await_lsn(tenant_id, &dest_ps, baseline).await?;
+        await_lsn(tenant_shard_id, &dest_ps, baseline).await?;
     }
 
     let cplane = ComputeControlPlane::load(env.clone())?;
     for (endpoint_name, endpoint) in &cplane.endpoints {
-        if endpoint.tenant_id == tenant_id {
+        if endpoint.tenant_id == tenant_shard_id.tenant_id {
             println!(
                 "🔁 Reconfiguring endpoint {} to use pageserver {}",
                 endpoint_name, dest_ps.conf.id
@@ -171,7 +173,7 @@ pub async fn migrate_tenant(
         let found = other_ps_tenants
             .into_iter()
             .map(|t| t.id)
-            .any(|i| i.tenant_id == tenant_id);
+            .any(|i| i == tenant_shard_id);
         if !found {
             continue;
         }
@@ -188,7 +190,7 @@ pub async fn migrate_tenant(
             other_ps.conf.id
         );
         other_ps
-            .location_config(tenant_id, secondary_conf, None)
+            .location_config(tenant_shard_id, secondary_conf, None)
             .await?;
     }
 
@@ -197,7 +199,9 @@ pub async fn migrate_tenant(
         dest_ps.conf.id
     );
     let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-    dest_ps.location_config(tenant_id, dest_conf, None).await?;
+    dest_ps
+        .location_config(tenant_shard_id, dest_conf, None)
+        .await?;
 
     println!("✅ Migration complete");
 
