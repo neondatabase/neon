@@ -202,7 +202,7 @@ pub struct ShardParameters {
 }
 
 impl ShardParameters {
-    fn is_unsharded(&self) -> bool {
+    pub fn is_unsharded(&self) -> bool {
         self.count == ShardCount(0)
     }
 }
@@ -251,7 +251,7 @@ impl std::ops::Deref for TenantCreateRequest {
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
@@ -280,7 +280,7 @@ pub struct TenantConfig {
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
 /// lists out all possible states (and the virtual "Detached" state)
 /// in a flat form rather than using rust-style enums.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum LocationConfigMode {
     AttachedSingle,
     AttachedMulti,
@@ -289,14 +289,14 @@ pub enum LocationConfigMode {
     Detached,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct LocationConfigSecondary {
     pub warm: bool,
 }
 
 /// An alternative representation of `pageserver::tenant::LocationConf`,
 /// for use in external-facing APIs.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct LocationConfig {
     pub mode: LocationConfigMode,
     /// If attaching, in what generation?

@@ -1,5 +1,6 @@
 //! Code to manage pageservers
 //!
+//!
 //! In the local test environment, the pageserver stores its data directly in
 //!
 //!   .neon/
@@ -371,6 +372,20 @@ impl PageServerNode {
                 .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
         };
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        } else {
+            Ok(result)
+        }
+    }
+
+    pub fn tenant_create(
+        &self,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
+        settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<TenantId> {
+        let config = Self::parse_config(settings)?;
 
         let request = models::TenantCreateRequest {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),

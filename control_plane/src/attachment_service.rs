@@ -1,10 +1,14 @@
 use crate::{background_process, local_env::LocalEnv};
 use anyhow::anyhow;
 use camino::Utf8PathBuf;
-use pageserver_api::shard::TenantShardId;
+use hyper::StatusCode;
+use pageserver_api::{
+    models::{TenantCreateRequest, TimelineCreateRequest},
+    shard::TenantShardId,
+};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, process::Child};
-use utils::id::NodeId;
+use utils::id::{NodeId, TenantId};
 
 pub struct AttachmentService {
     env: LocalEnv,
@@ -34,6 +38,25 @@ pub struct InspectRequest {
 #[derive(Serialize, Deserialize)]
 pub struct InspectResponse {
     pub attachment: Option<(u32, NodeId)>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantCreateResponseShard {
+    pub node_id: NodeId,
+    pub generation: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantCreateResponse {
+    pub shards: Vec<TenantCreateResponseShard>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeRegisterRequest {
+    pub node_id: NodeId,
+
+    pub listen_http_addr: String,
+    pub listen_http_port: u16,
 }
 
 impl AttachmentService {
@@ -91,8 +114,6 @@ impl AttachmentService {
         tenant_shard_id: TenantShardId,
         pageserver_id: NodeId,
     ) -> anyhow::Result<Option<u32>> {
-        use hyper::StatusCode;
-
         let url = self
             .env
             .control_plane_api
@@ -115,7 +136,10 @@ impl AttachmentService {
         Ok(response.gen)
     }
 
-    pub async fn inspect(&self, tenant_id: TenantShardId) -> anyhow::Result<Option<(u32, NodeId)>> {
+    pub async fn inspect(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> anyhow::Result<Option<(u32, NodeId)>> {
         use hyper::StatusCode;
 
         let url = self
@@ -135,5 +159,43 @@ impl AttachmentService {
 
         let response = response.json::<InspectResponse>().await?;
         Ok(response.attachment)
+    }
+
+    pub fn tenant_create(&self, req: TenantCreateRequest) -> anyhow::Result<()> {
+        let url = self
+            .env
+            .control_plane_api
+            .clone()
+            .unwrap()
+            .join("tenant")
+            .unwrap();
+
+        let response = self.client.post(url).json(&req).send()?;
+        if response.status() != StatusCode::OK {
+            return Err(anyhow!("Unexpected status {}", response.status()));
+        }
+
+        Ok(())
+    }
+
+    pub fn tenant_timeline_create(
+        &self,
+        tenant_id: TenantId,
+        req: TimelineCreateRequest,
+    ) -> anyhow::Result<()> {
+        let url = self
+            .env
+            .control_plane_api
+            .clone()
+            .unwrap()
+            .join(&format!("tenant/{tenant_id}/timeline"))
+            .unwrap();
+
+        let response = self.client.post(url).json(&req).send()?;
+        if response.status() != StatusCode::OK {
+            return Err(anyhow!("Unexpected status {}", response.status()));
+        }
+
+        Ok(())
     }
 }

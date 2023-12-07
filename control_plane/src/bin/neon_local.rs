@@ -15,7 +15,9 @@ use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
-use pageserver_api::models::TimelineInfo;
+use pageserver_api::models::{
+    ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
@@ -419,47 +421,47 @@ async fn handle_tenant(
                 .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
                 .unwrap_or_default();
 
+            let tenant_conf = PageServerNode::parse_config(tenant_conf)?;
+
             // If tenant ID was not specified, generate one
             let tenant_id = parse_tenant_id(create_match)?.unwrap_or_else(TenantId::generate);
 
-            // TODO(sharding): create multiple shards if requested
-            let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
-            let generation = if env.control_plane_api.is_some() {
-                // We must register the tenant with the attachment service, so
-                // that when the pageserver restarts, it will be re-attached.
-                let attachment_service = AttachmentService::from_env(env);
-                attachment_service
-                    .attach_hook(tenant_shard_id, pageserver.conf.id)
-                    .await?
-            } else {
-                None
-            };
-
-            pageserver
-                .tenant_create(tenant_id, generation, tenant_conf)
-                .await?;
+            // We must register the tenant with the attachment service, so
+            // that when the pageserver restarts, it will be re-attached.
+            let attachment_service = AttachmentService::from_env(env);
+            attachment_service.tenant_create(TenantCreateRequest {
+                // Note that ::unsharded here isn't actually because the tenant is unsharded, its because the
+                // attachment service expecfs a shard-naive tenant_id in this attribute, and the TenantCreateRequest
+                // type is used both in attachment service (for creating tenants) and in pageserver (for creating shards)
+                new_tenant_id: TenantShardId::unsharded(tenant_id),
+                generation: None,
+                shard_parameters: ShardParameters::default(),
+                config: tenant_conf,
+            })?;
             println!("tenant {tenant_id} successfully created on the pageserver");
 
             // Create an initial timeline for the new tenant
-            let new_timeline_id = parse_timeline_id(create_match)?;
+            let new_timeline_id =
+                parse_timeline_id(create_match)?.unwrap_or(TimelineId::generate());
             let pg_version = create_match
                 .get_one::<u32>("pg-version")
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info = pageserver
-                .timeline_create(
-                    tenant_id,
+            // FIXME: passing None for ancestor_start_lsn is not kosher in a sharded world: we can't have
+            // different shards picking different start lsns.  Maybe we have to teach attachment service
+            // to let shard 0 branch first and then propagate the chosen LSN to other shards.
+
+            attachment_service.tenant_timeline_create(
+                tenant_id,
+                TimelineCreateRequest {
                     new_timeline_id,
-                    None,
-                    None,
-                    Some(pg_version),
-                    None,
-                )
-                .await?;
-            let new_timeline_id = timeline_info.timeline_id;
-            let last_record_lsn = timeline_info.last_record_lsn;
+                    ancestor_timeline_id: None,
+                    ancestor_start_lsn: None,
+                    existing_initdb_timeline_id: None,
+                    pg_version: Some(pg_version),
+                },
+            )?;
 
             env.register_branch_mapping(
                 DEFAULT_BRANCH_NAME.to_string(),
@@ -467,9 +469,7 @@ async fn handle_tenant(
                 new_timeline_id,
             )?;
 
-            println!(
-                "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
-            );
+            println!("Created an initial timeline '{new_timeline_id}' for tenant: {tenant_id}",);
 
             if create_match.get_flag("set-default") {
                 println!("Setting tenant {tenant_id} as a default one");
