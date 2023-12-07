@@ -112,7 +112,7 @@ impl sasl::Mechanism for Exchange<'_> {
                 // This might've been caused by a MITM attack
                 if client_final_message.channel_binding != channel_binding {
                     return Err(SaslError::ChannelBindingFailed(
-                        "secure channel data mismatch. this connection is insecure",
+                        "insecure connection: secure channel data mismatch",
                     ));
                 }
 
