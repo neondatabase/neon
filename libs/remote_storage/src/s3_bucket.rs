@@ -37,7 +37,6 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::io::{self, AsyncRead};
 
 use super::StorageMetadata;
 use crate::{
@@ -291,17 +290,6 @@ impl<S> PermitCarrying<S> {
     }
 }
 
-impl<S: AsyncRead> AsyncRead for PermitCarrying<S> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_read(cx, buf)
-    }
-}
-
 impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
     type Item = <S as Stream>::Item;
 
@@ -337,28 +325,6 @@ impl<S> TimedDownload<S> {
             outcome: metrics::AttemptOutcome::Cancelled,
             inner,
         }
-    }
-}
-
-impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        let before = buf.filled().len();
-        let read = std::task::ready!(this.inner.poll_read(cx, buf));
-
-        let read_eof = buf.filled().len() == before;
-
-        match read {
-            Ok(()) if read_eof => *this.outcome = AttemptOutcome::Ok,
-            Ok(()) => { /* still in progress */ }
-            Err(_) => *this.outcome = AttemptOutcome::Err,
-        }
-
-        std::task::Poll::Ready(read)
     }
 }
 
