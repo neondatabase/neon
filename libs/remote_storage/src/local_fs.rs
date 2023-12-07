@@ -7,11 +7,14 @@
 use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin};
 
 use anyhow::{bail, ensure, Context};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
+use futures::stream::Stream;
 use tokio::{
     fs,
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
+use tokio_util::io::ReaderStream;
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
@@ -219,7 +222,7 @@ impl RemoteStorage for LocalFs {
 
     async fn upload(
         &self,
-        data: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -252,8 +255,11 @@ impl RemoteStorage for LocalFs {
         );
 
         let from_size_bytes = data_size_bytes as u64;
+        let data = tokio_util::io::StreamReader::new(data);
+        let data = std::pin::pin!(data);
         let mut buffer_to_read = data.take(from_size_bytes);
 
+        // alternatively we could just write the bytes to a file, but local_fs is a testing utility
         let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
             .await
             .with_context(|| {
@@ -308,7 +314,7 @@ impl RemoteStorage for LocalFs {
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
-            let source = io::BufReader::new(
+            let source = ReaderStream::new(
                 fs::OpenOptions::new()
                     .read(true)
                     .open(&target_path)
@@ -348,16 +354,14 @@ impl RemoteStorage for LocalFs {
         }
         let target_path = from.with_base(&self.storage_root);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
-            let mut source = io::BufReader::new(
-                fs::OpenOptions::new()
-                    .read(true)
-                    .open(&target_path)
-                    .await
-                    .with_context(|| {
-                        format!("Failed to open source file {target_path:?} to use in the download")
-                    })
-                    .map_err(DownloadError::Other)?,
-            );
+            let mut source = tokio::fs::OpenOptions::new()
+                .read(true)
+                .open(&target_path)
+                .await
+                .with_context(|| {
+                    format!("Failed to open source file {target_path:?} to use in the download")
+                })
+                .map_err(DownloadError::Other)?;
             source
                 .seek(io::SeekFrom::Start(start_inclusive))
                 .await
@@ -371,11 +375,13 @@ impl RemoteStorage for LocalFs {
             Ok(match end_exclusive {
                 Some(end_exclusive) => Download {
                     metadata,
-                    download_stream: Box::pin(source.take(end_exclusive - start_inclusive)),
+                    download_stream: Box::pin(ReaderStream::new(
+                        source.take(end_exclusive - start_inclusive),
+                    )),
                 },
                 None => Download {
                     metadata,
-                    download_stream: Box::pin(source),
+                    download_stream: Box::pin(ReaderStream::new(source)),
                 },
             })
         } else {
@@ -475,7 +481,9 @@ fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
 mod fs_tests {
     use super::*;
 
+    use bytes::Bytes;
     use camino_tempfile::tempdir;
+    use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
     async fn read_and_assert_remote_file_contents(
@@ -485,7 +493,7 @@ mod fs_tests {
         remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
-        let mut download = storage
+        let download = storage
             .download(remote_storage_path)
             .await
             .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
@@ -494,13 +502,9 @@ mod fs_tests {
             "Unexpected metadata returned for the downloaded file"
         );
 
-        let mut contents = String::new();
-        download
-            .download_stream
-            .read_to_string(&mut contents)
-            .await
-            .context("Failed to read remote file contents into string")?;
-        Ok(contents)
+        let contents = aggregate(download.download_stream).await?;
+
+        String::from_utf8(contents).map_err(anyhow::Error::new)
     }
 
     #[tokio::test]
@@ -529,25 +533,26 @@ mod fs_tests {
         let storage = create_storage()?;
 
         let id = RemotePath::new(Utf8Path::new("dummy"))?;
-        let content = std::io::Cursor::new(b"12345");
+        let content = Bytes::from_static(b"12345");
+        let content = move || futures::stream::once(futures::future::ready(Ok(content.clone())));
 
         // Check that you get an error if the size parameter doesn't match the actual
         // size of the stream.
         storage
-            .upload(Box::new(content.clone()), 0, &id, None)
+            .upload(content(), 0, &id, None)
             .await
             .expect_err("upload with zero size succeeded");
         storage
-            .upload(Box::new(content.clone()), 4, &id, None)
+            .upload(content(), 4, &id, None)
             .await
             .expect_err("upload with too short size succeeded");
         storage
-            .upload(Box::new(content.clone()), 6, &id, None)
+            .upload(content(), 6, &id, None)
             .await
             .expect_err("upload with too large size succeeded");
 
         // Correct size is 5, this should succeed.
-        storage.upload(Box::new(content), 5, &id, None).await?;
+        storage.upload(content(), 5, &id, None).await?;
 
         Ok(())
     }
@@ -595,7 +600,7 @@ mod fs_tests {
         let uploaded_bytes = dummy_contents(upload_name).into_bytes();
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
-        let mut first_part_download = storage
+        let first_part_download = storage
             .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
             .await?;
         assert!(
@@ -603,21 +608,13 @@ mod fs_tests {
             "No metadata should be returned for no metadata upload"
         );
 
-        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        io::copy(
-            &mut first_part_download.download_stream,
-            &mut first_part_remote,
-        )
-        .await?;
-        first_part_remote.flush().await?;
-        let first_part_remote = first_part_remote.into_inner().into_inner();
+        let first_part_remote = aggregate(first_part_download.download_stream).await?;
         assert_eq!(
-            first_part_local,
-            first_part_remote.as_slice(),
+            first_part_local, first_part_remote,
             "First part bytes should be returned when requested"
         );
 
-        let mut second_part_download = storage
+        let second_part_download = storage
             .download_byte_range(
                 &upload_target,
                 first_part_local.len() as u64,
@@ -629,17 +626,9 @@ mod fs_tests {
             "No metadata should be returned for no metadata upload"
         );
 
-        let mut second_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        io::copy(
-            &mut second_part_download.download_stream,
-            &mut second_part_remote,
-        )
-        .await?;
-        second_part_remote.flush().await?;
-        let second_part_remote = second_part_remote.into_inner().into_inner();
+        let second_part_remote = aggregate(second_part_download.download_stream).await?;
         assert_eq!(
-            second_part_local,
-            second_part_remote.as_slice(),
+            second_part_local, second_part_remote,
             "Second part bytes should be returned when requested"
         );
 
@@ -729,17 +718,10 @@ mod fs_tests {
         let uploaded_bytes = dummy_contents(upload_name).into_bytes();
         let (first_part_local, _) = uploaded_bytes.split_at(3);
 
-        let mut partial_download_with_metadata = storage
+        let partial_download_with_metadata = storage
             .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
             .await?;
-        let mut first_part_remote = io::BufWriter::new(std::io::Cursor::new(Vec::new()));
-        io::copy(
-            &mut partial_download_with_metadata.download_stream,
-            &mut first_part_remote,
-        )
-        .await?;
-        first_part_remote.flush().await?;
-        let first_part_remote = first_part_remote.into_inner().into_inner();
+        let first_part_remote = aggregate(partial_download_with_metadata.download_stream).await?;
         assert_eq!(
             first_part_local,
             first_part_remote.as_slice(),
@@ -815,16 +797,16 @@ mod fs_tests {
                 )
             })?;
 
-        storage
-            .upload(Box::new(file), size, &relative_path, metadata)
-            .await?;
+        let file = tokio_util::io::ReaderStream::new(file);
+
+        storage.upload(file, size, &relative_path, metadata).await?;
         Ok(relative_path)
     }
 
     async fn create_file_for_upload(
         path: &Utf8Path,
         contents: &str,
-    ) -> anyhow::Result<(io::BufReader<fs::File>, usize)> {
+    ) -> anyhow::Result<(fs::File, usize)> {
         std::fs::create_dir_all(path.parent().unwrap())?;
         let mut file_for_writing = std::fs::OpenOptions::new()
             .write(true)
@@ -834,7 +816,7 @@ mod fs_tests {
         drop(file_for_writing);
         let file_size = path.metadata()?.len() as usize;
         Ok((
-            io::BufReader::new(fs::OpenOptions::new().read(true).open(&path).await?),
+            fs::OpenOptions::new().read(true).open(&path).await?,
             file_size,
         ))
     }
@@ -847,5 +829,17 @@ mod fs_tests {
         let mut files = storage.list_all().await?;
         files.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(files)
+    }
+
+    async fn aggregate(
+        stream: impl Stream<Item = std::io::Result<Bytes>>,
+    ) -> anyhow::Result<Vec<u8>> {
+        use futures::stream::StreamExt;
+        let mut out = Vec::new();
+        let mut stream = std::pin::pin!(stream);
+        while let Some(res) = stream.next().await {
+            out.extend_from_slice(&res?[..]);
+        }
+        Ok(out)
     }
 }
