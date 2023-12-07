@@ -837,7 +837,7 @@ impl LayerInner {
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id.tenant_id),
+            Some(self.desc.tenant_shard_id),
             Some(self.desc.timeline_id),
             &task_name,
             false,

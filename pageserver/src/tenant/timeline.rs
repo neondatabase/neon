@@ -77,7 +77,7 @@ use postgres_ffi::to_pg_timestamp;
 use utils::{
     completion,
     generation::Generation,
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
     simple_rcu::{Rcu, RcuReadGuard},
@@ -926,7 +926,7 @@ impl Timeline {
         tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
         )
         .await;
@@ -977,7 +977,7 @@ impl Timeline {
         // Shut down the layer flush task before the remote client, as one depends on the other
         task_mgr::shutdown_tasks(
             Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
         )
         .await;
@@ -995,12 +995,7 @@ impl Timeline {
 
         tracing::debug!("Waiting for tasks...");
 
-        task_mgr::shutdown_tasks(
-            None,
-            Some(self.tenant_shard_id.tenant_id),
-            Some(self.timeline_id),
-        )
-        .await;
+        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
@@ -1496,7 +1491,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "layer flush task",
             false,
@@ -1847,7 +1842,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "initial size calculation",
             false,
@@ -2020,7 +2015,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
             false,
@@ -3209,7 +3204,7 @@ impl DurationRecorder {
 #[derive(Default)]
 struct CompactLevel0Phase1StatsBuilder {
     version: Option<u64>,
-    tenant_id: Option<TenantId>,
+    tenant_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
@@ -3226,7 +3221,7 @@ struct CompactLevel0Phase1StatsBuilder {
 #[derive(serde::Serialize)]
 struct CompactLevel0Phase1Stats {
     version: u64,
-    tenant_id: TenantId,
+    tenant_id: TenantShardId,
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
@@ -3745,7 +3740,7 @@ impl Timeline {
             let ctx = ctx.attached_child();
             let mut stats = CompactLevel0Phase1StatsBuilder {
                 version: Some(2),
-                tenant_id: Some(self.tenant_shard_id.tenant_id),
+                tenant_id: Some(self.tenant_shard_id),
                 timeline_id: Some(self.timeline_id),
                 ..Default::default()
             };
@@ -4251,7 +4246,7 @@ impl Timeline {
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "download all remote layers task",
             false,

@@ -2116,7 +2116,7 @@ pub(crate) async fn immediate_gc(
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
         TaskKind::GarbageCollector,
-        Some(tenant_id),
+        Some(tenant_shard_id),
         Some(timeline_id),
         &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
         false,

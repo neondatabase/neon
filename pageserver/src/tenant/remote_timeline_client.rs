@@ -1220,7 +1220,7 @@ impl RemoteTimelineClient {
             task_mgr::spawn(
                 &self.runtime,
                 TaskKind::RemoteUploadTask,
-                Some(self.tenant_shard_id.tenant_id),
+                Some(self.tenant_shard_id),
                 Some(self.timeline_id),
                 "remote upload",
                 false,
