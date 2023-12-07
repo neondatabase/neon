@@ -1309,16 +1309,20 @@ impl Timeline {
                 &self.conf.default_tenant_conf,
             );
 
-            // TODO(sharding): make evictions state shard aware
-            // (https://github.com/neondatabase/neon/issues/5953)
             let tenant_id_str = self.tenant_shard_id.tenant_id.to_string();
+            let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
 
             let timeline_id_str = self.timeline_id.to_string();
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
                 .unwrap()
-                .change_threshold(&tenant_id_str, &timeline_id_str, new_threshold);
+                .change_threshold(
+                    &tenant_id_str,
+                    &shard_id_str,
+                    &timeline_id_str,
+                    new_threshold,
+                );
         }
     }
 
@@ -1390,7 +1394,7 @@ impl Timeline {
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(
-                    &tenant_shard_id.tenant_id,
+                    &tenant_shard_id,
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
