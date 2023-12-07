@@ -90,7 +90,7 @@ pub async fn download_layer_file<'a>(
                 .map_err(DownloadError::Other)?;
 
             let mut destination_file =
-                tokio::io::BufWriter::with_capacity(8 * 1024, destination_file);
+                tokio::io::BufWriter::with_capacity(32 * 1024, destination_file);
 
             let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
 

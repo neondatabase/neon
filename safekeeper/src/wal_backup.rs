@@ -498,7 +498,7 @@ async fn backup_object(
         .await
         .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
 
-    let file = tokio_util::io::ReaderStream::with_capacity(file, 8 * 1024);
+    let file = tokio_util::io::ReaderStream::with_capacity(file, 32 * 1024);
 
     storage.upload_storage_object(file, size, target_file).await
 }
@@ -524,7 +524,7 @@ pub async fn read_object(
 
     let reader = tokio_util::io::StreamReader::new(download.download_stream);
 
-    let reader = tokio::io::BufReader::with_capacity(8 * 1024, reader);
+    let reader = tokio::io::BufReader::with_capacity(32 * 1024, reader);
 
     Ok(Box::pin(reader))
 }
