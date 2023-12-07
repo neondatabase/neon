@@ -108,8 +108,9 @@ fn generate_tls_config<'a>(
 trait TestAuth: Sized {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        _stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
+        stream.write_message_noflush(&Be::AuthenticationOk)?;
         Ok(())
     }
 }
@@ -167,7 +168,6 @@ async fn dummy_proxy(
     auth.authenticate(&mut stream).await?;
 
     stream
-        .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&Be::CLIENT_ENCODING)?
         .write_message(&Be::ReadyForQuery)
         .await?;
