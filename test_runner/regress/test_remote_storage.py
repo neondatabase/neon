@@ -60,8 +60,6 @@ def test_remote_storage_backup_and_restore(
 
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    neon_env_builder.enable_generations = generations
-
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.

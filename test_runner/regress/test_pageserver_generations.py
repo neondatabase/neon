@@ -187,7 +187,6 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     - After upgrade, the bucket should contain a mixture.
     - In both cases, postgres I/O should work.
     """
-    neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
@@ -196,7 +195,6 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.broker.try_start()
     for sk in env.safekeepers:
         sk.start()
-    assert env.attachment_service is not None
     env.attachment_service.start()
 
     env.pageserver.start(overrides=('--pageserver-config-override=control_plane_api=""',))
@@ -262,12 +260,10 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    assert env.attachment_service is not None
 
     some_other_pageserver = 1234
     ps_http = env.pageserver.http_client()
@@ -341,7 +337,6 @@ def test_deletion_queue_recovery(
     :param validate_before: whether to wait for deletions to be validated before restart.  This
     makes them elegible to be executed after restart, if the same node keeps the attachment.
     """
-    neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
@@ -405,7 +400,6 @@ def test_deletion_queue_recovery(
 
     if keep_attachment == KeepAttachment.LOSE:
         some_other_pageserver = 101010
-        assert env.attachment_service is not None
         env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
 
     env.pageserver.start()
@@ -453,7 +447,6 @@ def test_deletion_queue_recovery(
 
 
 def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
-    neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
@@ -473,7 +466,6 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     )
 
     # Simulate a major incident: the control plane goes offline
-    assert env.attachment_service is not None
     env.attachment_service.stop()
 
     # Remember how many validations had happened before the control plane went offline
@@ -545,7 +537,6 @@ def test_eviction_across_generations(neon_env_builder: NeonEnvBuilder):
     and must be constructed using the proper generation for the layer, which may not be the same generation
     that the tenant is running in.
     """
-    neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(
         RemoteStorageKind.MOCK_S3,
     )
@@ -575,7 +566,6 @@ def test_multi_attach(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
 ):
-    neon_env_builder.enable_generations = True
     neon_env_builder.num_pageservers = 3
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,

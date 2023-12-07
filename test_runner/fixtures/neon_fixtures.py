@@ -457,7 +457,6 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
-        self.enable_generations = True
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
 
@@ -677,8 +676,7 @@ class NeonEnvBuilder:
 
                 pageserver.stop(immediate=True)
 
-            if self.env.attachment_service is not None:
-                self.env.attachment_service.stop(immediate=True)
+            self.env.attachment_service.stop(immediate=True)
 
             cleanup_error = None
 
@@ -772,13 +770,9 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        if config.enable_generations:
-            attachment_service_port = self.port_distributor.get_port()
-            self.control_plane_api: Optional[str] = f"http://127.0.0.1:{attachment_service_port}"
-            self.attachment_service: Optional[NeonAttachmentService] = NeonAttachmentService(self)
-        else:
-            self.control_plane_api = None
-            self.attachment_service = None
+        attachment_service_port = self.port_distributor.get_port()
+        self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
+        self.attachment_service: NeonAttachmentService = NeonAttachmentService(self)
 
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
@@ -851,8 +845,7 @@ class NeonEnv:
         # Start up broker, pageserver and all safekeepers
         self.broker.try_start()
 
-        if self.attachment_service is not None:
-            self.attachment_service.start()
+        self.attachment_service.start()
 
         for pageserver in self.pageservers:
             pageserver.start()
@@ -1834,20 +1827,19 @@ class NeonPageserver(PgProtocol):
         """
         client = self.http_client()
         return client.tenant_attach(
-            tenant_id, config, config_null, generation=self.maybe_get_generation(tenant_id)
+            tenant_id,
+            config,
+            config_null,
+            generation=self.env.attachment_service.attach_hook_issue(tenant_id, self.id),
         )
 
     def tenant_detach(self, tenant_id: TenantId):
-        if self.env.attachment_service is not None:
-            self.env.attachment_service.attach_hook_drop(tenant_id)
+        self.env.attachment_service.attach_hook_drop(tenant_id)
 
         client = self.http_client()
         return client.tenant_detach(tenant_id)
 
     def tenant_location_configure(self, tenant_id: TenantId, config: dict[str, Any], **kwargs):
-        # This API is only for use when generations are enabled
-        assert self.env.attachment_service is not None
-
         if config["mode"].startswith("Attached") and "generation" not in config:
             config["generation"] = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
 
@@ -1873,26 +1865,15 @@ class NeonPageserver(PgProtocol):
         generation: Optional[int] = None,
     ) -> TenantId:
         if generation is None:
-            generation = self.maybe_get_generation(tenant_id)
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
         return client.tenant_create(tenant_id, conf, generation=generation)
 
     def tenant_load(self, tenant_id: TenantId):
         client = self.http_client()
-        return client.tenant_load(tenant_id, generation=self.maybe_get_generation(tenant_id))
-
-    def maybe_get_generation(self, tenant_id: TenantId):
-        """
-        For tests that would like to use an HTTP client directly instead of using
-        the `tenant_attach` and `tenant_create` helpers here: issue a generation
-        number for a tenant.
-
-        Returns None if the attachment service is not enabled (legacy mode)
-        """
-        if self.env.attachment_service is not None:
-            return self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
-        else:
-            return None
+        return client.tenant_load(
+            tenant_id, generation=self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+        )
 
 
 def append_pageserver_param_overrides(
