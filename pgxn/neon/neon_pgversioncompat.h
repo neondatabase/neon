@@ -109,4 +109,4 @@
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif
 
-#endif	/* //NEON_PGVERSIONCOMPAT_H */
+#endif							/* NEON_PGVERSIONCOMPAT_H */

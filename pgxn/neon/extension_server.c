@@ -29,15 +29,16 @@ static int	extension_server_port = 0;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
 
-/*  to download all SQL (and data) files for an extension: */
-/*  curl -X POST http://localhost:8080/extension_server/postgis */
-/*  it covers two possible extension files layouts: */
-/*  1. extension_name--version--platform.sql */
-/*  2. extension_name/extension_name--version.sql */
-/*     extension_name/extra_files.csv */
-/*  */
-/*  to download specific library file: */
-/*  curl -X POST http://localhost:8080/extension_server/postgis-3.so?is_library=true */
+/*
+  * to download all SQL (and data) files for an extension:
+  * curl -X POST http://localhost:8080/extension_server/postgis
+  * it covers two possible extension files layouts:
+  * 1. extension_name--version--platform.sql
+  * 2. extension_name/extension_name--version.sql
+  *    extension_name/extra_files.csv
+  * to download specific library file:
+  * curl -X POST http://localhost:8080/extension_server/postgis-3.so?is_library=true
+  */
 static bool
 neon_download_extension_file_http(const char *filename, bool is_library)
 {

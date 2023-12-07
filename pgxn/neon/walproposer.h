@@ -716,7 +716,7 @@ extern void WalProposerFree(WalProposer *wp);
 								 * events */
 
 #ifdef WALPROPOSER_LIB
-void		WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...);
+extern void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...);
 #define walprop_log(elevel, ...) WalProposerLibLog(wp, elevel, __VA_ARGS__)
 #else
 #define walprop_log(elevel, ...) elog(elevel, __VA_ARGS__)
