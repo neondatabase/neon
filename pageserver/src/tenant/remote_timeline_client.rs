@@ -1271,7 +1271,7 @@ impl RemoteTimelineClient {
 
             let upload_result: anyhow::Result<()> = match &task.op {
                 UploadOp::UploadLayer(ref layer, ref layer_metadata) => {
-                    let path = layer.build_local_path(&self.tenant_shard_id, &self.timeline_id);
+                    let path = layer.local_path_from_id(&self.tenant_shard_id, &self.timeline_id);
 
                     upload::upload_timeline_layer(
                         self.conf,

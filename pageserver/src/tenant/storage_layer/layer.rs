@@ -97,7 +97,7 @@ impl Layer {
             metadata.shard,
         )));
 
-        debug_assert!(owner.0.needs_download_blocking().unwrap().is_some());
+        debug_assert!(owner.0.needs_download_blocking(timeline).unwrap().is_some());
 
         owner
     }
@@ -136,7 +136,7 @@ impl Layer {
 
         let downloaded = resident.expect("just initialized");
 
-        debug_assert!(owner.0.needs_download_blocking().unwrap().is_none());
+        debug_assert!(owner.0.needs_download_blocking(timeline).unwrap().is_none());
 
         timeline
             .metrics
@@ -181,7 +181,7 @@ impl Layer {
         let downloaded = resident.expect("just initialized");
 
         // if the rename works, the path is as expected
-        std::fs::rename(temp_path, owner.local_path()?)
+        std::fs::rename(temp_path, owner.local_path(timeline))
             .with_context(|| format!("rename temporary file as correct path for {owner}"))?;
 
         Ok(ResidentLayer { downloaded, owner })
@@ -301,8 +301,8 @@ impl Layer {
         &self.0.access_stats
     }
 
-    fn local_path(&self) -> Result<Utf8PathBuf, DownloadError> {
-        self.0.local_path()
+    fn local_path(&self, timeline: &Timeline) -> Utf8PathBuf {
+        self.0.local_path(timeline)
     }
 
     pub(crate) fn filename(&self) -> LayerFileName {
@@ -482,7 +482,12 @@ impl Drop for LayerInner {
         // leave garbage layers behind to be cleaned up the next time this Timeline is instantiated.
         let timeline = match self.timeline.upgrade() {
             Some(t) => t,
-            None => return,
+            None => {
+                // no need to nag that timeline is gone: under normal situation on
+                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            }
         };
 
         // We will only do I/O during drop if our Timeline's layer_gate is open: this avoids
@@ -490,16 +495,18 @@ impl Drop for LayerInner {
         // path for which the Timeline object has been torn down already.
         let _gate_guard = match timeline.layer_gate.enter() {
             Ok(g) => g,
-            Err(GateError::GateClosed) => return,
+            Err(GateError::GateClosed) => {
+                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+                return;
+            }
         };
 
         // If timeline is alive, we can construct a span with IDs for this function.
         let span = tracing::info_span!(parent: None, "layer_delete", tenant_id = %timeline.tenant_shard_id.tenant_id, shard_id=%timeline.tenant_shard_id.shard_slug(), timeline_id = %timeline.timeline_id);
-        let path = self.build_local_path(&timeline.tenant_shard_id, &timeline.timeline_id);
+        let path = self.local_path(&timeline);
 
         let file_name = self.layer_desc().filename();
         let file_size = self.layer_desc().file_size;
-        let timeline = self.timeline.clone();
         let meta = self.metadata();
         let status = self.status.clone();
 
@@ -527,32 +534,26 @@ impl Drop for LayerInner {
                 }
             };
 
-            if let Some(timeline) = timeline.upgrade() {
-                if removed {
-                    timeline.metrics.resident_physical_size_sub(file_size);
-                }
-                if let Some(remote_client) = timeline.remote_client.as_ref() {
-                    let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
+            if removed {
+                timeline.metrics.resident_physical_size_sub(file_size);
+            }
+            if let Some(remote_client) = timeline.remote_client.as_ref() {
+                let res = remote_client.schedule_deletion_of_unlinked(vec![(file_name, meta)]);
 
-                    if let Err(e) = res {
-                        // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
-                        // demonstrating this deadlock (without spawn_blocking): stop will drop
-                        // queued items, which will have ResidentLayer's, and those drops would try
-                        // to re-entrantly lock the RemoteTimelineClient inner state.
-                        if !timeline.is_active() {
-                            tracing::info!("scheduling deletion on drop failed: {e:#}");
-                        } else {
-                            tracing::warn!("scheduling deletion on drop failed: {e:#}");
-                        }
-                        LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                if let Err(e) = res {
+                    // test_timeline_deletion_with_files_stuck_in_upload_queue is good at
+                    // demonstrating this deadlock (without spawn_blocking): stop will drop
+                    // queued items, which will have ResidentLayer's, and those drops would try
+                    // to re-entrantly lock the RemoteTimelineClient inner state.
+                    if !timeline.is_active() {
+                        tracing::info!("scheduling deletion on drop failed: {e:#}");
                     } else {
-                        LAYER_IMPL_METRICS.inc_completed_deletes();
+                        tracing::warn!("scheduling deletion on drop failed: {e:#}");
                     }
+                    LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::DeleteSchedulingFailed);
+                } else {
+                    LAYER_IMPL_METRICS.inc_completed_deletes();
                 }
-            } else {
-                // no need to nag that timeline is gone: under normal situation on
-                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
             }
         });
     }
@@ -593,20 +594,16 @@ impl LayerInner {
         }
     }
 
-    /// Use our weak ref to Timeline to build a local file path: this will
-    /// fail if our parent Timeline has been destroyed: layers should not
-    /// do any I/O after this point, and therefore not require knowledge of path.
-    pub(crate) fn local_path(&self) -> Result<Utf8PathBuf, DownloadError> {
-        let timeline = self
-            .timeline
-            .upgrade()
-            .ok_or_else(|| DownloadError::TimelineShutdown)?;
-
-        Ok(self.build_local_path(&timeline.tenant_shard_id, &timeline.timeline_id))
+    /// All call sites that need this function should already have a Timeline (e.g. from
+    /// upgrading the Self::timeline weak pointer) -- it doesn't make sense to try and
+    /// do anything with the local file if the Timeline isn't still alive.
+    fn local_path(&self, timeline: &Timeline) -> Utf8PathBuf {
+        self.local_path_from_id(&timeline.tenant_shard_id, &timeline.timeline_id)
     }
 
-    /// Use this instead of `local_path` if you already have a Timeline to hand.
-    pub(crate) fn build_local_path(
+    /// Use this instead of `local_path` if you don't have a Timeline but do have its ID: this
+    /// is used by external callers such as [`crate::tenant::RemoteTimelineClient`]
+    pub(crate) fn local_path_from_id(
         &self,
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
@@ -709,7 +706,7 @@ impl LayerInner {
                 // check if we really need to be downloaded; could have been already downloaded by a
                 // cancelled previous attempt.
                 let needs_download = self
-                    .needs_download()
+                    .needs_download(&timeline)
                     .await
                     .map_err(DownloadError::PreStatFailed)?;
 
@@ -859,6 +856,7 @@ impl LayerInner {
         // block tenant::mgr::remove_tenant_from_memory.
 
         let this: Arc<Self> = self.clone();
+        let timeline_clone = timeline.clone();
 
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
@@ -920,7 +918,7 @@ impl LayerInner {
         match rx.await {
             Ok((Ok(()), permit)) => {
                 if let Some(reason) = self
-                    .needs_download()
+                    .needs_download(&timeline_clone)
                     .await
                     .map_err(DownloadError::PostStatFailed)?
                 {
@@ -955,10 +953,11 @@ impl LayerInner {
         }
     }
 
-    async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        let path = self
-            .local_path()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Timeline destroyed"))?;
+    async fn needs_download(
+        &self,
+        timeline: &Timeline,
+    ) -> Result<Option<NeedsDownload>, std::io::Error> {
+        let path = self.local_path(timeline);
 
         match tokio::fs::metadata(path).await {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
@@ -967,10 +966,11 @@ impl LayerInner {
         }
     }
 
-    fn needs_download_blocking(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
-        let path = self
-            .local_path()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Timeline destroyed"))?;
+    fn needs_download_blocking(
+        &self,
+        timeline: &Timeline,
+    ) -> Result<Option<NeedsDownload>, std::io::Error> {
+        let path = self.local_path(timeline);
 
         match path.metadata() {
             Ok(m) => Ok(self.is_file_present_and_good_size(&m).err()),
@@ -1112,9 +1112,7 @@ impl LayerInner {
             LayerResidenceEventReason::ResidenceChange,
         );
 
-        let local_path = self
-            .local_path()
-            .map_err(|_| EvictionCancelled::TimelineGone)?;
+        let local_path = self.local_path(&timeline);
 
         let res = match capture_mtime_and_remove(&local_path) {
             Ok(local_layer_mtime) => {
@@ -1287,7 +1285,7 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     owner.desc.lsn_range.clone(),
                 ));
-                delta_layer::DeltaLayerInner::load(&owner.local_path()?, summary, ctx)
+                delta_layer::DeltaLayerInner::load(&owner.local_path(&timeline), summary, ctx)
                     .await
                     .map(|res| res.map(LayerKind::Delta))
             } else {
@@ -1298,7 +1296,7 @@ impl DownloadedLayer {
                     owner.desc.key_range.clone(),
                     lsn,
                 ));
-                image_layer::ImageLayerInner::load(&owner.local_path()?, lsn, summary, ctx)
+                image_layer::ImageLayerInner::load(&owner.local_path(&timeline), lsn, summary, ctx)
                     .await
                     .map(|res| res.map(LayerKind::Image))
             };
@@ -1422,12 +1420,14 @@ impl ResidentLayer {
         }
     }
 
-    pub(crate) fn build_local_path(
+    pub(crate) fn local_path_from_id(
         &self,
         tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
     ) -> Utf8PathBuf {
-        self.owner.0.build_local_path(tenant_shard_id, timeline_id)
+        self.owner
+            .0
+            .local_path_from_id(tenant_shard_id, timeline_id)
     }
 
     pub(crate) fn access_stats(&self) -> &LayerAccessStats {
