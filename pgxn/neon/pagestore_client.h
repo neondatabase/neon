@@ -44,6 +44,7 @@ typedef enum
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
 	T_NeonGetSlruSegmentResponse,
+	T_NeonGetCompressedPageResponse
 } NeonMessageTag;
 
 /* base struct for c-style inheritance */
@@ -143,6 +144,15 @@ typedef struct
 } NeonGetPageResponse;
 
 #define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
+
+typedef struct
+{
+	NeonMessageTag tag;
+	uint16         compressed_size;
+	char		   page[FLEXIBLE_ARRAY_MEMBER];
+}			NeonGetCompressedPageResponse;
+
+#define PS_GETCOMPRESSEDPAGERESPONSE_SIZE(compressded_size) (MAXALIGN(offsetof(NeonGetCompressedPageResponse, page) + compressed_size))
 
 typedef struct
 {

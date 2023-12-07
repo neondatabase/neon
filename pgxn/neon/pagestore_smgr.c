@@ -45,6 +45,10 @@
  */
 #include "postgres.h"
 
+#ifdef USE_LZ4
+#include <lz4.h>
+#endif
+
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
@@ -1059,6 +1063,7 @@ nm_pack_request(NeonRequest *msg)
 		case T_NeonExistsResponse:
 		case T_NeonNblocksResponse:
 		case T_NeonGetPageResponse:
+		case T_NeonGetCompressedPageResponse:
 		case T_NeonErrorResponse:
 		case T_NeonDbSizeResponse:
 		case T_NeonGetSlruSegmentResponse:
@@ -1113,6 +1118,21 @@ nm_unpack_response(StringInfo s)
 				pq_getmsgend(s);
 
 				Assert(msg_resp->tag == T_NeonGetPageResponse);
+
+				resp = (NeonResponse *) msg_resp;
+				break;
+			}
+		case T_NeonGetCompressedPageResponse:
+			{
+				NeonGetCompressedPageResponse *msg_resp;
+				uint16 compressed_size = pq_getmsgint(s, 2);
+				msg_resp = palloc0(PS_GETCOMPRESSEDPAGERESPONSE_SIZE(compressed_size));
+				msg_resp->tag = tag;
+				msg_resp->compressed_size = compressed_size;
+				memcpy(msg_resp->page, pq_getmsgbytes(s, compressed_size), compressed_size);
+				pq_getmsgend(s);
+				
+				Assert(msg_resp->tag == T_NeonGetCompressedPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
 				break;
@@ -1284,6 +1304,14 @@ nm_to_string(NeonMessage *msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonGetPageResponse\"");
 				appendStringInfo(&s, ", \"page\": \"XXX\"}");
+				appendStringInfoChar(&s, '}');
+				break;
+			}
+		case T_NeonGetCompressedPageResponse:
+			{
+				NeonGetCompressedPageResponse *msg_resp = (NeonGetCompressedPageResponse *) msg;
+				appendStringInfoString(&s, "{\"type\": \"NeonGetCompressedPageResponse\"");
+				appendStringInfo(&s, ", \"compressed_page_size\": \"%d\"}", msg_resp->compressed_size);
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -2205,6 +2233,29 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			lfc_write(rinfo, forkNum, blkno, buffer);
 			break;
 
+		case T_NeonGetCompressedPageResponse:
+		{
+#ifndef USE_LZ4
+			ereport(ERROR,							 \
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED), \
+					 errmsg("compression method lz4 not supported"),	\
+					 errdetail("This functionality requires the server to be built with lz4 support."), \
+					 errhint("You need to rebuild PostgreSQL using %s.", "--with-lz4")))
+#else
+			NeonGetCompressedPageResponse* cp = (NeonGetCompressedPageResponse *) resp;
+			int rc = LZ4_decompress_safe(cp->page,
+										 buffer,
+										 cp->compressed_size,
+										 BLCKSZ);
+			if (rc != BLCKSZ) {
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg_internal("compressed lz4 data is corrupt")));
+			}
+			lfc_write(rinfo, forkNum, blkno, buffer);
+#endif
+			break;
+		}
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
