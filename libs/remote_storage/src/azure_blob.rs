@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::{borrow::Cow, io::Cursor};
 
@@ -14,6 +15,8 @@ use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use bytes::Bytes;
+use futures::stream::Stream;
 use futures_util::StreamExt;
 use http_types::StatusCode;
 use tracing::debug;
@@ -218,9 +221,10 @@ impl RemoteStorage for AzureBlobStorage {
         }
         Ok(res)
     }
+
     async fn upload(
         &self,
-        from: impl futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -228,14 +232,8 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Put).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        let from: std::pin::Pin<
-            Box<
-                dyn futures::stream::Stream<Item = std::io::Result<bytes::Bytes>>
-                    + Send
-                    + Sync
-                    + 'static,
-            >,
-        > = Box::pin(from);
+        let from: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>> =
+            Box::pin(from);
 
         let from = NonSeekableStream::new(from, data_size_bytes);
 
@@ -320,6 +318,7 @@ impl RemoteStorage for AzureBlobStorage {
 }
 
 pin_project_lite::pin_project! {
+    /// Hack to work around not being able to stream easier with azure sdk.
     #[project = NonSeekableStreamProj]
     enum NonSeekableStream<S> {
         /// A stream wrappers initial form.
@@ -327,7 +326,7 @@ pin_project_lite::pin_project! {
         /// Mutex exists to allow moving when cloning. If the sdk changes to do less than 1
         /// clone before first request, then this must be changed.
         Initial {
-            inner: std::sync::Mutex<Option<tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>>>,
+            inner: std::sync::Mutex<Option<tokio_util::compat::Compat<tokio_util::io::StreamReader<S, Bytes>>>>,
             len: usize,
         },
         /// The actually readable variant, produced by cloning the Initial variant.
@@ -335,7 +334,7 @@ pin_project_lite::pin_project! {
         /// The sdk currently always clones once, even without retry policy.
         Actual {
             #[pin]
-            inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, bytes::Bytes>>,
+            inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, Bytes>>,
             len: usize,
             read_any: bool,
         },
@@ -348,7 +347,7 @@ pin_project_lite::pin_project! {
 
 impl<S> NonSeekableStream<S>
 where
-    S: futures::stream::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Sync + 'static,
+    S: Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
 {
     fn new(inner: S, len: usize) -> NonSeekableStream<S> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -372,7 +371,7 @@ impl<S> std::fmt::Debug for NonSeekableStream<S> {
 
 impl<S> futures::io::AsyncRead for NonSeekableStream<S>
 where
-    S: futures::stream::Stream<Item = std::io::Result<bytes::Bytes>>,
+    S: Stream<Item = std::io::Result<Bytes>>,
 {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
@@ -401,11 +400,15 @@ where
 }
 
 impl<S> Clone for NonSeekableStream<S> {
+    /// Weird clone implementation exists to support the sdk doing cloning before issuing the first
+    /// request, see type documentation.
     fn clone(&self) -> Self {
+        use NonSeekableStream::*;
+
         match self {
-            Self::Initial { inner, len } => {
+            Initial { inner, len } => {
                 if let Some(inner) = inner.lock().unwrap().take() {
-                    Self::Actual {
+                    Actual {
                         inner,
                         len: *len,
                         read_any: false,
@@ -414,8 +417,8 @@ impl<S> Clone for NonSeekableStream<S> {
                     Self::Cloned { len_was: *len }
                 }
             }
-            Self::Actual { len, .. } => Self::Cloned { len_was: *len },
-            Self::Cloned { len_was } => Self::Cloned { len_was: *len_was },
+            Actual { len, .. } => Cloned { len_was: *len },
+            Cloned { len_was } => Cloned { len_was: *len_was },
         }
     }
 }
@@ -423,24 +426,22 @@ impl<S> Clone for NonSeekableStream<S> {
 #[async_trait::async_trait]
 impl<S> azure_core::SeekableStream for NonSeekableStream<S>
 where
-    S: futures::stream::Stream<Item = std::io::Result<bytes::Bytes>>
-        + Unpin
-        + Send
-        + Sync
-        + 'static,
+    S: Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync + 'static,
 {
     async fn reset(&mut self) -> azure_core::error::Result<()> {
+        use NonSeekableStream::*;
+
         let msg = match self {
-            NonSeekableStream::Initial { inner, .. } => {
+            Initial { inner, .. } => {
                 if inner.get_mut().unwrap().is_some() {
                     return Ok(());
                 } else {
                     "reset after first clone is not supported"
                 }
             }
-            NonSeekableStream::Actual { read_any, .. } if !*read_any => return Ok(()),
-            NonSeekableStream::Actual { .. } => "reset after reading is not supported",
-            NonSeekableStream::Cloned { .. } => "reset after second clone is not supported",
+            Actual { read_any, .. } if !*read_any => return Ok(()),
+            Actual { .. } => "reset after reading is not supported",
+            Cloned { .. } => "reset after second clone is not supported",
         };
         Err(azure_core::error::Error::new(
             azure_core::error::ErrorKind::Io,
@@ -451,10 +452,11 @@ where
     // Note: it is not documented if this should be the total or remaining length, total passes the
     // tests.
     fn len(&self) -> usize {
+        use NonSeekableStream::*;
         match self {
-            NonSeekableStream::Initial { len, .. } => *len,
-            NonSeekableStream::Actual { len, .. } => *len,
-            NonSeekableStream::Cloned { len_was, .. } => *len_was,
+            Initial { len, .. } => *len,
+            Actual { len, .. } => *len,
+            Cloned { len_was, .. } => *len_was,
         }
     }
 }
