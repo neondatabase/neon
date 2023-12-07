@@ -1045,7 +1045,7 @@ pub fn neon_options_str(params: &StartupMessageParams) -> Option<String> {
         #[allow(unstable_name_collisions)]
         options
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{}:{}", k, v))
             .sorted() // we sort it to use as cache key
             .intersperse(" ".to_owned())
             .collect()

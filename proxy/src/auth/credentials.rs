@@ -406,10 +406,7 @@ mod tests {
         let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("project"));
-        assert_eq!(
-            creds.cache_key,
-            "projectneon_endpoint_type:read_write neon_lsn:0/2"
-        );
+        assert_eq!(creds.cache_key, "projectendpoint_type:read_write lsn:0/2");
 
         Ok(())
     }
