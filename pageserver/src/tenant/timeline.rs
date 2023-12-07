@@ -468,6 +468,7 @@ impl Timeline {
     /// an ancestor branch, for example, or waste a lot of cycles chasing the
     /// non-existing key.
     ///
+    #[instrument(skip_all, fields(%key, %lsn), level = tracing::Level::DEBUG)]
     pub async fn get(
         &self,
         key: Key,
