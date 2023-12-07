@@ -394,7 +394,7 @@ pub(crate) async fn download_initdb_tar_zst(
             .with_context(|| format!("timeline dir creation {timeline_path}"))
             .map_err(DownloadError::Other)?;
     }
-    let temp_path = timeline_path.join(format!("{INITDB_PATH}-{timeline_id}.{TEMP_FILE_SUFFIX}"));
+    let temp_path = timeline_path.join(format!("{INITDB_PATH}.download-{timeline_id}.{TEMP_FILE_SUFFIX}"));
 
     let file = download_retry(
         || async {
