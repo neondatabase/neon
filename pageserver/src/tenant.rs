@@ -2988,11 +2988,18 @@ impl Tenant {
                 .await
                 .context("extract initdb tar")?;
 
-            if initdb_tar_zst_path.exists() {
-                tokio::fs::remove_file(&initdb_tar_zst_path)
-                    .await
-                    .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
-            }
+            tokio::fs::remove_file(&initdb_tar_zst_path)
+                .await
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        // If something else already removed the file, ignore the error
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
+            if initdb_tar_zst_path.exists() {}
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
@@ -3025,11 +3032,17 @@ impl Tenant {
                 )
                 .await?;
 
-                if temp_path.exists() {
-                    tokio::fs::remove_file(&temp_path)
-                        .await
-                        .with_context(|| format!("tempfile removal {temp_path}"))?;
-                }
+                tokio::fs::remove_file(&temp_path)
+                    .await
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            // If something else already removed the file, ignore the error
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .with_context(|| format!("tempfile removal {temp_path}"))?;
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
