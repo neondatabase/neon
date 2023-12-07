@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+use bytes::Bytes;
 use camino::Utf8Path;
+use futures::stream::Stream;
 use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
@@ -176,23 +178,14 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
-    let data1 = "remote blob data1".as_bytes();
-    let data1_len = data1.len();
-    let data2 = "remote blob data2".as_bytes();
-    let data2_len = data2.len();
-    let data3 = "remote blob data3".as_bytes();
-    let data3_len = data3.len();
-    ctx.client
-        .upload(std::io::Cursor::new(data1), data1_len, &path1, None)
-        .await?;
+    let (data, len) = upload_stream("remote blob data1".as_bytes().into());
+    ctx.client.upload(data, len, &path1, None).await?;
 
-    ctx.client
-        .upload(std::io::Cursor::new(data2), data2_len, &path2, None)
-        .await?;
+    let (data, len) = upload_stream("remote blob data2".as_bytes().into());
+    ctx.client.upload(data, len, &path2, None).await?;
 
-    ctx.client
-        .upload(std::io::Cursor::new(data3), data3_len, &path3, None)
-        .await?;
+    let (data, len) = upload_stream("remote blob data3".as_bytes().into());
+    ctx.client.upload(data, len, &path3, None).await?;
 
     ctx.client.delete_objects(&[path1, path2]).await?;
 
@@ -432,11 +425,9 @@ async fn upload_s3_data(
             let blob_path = blob_prefix.join(Utf8Path::new(&format!("blob_{i}")));
             debug!("Creating remote item {i} at path {blob_path:?}");
 
-            let data = format!("remote blob data {i}").into_bytes();
-            let data_len = data.len();
-            task_client
-                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
-                .await?;
+            let (data, data_len) =
+                upload_stream(format!("remote blob data {i}").into_bytes().into());
+            task_client.upload(data, data_len, &blob_path, None).await?;
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))
         });
@@ -517,11 +508,9 @@ async fn upload_simple_s3_data(
             .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
             debug!("Creating remote item {i} at path {blob_path:?}");
 
-            let data = format!("remote blob data {i}").into_bytes();
-            let data_len = data.len();
-            task_client
-                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
-                .await?;
+            let (data, data_len) =
+                upload_stream(format!("remote blob data {i}").into_bytes().into());
+            task_client.upload(data, data_len, &blob_path, None).await?;
 
             Ok::<_, anyhow::Error>(blob_path)
         });
@@ -549,4 +538,31 @@ async fn upload_simple_s3_data(
     } else {
         ControlFlow::Continue(uploaded_blobs)
     }
+}
+
+fn upload_stream(
+    content: std::borrow::Cow<'static, [u8]>,
+) -> (
+    impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+    usize,
+) {
+    use std::borrow::Cow;
+
+    let content = match content {
+        Cow::Borrowed(x) => Bytes::from_static(x),
+        Cow::Owned(vec) => Bytes::from(vec),
+    };
+    wrap_stream(content)
+}
+
+fn wrap_stream(
+    content: bytes::Bytes,
+) -> (
+    impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+    usize,
+) {
+    let len = content.len();
+    let content = futures::future::ready(Ok(content));
+
+    (futures::stream::once(content), len)
 }

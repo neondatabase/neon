@@ -75,12 +75,11 @@ pub async fn download_layer_file<'a>(
 
     let (mut destination_file, bytes_amount) = download_retry(
         || async {
-            // TODO: this doesn't use the cached fd for some reason?
-            let mut destination_file = fs::File::create(&temp_file_path)
+            let destination_file = tokio::fs::File::create(&temp_file_path)
                 .await
                 .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
-            let mut download = storage
+            let download = storage
                 .download(&remote_path)
                 .await
                 .with_context(|| {
@@ -90,9 +89,14 @@ pub async fn download_layer_file<'a>(
                 })
                 .map_err(DownloadError::Other)?;
 
+            let mut destination_file =
+                tokio::io::BufWriter::with_capacity(8 * 1024, destination_file);
+
+            let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
+
             let bytes_amount = tokio::time::timeout(
                 MAX_DOWNLOAD_DURATION,
-                tokio::io::copy(&mut download.download_stream, &mut destination_file),
+                tokio::io::copy_buf(&mut reader, &mut destination_file),
             )
             .await
             .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
@@ -102,6 +106,8 @@ pub async fn download_layer_file<'a>(
                 )
             })
             .map_err(DownloadError::Other)?;
+
+            let destination_file = destination_file.into_inner();
 
             Ok((destination_file, bytes_amount))
         },
@@ -220,20 +226,22 @@ async fn do_download_index_part(
     index_generation: Generation,
     cancel: CancellationToken,
 ) -> Result<IndexPart, DownloadError> {
+    use futures::stream::StreamExt;
+
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
     let index_part_bytes = download_retry_forever(
         || async {
-            let mut index_part_download = storage.download(&remote_path).await?;
+            let index_part_download = storage.download(&remote_path).await?;
 
             let mut index_part_bytes = Vec::new();
-            tokio::io::copy(
-                &mut index_part_download.download_stream,
-                &mut index_part_bytes,
-            )
-            .await
-            .with_context(|| format!("download index part at {remote_path:?}"))
-            .map_err(DownloadError::Other)?;
+            let mut stream = std::pin::pin!(index_part_download.download_stream);
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk
+                    .with_context(|| format!("download index part at {remote_path:?}"))
+                    .map_err(DownloadError::Other)?;
+                index_part_bytes.extend_from_slice(&chunk[..]);
+            }
             Ok(index_part_bytes)
         },
         &format!("download {remote_path:?}"),
@@ -398,7 +406,7 @@ pub(crate) async fn download_initdb_tar_zst(
 
     let file = download_retry(
         || async {
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .create(true)
                 .truncate(true)
                 .read(true)
@@ -408,12 +416,16 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let mut download = storage.download(&remote_path).await?;
+            let download = storage.download(&remote_path).await?;
+            let mut download = tokio_util::io::StreamReader::new(download.download_stream);
+            let mut writer = tokio::io::BufWriter::with_capacity(8 * 1024, file);
 
-            tokio::io::copy(&mut download.download_stream, &mut file)
+            tokio::io::copy_buf(&mut download, &mut writer)
                 .await
                 .with_context(|| format!("download initdb.tar.zst at {remote_path:?}"))
                 .map_err(DownloadError::Other)?;
+
+            let mut file = writer.into_inner();
 
             file.seek(std::io::SeekFrom::Start(0))
                 .await

@@ -494,15 +494,13 @@ async fn backup_object(
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(
-        File::open(&source_file)
-            .await
-            .with_context(|| format!("Failed to open file {} for wal backup", source_file))?,
-    );
-
-    storage
-        .upload_storage_object(Box::new(file), size, target_file)
+    let file = File::open(&source_file)
         .await
+        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+
+    let file = tokio_util::io::ReaderStream::with_capacity(file, 8 * 1024);
+
+    storage.upload_storage_object(file, size, target_file).await
 }
 
 pub async fn read_object(
@@ -524,5 +522,9 @@ pub async fn read_object(
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
         })?;
 
-    Ok(download.download_stream)
+    let reader = tokio_util::io::StreamReader::new(download.download_stream);
+
+    let reader = tokio::io::BufReader::with_capacity(8 * 1024, reader);
+
+    Ok(Box::pin(reader))
 }

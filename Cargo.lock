@@ -3864,6 +3864,7 @@ dependencies = [
  "bytes",
  "camino",
  "camino-tempfile",
+ "futures",
  "futures-util",
  "http-types",
  "hyper",
@@ -4291,6 +4292,7 @@ dependencies = [
  "tokio-io-timeout",
  "tokio-postgres",
  "tokio-stream",
+ "tokio-util",
  "toml_edit",
  "tracing",
  "url",
@@ -5220,6 +5222,7 @@ checksum = "5419f34732d9eb6ee4c3578b7989078579b7f039cbbb9ca2c4da015749371e15"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",
