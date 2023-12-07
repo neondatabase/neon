@@ -216,9 +216,13 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
 
     ctx.client.upload(data, len, &path, None).await?;
 
-    async fn download_and_compare(mut dl: Download) -> anyhow::Result<Vec<u8>> {
+    async fn download_and_compare(dl: Download) -> anyhow::Result<Vec<u8>> {
         let mut buf = Vec::new();
-        tokio::io::copy(&mut dl.download_stream, &mut buf).await?;
+        tokio::io::copy_buf(
+            &mut tokio_util::io::StreamReader::new(dl.download_stream),
+            &mut buf,
+        )
+        .await?;
         Ok(buf)
     }
     // Normal download request

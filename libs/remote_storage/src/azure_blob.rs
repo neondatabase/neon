@@ -1,11 +1,11 @@
 //! Azure Blob Storage wrapper
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::{borrow::Cow, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
@@ -120,7 +120,8 @@ impl AzureBlobStorage {
         let mut metadata = HashMap::new();
         // TODO give proper streaming response instead of buffering into RAM
         // https://github.com/neondatabase/neon/issues/5563
-        let mut buf = Vec::new();
+
+        let mut bufs = Vec::new();
         while let Some(part) = response.next().await {
             let part = part.map_err(to_download_error)?;
             if let Some(blob_meta) = part.blob.metadata {
@@ -131,10 +132,10 @@ impl AzureBlobStorage {
                 .collect()
                 .await
                 .map_err(|e| DownloadError::Other(e.into()))?;
-            buf.extend_from_slice(&data.slice(..));
+            bufs.push(data);
         }
         Ok(Download {
-            download_stream: Box::pin(Cursor::new(buf)),
+            download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
             metadata: Some(StorageMetadata(metadata)),
         })
     }

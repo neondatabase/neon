@@ -522,5 +522,9 @@ pub async fn read_object(
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
         })?;
 
-    Ok(download.download_stream)
+    let reader = tokio_util::io::StreamReader::new(download.download_stream);
+
+    let reader = tokio::io::BufReader::with_capacity(8 * 1024, reader);
+
+    Ok(Box::pin(reader))
 }

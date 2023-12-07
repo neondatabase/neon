@@ -37,10 +37,7 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::{
-    io::{self, AsyncRead},
-    sync::mpsc::Permit,
-};
+use tokio::io::{self, AsyncRead};
 
 use super::StorageMetadata;
 use crate::{
@@ -233,12 +230,15 @@ impl S3Bucket {
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
+
+                let body = object_output.body;
+                let body = ByteStreamAsStream::from(body);
+                let body = PermitCarrying::new(permit, body);
+                let body = TimedDownload::new(started_at, body);
+
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(TimedDownload::new(
-                        started_at,
-                        RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
-                    )),
+                    download_stream: Box::pin(body),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
@@ -374,11 +374,13 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         use std::task::ready;
 
-        let res = ready!(self.project().inner.poll_next(cx));
+        let this = self.project();
+
+        let res = ready!(this.inner.poll_next(cx));
         match &res {
             Some(Ok(_)) => {}
-            Some(Err(_)) => self.outcome = metrics::AttemptOutcome::Err,
-            None => self.outcome = metrics::AttemptOutcome::Ok,
+            Some(Err(_)) => *this.outcome = metrics::AttemptOutcome::Err,
+            None => *this.outcome = metrics::AttemptOutcome::Ok,
         }
 
         Poll::Ready(res)
