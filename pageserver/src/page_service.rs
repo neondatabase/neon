@@ -67,9 +67,9 @@ use crate::trace::Tracer;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-// How long we may block waiting for a [`TenantSlot::InProgress`]` and/or a [`Tenant`] which
+// How long we may wait for a [`TenantSlot::InProgress`]` and/or a [`Tenant`] which
 // is not yet in state [`TenantState::Active`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 /// Read the end of a tar archive.
 ///
