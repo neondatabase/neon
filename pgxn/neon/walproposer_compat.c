@@ -9,8 +9,9 @@
 #include "utils/datetime.h"
 #include "miscadmin.h"
 
-void ExceptionalCondition(const char *conditionName,
-						  const char *fileName, int lineNumber)
+void
+ExceptionalCondition(const char *conditionName,
+					 const char *fileName, int lineNumber)
 {
 	fprintf(stderr, "ExceptionalCondition: %s:%d: %s\n",
 			fileName, lineNumber, conditionName);
@@ -169,17 +170,18 @@ timestamptz_to_str(TimestampTz t)
 
 bool
 TimestampDifferenceExceeds(TimestampTz start_time,
-								TimestampTz stop_time,
-								int msec)
+						   TimestampTz stop_time,
+						   int msec)
 {
 	TimestampTz diff = stop_time - start_time;
+
 	return (diff >= msec * INT64CONST(1000));
 }
 
 void
-WalProposerLibLog(WalProposer *wp, int elevel, char *fmt, ...)
+WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...)
 {
-	char buf[1024];
+	char		buf[1024];
 	va_list		args;
 
 	fmt = _(fmt);
