@@ -7,6 +7,7 @@ use crate::{
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
+use smol_str::SmolStr;
 use std::{collections::HashSet, net::IpAddr};
 use thiserror::Error;
 use tracing::{info, warn};
@@ -21,7 +22,7 @@ pub enum ClientCredsParseError {
          SNI ('{}') and project option ('{}').",
         .domain, .option,
     )]
-    InconsistentProjectNames { domain: String, option: String },
+    InconsistentProjectNames { domain: SmolStr, option: SmolStr },
 
     #[error(
         "Common name inferred from SNI ('{}') is not known",
@@ -30,7 +31,7 @@ pub enum ClientCredsParseError {
     UnknownCommonName { cn: String },
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphen.")]
-    MalformedProjectName(String),
+    MalformedProjectName(SmolStr),
 }
 
 impl UserFacingError for ClientCredsParseError {}
@@ -38,25 +39,25 @@ impl UserFacingError for ClientCredsParseError {}
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientCredentials<'a> {
-    pub user: &'a str,
+pub struct ClientCredentials {
+    pub user: SmolStr,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
-    pub project: Option<String>,
+    pub project: Option<SmolStr>,
 
-    pub cache_key: String,
+    pub cache_key: SmolStr,
     pub peer_addr: IpAddr,
 }
 
-impl ClientCredentials<'_> {
+impl ClientCredentials {
     #[inline]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
     }
 }
 
-impl<'a> ClientCredentials<'a> {
+impl ClientCredentials {
     pub fn parse(
-        params: &'a StartupMessageParams,
+        params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<HashSet<String>>,
         peer_addr: IpAddr,
@@ -65,7 +66,7 @@ impl<'a> ClientCredentials<'a> {
 
         // Some parameters are stored in the startup message.
         let get_param = |key| params.get(key).ok_or(MissingKey(key));
-        let user = get_param("user")?;
+        let user = get_param("user")?.into();
 
         // Project name might be passed via PG's command-line options.
         let project_option = params
@@ -79,7 +80,7 @@ impl<'a> ClientCredentials<'a> {
                     .at_most_one()
                     .ok()?
             })
-            .map(|name| name.to_string());
+            .map(|name| name.into());
 
         let project_from_domain = if let Some(sni_str) = sni {
             if let Some(cn) = common_names {
@@ -118,7 +119,7 @@ impl<'a> ClientCredentials<'a> {
         }
         .transpose()?;
 
-        info!(user, project = project.as_deref(), "credentials");
+        info!(%user, project = project.as_deref(), "credentials");
         if sni.is_some() {
             info!("Connection with sni");
             NUM_CONNECTION_ACCEPTED_BY_SNI
@@ -140,7 +141,8 @@ impl<'a> ClientCredentials<'a> {
             "{}{}",
             project.as_deref().unwrap_or(""),
             neon_options(params).unwrap_or("".to_string())
-        );
+        )
+        .into();
 
         Ok(Self {
             user,
@@ -203,10 +205,10 @@ fn project_name_valid(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '-')
 }
 
-fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<String> {
+fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<SmolStr> {
     sni.strip_suffix(common_name)?
         .strip_suffix('.')
-        .map(str::to_owned)
+        .map(SmolStr::from)
 }
 
 #[cfg(test)]

@@ -666,7 +666,7 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo<'_>>,
+    creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
@@ -915,7 +915,7 @@ struct Client<'a, S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<Stream<S>>,
     /// Client credentials that we care about.
-    creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
+    creds: auth::BackendType<'a, auth::ClientCredentials>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
     /// Unique connection ID.
@@ -928,7 +928,7 @@ impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
         stream: PqStream<Stream<S>>,
-        creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
+        creds: auth::BackendType<'a, auth::ClientCredentials>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
         allow_self_signed_compute: bool,
@@ -947,7 +947,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     // Instrumentation logs endpoint name everywhere. Doesn't work for link
     // auth; strictly speaking we don't know endpoint name in its case.
-    #[tracing::instrument(name = "", fields(ep = self.creds.get_endpoint().unwrap_or("".to_owned())), skip_all)]
+    #[tracing::instrument(name = "", fields(ep = %self.creds.get_endpoint().unwrap_or_default()), skip_all)]
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,

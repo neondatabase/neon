@@ -1,7 +1,11 @@
-use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
+use super::{
+    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint,
+};
 use crate::{
     auth::{self, AuthFlow},
+    console::AuthSecret,
     proxy::LatencyTimer,
+    sasl,
     stream::{self, Stream},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -11,36 +15,41 @@ use tracing::{info, warn};
 /// one round trip and *expensive* computations (>= 4096 HMAC iterations).
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
-pub async fn cleartext_hack<'a>(
-    info: ComputeUserInfo<'a>,
+pub async fn authenticate_cleartext(
+    info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<ComputeCredentials<'a, Vec<u8>>> {
+    secret: AuthSecret,
+) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     warn!("cleartext auth flow override is enabled, proceeding");
 
     // pause the timer while we communicate with the client
     let _paused = latency_timer.pause();
 
-    let password = AuthFlow::new(client)
-        .begin(auth::CleartextPassword)
+    let auth_outcome = AuthFlow::new(client)
+        .begin(auth::CleartextPassword(secret))
         .await?
         .authenticate()
         .await?;
 
-    // Report tentative success; compute node will check the password anyway.
-    Ok(ComputeCredentials {
-        info,
-        keys: password,
-    })
+    let keys = match auth_outcome {
+        sasl::Outcome::Success(key) => key,
+        sasl::Outcome::Failure(reason) => {
+            info!("auth backend failed with an error: {reason}");
+            return Err(auth::AuthError::auth_failed(&*info.inner.user));
+        }
+    };
+
+    Ok(ComputeCredentials { info, keys })
 }
 
 /// Workaround for clients which don't provide an endpoint (project) name.
 /// Very similar to [`cleartext_hack`], but there's a specific password format.
-pub async fn password_hack<'a>(
-    info: ComputeUserInfoNoEndpoint<'a>,
+pub async fn password_hack_no_authentication(
+    info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<ComputeCredentials<'a, Vec<u8>>> {
+) -> auth::Result<ComputeCredentials<Vec<u8>>> {
     warn!("project not specified, resorting to the password hack auth flow");
 
     // pause the timer while we communicate with the client
@@ -49,10 +58,10 @@ pub async fn password_hack<'a>(
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
         .await?
-        .authenticate()
+        .get_password()
         .await?;
 
-    info!(project = &payload.endpoint, "received missing parameter");
+    info!(project = &*payload.endpoint, "received missing parameter");
 
     // Report tentative success; compute node will check the password anyway.
     Ok(ComputeCredentials {

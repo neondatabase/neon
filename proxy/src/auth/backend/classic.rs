@@ -8,17 +8,16 @@ use crate::{
     sasl,
     stream::{PqStream, Stream},
 };
-use pq_proto::BeMessage as Be;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
-pub(super) async fn authenticate<'a>(
-    creds: ComputeUserInfo<'a>,
+pub(super) async fn authenticate(
+    creds: ComputeUserInfo,
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<ComputeCredentials<'a, ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
         #[cfg(feature = "testing")]
@@ -55,7 +54,7 @@ pub(super) async fn authenticate<'a>(
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
-                    return Err(auth::AuthError::auth_failed(creds.inner.user));
+                    return Err(auth::AuthError::auth_failed(&*creds.inner.user));
                 }
             };
 
@@ -65,8 +64,6 @@ pub(super) async fn authenticate<'a>(
             }
         }
     };
-
-    client.write_message_noflush(&Be::AuthenticationOk)?;
 
     Ok(ComputeCredentials {
         info: creds,

@@ -3,9 +3,11 @@ mod hacks;
 mod link;
 
 pub use link::LinkAuthError;
+use smol_str::SmolStr;
 use tokio_postgres::config::AuthKeys;
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
+use crate::auth::validate_password_and_exchange;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::AuthInfo;
 use crate::console::AuthSecret;
@@ -119,20 +121,20 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
-pub struct ComputeCredentials<'a, T> {
-    pub info: ComputeUserInfo<'a>,
+pub struct ComputeCredentials<T> {
+    pub info: ComputeUserInfo,
     pub keys: T,
 }
 
-pub struct ComputeUserInfoNoEndpoint<'a> {
-    pub user: &'a str,
+pub struct ComputeUserInfoNoEndpoint {
+    pub user: SmolStr,
     pub peer_addr: IpAddr,
-    pub cache_key: String,
+    pub cache_key: SmolStr,
 }
 
-pub struct ComputeUserInfo<'a> {
-    pub endpoint: String,
-    pub inner: ComputeUserInfoNoEndpoint<'a>,
+pub struct ComputeUserInfo {
+    pub endpoint: SmolStr,
+    pub inner: ComputeUserInfoNoEndpoint,
 }
 
 pub enum ComputeCredentialKeys {
@@ -141,11 +143,11 @@ pub enum ComputeCredentialKeys {
     AuthKeys(AuthKeys),
 }
 
-impl<'a> TryFrom<ClientCredentials<'a>> for ComputeUserInfo<'a> {
+impl TryFrom<ClientCredentials> for ComputeUserInfo {
     // user name
-    type Error = ComputeUserInfoNoEndpoint<'a>;
+    type Error = ComputeUserInfoNoEndpoint;
 
-    fn try_from(creds: ClientCredentials<'a>) -> Result<Self, Self::Error> {
+    fn try_from(creds: ClientCredentials) -> Result<Self, Self::Error> {
         let inner = ComputeUserInfoNoEndpoint {
             user: creds.user,
             peer_addr: creds.peer_addr,
@@ -160,21 +162,23 @@ impl<'a> TryFrom<ClientCredentials<'a>> for ComputeUserInfo<'a> {
 
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
-async fn auth_quirks_creds<'a>(
+///
+/// All authentication flows will emit an AuthenticationOk message if successful.
+async fn auth_quirks(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
-    creds: ClientCredentials<'a>,
+    creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<ComputeCredentials<'a, ComputeCredentialKeys>> {
+) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
-    let (info, maybe_success) = match creds.try_into() {
+    let (info, unauthenticated_password) = match creds.try_into() {
         Err(info) => {
-            let res = hacks::password_hack(info, client, latency_timer).await?;
+            let res = hacks::password_hack_no_authentication(info, client, latency_timer).await?;
             (res.info, Some(res.keys))
         }
         Ok(info) => (info, None),
@@ -196,87 +200,49 @@ async fn auth_quirks_creds<'a>(
         // prevent malicious probing (possible due to missing protocol steps).
         // This mocked secret will never lead to successful authentication.
         info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(info.inner.user, rand::random()))
+        AuthSecret::Scram(scram::ServerSecret::mock(&info.inner.user, rand::random()))
     });
 
-    if let Some(password) = maybe_success {
-        return Ok(ComputeCredentials {
-            keys: validate(client, &info.inner, password, secret)?,
-            info,
-        });
+    if let Some(password) = unauthenticated_password {
+        let auth_outcome = validate_password_and_exchange(client, &password, secret)?;
+        let keys = match auth_outcome {
+            crate::sasl::Outcome::Success(key) => key,
+            crate::sasl::Outcome::Failure(reason) => {
+                info!("auth backend failed with an error: {reason}");
+                return Err(auth::AuthError::auth_failed(&*info.inner.user));
+            }
+        };
+
+        // we have authenticated the password
+        client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
+
+        return Ok(ComputeCredentials { info, keys });
     }
+
+    // -- the remaining flows are self-authenticating --
 
     // Perform cleartext auth if we're allowed to do that.
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
-        // Password will be checked by the compute node later.
-        let ComputeCredentials { info, keys } =
-            hacks::cleartext_hack(info, client, latency_timer).await?;
-        return Ok(ComputeCredentials {
-            keys: validate(client, &info.inner, keys, secret)?,
-            info,
-        });
+        return hacks::authenticate_cleartext(info, client, latency_timer, secret).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
     classic::authenticate(info, client, config, latency_timer, secret).await
 }
 
-fn validate(
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-    info: &ComputeUserInfoNoEndpoint,
-    password: Vec<u8>,
-    secret: AuthSecret,
-) -> auth::Result<ComputeCredentialKeys> {
-    match secret {
-        #[cfg(feature = "testing")]
-        AuthSecret::Md5(_) => {
-            // test only
-            Ok(ComputeCredentialKeys::Password(password))
-        }
-        // perform scram authentication as both client and server to validate the keys
-        AuthSecret::Scram(scram_secret) => {
-            use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
-            let sasl_client = ScramSha256::new(&password, ChannelBinding::unsupported());
-            let outcome = crate::scram::exchange(
-                &scram_secret,
-                sasl_client,
-                crate::config::TlsServerEndPoint::Undefined,
-            )?;
-
-            let client_key = match outcome {
-                crate::sasl::Outcome::Success(client_key) => client_key,
-                crate::sasl::Outcome::Failure(reason) => {
-                    info!("auth backend failed with an error: {reason}");
-                    return Err(auth::AuthError::auth_failed(info.user));
-                }
-            };
-
-            // we have authenticated the password
-            client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
-
-            let keys = crate::compute::ScramKeys {
-                client_key: client_key.as_bytes(),
-                server_key: scram_secret.server_key.as_bytes(),
-            };
-
-            Ok(ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(keys)))
-        }
-    }
-}
-
-/// True to its name, this function encapsulates our current auth trade-offs.
-/// Here, we choose the appropriate auth flow based on circumstances.
-async fn auth_quirks<'a>(
+/// Authenticate the user and then wake a compute (or retrieve an existing compute session from cache)
+/// only if authentication was successfuly.
+async fn auth_and_wake_compute(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
-    creds: ClientCredentials<'a>,
+    creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
-) -> auth::Result<(CachedNodeInfo, ComputeUserInfo<'a>)> {
-    let compute_credentials = auth_quirks_creds(
+) -> auth::Result<(CachedNodeInfo, ComputeUserInfo)> {
+    let compute_credentials = auth_quirks(
         api,
         extra,
         creds,
@@ -315,18 +281,18 @@ async fn auth_quirks<'a>(
     Ok((node, compute_credentials.info))
 }
 
-impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
+impl<'a> BackendType<'a, ClientCredentials> {
     /// Get compute endpoint name from the credentials.
-    pub fn get_endpoint(&self) -> Option<String> {
+    pub fn get_endpoint(&self) -> Option<SmolStr> {
         use BackendType::*;
 
         match self {
             Console(_, creds) => creds.project.clone(),
             #[cfg(feature = "testing")]
             Postgres(_, creds) => creds.project.clone(),
-            Link(_) => Some("link".to_owned()),
+            Link(_) => Some("link".into()),
             #[cfg(test)]
-            Test(_) => Some("test".to_owned()),
+            Test(_) => Some("test".into()),
         }
     }
 
@@ -335,9 +301,9 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
         use BackendType::*;
 
         match self {
-            Console(_, creds) => creds.user,
+            Console(_, creds) => &creds.user,
             #[cfg(feature = "testing")]
-            Postgres(_, creds) => creds.user,
+            Postgres(_, creds) => &creds.user,
             Link(_) => "link",
             #[cfg(test)]
             Test(_) => "test",
@@ -353,18 +319,18 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         latency_timer: &mut LatencyTimer,
-    ) -> auth::Result<(CachedNodeInfo, BackendType<'a, ComputeUserInfo<'b>>)> {
+    ) -> auth::Result<(CachedNodeInfo, BackendType<'a, ComputeUserInfo>)> {
         use BackendType::*;
 
         let res = match self {
             Console(api, creds) => {
                 info!(
-                    user = creds.user,
+                    user = &*creds.user,
                     project = creds.project(),
                     "performing authentication using the console"
                 );
 
-                let success = auth_quirks(
+                let (cache_info, user_info) = auth_and_wake_compute(
                     &*api,
                     extra,
                     creds,
@@ -374,7 +340,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                     latency_timer,
                 )
                 .await?;
-                (success.0, BackendType::Console(api, success.1))
+                (cache_info, BackendType::Console(api, user_info))
             }
             #[cfg(feature = "testing")]
             Postgres(api, creds) => {
@@ -384,7 +350,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                     "performing authentication using a local postgres instance"
                 );
 
-                let success = auth_quirks(
+                let (cache_info, user_info) = auth_and_wake_compute(
                     &*api,
                     extra,
                     creds,
@@ -394,7 +360,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
                     latency_timer,
                 )
                 .await?;
-                (success.0, BackendType::Postgres(api, success.1))
+                (cache_info, BackendType::Postgres(api, user_info))
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
@@ -418,7 +384,7 @@ impl<'a, 'b> BackendType<'a, ClientCredentials<'b>> {
     }
 }
 
-impl BackendType<'_, ComputeUserInfo<'_>> {
+impl BackendType<'_, ComputeUserInfo> {
     pub async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,

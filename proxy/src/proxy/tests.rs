@@ -485,7 +485,7 @@ fn helper_create_connect_info(
 ) -> (
     CachedNodeInfo,
     console::ConsoleReqExtra<'static>,
-    auth::BackendType<'_, ComputeUserInfo<'static>>,
+    auth::BackendType<'_, ComputeUserInfo>,
 ) {
     let cache = helper_create_cached_node_info();
     let extra = console::ConsoleReqExtra {

@@ -49,7 +49,7 @@ impl Api {
     async fn do_get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ComputeUserInfo<'_>,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
@@ -62,7 +62,7 @@ impl Api {
                 .query(&[
                     ("application_name", extra.application_name),
                     ("project", Some(&creds.endpoint)),
-                    ("role", Some(creds.inner.user)),
+                    ("role", Some(&creds.inner.user)),
                 ])
                 .build()?;
 
@@ -102,7 +102,7 @@ impl Api {
     async fn do_wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ComputeUserInfo<'_>,
+        creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
