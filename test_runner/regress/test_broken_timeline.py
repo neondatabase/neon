@@ -160,7 +160,7 @@ def test_timeline_init_break_before_checkpoint_recreate(
         ]
     )
 
-    pageserver_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)

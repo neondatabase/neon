@@ -99,27 +99,35 @@ impl LocalFs {
         };
 
         // If we were given a directory, we may use it as our starting point.
-        // Otherwise, we must go up to the parent directory.  This is because
+        // Otherwise, we must go up to the first ancestor dir that exists.  This is because
         // S3 object list prefixes can be arbitrary strings, but when reading
         // the local filesystem we need a directory to start calling read_dir on.
         let mut initial_dir = full_path.clone();
-        match fs::metadata(full_path.clone()).await {
-            Ok(meta) => {
-                if !meta.is_dir() {
+        loop {
+            // Did we make it to the root?
+            if initial_dir.parent().is_none() {
+                anyhow::bail!("list_files: failed to find valid ancestor dir for {full_path}");
+            }
+
+            match fs::metadata(initial_dir.clone()).await {
+                Ok(meta) if meta.is_dir() => {
+                    // We found a directory, break
+                    break;
+                }
+                Ok(_meta) => {
                     // It's not a directory: strip back to the parent
                     initial_dir.pop();
                 }
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                // It's not a file that exists: strip the prefix back to the parent directory
-                initial_dir.pop();
-            }
-            Err(e) => {
-                // Unexpected I/O error
-                anyhow::bail!(e)
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    // It's not a file that exists: strip the prefix back to the parent directory
+                    initial_dir.pop();
+                }
+                Err(e) => {
+                    // Unexpected I/O error
+                    anyhow::bail!(e)
+                }
             }
         }
-
         // Note that Utf8PathBuf starts_with only considers full path segments, but
         // object prefixes are arbitrary strings, so we need the strings for doing
         // starts_with later.

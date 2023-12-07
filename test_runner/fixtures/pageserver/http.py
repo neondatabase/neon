@@ -210,16 +210,25 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def tenant_create(
-        self, new_tenant_id: TenantId, conf: Optional[Dict[str, Any]] = None
+        self,
+        new_tenant_id: TenantId,
+        conf: Optional[Dict[str, Any]] = None,
+        generation: Optional[int] = None,
     ) -> TenantId:
         if conf is not None:
             assert "new_tenant_id" not in conf.keys()
+
+        body: Dict[str, Any] = {
+            "new_tenant_id": str(new_tenant_id),
+            **(conf or {}),
+        }
+
+        if generation is not None:
+            body.update({"generation": generation})
+
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
-            json={
-                "new_tenant_id": str(new_tenant_id),
-                **(conf or {}),
-            },
+            json=body,
         )
         self.verbose_error(res)
         if res.status_code == 409:
@@ -273,8 +282,11 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return res
 
-    def tenant_load(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
+    def tenant_load(self, tenant_id: TenantId, generation=None):
+        body = None
+        if generation is not None:
+            body = {"generation": generation}
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load", json=body)
         self.verbose_error(res)
 
     def tenant_ignore(self, tenant_id: TenantId):

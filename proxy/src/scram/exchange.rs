@@ -106,14 +106,14 @@ impl sasl::Mechanism for Exchange<'_> {
 
                 let channel_binding = cbind_flag.encode(|_| match &self.tls_server_end_point {
                     config::TlsServerEndPoint::Sha256(x) => Ok(x),
-                    config::TlsServerEndPoint::Undefined => {
-                        Err(SaslError::ChannelBindingFailed("no cert digest provided"))
-                    }
+                    config::TlsServerEndPoint::Undefined => Err(SaslError::MissingBinding),
                 })?;
 
                 // This might've been caused by a MITM attack
                 if client_final_message.channel_binding != channel_binding {
-                    return Err(SaslError::ChannelBindingFailed("data mismatch"));
+                    return Err(SaslError::ChannelBindingFailed(
+                        "insecure connection: secure channel data mismatch",
+                    ));
                 }
 
                 if client_final_message.nonce != server_first_message.nonce() {

@@ -323,6 +323,7 @@ impl TenantConfigRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct TenantAttachRequest {
+    #[serde(default)]
     pub config: TenantAttachConfig,
     #[serde(default)]
     pub generation: Option<u32>,
@@ -330,7 +331,7 @@ pub struct TenantAttachRequest {
 
 /// Newtype to enforce deny_unknown_fields on TenantConfig for
 /// its usage inside `TenantAttachRequest`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TenantAttachConfig {
     #[serde(flatten)]
