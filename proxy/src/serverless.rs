@@ -180,6 +180,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
