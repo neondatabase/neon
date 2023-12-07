@@ -610,9 +610,11 @@ impl Drop for VirtualFile {
             slot.recently_used.store(false, Ordering::Relaxed);
             // there is also operation "close-by-replace" for closes done on eviction for
             // comparison.
-            STORAGE_IO_TIME_METRIC
-                .get(StorageIoOperation::Close)
-                .observe_closure_duration(|| drop(slot_guard.file.take()));
+            if let Some(fd) = slot_guard.file.take() {
+                STORAGE_IO_TIME_METRIC
+                    .get(StorageIoOperation::Close)
+                    .observe_closure_duration(|| drop(fd));
+            }
         }
     }
 }

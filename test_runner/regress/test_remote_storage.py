@@ -840,7 +840,7 @@ def test_compaction_waits_for_upload(
     ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
 
     def layer_deletes_completed():
-        m = client.get_metric_value("pageserver_layer_gcs_count_total", {"state": "completed"})
+        m = client.get_metric_value("pageserver_layer_completed_deletes_total")
         if m is None:
             return 0
         return int(m)
