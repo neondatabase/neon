@@ -37,8 +37,10 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::io::{self, AsyncRead};
-use tracing::debug;
+use tokio::{
+    io::{self, AsyncRead},
+    sync::mpsc::Permit,
+};
 
 use super::StorageMetadata;
 use crate::{
@@ -69,7 +71,7 @@ struct GetObjectRequest {
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
-        debug!(
+        tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
@@ -250,21 +252,52 @@ impl S3Bucket {
 }
 
 pin_project_lite::pin_project! {
+    struct ByteStreamAsStream {
+        #[pin]
+        inner: aws_smithy_types::byte_stream::ByteStream
+    }
+}
+
+impl From<aws_smithy_types::byte_stream::ByteStream> for ByteStreamAsStream {
+    fn from(inner: aws_smithy_types::byte_stream::ByteStream) -> Self {
+        ByteStreamAsStream { inner }
+    }
+}
+
+impl Stream for ByteStreamAsStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // this does the std::io::ErrorKind::Other conversion
+        self.project().inner.poll_next(cx).map_err(|x| x.into())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (min, max) = self.inner.size_hint();
+
+        (
+            usize::try_from(min).unwrap_or(usize::MAX),
+            max.map(|max| usize::try_from(max).unwrap_or(usize::MAX)),
+        )
+    }
+}
+
+pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct RatelimitedAsyncRead<S> {
+    struct PermitCarrying<S> {
         permit: tokio::sync::OwnedSemaphorePermit,
         #[pin]
         inner: S,
     }
 }
 
-impl<S: AsyncRead> RatelimitedAsyncRead<S> {
+impl<S> PermitCarrying<S> {
     fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        RatelimitedAsyncRead { permit, inner }
+        Self { permit, inner }
     }
 }
 
-impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
+impl<S: AsyncRead> AsyncRead for PermitCarrying<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -272,6 +305,18 @@ impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.project();
         this.inner.poll_read(cx, buf)
+    }
+}
+
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -291,7 +336,7 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<S: AsyncRead> TimedDownload<S> {
+impl<S> TimedDownload<S> {
     fn new(started_at: std::time::Instant, inner: S) -> Self {
         TimedDownload {
             started_at,
@@ -320,6 +365,28 @@ impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
         }
 
         std::task::Poll::Ready(read)
+    }
+}
+
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use std::task::ready;
+
+        let res = ready!(self.project().inner.poll_next(cx));
+        match &res {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => self.outcome = metrics::AttemptOutcome::Err,
+            None => self.outcome = metrics::AttemptOutcome::Ok,
+        }
+
+        Poll::Ready(res)
+    }
+
+    // Provided method
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
