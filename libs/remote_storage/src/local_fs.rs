@@ -260,7 +260,7 @@ impl RemoteStorage for LocalFs {
         let mut buffer_to_read = data.take(from_size_bytes);
 
         // alternatively we could just write the bytes to a file, but local_fs is a testing utility
-        let bytes_read = io::copy(&mut buffer_to_read, &mut destination)
+        let bytes_read = io::copy_buf(&mut buffer_to_read, &mut destination)
             .await
             .with_context(|| {
                 format!(

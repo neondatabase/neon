@@ -254,6 +254,9 @@ pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
 pub(crate) const INITDB_PATH: &str = "initdb.tar.zst";
 
+/// Default buffer size when interfacing with [`tokio::fs::File`].
+const BUFFER_SIZE: usize = 32 * 1024;
+
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
