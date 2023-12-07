@@ -181,6 +181,7 @@ impl LayerMap {
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult> {
         let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
         let latest_delta = version.delta_coverage.query(key.to_i128());

@@ -2045,6 +2045,7 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
+    #[instrument(level = tracing::Level::DEBUG, skip_all)]
     async fn get_reconstruct_data(
         &self,
         key: Key,
@@ -2079,7 +2080,8 @@ impl Timeline {
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
         'outer: loop {
-            if self.cancel.is_cancelled() {
+
+             if self.cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
             }
 

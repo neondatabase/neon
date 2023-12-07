@@ -227,6 +227,7 @@ impl Layer {
     ///
     /// It is up to the caller to collect more data from the previous layer and
     /// perform WAL redo, if necessary.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) async fn get_value_reconstruct_data(
         &self,
         key: Key,

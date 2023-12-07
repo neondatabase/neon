@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{io::BufWriter, str::FromStr};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
@@ -77,6 +77,7 @@ pub enum Output {
 #[must_use]
 pub struct FlushGuard {
     _tracing_chrome_layer: Option<tracing_chrome::FlushGuard>,
+    _tracing_flame_layer: Option<tracing_flame::FlushGuard<BufWriter<std::fs::File>>>,
 }
 
 pub fn init(
@@ -98,6 +99,16 @@ pub fn init(
         Err(std::env::VarError::NotPresent) => false,
         Err(std::env::VarError::NotUnicode(_)) => {
             panic!("env var NEON_PAGESERVER_ENABLE_TRACING_CHROME not unicode")
+        }
+    };
+
+    // WIP: lift it up as an argument
+    let enable_tracing_flame = match std::env::var("NEON_PAGESERVER_ENABLE_TRACING_FLAME") {
+        Ok(s) if s != "0" => true,
+        Ok(_s) => false,
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("env var NEON_PAGESERVER_ENABLE_TRACING_FLAME not unicode")
         }
     };
 
@@ -147,8 +158,23 @@ pub fn init(
         .add_layer(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
 
     let tracing_chrome_layer_flush_guard = if enable_tracing_chrome {
-        let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new().build();
-        layers.add_layer(layer);
+        let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+            .trace_style(tracing_chrome::TraceStyle::Async)
+            .build();
+        layers.add_layer(layer.with_filter(rust_log_env_filter()));
+        Some(guard)
+    } else {
+        None
+    };
+
+    let tracing_flame_flush_guard = if enable_tracing_flame {
+        let (layer, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
+        let layer = layer
+            .with_empty_samples(false)
+            .with_module_path(false)
+            .with_file_and_line(false)
+            .with_threads_collapsed(true);
+        layers.add_layer(layer.with_filter(rust_log_env_filter()));
         Some(guard)
     } else {
         None
@@ -166,6 +192,7 @@ pub fn init(
 
     Ok(FlushGuard {
         _tracing_chrome_layer: tracing_chrome_layer_flush_guard,
+        _tracing_flame_layer: tracing_flame_flush_guard,
     })
 }
 
