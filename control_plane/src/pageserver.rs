@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::models::{self, LocationConfig, TenantInfo, TimelineInfo};
+use pageserver_api::models::{self, LocationConfig, ShardParameters, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -376,6 +376,7 @@ impl PageServerNode {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),
             generation,
             config,
+            shard_parameters: ShardParameters::default(),
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

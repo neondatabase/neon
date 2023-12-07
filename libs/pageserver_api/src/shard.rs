@@ -1,6 +1,9 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
-use crate::key::{is_rel_block_key, Key};
+use crate::{
+    key::{is_rel_block_key, Key},
+    models::ShardParameters,
+};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use thiserror;
@@ -400,6 +403,17 @@ impl ShardIdentity {
                 layout: LAYOUT_V1,
                 stripe_size,
             })
+        }
+    }
+
+    /// For use when creating ShardIdentity instances for new shards, where a creation request
+    /// specifies the ShardParameters that apply to all shards.
+    pub fn from_params(number: ShardNumber, params: &ShardParameters) -> Self {
+        Self {
+            number,
+            count: params.count,
+            layout: LAYOUT_V1,
+            stripe_size: params.stripe_size.unwrap_or(DEFAULT_STRIPE_SIZE),
         }
     }
 
