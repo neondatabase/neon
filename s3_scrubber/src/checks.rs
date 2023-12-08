@@ -142,7 +142,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         .collect();
 
                     if !orphan_layers.is_empty() {
-                        result.errors.push(format!(
+                        result.warnings.push(format!(
                             "index_part.json does not contain layers from S3: {:?}",
                             orphan_layers
                                 .iter()

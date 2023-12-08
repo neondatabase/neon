@@ -23,6 +23,12 @@ pub struct MetadataSummary {
     indices_with_generation: usize,
     indices_without_generation: usize,
 
+    /// Timelines that couldn't even parse metadata and/or object keys: extremely damaged
+    invalid_count: usize,
+
+    /// Timelines with just an initdb archive, left behind after deletion.
+    relic_count: usize,
+
     layer_count: MinMaxHisto,
     timeline_size_bytes: MinMaxHisto,
     layer_size_bytes: MinMaxHisto,
@@ -41,6 +47,8 @@ impl MinMaxHisto {
     fn new() -> Self {
         Self {
             histo: histogram::Histogram::builder()
+                // Accomodate tenant sizes up to 32TiB
+                .maximum_value(32 * 1024 * 1024 * 1024 * 1024)
                 .build()
                 .expect("Bad histogram params"),
             min: u64::MAX,
@@ -94,6 +102,8 @@ impl MetadataSummary {
             indices_by_version: HashMap::new(),
             indices_with_generation: 0,
             indices_without_generation: 0,
+            invalid_count: 0,
+            relic_count: 0,
             layer_count: MinMaxHisto::new(),
             timeline_size_bytes: MinMaxHisto::new(),
             layer_size_bytes: MinMaxHisto::new(),
@@ -115,32 +125,35 @@ impl MetadataSummary {
 
     fn update_data(&mut self, data: &S3TimelineBlobData) {
         self.count += 1;
-        if let BlobDataParseResult::Parsed {
-            index_part,
-            index_part_generation,
-            s3_layers: _,
-        } = &data.blob_data
-        {
-            *self
-                .indices_by_version
-                .entry(index_part.get_version())
-                .or_insert(0) += 1;
+        match &data.blob_data {
+            BlobDataParseResult::Parsed {
+                index_part,
+                index_part_generation,
+                s3_layers: _,
+            } => {
+                *self
+                    .indices_by_version
+                    .entry(index_part.get_version())
+                    .or_insert(0) += 1;
 
-            // These statistics exist to track the transition to generations.  By early 2024 there should be zero
-            // generation-less timelines in the field and this check can be removed.
-            if index_part_generation.is_none() {
-                self.indices_without_generation += 1;
-            } else {
-                self.indices_with_generation += 1;
-            }
+                // These statistics exist to track the transition to generations.  By early 2024 there should be zero
+                // generation-less timelines in the field and this check can be removed.
+                if index_part_generation.is_none() {
+                    self.indices_without_generation += 1;
+                } else {
+                    self.indices_with_generation += 1;
+                }
 
-            if let Err(e) = self.update_histograms(index_part) {
-                // Value out of range?  Warn that the results are untrustworthy
-                tracing::warn!(
-                    "Error updating histograms, summary stats may be wrong: {}",
-                    e
-                );
+                if let Err(e) = self.update_histograms(index_part) {
+                    // Value out of range?  Warn that the results are untrustworthy
+                    tracing::warn!(
+                        "Error updating histograms, summary stats may be wrong: {}",
+                        e
+                    );
+                }
             }
+            BlobDataParseResult::Incorrect(_) => self.invalid_count += 1,
+            BlobDataParseResult::Relic => self.relic_count += 1,
         }
     }
 
@@ -168,6 +181,8 @@ impl MetadataSummary {
 With errors: {1}
 With warnings: {2}
 With garbage: {3}
+Invalid: {9}
+Relics: {10}
 Index versions: {version_summary}
 Indices with/without generations: {7}/{8}
 Timeline size bytes: {4}
@@ -182,7 +197,9 @@ Timeline layer count: {6}
             self.layer_size_bytes.oneline(),
             self.layer_count.oneline(),
             self.indices_with_generation,
-            self.indices_without_generation
+            self.indices_without_generation,
+            self.invalid_count,
+            self.relic_count
         )
     }
 
