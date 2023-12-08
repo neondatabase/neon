@@ -10,7 +10,7 @@ import sys
 
 
 @enum.unique
-class Color(enum.Enum):
+class Color(enum.StrEnum):
     RED = "\033[0;31m"
     GREEN = "\033[0;33m"
     CYAN = "\033[0;36m"
@@ -61,16 +61,35 @@ def get_commit_files() -> list[str]:
     return files.decode().splitlines()
 
 
+def pgindent(fix_inplace: bool) -> str:
+    if fix_inplace:
+        return "make neon-pgindent"
+
+    return "make -s -j neon-pgindent-check"
+
+
+def is_applicable(fname: str, suffix: str | set[str]) -> bool:
+    fname = fname.strip()
+    if isinstance(suffix, str):
+        suffix = {suffix}
+
+    for s in suffix:
+        if fname.endswith(s):
+            return True
+
+    return False
+
+
 def check(
     name: str,
-    suffix: str,
+    suffix: str | set[str],
     cmd: str,
     changed_files: list[str],
     no_color: bool = False,
     append_files_to_cmd: bool = True,
 ):
     print(f"Checking: {name} ", end="")
-    applicable_files = list(filter(lambda fname: fname.strip().endswith(suffix), changed_files))
+    applicable_files = list(filter(lambda fname: is_applicable(fname, suffix), changed_files))
     if not applicable_files:
         print(colorify("[NOT APPLICABLE]", Color.CYAN, no_color))
         return
@@ -83,15 +102,20 @@ def check(
         print(colorify("[FAILED]", Color.RED, no_color))
         if name == "mypy":
             print("Please inspect the output below and fix type mismatches.")
+        elif name == "pgindent":
+            print("pgindent does not print output.")
         else:
             print("Please inspect the output below and run make fmt to fix automatically.")
         if suffix == ".py":
             print(
                 "If the output is empty, ensure that you've installed Python tooling by\n"
-                "running './scripts/pysync' in the current directory (no root needed)"
+                + "running './scripts/pysync' in the current directory (no root needed)"
             )
-        print()
-        print(res.stdout.decode())
+
+        output = res.stdout.decode()
+        if len(output) > 0:
+            print()
+            print(res.stdout.decode())
         sys.exit(1)
 
     print(colorify("[OK]", Color.GREEN, no_color))
@@ -137,4 +161,10 @@ if __name__ == "__main__":
         cmd=mypy(),
         changed_files=files,
         no_color=args.no_color,
+    )
+    check(
+        name="pgindent",
+        suffix={"c", "h"},
+        cmd=pgindent(fix_inplace=args.fix_inplace),
+        changed_files=files,
     )
