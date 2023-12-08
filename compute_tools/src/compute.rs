@@ -252,7 +252,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                     IF NOT EXISTS (
                         SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
                     THEN
-                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION IN ROLE pg_read_all_data, pg_write_all_data;
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION BYPASSRLS IN ROLE pg_read_all_data, pg_write_all_data;
                         IF array_length(roles, 1) IS NOT NULL THEN
                             EXECUTE format('GRANT neon_superuser TO %s',
                                            array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
