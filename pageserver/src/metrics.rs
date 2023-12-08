@@ -850,7 +850,8 @@ pub(crate) mod virtual_file_descriptor_cache {
         register_uint_gauge!(
             "pageserver_virtual_file_descriptor_cache_size_max",
             "Maximum number of open file descriptors in the cache."
-        ).unwrap()
+        )
+        .unwrap()
     });
 
     // SIZE_CURRENT: derive it like so:
