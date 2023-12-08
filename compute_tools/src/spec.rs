@@ -727,3 +727,33 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
 
     Ok(())
 }
+
+#[instrument(skip_all)]
+pub fn handle_migrations(client: &mut Client) -> Result<()> {
+    info!("handle migrations");
+    let migrations = vec![""];
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration AUTHORIZATION cloud_admin";
+    client.simple_query(query)?;
+
+    query = "CREATE SEQUENCE IF NOT EXISTS neon_migration.migration_id START WITH 0 INCREMENT BY 1 MINVALUE 0";
+    client.simple_query(query)?;
+
+    query = "GRANT USAGE, SELECT ON SEQUENCE neon_migration.migration_id TO cloud_admin";
+    client.simple_query(query)?;
+
+    query = "SELECT last_value FROM neon_migration.migration_id";
+    let row = client.query_one(query, &[])?;
+    let mut current_migration: usize = row.get::<&str, i64>("last_value") as usize;
+
+    while current_migration < migrations.len() {
+        client.simple_query(migrations[current_migration])?;
+        current_migration += 1;
+    }
+    let setval = format!(
+        "SELECT setval('neon_migration.migration_id', {})",
+        migrations.len()
+    );
+    client.simple_query(&setval)?;
+    Ok(())
+}
