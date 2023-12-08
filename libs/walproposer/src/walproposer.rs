@@ -6,8 +6,8 @@ use utils::id::TenantTimelineId;
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
-        Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate, WalProposerFree,
-        WalProposerStart,
+        NeonWALReadResult, Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate,
+        WalProposerFree, WalProposerStart,
     },
 };
 
@@ -90,15 +90,15 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn wal_read(&self, _sk: &mut Safekeeper, _buf: &mut [u8], _startpos: u64) {
+    fn wal_reader_allocate(&self, _sk: &mut Safekeeper) -> NeonWALReadResult {
         todo!()
     }
 
-    fn wal_reader_allocate(&self, _sk: &mut Safekeeper) {
+    fn wal_read(&self, _sk: &mut Safekeeper, _buf: &mut [u8], _startpos: u64) -> NeonWALReadResult {
         todo!()
     }
 
-    fn free_event_set(&self, _wp: &mut WalProposer) {
+    fn wal_reader_events(&self, _sk: &mut Safekeeper) -> u32 {
         todo!()
     }
 
@@ -110,7 +110,15 @@ pub trait ApiImpl {
         todo!()
     }
 
+    fn active_state_update_event_set(&self, _sk: &mut Safekeeper) {
+        todo!()
+    }
+
     fn add_safekeeper_event_set(&self, _sk: &mut Safekeeper, _events_mask: u32) {
+        todo!()
+    }
+
+    fn rm_safekeeper_event_set(&self, _sk: &mut Safekeeper) {
         todo!()
     }
 
@@ -240,6 +248,7 @@ impl Drop for Wrapper {
 
 #[cfg(test)]
 mod tests {
+    use core::panic;
     use std::{
         cell::Cell,
         sync::{atomic::AtomicUsize, mpsc::sync_channel},
@@ -247,7 +256,7 @@ mod tests {
 
     use utils::id::TenantTimelineId;
 
-    use crate::{api_bindings::Level, walproposer::Wrapper};
+    use crate::{api_bindings::Level, bindings::NeonWALReadResult, walproposer::Wrapper};
 
     use super::ApiImpl;
 
@@ -355,12 +364,9 @@ mod tests {
             true
         }
 
-        fn wal_reader_allocate(&self, _: &mut crate::bindings::Safekeeper) {
-            println!("wal_reader_allocate")
-        }
-
-        fn free_event_set(&self, _: &mut crate::bindings::WalProposer) {
-            println!("free_event_set")
+        fn wal_reader_allocate(&self, _: &mut crate::bindings::Safekeeper) -> NeonWALReadResult {
+            println!("wal_reader_allocate");
+            crate::bindings::NeonWALReadResult_NEON_WALREAD_SUCCESS
         }
 
         fn init_event_set(&self, _: &mut crate::bindings::WalProposer) {
@@ -381,6 +387,13 @@ mod tests {
                 sk as *mut crate::bindings::Safekeeper, event_mask
             );
             self.wait_events.set(WaitEventsData { sk, event_mask });
+        }
+
+        fn rm_safekeeper_event_set(&self, sk: &mut crate::bindings::Safekeeper) {
+            println!(
+                "rm_safekeeper_event_set, sk={:?}",
+                sk as *mut crate::bindings::Safekeeper
+            );
         }
 
         fn wait_event_set(
