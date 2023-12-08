@@ -337,6 +337,63 @@ pub(crate) mod page_cache_eviction_metrics {
     }
 }
 
+pub(crate) mod page_cache_eviction_metrics {
+    use std::num::NonZeroUsize;
+
+    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Outcome {
+        FoundSlotUnused { iters: NonZeroUsize },
+        FoundSlotEvicted { iters: NonZeroUsize },
+        ItersExceeded { iters: NonZeroUsize },
+    }
+
+    static ITERS_TOTAL_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_iters_total",
+            "Counter for the number of iterations in the find_victim loop",
+            &["outcome"],
+        )
+        .expect("failed to define a metric")
+    });
+
+    static CALLS_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_calls",
+            "Incremented at the end of each find_victim() call.\
+             Filter by outcome to get e.g., eviction rate.",
+            &["outcome"]
+        )
+        .unwrap()
+    });
+
+    pub(crate) fn observe(outcome: Outcome) {
+        macro_rules! dry {
+            ($label:literal, $iters:expr) => {{
+                static LABEL: &'static str = $label;
+                static ITERS_TOTAL: Lazy<IntCounter> =
+                    Lazy::new(|| ITERS_TOTAL_VEC.with_label_values(&[LABEL]));
+                static CALLS: Lazy<IntCounter> =
+                    Lazy::new(|| CALLS_VEC.with_label_values(&[LABEL]));
+                ITERS_TOTAL.inc_by(($iters.get()) as u64);
+                CALLS.inc();
+            }};
+        }
+        match outcome {
+            Outcome::FoundSlotUnused { iters } => dry!("found_empty", iters),
+            Outcome::FoundSlotEvicted { iters } => {
+                dry!("found_evicted", iters)
+            }
+            Outcome::ItersExceeded { iters } => {
+                dry!("err_iters_exceeded", iters);
+                super::page_cache_errors_inc(super::PageCacheErrorKind::EvictIterLimit);
+            }
+        }
+    }
+}
+
 pub(crate) static PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_page_cache_acquire_pinned_slot_seconds",
