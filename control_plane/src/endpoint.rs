@@ -464,10 +464,19 @@ impl Endpoint {
         }
     }
 
+    fn build_pageserver_connstr(pageservers: &[(String, u16)]) -> String {
+        pageservers
+            .iter()
+            .map(|(host, port)| format!("postgresql://no_user@{host}:{port}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     pub async fn start(
         &self,
         auth_token: &Option<String>,
         safekeepers: Vec<NodeId>,
+        pageservers: Vec<(String, u16)>,
         remote_ext_config: Option<&String>,
     ) -> Result<()> {
         if self.status() == "running" {
@@ -482,13 +491,8 @@ impl Endpoint {
             std::fs::remove_dir_all(self.pgdata())?;
         }
 
-        let pageserver_connstring = {
-            let config = &self.pageserver.pg_connection_config;
-            let (host, port) = (config.host(), config.port());
+        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
 
-            // NOTE: avoid spaces in connection string, because it is less error prone if we forward it somewhere.
-            format!("postgresql://no_user@{host}:{port}")
-        };
         let mut safekeeper_connstrings = Vec::new();
         if self.mode == ComputeMode::Primary {
             for sk_id in safekeepers {

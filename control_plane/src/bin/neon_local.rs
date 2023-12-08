@@ -451,7 +451,6 @@ async fn handle_tenant(
             // FIXME: passing None for ancestor_start_lsn is not kosher in a sharded world: we can't have
             // different shards picking different start lsns.  Maybe we have to teach attachment service
             // to let shard 0 branch first and then propagate the chosen LSN to other shards.
-
             attachment_service.tenant_timeline_create(
                 tenant_id,
                 TimelineCreateRequest {
@@ -838,6 +837,14 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 endpoint.timeline_id,
             )?;
 
+            let attachment_service = AttachmentService::from_env(env);
+            let pageservers = attachment_service
+                .tenant_locate(endpoint.tenant_id)?
+                .shards
+                .into_iter()
+                .map(|shard| (shard.listen_pg_addr, shard.listen_pg_port))
+                .collect::<Vec<_>>();
+
             let ps_conf = env.get_pageserver_conf(pageserver_id)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
@@ -849,7 +856,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
-                .start(&auth_token, safekeepers, remote_ext_config)
+                .start(&auth_token, safekeepers, pageservers, remote_ext_config)
                 .await?;
         }
         "reconfigure" => {
