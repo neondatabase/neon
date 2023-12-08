@@ -255,7 +255,9 @@ async fn auth_and_wake_compute(
 
     let mut num_retries = 0;
     let mut node = loop {
-        let wake_res = api.wake_compute(extra, &compute_credentials.info, latency_timer).await;
+        let wake_res = api
+            .wake_compute(extra, &compute_credentials.info, latency_timer)
+            .await;
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
@@ -411,9 +413,17 @@ impl BackendType<'_, ComputeUserInfo> {
         use BackendType::*;
 
         match self {
-            Console(api, creds) => api.wake_compute(extra, creds, latency_timer).map_ok(Some).await,
+            Console(api, creds) => {
+                api.wake_compute(extra, creds, latency_timer)
+                    .map_ok(Some)
+                    .await
+            }
             #[cfg(feature = "testing")]
-            Postgres(api, creds) => api.wake_compute(extra, creds, latency_timer).map_ok(Some).await,
+            Postgres(api, creds) => {
+                api.wake_compute(extra, creds, latency_timer)
+                    .map_ok(Some)
+                    .await
+            }
             Link(_) => Ok(None),
             #[cfg(test)]
             Test(x) => x.wake_compute().map(Some),

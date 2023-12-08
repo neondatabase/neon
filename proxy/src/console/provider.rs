@@ -6,7 +6,9 @@ use super::messages::MetricsAuxInfo;
 use crate::{
     auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
-    compute, scram, proxy::LatencyTimer,
+    compute,
+    proxy::LatencyTimer,
+    scram,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
