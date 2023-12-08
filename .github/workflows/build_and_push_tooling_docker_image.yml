@@ -3,7 +3,7 @@ name: Build and Push Tools Docker Image
 on:
   push:
     paths:
-      - Dockerfile.buildtool
+      - Dockerfile.buildtool 
   pull_request:
       paths:
       - Dockerfile.buildtool
@@ -24,6 +24,6 @@ jobs:
           echo "github.ref -> {{ github.ref }}"
   
       - name: Build and push Docker image
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v5
         with:
-          context: Dockerfile.buildtool
+          file: Dockerfile.buildtool
