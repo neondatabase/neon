@@ -405,7 +405,7 @@ async fn connect_to_compute(
     conn_info: &ConnInfo,
     conn_id: uuid::Uuid,
     session_id: uuid::Uuid,
-    latency_timer: LatencyTimer,
+    mut latency_timer: LatencyTimer,
     peer_addr: IpAddr,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
@@ -437,13 +437,13 @@ async fn connect_to_compute(
     };
     // TODO(anna): this is a bit hacky way, consider using console notification listener.
     if !config.disable_ip_check_for_http {
-        let allowed_ips = backend.get_allowed_ips(&extra).await?;
+        let allowed_ips = backend.get_allowed_ips(&extra, &mut latency_timer).await?;
         if !check_peer_addr_is_in_list(&peer_addr, &allowed_ips) {
             return Err(auth::AuthError::ip_address_not_allowed().into());
         }
     }
     let node_info = backend
-        .wake_compute(&extra)
+        .wake_compute(&extra, &mut latency_timer)
         .await?
         .context("missing cache entry from wake_compute")?;
 

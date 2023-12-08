@@ -24,7 +24,7 @@ pub async fn authenticate_cleartext(
     warn!("cleartext auth flow override is enabled, proceeding");
 
     // pause the timer while we communicate with the client
-    let _paused = latency_timer.pause();
+    let _paused = latency_timer.wait_for_user();
 
     let auth_outcome = AuthFlow::new(client)
         .begin(auth::CleartextPassword(secret))
@@ -54,7 +54,7 @@ pub async fn password_hack_no_authentication(
     warn!("project not specified, resorting to the password hack auth flow");
 
     // pause the timer while we communicate with the client
-    let _paused = latency_timer.pause();
+    let _paused = latency_timer.wait_for_user();
 
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)

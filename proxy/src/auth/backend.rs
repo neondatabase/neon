@@ -189,7 +189,7 @@ async fn auth_quirks(
     let AuthInfo {
         secret,
         allowed_ips,
-    } = api.get_auth_info(extra, &info).await?;
+    } = api.get_auth_info(extra, &info, latency_timer).await?;
 
     // check allowed list
     if !check_peer_addr_is_in_list(&info.inner.peer_addr, &allowed_ips) {
@@ -255,7 +255,7 @@ async fn auth_and_wake_compute(
 
     let mut num_retries = 0;
     let mut node = loop {
-        let wake_res = api.wake_compute(extra, &compute_credentials.info).await;
+        let wake_res = api.wake_compute(extra, &compute_credentials.info, latency_timer).await;
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
@@ -388,12 +388,13 @@ impl BackendType<'_, ComputeUserInfo> {
     pub async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         use BackendType::*;
         match self {
-            Console(api, creds) => api.get_allowed_ips(extra, creds).await,
+            Console(api, creds) => api.get_allowed_ips(extra, creds, latency_timer).await,
             #[cfg(feature = "testing")]
-            Postgres(api, creds) => api.get_allowed_ips(extra, creds).await,
+            Postgres(api, creds) => api.get_allowed_ips(extra, creds, latency_timer).await,
             Link(_) => Ok(Arc::new(vec![])),
             #[cfg(test)]
             Test(x) => x.get_allowed_ips(),
@@ -405,13 +406,14 @@ impl BackendType<'_, ComputeUserInfo> {
     pub async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<Option<CachedNodeInfo>, console::errors::WakeComputeError> {
         use BackendType::*;
 
         match self {
-            Console(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
+            Console(api, creds) => api.wake_compute(extra, creds, latency_timer).map_ok(Some).await,
             #[cfg(feature = "testing")]
-            Postgres(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
+            Postgres(api, creds) => api.wake_compute(extra, creds, latency_timer).map_ok(Some).await,
             Link(_) => Ok(None),
             #[cfg(test)]
             Test(x) => x.wake_compute().map(Some),

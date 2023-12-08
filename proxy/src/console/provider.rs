@@ -6,7 +6,7 @@ use super::messages::MetricsAuxInfo;
 use crate::{
     auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
-    compute, scram,
+    compute, scram, proxy::LatencyTimer,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -250,12 +250,14 @@ pub trait Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<AuthInfo, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
@@ -263,6 +265,7 @@ pub trait Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 

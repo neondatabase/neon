@@ -110,6 +110,19 @@ static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+static CONTROL_PLANE_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "proxy_compute_connection_control_plane_latency_seconds",
+        "Time proxy spent talking to control-plane/console while trying to establish a connection to the compute endpoint",
+        // http/ws/tcp, true/false, true/false, success/failure
+        // 3 * 2 * 2 * 2 = 24 counters
+        &["protocol", "cache_miss", "pool_miss", "outcome"],
+        // largest bucket = 2^16 * 0.5ms = 32s
+        exponential_buckets(0.0005, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
 pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "proxy_console_request_latency",
@@ -174,6 +187,10 @@ pub struct LatencyTimer {
     start: Option<Instant>,
     // accumulated time on the stopwatch
     accumulated: std::time::Duration,
+    // time since the stopwatch was started while talking to control-plane
+    start_cp: Option<Instant>,
+    // accumulated time on the stopwatch while talking to control-plane
+    accumulated_cp: std::time::Duration,
     // label data
     protocol: &'static str,
     cache_miss: bool,
@@ -181,7 +198,11 @@ pub struct LatencyTimer {
     outcome: &'static str,
 }
 
-pub struct LatencyTimerPause<'a> {
+pub struct LatencyTimerUserIO<'a> {
+    timer: &'a mut LatencyTimer,
+}
+
+pub struct LatencyTimerControlPlane<'a> {
     timer: &'a mut LatencyTimer,
 }
 
@@ -190,6 +211,8 @@ impl LatencyTimer {
         Self {
             start: Some(Instant::now()),
             accumulated: std::time::Duration::ZERO,
+            start_cp: None,
+            accumulated_cp: std::time::Duration::ZERO,
             protocol,
             cache_miss: false,
             // by default we don't do pooling
@@ -199,11 +222,17 @@ impl LatencyTimer {
         }
     }
 
-    pub fn pause(&mut self) -> LatencyTimerPause<'_> {
+    pub fn control_plane(&mut self) -> LatencyTimerControlPlane<'_> {
+        // start the stopwatch again
+        self.start = Some(Instant::now());
+        LatencyTimerControlPlane { timer: self }
+    }
+
+    pub fn wait_for_user(&mut self) -> LatencyTimerUserIO<'_> {
         // stop the stopwatch and record the time that we have accumulated
         let start = self.start.take().expect("latency timer should be started");
         self.accumulated += start.elapsed();
-        LatencyTimerPause { timer: self }
+        LatencyTimerUserIO { timer: self }
     }
 
     pub fn cache_miss(&mut self) {
@@ -219,10 +248,22 @@ impl LatencyTimer {
     }
 }
 
-impl Drop for LatencyTimerPause<'_> {
+impl Drop for LatencyTimerUserIO<'_> {
     fn drop(&mut self) {
         // start the stopwatch again
         self.timer.start = Some(Instant::now());
+    }
+}
+
+impl Drop for LatencyTimerControlPlane<'_> {
+    fn drop(&mut self) {
+        // stop the control-plane stopwatch and record the time that we have accumulated
+        let start = self
+            .timer
+            .start_cp
+            .take()
+            .expect("latency timer should be started");
+        self.timer.accumulated_cp += start.elapsed();
     }
 }
 
@@ -237,7 +278,21 @@ impl Drop for LatencyTimer {
                 bool_to_str(self.pool_miss),
                 self.outcome,
             ])
-            .observe(duration.as_secs_f64())
+            .observe(duration.as_secs_f64());
+
+        let duration_cp = self
+            .start_cp
+            .map(|start| start.elapsed())
+            .unwrap_or_default()
+            + self.accumulated_cp;
+        CONTROL_PLANE_LATENCY
+            .with_label_values(&[
+                self.protocol,
+                bool_to_str(self.cache_miss),
+                bool_to_str(self.pool_miss),
+                self.outcome,
+            ])
+            .observe(duration_cp.as_secs_f64());
     }
 }
 
@@ -695,9 +750,9 @@ where
     info!("compute node's state has likely changed; requesting a wake-up");
     let node_info = loop {
         let wake_res = match creds {
-            auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+            auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds, &mut latency_timer).await,
             #[cfg(feature = "testing")]
-            auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
+            auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds, &mut latency_timer).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend

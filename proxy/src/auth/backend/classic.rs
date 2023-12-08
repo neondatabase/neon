@@ -33,7 +33,7 @@ pub(super) async fn authenticate(
                 config.scram_protocol_timeout,
                 async {
                     // pause the timer while we communicate with the client
-                    let _paused = latency_timer.pause();
+                    let _paused = latency_timer.wait_for_user();
 
                     flow.begin(scram).await.map_err(|error| {
                         warn!(?error, "error sending scram acknowledgement");

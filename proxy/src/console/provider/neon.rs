@@ -5,7 +5,7 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
+use crate::proxy::{LatencyTimer, ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -158,7 +158,9 @@ impl super::Api for Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<AuthInfo, GetAuthInfoError> {
+        let _timer = latency_timer.control_plane();
         self.do_get_auth_info(extra, creds).await
     }
 
@@ -166,6 +168,7 @@ impl super::Api for Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         let key: &str = &creds.endpoint;
         if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
@@ -177,7 +180,11 @@ impl super::Api for Api {
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
             .inc();
+
+        let timer = latency_timer.control_plane();
         let allowed_ips = Arc::new(self.do_get_auth_info(extra, creds).await?.allowed_ips);
+        drop(timer);
+
         self.caches
             .allowed_ips
             .insert(key.into(), allowed_ips.clone());
@@ -189,6 +196,7 @@ impl super::Api for Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        latency_timer: &mut LatencyTimer,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key: &str = &creds.inner.cache_key;
 
@@ -214,7 +222,10 @@ impl super::Api for Api {
             }
         }
 
+        let timer = latency_timer.control_plane();
         let node = self.do_wake_compute(extra, creds).await?;
+        drop(timer);
+
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 

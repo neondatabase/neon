@@ -7,6 +7,7 @@ use super::{
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
+use crate::proxy::LatencyTimer;
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
@@ -146,6 +147,7 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        _latency_timer: &mut LatencyTimer,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         self.do_get_auth_info(creds).await
     }
@@ -154,6 +156,7 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra<'_>,
         creds: &ComputeUserInfo,
+        _latency_timer: &mut LatencyTimer,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
     }
@@ -163,6 +166,7 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra<'_>,
         _creds: &ComputeUserInfo,
+        _latency_timer: &mut LatencyTimer,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)
