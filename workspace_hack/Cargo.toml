@@ -53,7 +53,8 @@ num-traits = { version = "0.2", features = ["i128"] }
 prost = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
-regex-syntax = { version = "0.7" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-syntax = { version = "0.8" }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "default-tls", "json", "multipart", "rustls-tls", "stream"] }
 ring = { version = "0.16", features = ["std"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
@@ -90,7 +91,8 @@ memchr = { version = "2" }
 nom = { version = "7" }
 prost = { version = "0.11" }
 regex = { version = "1" }
-regex-syntax = { version = "0.7" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-syntax = { version = "0.8" }
 serde = { version = "1", features = ["alloc", "derive"] }
 syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full", "visit"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
