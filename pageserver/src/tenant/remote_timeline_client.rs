@@ -182,7 +182,7 @@
 
 pub(crate) mod download;
 pub mod index;
-mod upload;
+pub(crate) mod upload;
 
 use anyhow::Context;
 use camino::Utf8Path;
@@ -690,7 +690,10 @@ impl RemoteTimelineClient {
             .insert(layer.layer_desc().filename(), metadata.clone());
         upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
 
-        info!("scheduled layer file upload {layer}");
+        info!(
+            "scheduled layer file upload {layer} gen={:?} shard={:?}",
+            metadata.generation, metadata.shard
+        );
         let op = UploadOp::UploadLayer(layer, metadata);
         self.calls_unfinished_metric_begin(&op);
         upload_queue.queued_operations.push_back(op);

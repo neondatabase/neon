@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use hyper::{Method, StatusCode};
 use pageserver_api::{
-    models::{TenantCreateRequest, TimelineCreateRequest},
+    models::{TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest},
     shard::TenantShardId,
 };
 use postgres_connection::parse_host_port;
@@ -245,6 +245,15 @@ impl AttachmentService {
     #[instrument(skip(self))]
     pub fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
         self.dispatch::<(), _>(Method::GET, format!("tenant/{tenant_id}/locate"), None)
+    }
+
+    #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
+    pub fn tenant_split(&self, tenant_id: TenantId, new_shard_count: u8) -> anyhow::Result<()> {
+        self.dispatch::<_, ()>(
+            Method::POST,
+            format!("tenant/{tenant_id}/shard_split"),
+            Some(TenantShardSplitRequest { new_shard_count }),
+        )
     }
 
     #[instrument(skip_all, fields(node_id=%req.node_id))]

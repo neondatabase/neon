@@ -191,6 +191,16 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct TenantShardSplitRequest {
+    pub new_shard_count: u8,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantShardSplitResponse {
+    pub new_shards: Vec<TenantShardId>,
+}
+
 /// Parameters that apply to all shards in a tenant.  Used during tenant creation.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]

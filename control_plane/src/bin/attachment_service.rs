@@ -10,7 +10,8 @@ use hyper::{Body, Request, Response};
 use hyper::{Method, StatusCode};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, TenantConfig, TenantCreateRequest,
-    TenantLocationConfigRequest, TimelineCreateRequest,
+    TenantLocationConfigRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+    TimelineCreateRequest,
 };
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
 use reqwest::Client;
@@ -722,6 +723,121 @@ async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, 
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_shard_split(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let split_req = json_request::<TenantShardSplitRequest>(&mut req).await?;
+    let state = get_state(&req).inner.clone();
+    let mut locked = state.write().await;
+
+    let pageservers = locked.pageservers.clone();
+
+    let mut replacements = HashMap::new();
+
+    for (tenant_shard_id, shard) in locked
+        .tenants
+        .range_mut(TenantShardId::tenant_range(tenant_id))
+    {
+        if tenant_shard_id.shard_count == ShardCount(split_req.new_shard_count) {
+            tracing::warn!(
+                "Tenant shard {} already has shard count {}",
+                tenant_shard_id,
+                split_req.new_shard_count
+            );
+            continue;
+        }
+
+        let node_id = shard
+            .pageserver
+            .ok_or(ApiError::BadRequest(anyhow::anyhow!(
+                "Cannot split a tenant that is not attached"
+            )))?;
+
+        let node = pageservers
+            .get(&node_id)
+            .expect("Pageservers may not be deleted while referenced");
+
+        let client = Client::new();
+        let response = client
+            .request(
+                Method::POST,
+                format!("{}/tenant/{}/shard_split", node.base_url(), tenant_shard_id),
+            )
+            .json(&TenantShardSplitRequest {
+                new_shard_count: split_req.new_shard_count,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                ApiError::Conflict(format!("Failed to split {}: {}", tenant_shard_id, e))
+            })?;
+        // response.error_for_status().map_err(|e| {
+        //     ApiError::Conflict(format!("Failed to split {}: {}", tenant_shard_id, e))
+        // })?;
+        let response: TenantShardSplitResponse = response.json().await.map_err(|e| {
+            ApiError::InternalServerError(anyhow::anyhow!(
+                "Malformed response from pageserver: {}",
+                e
+            ))
+        })?;
+
+        replacements.insert(*tenant_shard_id, response.new_shards);
+    }
+
+    // Replace all the shards we just split with their children
+    for (replaced, children) in replacements.into_iter() {
+        let (pageserver, generation, shard_ident, config) = {
+            let old_state = locked
+                .tenants
+                .remove(&replaced)
+                .expect("It was present, we just split it");
+            (
+                old_state.pageserver.unwrap(),
+                old_state.generation,
+                old_state.shard,
+                old_state.config.clone(),
+            )
+        };
+
+        for child in children {
+            let mut child_shard = shard_ident;
+            child_shard.number = child.shard_number;
+            child_shard.count = child.shard_count;
+
+            let mut child_observed: HashMap<NodeId, ObservedStateLocation> = HashMap::new();
+            child_observed.insert(
+                pageserver,
+                ObservedStateLocation {
+                    conf: Some(LocationConfig {
+                        mode: LocationConfigMode::AttachedSingle,
+                        generation: Some(generation),
+                        secondary_conf: None,
+                        shard_number: child.shard_number.0,
+                        shard_count: child.shard_count.0,
+                        shard_stripe_size: shard_ident.stripe_size.0,
+                        tenant_conf: config.clone(),
+                    }),
+                },
+            );
+
+            locked.tenants.insert(
+                child,
+                TenantState {
+                    tenant_shard_id: child,
+                    shard: child_shard,
+                    pageserver: Some(pageserver),
+                    generation: generation,
+                    observed: ObservedState {
+                        locations: child_observed,
+                    },
+                    config: config.clone(),
+                },
+            );
+        }
+    }
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Status endpoint is just used for checking that our HTTP listener is up
 async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, ())
@@ -742,6 +858,9 @@ fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, 
         })
         .get("/tenant/:tenant_id/locate", |r| {
             request_span(r, handle_tenant_locate)
+        })
+        .put("/tenant/:tenant_id/shard_split", |r| {
+            request_span(r, handle_tenant_shard_split)
         })
 }
 

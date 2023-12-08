@@ -515,6 +515,18 @@ async fn handle_tenant(
             migrate_tenant(env, tenant_shard_id, new_pageserver).await?;
             println!("tenant {tenant_shard_id} migrated to {}", new_pageserver_id);
         }
+        Some(("split", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+            let attachment_service = AttachmentService::from_env(env);
+            let old_shards = attachment_service.tenant_locate(tenant_id)?.shards;
+            let new_shard_count = old_shards.len() * 2;
+            if old_shards.len() > 127 {
+                bail!("Cannot split further");
+            }
+
+            attachment_service.tenant_split(tenant_id, new_shard_count as u8)?;
+            println!("Split {}->{}", old_shards.len(), new_shard_count);
+        }
         Some(("status", matches)) => {
             let tenant_id = get_tenant_id(matches, env)?;
 
