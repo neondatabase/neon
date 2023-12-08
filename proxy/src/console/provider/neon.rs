@@ -117,9 +117,10 @@ impl Api {
                     ("project", Some(&creds.endpoint)),
                 ]);
 
-            request_builder = match extra.options.as_ref() {
-                Some(_) => request_builder.query(&extra.options_as_deep_object()),
-                None => request_builder,
+            request_builder = if extra.options.is_empty() {
+                request_builder
+            } else {
+                request_builder.query(&extra.options_as_deep_object())
             };
             let request = request_builder.build()?;
 
