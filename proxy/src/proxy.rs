@@ -1055,7 +1055,6 @@ pub fn neon_option(bytes: &str) -> Option<(String, String)> {
     let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
 
     let cap = re.captures(bytes)?;
-    let k = cap.get(1)?.as_str().to_owned();
-    let v = cap.get(2)?.as_str().to_owned();
-    Some((k, v))
+    let (_, [k, v]) = cap.extract();
+    Some((k.to_owned(), v.to_owned()))
 }
