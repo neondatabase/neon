@@ -18,7 +18,7 @@ use control_plane::{broker, local_env};
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };
-use pageserver_api::shard::{ShardCount, TenantShardId};
+use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -428,6 +428,9 @@ async fn handle_tenant(
                 .cloned()
                 .unwrap_or(1);
 
+            let shard_stripe_size: Option<u32> =
+                create_match.get_one::<u32>("shard-stripe-size").cloned();
+
             let tenant_conf = PageServerNode::parse_config(tenant_conf)?;
 
             // If tenant ID was not specified, generate one
@@ -444,7 +447,7 @@ async fn handle_tenant(
                 generation: None,
                 shard_parameters: ShardParameters {
                     count: ShardCount(shard_count),
-                    stripe_size: None,
+                    stripe_size: shard_stripe_size.map(ShardStripeSize),
                 },
                 config: tenant_conf,
             })?;
@@ -1403,6 +1406,7 @@ fn cli() -> Command {
                 .arg(Arg::new("set-default").long("set-default").action(ArgAction::SetTrue).required(false)
                     .help("Use this tenant in future CLI commands where tenant_id is needed, but not specified"))
                 .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
+                .arg(Arg::new("shard-stripe-size").value_parser(value_parser!(u32)).long("shard-stripe-size").action(ArgAction::Set).help("Sharding stripe size in pages"))
                 )
             .subcommand(Command::new("set-default").arg(tenant_id_arg.clone().required(true))
                 .about("Set a particular tenant as default in future CLI commands where tenant_id is needed, but not specified"))
