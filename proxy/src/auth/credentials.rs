@@ -140,7 +140,7 @@ impl ClientCredentials {
         let cache_key = format!(
             "{}{}",
             project.as_deref().unwrap_or(""),
-            neon_options_str(params).unwrap_or("".to_string())
+            neon_options_str(params)
         )
         .into();
 

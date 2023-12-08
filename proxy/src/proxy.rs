@@ -1033,21 +1033,14 @@ pub fn neon_options(params: &StartupMessageParams) -> Vec<(String, String)> {
     }
 }
 
-pub fn neon_options_str(params: &StartupMessageParams) -> Option<String> {
-    let options = neon_options(params);
-    if options.is_empty() {
-        return None;
-    } else {
-        #[allow(unstable_name_collisions)]
-        return Some(
-            options
-                .iter()
-                .map(|(k, v)| format!("{}:{}", k, v))
-                .sorted() // we sort it to use as cache key
-                .intersperse(" ".to_owned())
-                .collect(),
-        );
-    }
+pub fn neon_options_str(params: &StartupMessageParams) -> String {
+    #[allow(unstable_name_collisions)]
+    neon_options(params)
+        .iter()
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .sorted() // we sort it to use as cache key
+        .intersperse(" ".to_owned())
+        .collect()
 }
 
 pub fn neon_option(bytes: &str) -> Option<(String, String)> {
