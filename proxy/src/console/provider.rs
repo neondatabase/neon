@@ -201,7 +201,18 @@ pub struct ConsoleReqExtra<'a> {
     pub session_id: uuid::Uuid,
     /// Name of client application, if set.
     pub application_name: Option<&'a str>,
-    pub options: Option<&'a str>,
+    pub options: Vec<(String, String)>,
+}
+
+impl<'a> ConsoleReqExtra<'a> {
+    // https://swagger.io/docs/specification/serialization/ DeepObject format
+    // paramName[prop1]=value1&paramName[prop2]=value2&....
+    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
+        self.options
+            .iter()
+            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
+            .collect()
+    }
 }
 
 /// Auth secret which is managed by the cloud.

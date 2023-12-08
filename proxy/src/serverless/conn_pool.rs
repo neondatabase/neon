@@ -433,7 +433,7 @@ async fn connect_to_compute(
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
         application_name: Some(APP_NAME),
-        options: console_options.as_deref(),
+        options: console_options,
     };
     // TODO(anna): this is a bit hacky way, consider using console notification listener.
     if !config.disable_ip_check_for_http {

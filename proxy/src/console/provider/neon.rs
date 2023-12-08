@@ -106,7 +106,7 @@ impl Api {
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
-            let request = self
+            let mut request_builder = self
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
@@ -115,9 +115,14 @@ impl Api {
                 .query(&[
                     ("application_name", extra.application_name),
                     ("project", Some(&creds.endpoint)),
-                    ("options", extra.options),
-                ])
-                .build()?;
+                ]);
+
+            request_builder = if extra.options.is_empty() {
+                request_builder
+            } else {
+                request_builder.query(&extra.options_as_deep_object())
+            };
+            let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();

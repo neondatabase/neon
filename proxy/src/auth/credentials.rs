@@ -3,7 +3,7 @@
 use crate::{
     auth::password_hack::parse_endpoint_param,
     error::UserFacingError,
-    proxy::{neon_options, NUM_CONNECTION_ACCEPTED_BY_SNI},
+    proxy::{neon_options_str, NUM_CONNECTION_ACCEPTED_BY_SNI},
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -140,7 +140,7 @@ impl ClientCredentials {
         let cache_key = format!(
             "{}{}",
             project.as_deref().unwrap_or(""),
-            neon_options(params).unwrap_or("".to_string())
+            neon_options_str(params)
         )
         .into();
 
@@ -406,10 +406,7 @@ mod tests {
         let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("project"));
-        assert_eq!(
-            creds.cache_key,
-            "projectneon_endpoint_type:read_write neon_lsn:0/2"
-        );
+        assert_eq!(creds.cache_key, "projectendpoint_type:read_write lsn:0/2");
 
         Ok(())
     }
