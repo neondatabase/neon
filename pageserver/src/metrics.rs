@@ -891,6 +891,26 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub(crate) mod virtual_file_descriptor_cache {
+    use super::*;
+
+    pub(crate) static SIZE_MAX: Lazy<UIntGauge> = Lazy::new(|| {
+        register_uint_gauge!(
+            "pageserver_virtual_file_descriptor_cache_size_max",
+            "Maximum number of open file descriptors in the cache."
+        )
+        .unwrap()
+    });
+
+    // SIZE_CURRENT: derive it like so:
+    // ```
+    // sum (pageserver_io_operations_seconds_count{operation=~"^(open|open-after-replace)$")
+    // -ignoring(operation)
+    // sum(pageserver_io_operations_seconds_count{operation=~"^(close|close-by-replace)$"}
+    // ```
+}
+
 #[derive(Debug)]
 struct GlobalAndPerTimelineHistogram {
     global: Histogram,
