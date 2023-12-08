@@ -2,7 +2,7 @@ use hyper::{Body, Request, Response, StatusCode, Uri};
 
 use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::SkTimelineInfo;
+use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -18,7 +18,7 @@ use utils::failpoint_support::failpoints_handler;
 use std::io::Write as _;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::info_span;
+use tracing::{info_span, Instrument};
 use utils::http::endpoint::{request_span, ChannelWriter};
 
 use crate::receive_wal::WalReceiverState;
@@ -26,7 +26,7 @@ use crate::safekeeper::Term;
 use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
 use crate::timeline::PeerInfo;
-use crate::{debug_dump, pull_timeline};
+use crate::{copy_timeline, debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -202,6 +202,29 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
+}
+
+async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let request_data: TimelineCopyRequest = json_request(&mut request).await?;
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "source_timeline_id")?,
+    );
+
+    let source = GlobalTimelines::get(ttid)?;
+
+    copy_timeline::handle_request(copy_timeline::Request{
+        source,
+        until_lsn: request_data.until_lsn,
+        destination_ttid: TenantTimelineId::new(ttid.tenant_id, request_data.target_timeline_id),
+    })
+        .instrument(info_span!("copy_timeline", from=%ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Download a file from the timeline directory.
@@ -471,6 +494,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
             |r| request_span(r, timeline_files_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant:id/timeline/:source_timeline_id/copy",
+            |r| request_span(r, timeline_copy_handler),
         )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {

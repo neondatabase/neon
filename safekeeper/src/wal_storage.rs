@@ -728,7 +728,7 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
 }
 
 /// Helper returning full path to WAL segment file and its .partial brother.
-fn wal_file_paths(
+pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,

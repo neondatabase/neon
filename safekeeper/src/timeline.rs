@@ -141,7 +141,8 @@ impl SharedState {
 
         // We don't want to write anything to disk, because we may have existing timeline there.
         // These functions should not change anything on disk.
-        let control_store = control_file::FileStorage::create_new(ttid, conf, state)?;
+        let timeline_dir = conf.timeline_dir(ttid);
+        let control_store = control_file::FileStorage::create_new(timeline_dir, conf, state)?;
         let wal_store =
             wal_storage::PhysicalStorage::new(ttid, conf.timeline_dir(ttid), conf, &control_store)?;
         let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
