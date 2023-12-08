@@ -55,8 +55,27 @@ pub struct TenantCreateResponse {
 pub struct NodeRegisterRequest {
     pub node_id: NodeId,
 
+    pub listen_pg_addr: String,
+    pub listen_pg_port: u16,
+
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantLocateResponseShard {
+    pub node_id: NodeId,
+
+    pub listen_pg_addr: String,
+    pub listen_pg_port: u16,
+
+    pub listen_http_addr: String,
+    pub listen_http_port: u16,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TenantLocateResponse {
+    pub shards: Vec<TenantLocateResponseShard>,
 }
 
 impl AttachmentService {
@@ -176,6 +195,23 @@ impl AttachmentService {
         }
 
         Ok(())
+    }
+
+    pub fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
+        let url = self
+            .env
+            .control_plane_api
+            .clone()
+            .unwrap()
+            .join(&format!("tenant/{tenant_id}"))
+            .unwrap();
+
+        let response = self.client.get(url).send()?;
+        if response.status() != StatusCode::OK {
+            return Err(anyhow!("Unexpected status {}", response.status()));
+        }
+
+        Ok(response.json()?)
     }
 
     pub fn tenant_timeline_create(

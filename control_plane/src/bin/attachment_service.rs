@@ -42,7 +42,8 @@ use pageserver_api::control_api::{
 
 use control_plane::attachment_service::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse, NodeRegisterRequest,
-    TenantCreateResponse, TenantCreateResponseShard,
+    TenantCreateResponse, TenantCreateResponseShard, TenantLocateResponse,
+    TenantLocateResponseShard,
 };
 
 #[derive(Parser)]
@@ -103,6 +104,9 @@ struct NodeState {
 
     listen_http_addr: String,
     listen_http_port: u16,
+
+    listen_pg_addr: String,
+    listen_pg_port: u16,
 }
 
 impl NodeState {
@@ -647,6 +651,45 @@ async fn handle_tenant_timeline_create(mut req: Request<Body>) -> Result<Respons
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_locate(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
+    let state = get_state(&req).inner.clone();
+    let mut locked = state.write().await;
+
+    tracing::info!("Locating shards for tenant {tenant_id}");
+
+    // Take a snapshot of pageservers
+    let pageservers = locked.pageservers.clone();
+
+    let mut result = Vec::new();
+
+    for (_tenant_shard_id, shard) in locked
+        .tenants
+        .range_mut(TenantShardId::tenant_range(tenant_id))
+    {
+        let node_id = shard
+            .pageserver
+            .ok_or(ApiError::BadRequest(anyhow::anyhow!(
+                "Cannot locate a tenant that is not attached"
+            )))?;
+
+        let node = pageservers
+            .get(&node_id)
+            .expect("Pageservers may not be deleted while referenced");
+
+        result.push(TenantLocateResponseShard {
+            node_id,
+            listen_http_addr: node.listen_http_addr.clone(),
+            listen_http_port: node.listen_http_port,
+            listen_pg_addr: node.listen_pg_addr.clone(),
+            listen_pg_port: node.listen_pg_port,
+        });
+    }
+
+    json_response(StatusCode::OK, TenantLocateResponse { shards: result })
+}
+
 async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let register_req = json_request::<NodeRegisterRequest>(&mut req).await?;
     let state = get_state(&req).inner.clone();
@@ -658,6 +701,8 @@ async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, 
             id: register_req.node_id,
             listen_http_addr: register_req.listen_http_addr,
             listen_http_port: register_req.listen_http_port,
+            listen_pg_addr: register_req.listen_pg_addr,
+            listen_pg_port: register_req.listen_pg_port,
         },
     );
 
@@ -681,6 +726,9 @@ fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, 
         .post("/tenant", |r| request_span(r, handle_tenant_create))
         .post("/tenant/:tenant_id/timeline", |r| {
             request_span(r, handle_tenant_timeline_create)
+        })
+        .get("/tenant/:tenant_id/locate", |r| {
+            request_span(r, handle_tenant_locate)
         })
 }
 
