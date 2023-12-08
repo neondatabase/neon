@@ -20,6 +20,8 @@ pub struct MetadataSummary {
     with_warnings: HashSet<TenantTimelineId>,
     with_garbage: HashSet<TenantTimelineId>,
     indices_by_version: HashMap<usize, usize>,
+    indices_with_generation: usize,
+    indices_without_generation: usize,
 
     layer_count: MinMaxHisto,
     timeline_size_bytes: MinMaxHisto,
@@ -90,6 +92,8 @@ impl MetadataSummary {
             with_warnings: HashSet::new(),
             with_garbage: HashSet::new(),
             indices_by_version: HashMap::new(),
+            indices_with_generation: 0,
+            indices_without_generation: 0,
             layer_count: MinMaxHisto::new(),
             timeline_size_bytes: MinMaxHisto::new(),
             layer_size_bytes: MinMaxHisto::new(),
@@ -113,7 +117,7 @@ impl MetadataSummary {
         self.count += 1;
         if let BlobDataParseResult::Parsed {
             index_part,
-            index_part_generation: _,
+            index_part_generation,
             s3_layers: _,
         } = &data.blob_data
         {
@@ -121,6 +125,14 @@ impl MetadataSummary {
                 .indices_by_version
                 .entry(index_part.get_version())
                 .or_insert(0) += 1;
+
+            // These statistics exist to track the transition to generations.  By early 2024 there should be zero
+            // generation-less timelines in the field and this check can be removed.
+            if index_part_generation.is_none() {
+                self.indices_without_generation += 1;
+            } else {
+                self.indices_with_generation += 1;
+            }
 
             if let Err(e) = self.update_histograms(index_part) {
                 // Value out of range?  Warn that the results are untrustworthy
@@ -157,6 +169,7 @@ With errors: {1}
 With warnings: {2}
 With garbage: {3}
 Index versions: {version_summary}
+Indices with/without generations: {7}/{8}
 Timeline size bytes: {4}
 Layer size bytes: {5}
 Timeline layer count: {6}
@@ -168,6 +181,8 @@ Timeline layer count: {6}
             self.timeline_size_bytes.oneline(),
             self.layer_size_bytes.oneline(),
             self.layer_count.oneline(),
+            self.indices_with_generation,
+            self.indices_without_generation
         )
     }
 
