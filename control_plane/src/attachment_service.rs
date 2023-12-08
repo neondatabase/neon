@@ -66,6 +66,7 @@ pub struct NodeRegisterRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantLocateResponseShard {
+    pub shard_id: TenantShardId,
     pub node_id: NodeId,
 
     pub listen_pg_addr: String,

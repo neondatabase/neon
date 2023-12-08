@@ -515,6 +515,51 @@ async fn handle_tenant(
             migrate_tenant(env, tenant_shard_id, new_pageserver).await?;
             println!("tenant {tenant_shard_id} migrated to {}", new_pageserver_id);
         }
+        Some(("status", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+
+            let mut shard_table = comfy_table::Table::new();
+            shard_table.set_header(["Shard", "Pageserver", "Physical Size"]);
+
+            let mut tenant_synthetic_size = None;
+
+            let attachment_service = AttachmentService::from_env(env);
+            for shard in attachment_service.tenant_locate(tenant_id)?.shards {
+                let pageserver =
+                    PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
+
+                let size = pageserver
+                    .http_client
+                    .tenant_details(shard.shard_id)
+                    .await?
+                    .tenant_info
+                    .current_physical_size
+                    .unwrap();
+                shard_table.add_row([
+                    format!("{}", shard.shard_id.shard_number.0),
+                    format!("{}", shard.node_id.0),
+                    format!("{}", size),
+                ]);
+
+                if shard.shard_id.is_zero() {
+                    tenant_synthetic_size = Some(pageserver.tenant_synthetic_size(shard.shard_id)?);
+                }
+            }
+
+            let Some(synthetic_size) = tenant_synthetic_size else {
+                bail!("Shard 0 not found")
+            };
+
+            let mut tenant_table = comfy_table::Table::new();
+            tenant_table.add_row(["Tenant ID".to_string(), tenant_id.to_string()]);
+            tenant_table.add_row([
+                "Synthetic size".to_string(),
+                format!("{}", synthetic_size.size.unwrap_or(0)),
+            ]);
+
+            println!("{tenant_table}");
+            println!("{shard_table}");
+        }
 
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
@@ -1417,6 +1462,10 @@ fn cli() -> Command {
                 .about("Migrate a tenant from one pageserver to another")
                 .arg(tenant_id_arg.clone())
                 .arg(pageserver_id_arg.clone()))
+            .subcommand(Command::new("status")
+                .about("Human readable summary of the tenant's shards and attachment locations")
+                .arg(tenant_id_arg.clone())
+                )
         )
         .subcommand(
             Command::new("pageserver")

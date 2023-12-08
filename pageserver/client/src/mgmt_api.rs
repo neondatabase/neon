@@ -1,4 +1,4 @@
-use pageserver_api::models::*;
+use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method};
 use utils::{
     http::error::HttpErrorBody,
@@ -68,9 +68,9 @@ impl Client {
 
     pub async fn tenant_details(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<pageserver_api::models::TenantDetails> {
-        let uri = format!("{}/v1/tenant/{tenant_id}", self.mgmt_api_endpoint);
+        let uri = format!("{}/v1/tenant/{tenant_shard_id}", self.mgmt_api_endpoint);
         self.get(uri)
             .await?
             .json()
@@ -200,6 +200,21 @@ impl Client {
             self.mgmt_api_endpoint, tenant_id
         );
         self.request(Method::POST, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn tenant_synthetic_size(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<TenantHistorySize> {
+        let uri = format!(
+            "{}/v1/tenant/{}/synthetic_size",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.get(&uri)
             .await?
             .json()
             .await

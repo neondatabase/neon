@@ -494,7 +494,13 @@ impl Scheduler {
         let mut tenant_counts: Vec<(NodeId, usize)> =
             self.tenant_counts.iter().map(|(k, v)| (*k, *v)).collect();
         tenant_counts.sort_by_key(|i| i.1);
-        let node_id = tenant_counts.last().unwrap().0;
+
+        for (node_id, count) in &tenant_counts {
+            tracing::info!("tenant_counts[{node_id}]={count}");
+        }
+
+        let node_id = tenant_counts.first().unwrap().0;
+        tracing::info!("scheduler selected node {node_id}");
         *self.tenant_counts.get_mut(&node_id).unwrap() += 1;
         Ok(node_id)
     }
@@ -664,7 +670,7 @@ async fn handle_tenant_locate(req: Request<Body>) -> Result<Response<Body>, ApiE
 
     let mut result = Vec::new();
 
-    for (_tenant_shard_id, shard) in locked
+    for (tenant_shard_id, shard) in locked
         .tenants
         .range_mut(TenantShardId::tenant_range(tenant_id))
     {
@@ -679,6 +685,7 @@ async fn handle_tenant_locate(req: Request<Body>) -> Result<Response<Body>, ApiE
             .expect("Pageservers may not be deleted while referenced");
 
         result.push(TenantLocateResponseShard {
+            shard_id: *tenant_shard_id,
             node_id,
             listen_http_addr: node.listen_http_addr.clone(),
             listen_http_port: node.listen_http_port,

@@ -705,6 +705,22 @@ pub struct PagestreamDbSizeResponse {
     pub db_size: i64,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantPhysicalSizeResponse {
+    pub size: u64,
+}
+
+// XXX hack: this is a cut-down version of TenantHistorySize from the pageserver crate, omitting fields
+// that require pageserver-internal types.  It is sufficient to get the total size.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantHistorySize {
+    pub id: TenantId,
+    /// Size is a mixture of WAL and logical size, so the unit is bytes.
+    ///
+    /// Will be none if `?inputs_only=true` was given.
+    pub size: Option<u64>,
+}
+
 impl PagestreamFeMessage {
     pub fn serialize(&self) -> Bytes {
         let mut bytes = BytesMut::new();

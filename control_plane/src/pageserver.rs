@@ -18,7 +18,9 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::models::{self, LocationConfig, ShardParameters, TenantInfo, TimelineInfo};
+use pageserver_api::models::{
+    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -302,16 +304,8 @@ impl PageServerNode {
     pub async fn tenant_list(&self) -> mgmt_api::Result<Vec<TenantInfo>> {
         self.http_client.list_tenants().await
     }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
+    pub fn parse_config(mut settings: HashMap<&str, &str>) -> anyhow::Result<models::TenantConfig> {
+        let result = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -379,13 +373,13 @@ impl PageServerNode {
         }
     }
 
-    pub fn tenant_create(
+    pub async fn tenant_create(
         &self,
         new_tenant_id: TenantId,
         generation: Option<u32>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
-        let config = Self::parse_config(settings)?;
+        let config = Self::parse_config(settings.clone())?;
 
         let request = models::TenantCreateRequest {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),
