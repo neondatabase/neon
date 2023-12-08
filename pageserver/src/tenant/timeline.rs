@@ -2736,7 +2736,9 @@ impl Timeline {
                 )
             };
 
-        pausable_failpoint!("flush-layer-cancel-after-writing-layer-out-pausable");
+        crate::failpoint_support::pausable_failpoint!(
+            "flush-layer-cancel-after-writing-layer-out-pausable"
+        );
 
         if self.cancel.is_cancelled() {
             return Err(FlushLayerError::Cancelled);
@@ -2774,7 +2776,7 @@ impl Timeline {
         // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
         // race situation.
         // See https://github.com/neondatabase/neon/issues/4526
-        pausable_failpoint!("flush-frozen-pausable");
+        crate::failpoint_support::pausable_failpoint!("flush-frozen-pausable");
 
         // This failpoint is used by another test case `test_pageserver_recovery`.
         fail_point!("flush-frozen-exit");

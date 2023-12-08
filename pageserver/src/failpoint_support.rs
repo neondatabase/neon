@@ -34,6 +34,44 @@ pub(crate) async fn failpoint_sleep_helper(name: &'static str, duration_str: Str
     tracing::info!("failpoint {:?}: sleep done", name);
 }
 
+/// Declare a failpoint that can use the `pause` failpoint action.
+/// We don't want to block the executor thread, hence, spawn_blocking + await.
+#[macro_export]
+macro_rules! __pausable_failpoint {
+    ($name:literal) => {
+        if cfg!(feature = "testing") {
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut jh = tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                let barrier = barrier.clone();
+                move || {
+                    let _entered = current.entered();
+                    // pausing will park the thread within `fail`, but we want to synchronize with
+                    // failpoints from test code which we currently do by waiting for a log line.
+                    //
+                    // instead of producing the log line conditionally, produce it only after
+                    // 100ms of joining at the barrier.
+                    tokio::runtime::Handle::current().block_on(barrier.wait());
+                    fail::fail_point!($name);
+                }
+            });
+
+            barrier.wait().await;
+
+            let res = tokio::time::timeout(std::time::Duration::from_millis(100), &mut jh).await;
+
+            if res.is_ok() {
+                // `fail` action "pause" was not hit
+            } else {
+                tracing::info!("at failpoint {}", $name);
+                jh.await.expect("spawn_blocking");
+            }
+        }
+    };
+}
+
+pub use __pausable_failpoint as pausable_failpoint;
+
 pub fn init() -> fail::FailScenario<'static> {
     // The failpoints lib provides support for parsing the `FAILPOINTS` env var.
     // We want non-default behavior for `exit`, though, so, we handle it separately.

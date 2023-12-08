@@ -961,7 +961,7 @@ impl RemoteTimelineClient {
             stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
         });
 
-        pausable_failpoint!("persist_deleted_index_part");
+        crate::failpoint_support::pausable_failpoint!("persist_deleted_index_part");
 
         backoff::retry(
             || {
@@ -1326,7 +1326,7 @@ impl RemoteTimelineClient {
                     res
                 }
                 UploadOp::Delete(delete) => {
-                    pausable_failpoint!("before-delete-layer-pausable");
+                    crate::failpoint_support::pausable_failpoint!("before-delete-layer-pausable");
                     self.deletion_queue_client
                         .push_layers(
                             self.tenant_shard_id,

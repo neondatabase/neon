@@ -286,7 +286,7 @@ impl DeleteTenantFlow {
     ) -> Result<(), DeleteTenantError> {
         span::debug_assert_current_span_has_tenant_id();
 
-        pausable_failpoint!("tenant-delete-before-run");
+        crate::failpoint_support::pausable_failpoint!("tenant-delete-before-run");
 
         let mut guard = Self::prepare(&tenant).await?;
 
@@ -538,7 +538,7 @@ impl DeleteTenantFlow {
             .context("cleanup_remaining_fs_traces")?;
 
         {
-            pausable_failpoint!("tenant-delete-before-map-remove");
+            crate::failpoint_support::pausable_failpoint!("tenant-delete-before-map-remove");
 
             // This block is simply removing the TenantSlot for this tenant.  It requires a loop because
             // we might conflict with a TenantSlot::InProgress marker and need to wait for it.

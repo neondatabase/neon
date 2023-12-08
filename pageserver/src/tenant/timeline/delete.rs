@@ -558,7 +558,7 @@ impl DeleteTimelineFlow {
 
         delete_remote_layers_and_index(timeline).await?;
 
-        pausable_failpoint!("in_progress_delete");
+        crate::failpoint_support::pausable_failpoint!("in_progress_delete");
 
         cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_shard_id, timeline.timeline_id)
             .await?;
