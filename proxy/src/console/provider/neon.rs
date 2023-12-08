@@ -5,12 +5,8 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{
-    auth::ClientCredentials,
-    compute, http,
-    proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
-    scram,
-};
+use crate::proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
+use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -53,7 +49,7 @@ impl Api {
     async fn do_get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
@@ -65,8 +61,8 @@ impl Api {
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
-                    ("project", Some(creds.project().expect("impossible"))),
-                    ("role", Some(creds.user)),
+                    ("project", Some(&creds.endpoint)),
+                    ("role", Some(&creds.inner.user)),
                 ])
                 .build()?;
 
@@ -106,9 +102,8 @@ impl Api {
     async fn do_wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let project = creds.project().expect("impossible");
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
             let request = self
@@ -119,7 +114,7 @@ impl Api {
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
                     ("application_name", extra.application_name),
-                    ("project", Some(project)),
+                    ("project", Some(&creds.endpoint)),
                     ("options", extra.options),
                 ])
                 .build()?;
@@ -162,7 +157,7 @@ impl super::Api for Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         self.do_get_auth_info(extra, creds).await
     }
@@ -170,9 +165,9 @@ impl super::Api for Api {
     async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        let key: &str = creds.project().expect("impossible");
+        let key: &str = &creds.endpoint;
         if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
@@ -193,9 +188,9 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key: &str = &creds.cache_key;
+        let key: &str = &creds.inner.cache_key;
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);

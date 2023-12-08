@@ -23,7 +23,7 @@ use hyper::{
     Body, Method, Request, Response,
 };
 
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::task::Poll;
 use std::{future::ready, sync::Arc};
 use tls_listener::TlsListener;
@@ -103,7 +103,13 @@ pub async fn task_main(
                             let session_id = uuid::Uuid::new_v4();
 
                             request_handler(
-                                req, config, conn_pool, cancel_map, session_id, sni_name, peer_addr,
+                                req,
+                                config,
+                                conn_pool,
+                                cancel_map,
+                                session_id,
+                                sni_name,
+                                peer_addr.ip(),
                             )
                             .instrument(info_span!(
                                 "serverless",
@@ -171,7 +177,7 @@ async fn request_handler(
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()

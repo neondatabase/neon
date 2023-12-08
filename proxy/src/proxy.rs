@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::{
-    auth::{self, backend::AuthSuccess},
+    auth,
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
@@ -24,7 +24,7 @@ use prometheus::{
     IntGaugeVec,
 };
 use regex::Regex;
-use std::{error::Error, io, net::SocketAddr, ops::ControlFlow, sync::Arc, time::Instant};
+use std::{error::Error, io, net::IpAddr, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -318,7 +318,7 @@ pub async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr).await
+                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr.ip()).await
                     }
                     .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
                     .unwrap_or_else(move |e| {
@@ -408,7 +408,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -666,7 +666,7 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+    creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
@@ -696,10 +696,12 @@ where
     let node_info = loop {
         let wake_res = match creds {
             auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+            #[cfg(feature = "testing")]
             auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend
+            #[cfg(test)]
             auth::BackendType::Test(x) => x.wake_compute(),
         };
 
@@ -838,20 +840,12 @@ pub fn retry_after(num_retries: u32) -> time::Duration {
 #[tracing::instrument(skip_all)]
 async fn prepare_client_connection(
     node: &compute::PostgresConnection,
-    reported_auth_ok: bool,
     session: cancellation::Session<'_>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> anyhow::Result<()> {
     // Register compute's query cancellation token and produce a new, unique one.
     // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
-
-    // Report authentication success if we haven't done this already.
-    // Note that we do this only (for the most part) after we've connected
-    // to a compute (see above) which performs its own authentication.
-    if !reported_auth_ok {
-        stream.write_message_noflush(&Be::AuthenticationOk)?;
-    }
 
     // Forward all postgres connection params to the client.
     // Right now the implementation is very hacky and inefficent (ideally,
@@ -921,7 +915,7 @@ struct Client<'a, S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<Stream<S>>,
     /// Client credentials that we care about.
-    creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
+    creds: auth::BackendType<'a, auth::ClientCredentials>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
     /// Unique connection ID.
@@ -934,7 +928,7 @@ impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
         stream: PqStream<Stream<S>>,
-        creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
+        creds: auth::BackendType<'a, auth::ClientCredentials>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
         allow_self_signed_compute: bool,
@@ -953,7 +947,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     // Instrumentation logs endpoint name everywhere. Doesn't work for link
     // auth; strictly speaking we don't know endpoint name in its case.
-    #[tracing::instrument(name = "", fields(ep = self.creds.get_endpoint().unwrap_or("".to_owned())), skip_all)]
+    #[tracing::instrument(name = "", fields(ep = %self.creds.get_endpoint().unwrap_or_default()), skip_all)]
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,
@@ -962,7 +956,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
-            mut creds,
+            creds,
             params,
             session_id,
             allow_self_signed_compute,
@@ -978,6 +972,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
 
+        let user = creds.get_user().to_owned();
         let auth_result = match creds
             .authenticate(
                 &extra,
@@ -990,7 +985,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         {
             Ok(auth_result) => auth_result,
             Err(e) => {
-                let user = creds.get_user();
                 let db = params.get("database");
                 let app = params.get("application_name");
                 let params_span = tracing::info_span!("", ?user, ?db, ?app);
@@ -999,10 +993,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         };
 
-        let AuthSuccess {
-            reported_auth_ok,
-            value: mut node_info,
-        } = auth_result;
+        let (mut node_info, creds) = auth_result;
 
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
@@ -1025,7 +1016,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
         }
 
-        prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+        prepare_client_connection(&node, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the
         // PqStream input buffer. Normally there is none, but our serverless npm
         // driver in pipeline mode sends startup, password and first query

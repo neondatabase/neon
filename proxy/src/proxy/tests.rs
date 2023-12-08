@@ -3,8 +3,7 @@
 mod mitm;
 
 use super::*;
-use crate::auth::backend::TestBackend;
-use crate::auth::ClientCredentials;
+use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
 use crate::{auth, http, sasl, scram};
@@ -109,8 +108,9 @@ fn generate_tls_config<'a>(
 trait TestAuth: Sized {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        _stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
+        stream.write_message_noflush(&Be::AuthenticationOk)?;
         Ok(())
     }
 }
@@ -168,7 +168,6 @@ async fn dummy_proxy(
     auth.authenticate(&mut stream).await?;
 
     stream
-        .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&Be::CLIENT_ENCODING)?
         .write_message(&Be::ReadyForQuery)
         .await?;
@@ -486,7 +485,7 @@ fn helper_create_connect_info(
 ) -> (
     CachedNodeInfo,
     console::ConsoleReqExtra<'static>,
-    auth::BackendType<'_, ClientCredentials<'static>>,
+    auth::BackendType<'_, ComputeUserInfo>,
 ) {
     let cache = helper_create_cached_node_info();
     let extra = console::ConsoleReqExtra {
