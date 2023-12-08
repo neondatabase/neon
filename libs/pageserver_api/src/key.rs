@@ -577,7 +577,3 @@ mod tests {
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());
     }
 }
-
-pub fn is_rel_data_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
-}

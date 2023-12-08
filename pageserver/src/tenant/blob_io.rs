@@ -18,6 +18,9 @@ use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
 use crate::virtual_file::VirtualFile;
+use crate::{LZ4_COMPRESSION, NO_COMPRESSION};
+use lz4_flex;
+use postgres_ffi::BLCKSZ;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
@@ -32,6 +35,29 @@ impl<'a> BlockCursor<'a> {
         self.read_blob_into_buf(offset, &mut buf, ctx).await?;
         Ok(buf)
     }
+    /// Read blob into the given buffer. Any previous contents in the buffer
+    /// are overwritten.
+    pub async fn read_compressed_blob(
+        &self,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let blknum = (offset / PAGE_SZ as u64) as u32;
+        let off = (offset % PAGE_SZ as u64) as usize;
+
+        let buf = self.read_blk(blknum, ctx).await?;
+        let compression_alg = buf[off];
+        let res = self.read_blob(offset + 1, ctx).await?;
+        if compression_alg == LZ4_COMPRESSION {
+            lz4_flex::block::decompress(&res, BLCKSZ as usize).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "decompress error")
+            })
+        } else {
+            assert_eq!(compression_alg, NO_COMPRESSION);
+            Ok(res)
+        }
+    }
+
     /// Read blob into the given buffer. Any previous contents in the buffer
     /// are overwritten.
     pub async fn read_blob_into_buf(
@@ -209,6 +235,41 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             Slice::into_inner(src_buf)
         };
         (src_buf, Ok(()))
+    }
+
+    pub async fn write_compressed_blob(&mut self, srcbuf: &[u8]) -> Result<u64, Error> {
+        let offset = self.offset;
+        if srcbuf.len() < 128 {
+            self.write_all(&[NO_COMPRESSION]).await?;
+            // Short blob. Write a 1-byte length header
+            let len_buf = srcbuf.len() as u8;
+            self.write_all(&[len_buf]).await?;
+        } else {
+            // Write a 4-byte length header
+            if srcbuf.len() == BLCKSZ as usize {
+                let compressed = lz4_flex::block::compress(srcbuf);
+                if compressed.len() < srcbuf.len() {
+                    self.write_all(&[LZ4_COMPRESSION]).await?;
+                    let mut len_buf = (compressed.len() as u32).to_be_bytes();
+                    len_buf[0] |= 0x80;
+                    self.write_all(&len_buf).await?;
+                    self.write_all(&compressed).await?;
+                    return Ok(offset);
+                }
+            }
+            if srcbuf.len() > 0x7fff_ffff {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!("blob too large ({} bytes)", srcbuf.len()),
+                ));
+            }
+            self.write_all(&[NO_COMPRESSION]).await?;
+            let mut len_buf = ((srcbuf.len()) as u32).to_be_bytes();
+            len_buf[0] |= 0x80;
+            self.write_all(&len_buf).await?;
+        }
+        self.write_all(srcbuf).await?;
+        Ok(offset)
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
