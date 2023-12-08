@@ -55,7 +55,7 @@ def do_gc_target(
 class ReattachMode(str, enum.Enum):
     REATTACH_EXPLICIT = "explicit"
     REATTACH_RESET = "reset"
-    REATTACH_RESET_DROP = "reset"
+    REATTACH_RESET_DROP = "reset_drop"
 
 
 # Basic detach and re-attach test
