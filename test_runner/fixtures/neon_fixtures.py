@@ -56,6 +56,7 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     RemoteStorageUser,
     S3Storage,
+    default_remote_storage,
     remote_storage_to_toml_inline_table,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -468,7 +469,7 @@ class NeonEnvBuilder:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
-            self.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+            self.enable_pageserver_remote_storage(default_remote_storage())
         self.env = NeonEnv(self)
         return self.env
 

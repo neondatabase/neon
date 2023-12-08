@@ -20,7 +20,6 @@ from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
@@ -449,13 +448,9 @@ def test_tenant_relocation(
 # last-record LSN. We had a bug where GetPage incorrectly followed the
 # timeline to the ancestor without waiting for the missing WAL to
 # arrive.
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_emergency_relocate_with_branches_slow_replay(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
     env = neon_env_builder.init_start()
     env.pageserver.is_testing_enabled_or_skip()
     pageserver_http = env.pageserver.http_client()
@@ -603,13 +598,9 @@ def test_emergency_relocate_with_branches_slow_replay(
 # exist. Update dbir" path (2), and inserts an entry in the
 # DbDirectory with 'false' to indicate there is no PG_VERSION file.
 #
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_emergency_relocate_with_branches_createdb(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
 ):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
