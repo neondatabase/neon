@@ -335,7 +335,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
     let mut warned = None;
     let mut usage_planned = usage_pre;
-    let mut evict_up_to_inclusive = 0;
+    let mut evicted_amount = 0;
 
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
         if !usage_planned.has_pressure() {
@@ -352,7 +352,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         }
 
         usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
-        evict_up_to_inclusive = i;
+        evicted_amount += 1;
     }
 
     let usage_planned = match warned {
@@ -372,7 +372,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let mut js = tokio::task::JoinSet::new();
     let limit = 1000;
 
-    let mut evicted = candidates.into_iter().take(evict_up_to_inclusive).fuse();
+    let mut evicted = candidates.into_iter().take(evicted_amount).fuse();
     let mut consumed_all = false;
 
     // After the evictions, `usage_assumed` is the post-eviction usage,
