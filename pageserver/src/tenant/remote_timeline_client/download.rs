@@ -402,7 +402,9 @@ pub(crate) async fn download_initdb_tar_zst(
             .with_context(|| format!("timeline dir creation {timeline_path}"))
             .map_err(DownloadError::Other)?;
     }
-    let temp_path = timeline_path.join(format!("{INITDB_PATH}-{timeline_id}.{TEMP_FILE_SUFFIX}"));
+    let temp_path = timeline_path.join(format!(
+        "{INITDB_PATH}.download-{timeline_id}.{TEMP_FILE_SUFFIX}"
+    ));
 
     let file = download_retry(
         || async {
@@ -438,10 +440,10 @@ pub(crate) async fn download_initdb_tar_zst(
     )
     .await
     .map_err(|e| {
-        if temp_path.exists() {
-            // Do a best-effort attempt at deleting the temporary file upon encountering an error.
-            // We don't have async here nor do we want to pile on any extra errors.
-            if let Err(e) = std::fs::remove_file(&temp_path) {
+        // Do a best-effort attempt at deleting the temporary file upon encountering an error.
+        // We don't have async here nor do we want to pile on any extra errors.
+        if let Err(e) = std::fs::remove_file(&temp_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
                 warn!("error deleting temporary file {temp_path}: {e}");
             }
         }

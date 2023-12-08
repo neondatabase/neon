@@ -1,12 +1,11 @@
 //! Helper functions to upload files to remote storage with a RemoteStorage
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
 use std::io::ErrorKind;
-use tokio::fs;
+use tokio::fs::{self, File};
 
 use super::Generation;
 use crate::{
@@ -120,17 +119,16 @@ pub(crate) async fn upload_initdb_dir(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-    initdb_dir: Bytes,
+    initdb_tar_zst: File,
+    size: u64,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading initdb dir");
 
-    let size = initdb_dir.len();
-
-    let bytes = futures::stream::once(futures::future::ready(Ok(initdb_dir)));
+    let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     storage
-        .upload_storage_object(bytes, size, &remote_path)
+        .upload_storage_object(file, size as usize, &remote_path)
         .await
         .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }

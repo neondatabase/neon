@@ -12,7 +12,6 @@
 //!
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
@@ -69,6 +68,7 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
+use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
@@ -2949,10 +2949,10 @@ impl Tenant {
         };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
+
+        let timelines_path = self.conf.timelines_path(&self.tenant_shard_id);
         let pgdata_path = path_with_suffix_extension(
-            self.conf
-                .timelines_path(&self.tenant_shard_id)
-                .join(format!("basebackup-{timeline_id}")),
+            timelines_path.join(format!("basebackup-{timeline_id}")),
             TEMP_FILE_SUFFIX,
         );
 
@@ -2983,31 +2983,43 @@ impl Tenant {
                 )
                 .await
                 .context("download initdb tar")?;
-            let buf_read = Box::pin(BufReader::new(initdb_tar_zst));
+            let buf_read =
+                BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
             import_datadir::extract_tar_zst(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
 
-            if initdb_tar_zst_path.exists() {
-                tokio::fs::remove_file(&initdb_tar_zst_path)
-                    .await
-                    .context("tempfile removal")?;
-            }
+            tokio::fs::remove_file(&initdb_tar_zst_path)
+                .await
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        // If something else already removed the file, ignore the error
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
             if let Some(storage) = &self.remote_storage {
-                let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
-                let pgdata_zstd = Bytes::from(pgdata_zstd);
+                let temp_path = timelines_path.join(format!(
+                    "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
+                ));
+
+                let (pgdata_zstd, tar_zst_size) =
+                    import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
                 backoff::retry(
                     || async {
                         self::remote_timeline_client::upload_initdb_dir(
                             storage,
                             &self.tenant_shard_id.tenant_id,
                             &timeline_id,
-                            pgdata_zstd.clone(),
+                            pgdata_zstd.try_clone().await?,
+                            tar_zst_size,
                         )
                         .await
                     },
@@ -3019,6 +3031,18 @@ impl Tenant {
                     backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
                 )
                 .await?;
+
+                tokio::fs::remove_file(&temp_path)
+                    .await
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            // If something else already removed the file, ignore the error
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .with_context(|| format!("tempfile removal {temp_path}"))?;
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
