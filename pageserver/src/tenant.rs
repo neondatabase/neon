@@ -114,16 +114,32 @@ use utils::{
 macro_rules! pausable_failpoint {
     ($name:literal) => {
         if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut jh = tokio::task::spawn_blocking({
                 let current = tracing::Span::current();
+                let barrier = barrier.clone();
                 move || {
                     let _entered = current.entered();
-                    tracing::info!("at failpoint {}", $name);
+                    // pausing will park the thread within `fail`, but we want to synchronize with
+                    // failpoints from test code which we currently do by waiting for a log line.
+                    //
+                    // instead of producing the log line conditionally, produce it only after
+                    // 100ms of joining at the barrier.
+                    tokio::runtime::Handle::current().block_on(barrier.wait());
                     fail::fail_point!($name);
                 }
-            })
-            .await
-            .expect("spawn_blocking");
+            });
+
+            barrier.wait().await;
+
+            let res = tokio::time::timeout(std::time::Duration::from_millis(100), &mut jh).await;
+
+            if res.is_ok() {
+                // `fail` action "pause" was not hit
+            } else {
+                tracing::info!("at failpoint {}", $name);
+                jh.await.expect("spawn_blocking");
+            }
         }
     };
 }
