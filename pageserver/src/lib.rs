@@ -40,7 +40,14 @@ use tracing::info;
 /// format, bump this!
 /// Note that TimelineMetadata uses its own version number to track
 /// backwards-compatible changes to the metadata format.
-pub const STORAGE_FORMAT_VERSION: u16 = 3;
+pub const STORAGE_FORMAT_VERSION: u16 = 4;
+
+/// Minimal sorage format version with compression support
+pub const COMPRESSED_STORAGE_FORMAT_VERSION: u16 = 4;
+
+/// Page image compression algorithm
+pub const NO_COMPRESSION: u8 = 0;
+pub const LZ4_COMPRESSION: u8 = 0;
 
 pub const DEFAULT_PG_VERSION: u32 = 15;
 
