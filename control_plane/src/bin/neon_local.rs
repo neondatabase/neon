@@ -18,7 +18,7 @@ use control_plane::{broker, local_env};
 use pageserver_api::models::{
     ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
 };
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardCount, TenantShardId};
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -418,8 +418,15 @@ async fn handle_tenant(
         Some(("create", create_match)) => {
             let tenant_conf: HashMap<_, _> = create_match
                 .get_many::<String>("config")
-                .map(|vals| vals.flat_map(|c| c.split_once(':')).collect())
+                .map(|vals: clap::parser::ValuesRef<'_, String>| {
+                    vals.flat_map(|c| c.split_once(':')).collect()
+                })
                 .unwrap_or_default();
+
+            let shard_count: u8 = create_match
+                .get_one::<u8>("shard-count")
+                .cloned()
+                .unwrap_or(1);
 
             let tenant_conf = PageServerNode::parse_config(tenant_conf)?;
 
@@ -435,7 +442,10 @@ async fn handle_tenant(
                 // type is used both in attachment service (for creating tenants) and in pageserver (for creating shards)
                 new_tenant_id: TenantShardId::unsharded(tenant_id),
                 generation: None,
-                shard_parameters: ShardParameters::default(),
+                shard_parameters: ShardParameters {
+                    count: ShardCount(shard_count),
+                    stripe_size: None,
+                },
                 config: tenant_conf,
             })?;
             println!("tenant {tenant_id} successfully created on the pageserver");
@@ -1392,6 +1402,7 @@ fn cli() -> Command {
                 .arg(pg_version_arg.clone())
                 .arg(Arg::new("set-default").long("set-default").action(ArgAction::SetTrue).required(false)
                     .help("Use this tenant in future CLI commands where tenant_id is needed, but not specified"))
+                .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
                 )
             .subcommand(Command::new("set-default").arg(tenant_id_arg.clone().required(true))
                 .about("Set a particular tenant as default in future CLI commands where tenant_id is needed, but not specified"))

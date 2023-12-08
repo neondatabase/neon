@@ -715,9 +715,15 @@ async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, 
     json_response(StatusCode::OK, ())
 }
 
+/// Status endpoint is just used for checking that our HTTP listener is up
+async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    json_response(StatusCode::OK, ())
+}
+
 fn make_router(persistent_state: PersistentState) -> RouterBuilder<hyper::Body, ApiError> {
     endpoint::make_router()
         .data(Arc::new(State::new(persistent_state)))
+        .get("/status", |r| request_span(r, handle_status))
         .post("/re-attach", |r| request_span(r, handle_re_attach))
         .post("/validate", |r| request_span(r, handle_validate))
         .post("/attach-hook", |r| request_span(r, handle_attach_hook))
