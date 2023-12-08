@@ -277,6 +277,21 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub async fn run_until_cancelled<F: std::future::Future>(
+    f: F,
+    cancellation_token: &CancellationToken,
+) -> Option<F::Output> {
+    match futures::future::select(
+        std::pin::pin!(f),
+        std::pin::pin!(cancellation_token.cancelled()),
+    )
+    .await
+    {
+        futures::future::Either::Left((f, _)) => Some(f),
+        futures::future::Either::Right(((), _)) => None,
+    }
+}
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
@@ -290,71 +305,62 @@ pub async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
-    let mut connections = tokio::task::JoinSet::new();
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let cancel_map = Arc::clone(&cancel_map);
-                connections.spawn(
-                    async move {
-                        info!("accepted postgres client connection");
+        let session_id = uuid::Uuid::new_v4();
+        let cancel_map = Arc::clone(&cancel_map);
+        connections.spawn(
+            async move {
+                info!("accepted postgres client connection");
 
-                        let mut socket = WithClientIp::new(socket);
-                        let mut peer_addr = peer_addr;
-                        if let Some(ip) = socket.wait_for_addr().await? {
-                            peer_addr = ip;
-                            tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
-                        } else if config.require_client_ip {
-                            bail!("missing required client IP");
-                        }
-
-                        socket
-                            .inner
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
-
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr.ip()).await
-                    }
-                    .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
-                    .unwrap_or_else(move |e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!(?session_id, "per-client task finished with an error: {e:#}");
-                    }),
-                );
-            }
-            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
-            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
-            // This only counts for this loop and it will be enabled again on next `select!`.
-            //
-            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
-            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
-            // not get called again, even if there are more connections to remove.
-            Some(res) = connections.join_next() => {
-                if let Err(e) = res {
-                    if !e.is_panic() && !e.is_cancelled() {
-                        warn!("unexpected error from joined connection task: {e:?}");
-                    }
+                let mut socket = WithClientIp::new(socket);
+                let mut peer_addr = peer_addr;
+                if let Some(ip) = socket.wait_for_addr().await? {
+                    peer_addr = ip;
+                    tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                } else if config.require_client_ip {
+                    bail!("missing required client IP");
                 }
+
+                socket
+                    .inner
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
+
+                handle_client(
+                    config,
+                    &cancel_map,
+                    session_id,
+                    socket,
+                    ClientMode::Tcp,
+                    peer_addr.ip(),
+                )
+                .await
             }
-            _ = cancellation_token.cancelled() => {
-                drop(listener);
-                break;
-            }
-        }
+            .instrument(info_span!(
+                "handle_client",
+                ?session_id,
+                peer_addr = tracing::field::Empty
+            ))
+            .unwrap_or_else(move |e| {
+                // Acknowledge that the task has finished with an error.
+                error!(?session_id, "per-client task finished with an error: {e:#}");
+            }),
+        );
     }
+
+    connections.close();
+    drop(listener);
+
     // Drain connections
-    while let Some(res) = connections.join_next().await {
-        if let Err(e) = res {
-            if !e.is_panic() && !e.is_cancelled() {
-                warn!("unexpected error from joined connection task: {e:?}");
-            }
-        }
-    }
+    connections.wait().await;
+
     Ok(())
 }
 

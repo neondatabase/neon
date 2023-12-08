@@ -10,6 +10,7 @@ use anyhow::bail;
 use hyper::StatusCode;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
@@ -70,6 +71,9 @@ pub async fn task_main(
         incoming: addr_incoming,
     };
 
+    let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
+    ws_connections.close(); // allows `ws_connections.wait to complete`
+
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
             error!("failed to accept TLS connection for websockets: {err:?}");
@@ -86,6 +90,7 @@ pub async fn task_main(
             let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
+            let ws_connections = ws_connections.clone();
 
             async move {
                 let peer_addr = match client_addr {
@@ -97,6 +102,7 @@ pub async fn task_main(
                     move |req: Request<Body>| {
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
+                        let ws_connections = ws_connections.clone();
 
                         async move {
                             let cancel_map = Arc::new(CancelMap::default());
@@ -106,6 +112,7 @@ pub async fn task_main(
                                 req,
                                 config,
                                 conn_pool,
+                                ws_connections,
                                 cancel_map,
                                 session_id,
                                 sni_name,
@@ -128,6 +135,9 @@ pub async fn task_main(
         .serve(make_svc)
         .with_graceful_shutdown(cancellation_token.cancelled())
         .await?;
+
+    // await websocket connections
+    ws_connections.wait().await;
 
     Ok(())
 }
@@ -170,10 +180,12 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
     conn_pool: Arc<conn_pool::GlobalConnPool>,
+    ws_connections: TaskTracker,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
@@ -193,7 +205,7 @@ async fn request_handler(
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        tokio::spawn(
+        ws_connections.spawn(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     websocket,

@@ -61,6 +61,7 @@ thiserror.workspace = true
 tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
+tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
@@ -77,7 +78,6 @@ postgres-protocol.workspace = true
 smol_str.workspace = true
 
 workspace_hack.workspace = true
-tokio-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
