@@ -1838,3 +1838,58 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     assert final_stats.get("START_REPLICATION", 0) >= 1
     # walproposer should connect to each safekeeper at least once
     assert final_stats.get("START_WAL_PUSH", 0) >= 3
+
+
+@pytest.mark.parametrize("insert_rows", [0, 1000, 1000000, 5000000])
+def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
+    target_percents = [10, 50, 90, 100]
+
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+
+    lsns = []
+
+    def remember_lsn():
+        lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+        lsns.append(lsn)
+        return lsn
+
+    # remember LSN right after timeline creation
+    lsn = remember_lsn()
+    log.info(f"LSN after timeline creation: {lsn}")
+
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    current_percent = 0.0
+    for new_percent in target_percents:
+        new_rows = insert_rows * (new_percent - current_percent) / 100
+        current_percent = new_percent
+
+        if new_rows == 0:
+            continue
+
+        endpoint.safe_psql(f"insert into t select generate_series(1, {new_rows}), 'payload'")
+
+        # remember LSN right after reaching new_percent
+        lsn = remember_lsn()
+        log.info(f"LSN after inserting {new_rows} rows: {lsn}")
+
+    # TODO: would be also good to test cases where segments are not fully uploaded to S3
+
+    for lsn in lsns:
+        new_timeline_id = TimelineId.generate()
+        log.info(f"Copying branch for LSN {lsn}, to timeline {new_timeline_id}")
+
+        for sk in env.safekeepers:
+            sk.http_client().copy_timeline(tenant_id, timeline_id, {
+                "target_timeline_id": str(new_timeline_id),
+                "until_lsn": str(lsn),
+            })
+
+        # TODO: verify copy result
+    

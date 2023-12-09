@@ -496,7 +496,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             |r| request_span(r, timeline_files_handler),
         )
         .post(
-            "/v1/tenant/:tenant:id/timeline/:source_timeline_id/copy",
+            "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
             |r| request_span(r, timeline_copy_handler),
         )
         // for tests
