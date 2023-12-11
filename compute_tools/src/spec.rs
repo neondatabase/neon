@@ -731,9 +731,43 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
 #[instrument(skip_all)]
 pub fn handle_migrations(client: &mut Client) -> Result<()> {
     info!("handle migrations");
-    let migrations = vec![""];
+    let migrations = vec![
+        "ALTER ROLE neon_superuser BYPASSRLS",
+        r#"
+DO $$
+DECLARE
+    role_name text;
+BEGIN
+    FOR role_name IN SELECT rolname FROM pg_roles WHERE pg_has_role(rolname, 'neon_superuser', 'member')
+    LOOP
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' INHERIT';
+    END LOOP;
 
-    let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration AUTHORIZATION cloud_admin";
+    FOR role_name IN SELECT rolname FROM pg_roles
+        WHERE
+            NOT pg_has_role(rolname, 'neon_superuser', 'member') AND
+            rolname NOT IN ('pg_read_all_data',
+                            'pg_write_all_data',
+                            'pg_read_all_settings',
+                            'pg_read_all_stats',
+                            'pg_stat_scan_tables',
+                            'pg_monitor',
+                            'pg_database_owner',
+                            'pg_signal_backend',
+                            'pg_read_server_files',
+                            'pg_write_server_files',
+                            'pg_execute_server_program',
+                            'pg_checkpoint',
+                            'pg_use_reserved_connections',
+                            'pg_create_subscription')
+    LOOP
+        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOBYPASSRLS';
+    END LOOP;
+END $$;
+"#,
+    ];
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
     client.simple_query(query)?;
 
     query = "CREATE SEQUENCE IF NOT EXISTS neon_migration.migration_id START WITH 0 INCREMENT BY 1 MINVALUE 0";
@@ -745,6 +779,7 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
     query = "SELECT last_value FROM neon_migration.migration_id";
     let row = client.query_one(query, &[])?;
     let mut current_migration: usize = row.get::<&str, i64>("last_value") as usize;
+    let starting_migration_id = current_migration;
 
     while current_migration < migrations.len() {
         client.simple_query(migrations[current_migration])?;
@@ -755,5 +790,9 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
         migrations.len()
     );
     client.simple_query(&setval)?;
+    info!(
+        "Ran {} migrations",
+        (migrations.len() - starting_migration_id)
+    );
     Ok(())
 }
