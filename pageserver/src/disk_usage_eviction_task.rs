@@ -386,8 +386,6 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 js.join_next().await
             } else if !js.is_empty() {
                 // opportunistically consume ready result, one per each new evicted
-                //
-                // this returning Poll::Pending is handled by yielding after each spawn.
                 futures::future::FutureExt::now_or_never(js.join_next()).and_then(|x| x)
             } else {
                 None
@@ -419,10 +417,9 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             };
 
             js.spawn(async move {
-                let rtc =
-                    candidate.timeline.remote_client.as_ref().expect(
-                        "holding the witness, all timelines must have remote timeline client",
-                    );
+                let rtc = candidate.timeline.remote_client.as_ref().expect(
+                    "holding the witness, all timelines must have a remote timeline client",
+                );
                 let file_size = candidate.layer.layer_desc().file_size;
                 candidate
                     .layer
