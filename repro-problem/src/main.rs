@@ -1,4 +1,3 @@
-use page_cache::FileId;
 use virtual_file::VirtualFile;
 
 mod page_cache;
@@ -7,7 +6,7 @@ mod virtual_file;
 fn main() {
     page_cache::init(10);
 
-    let x: Box<dyn std::future::Future<Output=()> + Send> = Box::new(async move {
+    tokio::spawn(async move {
         let cache = page_cache::get();
 
         let res = cache
