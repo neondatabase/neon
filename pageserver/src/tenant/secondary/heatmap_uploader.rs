@@ -259,9 +259,6 @@ impl HeatmapUploader {
     /// for heatmap uploads at all, and whether sufficient time has passed
     /// since the last upload.
     fn maybe_schedule_upload(&mut self, now: &Instant, tenant: Arc<Tenant>) {
-        if tenant.get_heatmap_period().is_none() {
-            return;
-        }
         match tenant.get_heatmap_period() {
             None => {
                 // Heatmaps are disabled for this tenant
