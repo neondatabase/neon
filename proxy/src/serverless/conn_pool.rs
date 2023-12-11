@@ -37,7 +37,7 @@ use crate::proxy::ConnectMechanism;
 use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
-pub const APP_NAME: &str = "sql_over_http";
+pub const APP_NAME: &str = "/sql_over_http";
 const MAX_CONNS_PER_ENDPOINT: usize = 20;
 
 #[derive(Debug, Clone)]
