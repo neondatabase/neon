@@ -85,7 +85,7 @@ strum.workspace = true
 strum_macros.workspace = true
 # WIP PR: https://github.com/neondatabase/tokio-epoll-uring/pull/25
 #tokio-epoll-uring = { path = "../../tokio-epoll-uring/tokio-epoll-uring" }
-tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/generic-owned-fd" }
 
 [dev-dependencies]
 criterion.workspace = true

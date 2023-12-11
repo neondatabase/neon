@@ -5158,7 +5158,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#53c832d322244f704c7612125496df5ac117ac39"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/generic-owned-fd#c57c5867ae9511f2f2d9ba170f493bbab73a2eee"
 dependencies = [
  "futures",
  "once_cell",
@@ -5714,7 +5714,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#53c832d322244f704c7612125496df5ac117ac39"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/generic-owned-fd#c57c5867ae9511f2f2d9ba170f493bbab73a2eee"
 dependencies = [
  "io-uring",
  "libc",
