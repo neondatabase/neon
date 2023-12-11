@@ -14,3 +14,4 @@ utils = {path = "../libs/utils" }
 once_cell.workspace = true
 tracing.workspace = true
 nix.workspace = true
+anyhow.workspace = true
