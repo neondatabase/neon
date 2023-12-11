@@ -87,7 +87,7 @@ impl S3Target {
             new_self.prefix_in_bucket = format!("/{}/", new_segment);
         } else {
             if new_self.prefix_in_bucket.ends_with('/') {
-                let _ = new_self.prefix_in_bucket.pop();
+                new_self.prefix_in_bucket.pop();
             }
             new_self.prefix_in_bucket =
                 [&new_self.prefix_in_bucket, new_segment, ""].join(&new_self.delimiter);
