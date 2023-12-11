@@ -3,7 +3,6 @@ use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::storage_layer::PersistentLayerDesc;
-use pageserver_api::shard::TenantShardId;
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -11,7 +10,6 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Instant;
-use utils::id::{TenantId, TimelineId};
 
 use utils::lsn::Lsn;
 
@@ -211,13 +209,8 @@ fn bench_sequential(c: &mut Criterion) {
     for i in 0..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
-        let layer = PersistentLayerDesc::new_img(
-            TenantShardId::unsharded(TenantId::generate()),
-            TimelineId::generate(),
-            zero.add(10 * i32)..zero.add(10 * i32 + 1),
-            Lsn(i),
-            0,
-        );
+        let layer =
+            PersistentLayerDesc::new_img(zero.add(10 * i32)..zero.add(10 * i32 + 1), Lsn(i), 0);
         updates.insert_historic(layer);
     }
     updates.flush();
