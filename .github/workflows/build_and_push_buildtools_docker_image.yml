@@ -1,0 +1,71 @@
+name: Build and Push Build Tools Docker Image
+
+on:
+  push:
+    paths:
+      - Dockerfile.buildtool 
+  pull_request:
+      paths:
+      - Dockerfile.buildtool
+  workflow_dispatch:
+
+jobs:
+  kaniko:
+    name: 'kaniko'
+    runs-on: [ self-hosted, dev, x64 ]
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile Dockerfile.buildtool --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID-amd64
+
+  kaniko-arm:
+    name: 'kaniko-arm'
+    runs-on: [ self-hosted, dev, arm64 ]
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Configure ECR login
+        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+
+      - name: Kaniko build
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile Dockerfile.buildtool --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID-arm64
+
+  manifest:
+    name: 'manifest'
+    runs-on: [ self-hosted, dev, x64 ]
+    environment: dev
+    needs:
+      - kaniko
+      - kaniko-arm
+
+    steps:
+      - name: Create manifest
+        run: docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID-amd64 --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID-arm64
+
+      - name: Push manifest
+        run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID
+
+  promote:
+    name: 'promote'
+    runs-on: [ self-hosted, dev, x64 ]
+    container: amazon/aws-cli
+    environment: dev-apply
+    needs:
+      - manifest
+
+    steps:
+      - name: Promote image
+        run:
+          MANIFEST=$(aws ecr batch-get-image --repository-name build-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name build-tools --image-tag latest --image-manifest "$MANIFEST"
