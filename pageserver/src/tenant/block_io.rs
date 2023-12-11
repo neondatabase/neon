@@ -39,6 +39,8 @@ pub enum BlockLease<'a> {
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
+    #[cfg(test)]
+    Vec(Vec<u8>),
 }
 
 impl From<PageReadGuard<'static>> for BlockLease<'static> {
@@ -63,6 +65,13 @@ impl<'a> Deref for BlockLease<'a> {
             BlockLease::EphemeralFileMutableTail(v) => v,
             #[cfg(test)]
             BlockLease::Arc(v) => v.deref(),
+            #[cfg(test)]
+            BlockLease::Vec(v) => {
+                let v: &Vec<u8> = v;
+                assert_eq!(v.len(), PAGE_SZ, "caller must ensure that v has PAGE_SZ");
+                // Safety: see above assertion.
+                unsafe { &*(v.as_ptr() as *const [u8; PAGE_SZ]) }
+            }
         }
     }
 }
@@ -176,7 +185,7 @@ impl FileBlockReader {
     ) -> Result<PageWriteGuard<'static>, std::io::Error> {
         assert!(buf.len() == PAGE_SZ);
         self.file
-            .read_exact_at(buf, blkno as u64 * PAGE_SZ as u64)
+            .read_exact_at_page(buf, blkno as u64 * PAGE_SZ as u64)
             .await
     }
     /// Read a block.
