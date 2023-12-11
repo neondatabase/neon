@@ -3,9 +3,9 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 
-use postgres_ffi::{MAX_SEND_SIZE};
+use postgres_ffi::{MAX_SEND_SIZE, WAL_SEGMENT_SIZE};
 use tokio::{
-    fs::{OpenOptions},
+    fs::OpenOptions,
     io::{AsyncSeekExt, AsyncWriteExt},
 };
 use tracing::{info, warn};
@@ -14,8 +14,9 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 use crate::{
     control_file::{FileStorage, Storage},
     pull_timeline::{create_temp_timeline_dir, load_temp_timeline, validate_temp_timeline},
-    safekeeper::{SafeKeeperState},
+    safekeeper::SafeKeeperState,
     timeline::{Timeline, TimelineError},
+    wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines,
 };
@@ -28,6 +29,9 @@ pub struct Request {
 
 pub async fn handle_request(request: Request) -> Result<()> {
     // TODO: request.until_lsn MUST be a valid LSN, and we cannot check it :(
+
+    // we don't want to have more than 10 segments on disk after copy, because they take space
+    const MAX_BACKUP_LAG: u64 = 10 * WAL_SEGMENT_SIZE as u64;
 
     match GlobalTimelines::get(request.destination_ttid) {
         // timeline already exists. would be good to check that this timeline is the copy
@@ -51,16 +55,18 @@ pub async fn handle_request(request: Request) -> Result<()> {
     if start_lsn == Lsn::INVALID {
         bail!("timeline is not initialized");
     }
+    let backup_lsn = mem_state.backup_lsn;
 
     {
         let commit_lsn = mem_state.commit_lsn;
         let flush_lsn = request.source.get_flush_lsn().await;
 
         info!(
-            "collected info about source timeline: start_lsn={}, commit_lsn={}, flush_lsn={}",
-            start_lsn, commit_lsn, flush_lsn
+            "collected info about source timeline: start_lsn={}, backup_lsn={}, commit_lsn={}, flush_lsn={}",
+            start_lsn, backup_lsn, commit_lsn, flush_lsn
         );
 
+        assert!(backup_lsn >= start_lsn);
         assert!(commit_lsn >= start_lsn);
         assert!(flush_lsn >= start_lsn);
 
@@ -74,6 +80,12 @@ pub async fn handle_request(request: Request) -> Result<()> {
         if request.until_lsn > commit_lsn {
             warn!("copy_timeline WAL is not fully committed");
         }
+
+        if backup_lsn < request.until_lsn && request.until_lsn.0 - backup_lsn.0 > MAX_BACKUP_LAG {
+            // we can try to wait here until segments will be backed up to remote storage,
+            // but it's not clear how long to wait
+            bail!("requested backup LSN is beyond the end of the timeline");
+        }
     }
 
     let wal_seg_size = state.server.wal_seg_size as usize;
@@ -83,6 +95,31 @@ pub async fn handle_request(request: Request) -> Result<()> {
 
     let first_segment = start_lsn.segment_number(wal_seg_size);
     let last_segment = request.until_lsn.segment_number(wal_seg_size);
+
+    let new_backup_lsn = {
+        // we can't have new backup_lsn greater than existing backup_lsn or start of the last segment
+        let max_backup_lsn = backup_lsn.min(Lsn(last_segment * wal_seg_size as u64));
+
+        if max_backup_lsn < start_lsn {
+            // probably we have only one segment, it's okay to leave backup_lsn at the start
+            start_lsn
+        } else {
+            max_backup_lsn
+        }
+    };
+
+    let first_ondisk_segment = new_backup_lsn.segment_number(wal_seg_size);
+    assert!(first_ondisk_segment <= last_segment);
+    assert!(first_ondisk_segment >= first_segment);
+
+    copy_s3_segments(
+        wal_seg_size,
+        &request.source.ttid,
+        &request.destination_ttid,
+        first_segment,
+        first_ondisk_segment,
+    )
+    .await?;
 
     let mut wal_reader = WalReader::new(
         conf.workdir.clone(),
@@ -133,6 +170,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
         start_lsn,
     );
     new_state.timeline_start_lsn = start_lsn;
+    new_state.peer_horizon_lsn = request.until_lsn;
 
     let mut file_storage = FileStorage::create_new(tli_dir_path.clone(), conf, new_state.clone())?;
     file_storage.persist(&new_state).await?;
