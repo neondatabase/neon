@@ -594,7 +594,7 @@ def test_multi_attach(
             [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
         )
 
-    # Initially, the tenant will be attached to the pageserver a (first is default in our test harness)
+    # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
     with pytest.raises(PageserverApiException):
@@ -614,7 +614,7 @@ def test_multi_attach(
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[2], tenant_id, "Active"))
 
     # Now they all have it attached
-    _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
+    _details = list([c.timeline_detail(tenant_id, timeline_id) for c in http_clients])
     _detail = http_clients[1].timeline_detail(tenant_id, timeline_id)
     _detail = http_clients[2].timeline_detail(tenant_id, timeline_id)
 
