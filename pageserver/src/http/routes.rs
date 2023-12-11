@@ -886,7 +886,9 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
+    state
+        .tenant_manager
+        .delete_tenant(tenant_shard_id)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard = %tenant_shard_id.shard_slug()
