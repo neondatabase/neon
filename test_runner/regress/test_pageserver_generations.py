@@ -23,7 +23,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     S3Scrubber,
     last_flush_lsn_upload,
-    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
@@ -100,7 +99,10 @@ def generate_uploads_and_deletions(
             )
             assert tenant_id is not None
             assert timeline_id is not None
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+            # We are waiting for uploads as well as local flush, in order to avoid leaving the system
+            # in a state where there are "future layers" in remote storage that will generate deletions
+            # after a restart.
+            last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
             ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # Compaction should generate some GC-elegible layers
