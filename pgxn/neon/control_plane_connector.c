@@ -637,7 +637,7 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	ListCell   *option;
 	const char *role_name = stmt->role->rolename;
 
-	if (RoleIsNeonSuperuser(role_name))
+	if (RoleIsNeonSuperuser(role_name) && !superuser())
 		elog(ERROR, "can't ALTER neon_superuser");
 
 	foreach(option, stmt->options)
