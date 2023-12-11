@@ -689,7 +689,7 @@ impl AsRef<OwnedFd> for FileGuard<'static> {
     }
 }
 
-impl<'a> FileGuard<'a> {
+impl FileGuard<'static> {
     // TODO: switch to tokio-epoll-uring native operations.
     #[deprecated]
     fn with_std_file<F, R>(&mut self, with: F) -> R
