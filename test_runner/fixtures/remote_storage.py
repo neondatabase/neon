@@ -372,6 +372,13 @@ def s3_storage() -> RemoteStorageKind:
         return RemoteStorageKind.MOCK_S3
 
 
+def default_remote_storage() -> RemoteStorageKind:
+    """
+    The remote storage kind used in tests that do not specify a preference
+    """
+    return RemoteStorageKind.LOCAL_FS
+
+
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
     if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
