@@ -1865,6 +1865,10 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
 
     endpoint.safe_psql("create table t(key int, value text)")
 
+    timeline_status = env.safekeepers[0].http_client().timeline_status(tenant_id, timeline_id)
+    timeline_start_lsn = timeline_status.timeline_start_lsn
+    log.info(f"Timeline start LSN: {timeline_start_lsn}")
+
     current_percent = 0.0
     for new_percent in target_percents:
         new_rows = insert_rows * (new_percent - current_percent) / 100
@@ -1885,11 +1889,26 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
         new_timeline_id = TimelineId.generate()
         log.info(f"Copying branch for LSN {lsn}, to timeline {new_timeline_id}")
 
-        for sk in env.safekeepers:
-            sk.http_client().copy_timeline(tenant_id, timeline_id, {
-                "target_timeline_id": str(new_timeline_id),
-                "until_lsn": str(lsn),
-            })
+        orig_digest = (
+            env.safekeepers[0]
+            .http_client()
+            .timeline_digest(tenant_id, timeline_id, timeline_start_lsn, lsn)
+        )
+        log.info(f"Original digest: {orig_digest}")
 
-        # TODO: verify copy result
-    
+        for sk in env.safekeepers:
+            sk.http_client().copy_timeline(
+                tenant_id,
+                timeline_id,
+                {
+                    "target_timeline_id": str(new_timeline_id),
+                    "until_lsn": str(lsn),
+                },
+            )
+
+            new_digest = sk.http_client().timeline_digest(
+                tenant_id, new_timeline_id, timeline_start_lsn, lsn
+            )
+            log.info(f"Digest after timeline copy on safekeeper {sk.id}: {new_digest}")
+
+            assert orig_digest == new_digest

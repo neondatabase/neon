@@ -3033,9 +3033,28 @@ class SafekeeperHttpClient(requests.Session):
         return res_json
 
     def copy_timeline(self, tenant_id: TenantId, timeline_id: TimelineId, body: Dict[str, Any]):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/copy", json=body)
-        log.info(f"Safekeeper copy_timeline responsed with {res.text}")
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/copy",
+            json=body,
+        )
         res.raise_for_status()
+
+    def timeline_digest(
+        self, tenant_id: TenantId, timeline_id: TimelineId, from_lsn: Lsn, until_lsn: Lsn
+    ) -> Dict[str, Any]:
+        body = {
+            "from_lsn": str(from_lsn),
+            "until_lsn": str(until_lsn),
+        }
+
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/digest",
+            json=body,
+        )
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
 
     def timeline_create(
         self,

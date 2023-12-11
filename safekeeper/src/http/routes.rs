@@ -21,6 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info_span, Instrument};
 use utils::http::endpoint::{request_span, ChannelWriter};
 
+use crate::debug_dump::TimelineDigestRequest;
 use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::Term;
 use crate::safekeeper::{ServerInfo, TermLsn};
@@ -225,6 +226,22 @@ async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Bo
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
+}
+
+async fn timeline_digest_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let request: TimelineDigestRequest = json_request(&mut request).await?;
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let response = debug_dump::calculate_digest(&tli, request)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, response)
 }
 
 /// Download a file from the timeline directory.
@@ -504,6 +521,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             request_span(r, record_safekeeper_info)
         })
         .get("/v1/debug_dump", |r| request_span(r, dump_debug_handler))
+        .post("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
+            request_span(r, timeline_digest_handler)
+        })
 }
 
 #[cfg(test)]
