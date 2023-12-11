@@ -57,15 +57,16 @@ jobs:
       - name: Push manifest
         run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:$GITHUB_RUN_ID
 
-  promote:
-    name: 'promote'
+  update-state:
+    name: 'update change image state'
     runs-on: [ self-hosted, dev, x64 ]
-    container: amazon/aws-cli
-    environment: dev-apply
+    environment: dev
     needs:
       - manifest
-
-    steps:
-      - name: Promote image
-        run:
-          MANIFEST=$(aws ecr batch-get-image --repository-name build-tools --image-ids imageTag=$GITHUB_RUN_ID --query 'images[].imageManifest' --output text) && aws ecr put-image --repository-name build-tools --image-tag latest --image-manifest "$MANIFEST"
+    
+    steps:  
+      - name: create a file with status and upload it
+        run: echo "imageupdated" > ImageUpdateStatus.txt
+      - uses: actions/upload-artifact@v3
+        with:
+          path: ImageUpdateStatus.txt
