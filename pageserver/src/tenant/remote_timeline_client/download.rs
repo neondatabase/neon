@@ -349,10 +349,7 @@ pub(super) async fn download_index_part(
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "listing index_part files",
-        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-        backoff::Cancel::new(CancellationToken::new(), || -> anyhow::Error {
-            unreachable!()
-        }),
+        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
     )
     .await
     .map_err(DownloadError::Other)?;

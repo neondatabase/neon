@@ -528,6 +528,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(
@@ -544,7 +545,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
-                &self.cancel,
+                cancel,
             )
             .measure_remote_op(
                 self.tenant_shard_id.tenant_id,
@@ -1009,8 +1010,7 @@ impl RemoteTimelineClient {
             // when executed as part of tenant deletion this happens in the background
             2,
             "persist_index_part_with_deleted_flag",
-            // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
         )
         .await?;
 

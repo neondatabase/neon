@@ -3029,8 +3029,7 @@ impl Tenant {
                     3,
                     u32::MAX,
                     "persist_initdb_tar_zst",
-                    // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-                    backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
                 )
                 .await?;
 

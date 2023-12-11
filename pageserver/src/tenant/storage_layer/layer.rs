@@ -851,6 +851,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
+                    &crate::task_mgr::shutdown_token()
                 )
                 .await;
 
