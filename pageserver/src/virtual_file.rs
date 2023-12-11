@@ -413,7 +413,7 @@ impl VirtualFile {
         }
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
-        slot_guard.file = Some({
+        slot_guard.file = Some(observe_duration!(StorageIoOperation::Open, {
             let system = tokio_epoll_uring::thread_local_system().await;
             let file: OwnedFd = system
                 .open(path, &open_options)
@@ -426,7 +426,7 @@ impl VirtualFile {
                 })?;
             let file = File::from(file);
             file
-        });
+        }));
 
         // Strip all options other than read and write.
         //
@@ -577,11 +577,19 @@ impl VirtualFile {
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
     pub async fn read_exact_at(
         &self,
+        page: PageWriteGuard<'static>,
+        offset: u64,
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        with_file!(self, StorageIoOperation::Read, |file_guard| {
+            self.read_exact_at0(file_guard, page, offset).await
+        })
+    }
+    async fn read_exact_at0(
+        &self,
+        file_guard: FileGuard<'static>,
         write_guard: PageWriteGuard<'static>,
         offset: u64,
     ) -> Result<PageWriteGuard<'static>, Error> {
-        let file_guard: FileGuard<'static> = self.lock_file().await?;
-
         let system = tokio_epoll_uring::thread_local_system().await;
         struct PageWriteGuardBuf {
             buf: PageWriteGuard<'static>,
