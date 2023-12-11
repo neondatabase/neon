@@ -4,6 +4,7 @@ mod mitm;
 
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, TestBackend};
+use crate::auth::IpPattern;
 use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
 use crate::{auth, http, sasl, scram};
@@ -466,7 +467,7 @@ impl TestBackend for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError> {
+    fn get_allowed_ips(&self) -> Result<Arc<Vec<IpPattern>>, console::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 }

@@ -5,11 +5,13 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
+use crate::{
+    auth::IpPattern,
+    proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use itertools::Itertools;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
@@ -82,12 +84,7 @@ impl Api {
             let secret = scram::ServerSecret::parse(&body.role_secret)
                 .map(AuthSecret::Scram)
                 .ok_or(GetAuthInfoError::BadSecret)?;
-            let allowed_ips = body
-                .allowed_ips
-                .into_iter()
-                .flatten()
-                .map(String::from)
-                .collect_vec();
+            let allowed_ips = body.allowed_ips.unwrap_or_default();
             ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
                 secret: Some(secret),
@@ -171,7 +168,7 @@ impl super::Api for Api {
         &self,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+    ) -> Result<Arc<Vec<IpPattern>>, GetAuthInfoError> {
         let key: &str = &creds.endpoint;
         if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
             ALLOWED_IPS_BY_CACHE_OUTCOME

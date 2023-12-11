@@ -4,7 +4,7 @@ pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::backend::ComputeUserInfo,
+    auth::{backend::ComputeUserInfo, IpPattern},
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
@@ -229,7 +229,7 @@ pub enum AuthSecret {
 pub struct AuthInfo {
     pub secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<String>,
+    pub allowed_ips: Vec<IpPattern>,
 }
 
 /// Info for establishing a connection to a compute node.
@@ -250,7 +250,7 @@ pub struct NodeInfo {
 
 pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
 pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
-pub type AllowedIpsCache = TimedLru<Arc<str>, Arc<Vec<String>>>;
+pub type AllowedIpsCache = TimedLru<Arc<str>, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
@@ -267,7 +267,7 @@ pub trait Api {
         &self,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
+    ) -> Result<Arc<Vec<IpPattern>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
@@ -282,7 +282,7 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
     /// Cache for the `get_allowed_ips`. TODO(anna): use notifications listener instead.
-    pub allowed_ips: TimedLru<Arc<str>, Arc<Vec<String>>>,
+    pub allowed_ips: TimedLru<Arc<str>, Arc<Vec<IpPattern>>>,
 }
 
 /// Various caches for [`console`](super).

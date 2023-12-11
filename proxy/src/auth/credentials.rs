@@ -153,44 +153,65 @@ impl ClientCredentials {
     }
 }
 
-pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<String>) -> bool {
+pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
     if ip_list.is_empty() {
         return true;
     }
     for ip in ip_list {
-        // We expect that all ip addresses from control plane are correct.
-        // However, if some of them are broken, we still can check the others.
-        match parse_ip_pattern(ip) {
-            Ok(pattern) => {
-                if check_ip(peer_addr, &pattern) {
-                    return true;
-                }
-            }
-            Err(err) => warn!("Cannot parse ip: {}; err: {}", ip, err),
+        if check_ip(peer_addr, ip) {
+            return true;
         }
     }
     false
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum IpPattern {
+pub enum IpPattern {
     Subnet(ipnet::IpNet),
     Range(IpAddr, IpAddr),
     Single(IpAddr),
 }
 
-fn parse_ip_pattern(pattern: &str) -> anyhow::Result<IpPattern> {
-    if pattern.contains('/') {
-        let subnet: ipnet::IpNet = pattern.parse()?;
-        return Ok(IpPattern::Subnet(subnet));
+impl<'de> serde::Deserialize<'de> for IpPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let ip = <&'de str>::deserialize(deserializer)?;
+        Ok(Self::from_str_lossy(ip))
     }
-    if let Some((start, end)) = pattern.split_once('-') {
-        let start: IpAddr = start.parse()?;
-        let end: IpAddr = end.parse()?;
-        return Ok(IpPattern::Range(start, end));
+}
+
+impl std::str::FromStr for IpPattern {
+    type Err = anyhow::Error;
+
+    fn from_str(pattern: &str) -> Result<Self, Self::Err> {
+        if pattern.contains('/') {
+            let subnet: ipnet::IpNet = pattern.parse()?;
+            return Ok(IpPattern::Subnet(subnet));
+        }
+        if let Some((start, end)) = pattern.split_once('-') {
+            let start: IpAddr = start.parse()?;
+            let end: IpAddr = end.parse()?;
+            return Ok(IpPattern::Range(start, end));
+        }
+        let addr: IpAddr = pattern.parse()?;
+        Ok(IpPattern::Single(addr))
     }
-    let addr: IpAddr = pattern.parse()?;
-    Ok(IpPattern::Single(addr))
+}
+
+impl IpPattern {
+    pub fn from_str_lossy(pattern: &str) -> Self {
+        match pattern.parse() {
+            Ok(pattern) => pattern,
+            Err(err) => {
+                warn!("Cannot parse ip: {}; err: {}", pattern, err);
+                // We expect that all ip addresses from control plane are correct.
+                // However, if some of them are broken, we still can check the others.
+                Self::Single([0, 0, 0, 0].into())
+            }
+        }
+    }
 }
 
 fn check_ip(ip: &IpAddr, pattern: &IpPattern) -> bool {
@@ -213,6 +234,8 @@ fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<SmolStr> {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use ClientCredsParseError::*;
 
@@ -414,41 +437,47 @@ mod tests {
     #[test]
     fn test_check_peer_addr_is_in_list() {
         let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        assert!(check_peer_addr_is_in_list(&peer_addr, &vec![]));
+        assert!(check_peer_addr_is_in_list(&peer_addr, &[]));
         assert!(check_peer_addr_is_in_list(
             &peer_addr,
-            &vec!["127.0.0.1".into()]
+            &[IpPattern::from_str_lossy("127.0.0.1")]
         ));
         assert!(!check_peer_addr_is_in_list(
             &peer_addr,
-            &vec!["8.8.8.8".into()]
+            &[IpPattern::from_str_lossy("8.8.8.8")]
         ));
         // If there is an incorrect address, it will be skipped.
         assert!(check_peer_addr_is_in_list(
             &peer_addr,
-            &vec!["88.8.8".into(), "127.0.0.1".into()]
+            &[
+                IpPattern::from_str_lossy("88.8.8"),
+                IpPattern::from_str_lossy("127.0.0.1")
+            ]
         ));
     }
     #[test]
     fn test_parse_ip_v4() -> anyhow::Result<()> {
         let peer_addr = IpAddr::from([127, 0, 0, 1]);
         // Ok
-        assert_eq!(parse_ip_pattern("127.0.0.1")?, IpPattern::Single(peer_addr));
         assert_eq!(
-            parse_ip_pattern("127.0.0.1/31")?,
+            IpPattern::from_str("127.0.0.1")?,
+            IpPattern::Single(peer_addr)
+        );
+        assert_eq!(
+            IpPattern::from_str("127.0.0.1/31")?,
             IpPattern::Subnet(ipnet::IpNet::new(peer_addr, 31)?)
         );
         assert_eq!(
-            parse_ip_pattern("0.0.0.0-200.0.1.2")?,
+            IpPattern::from_str("0.0.0.0-200.0.1.2")?,
             IpPattern::Range(IpAddr::from([0, 0, 0, 0]), IpAddr::from([200, 0, 1, 2]))
         );
 
         // Error
-        assert!(parse_ip_pattern("300.0.1.2").is_err());
-        assert!(parse_ip_pattern("30.1.2").is_err());
-        assert!(parse_ip_pattern("127.0.0.1/33").is_err());
-        assert!(parse_ip_pattern("127.0.0.1-127.0.3").is_err());
-        assert!(parse_ip_pattern("1234.0.0.1-127.0.3.0").is_err());
+        assert!(IpPattern::from_str("300.0.1.2").is_err());
+        assert!(IpPattern::from_str("30.1.2").is_err());
+        assert!(IpPattern::from_str("127.0.0.1/33").is_err());
+        assert!(IpPattern::from_str("127.0.0.1-127.0.3").is_err());
+        assert!(IpPattern::from_str("1234.0.0.1-127.0.3.0").is_err());
         Ok(())
     }
 

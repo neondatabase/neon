@@ -32,6 +32,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
+use super::IpPattern;
+
 /// This type serves two purposes:
 ///
 /// * When `T` is `()`, it's just a regular auth backend selector
@@ -55,7 +57,7 @@ pub enum BackendType<'a, T> {
 
 pub trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
-    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError>;
+    fn get_allowed_ips(&self) -> Result<Arc<Vec<IpPattern>>, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -388,7 +390,7 @@ impl BackendType<'_, ComputeUserInfo> {
     pub async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+    ) -> Result<Arc<Vec<IpPattern>>, GetAuthInfoError> {
         use BackendType::*;
         match self {
             Console(api, creds) => api.get_allowed_ips(extra, creds).await,

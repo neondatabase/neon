@@ -6,7 +6,13 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
+use crate::{
+    auth::{backend::ComputeUserInfo, IpPattern},
+    compute,
+    error::io_error,
+    scram,
+    url::ApiUrl,
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
@@ -85,7 +91,7 @@ impl Api {
             {
                 Some(s) => {
                     info!("got allowed_ips: {s}");
-                    s.split(',').map(String::from).collect()
+                    s.split(',').map(IpPattern::from_str_lossy).collect()
                 }
                 None => vec![],
             };
@@ -154,7 +160,7 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+    ) -> Result<Arc<Vec<IpPattern>>, GetAuthInfoError> {
         Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
     }
 
