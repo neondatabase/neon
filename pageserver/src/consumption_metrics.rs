@@ -297,12 +297,12 @@ async fn calculate_synthetic_size_worker(
             // mean the synthetic size worker should terminate. we do not need any checks
             // in this function because `mgr::get_tenant` will error out after shutdown has
             // progressed to shutting down tenants.
-            let is_cancelled = matches!(
+            let timeline_shutting_down = matches!(
                 e.downcast_ref::<PageReconstructError>(),
-                Some(PageReconstructError::Cancelled)
+                Some(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
             );
 
-            if !is_cancelled {
+            if !timeline_shutting_down {
                 error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
             }
         }
