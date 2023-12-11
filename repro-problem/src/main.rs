@@ -4,11 +4,10 @@ use virtual_file::VirtualFile;
 mod page_cache;
 mod virtual_file;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     page_cache::init(10);
 
-    tokio::spawn(async move {
+    let x: Box<dyn std::future::Future<Output=()> + Send> = Box::new(async move {
         let cache = page_cache::get();
 
         let res = cache
