@@ -1751,6 +1751,9 @@ const AUX_FILES_KEY: Key = Key {
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
+// AUX_FILES currently stores only data for logical replication (slots etc), and
+// we don't preserve these on a branch because safekeepers can't follow timeline
+// switch (and generally it likely should be optional), so ignore these.
 pub fn is_inherited_key(key: Key) -> bool {
     key != AUX_FILES_KEY
 }
