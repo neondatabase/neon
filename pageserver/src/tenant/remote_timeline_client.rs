@@ -324,12 +324,12 @@ pub struct RemoteTimelineClient {
 
 /// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
 /// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
-const UPLOAD_TIMEOUT: Duration = Duration::from_millis(60000);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Wrapper for timeout_cancellable that embeds our upload timeout, and
-/// converts TimeoutCancellableError to anyhow.
+/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to anyhow.
 ///
-/// This is a convenience for the various upload/download functions.  In future
+/// This is a convenience for the various upload functions.  In future
 /// the anyhow::Error result should be replaced with a more structured type that
 /// enables callers to avoid handling shutdown as an error.
 async fn upload_cancellable<F>(cancel: &CancellationToken, future: F) -> anyhow::Result<()>
@@ -341,6 +341,23 @@ where
         Ok(Err(e)) => Err(e),
         Err(TimeoutCancellableError::Timeout) => Err(anyhow::anyhow!("Timeout")),
         Err(TimeoutCancellableError::Cancelled) => Err(anyhow::anyhow!("Shutting down")),
+    }
+}
+/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to DownloaDError.
+async fn download_cancellable<F, R>(
+    cancel: &CancellationToken,
+    future: F,
+) -> Result<R, DownloadError>
+where
+    F: std::future::Future<Output = Result<R, DownloadError>>,
+{
+    match timeout_cancellable(DOWNLOAD_TIMEOUT, &cancel, future).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(e),
+        Err(TimeoutCancellableError::Timeout) => {
+            Err(DownloadError::Other(anyhow::anyhow!("Timed out")))
+        }
+        Err(TimeoutCancellableError::Cancelled) => Err(DownloadError::Cancelled),
     }
 }
 
