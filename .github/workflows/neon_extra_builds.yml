@@ -142,6 +142,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v4
