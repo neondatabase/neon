@@ -184,7 +184,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81953c529336010edd6d8e358f886d9581267795c61b19475b71314bffa46d35"
 dependencies = [
  "concurrent-queue",
- "event-listener",
+ "event-listener 2.5.3",
  "futures-core",
 ]
 
@@ -205,11 +205,13 @@ dependencies = [
 
 [[package]]
 name = "async-lock"
-version = "2.8.0"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "287272293e9d8c41773cec55e365490fe034813a2f172f502d6ddcf75b2f582b"
+checksum = "7125e42787d53db9dd54261812ef17e937c95a51e4d291373b670342fa44310c"
 dependencies = [
- "event-listener",
+ "event-listener 4.0.0",
+ "event-listener-strategy",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -692,9 +694,9 @@ dependencies = [
 
 [[package]]
 name = "azure_core"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e29286b9edfdd6f2c7e9d970bb5b015df8621258acab9ecfcea09b2d7692467"
+checksum = "4ccd63c07d1fbfb3d4543d7ea800941bf5a30db1911b9b9e4db3b2c4210a434f"
 dependencies = [
  "async-trait",
  "base64 0.21.1",
@@ -719,9 +721,9 @@ dependencies = [
 
 [[package]]
 name = "azure_identity"
-version = "0.16.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b67b337346da8739e91ea1e9400a6ebc9bc54e0b2af1d23c9bcd565950588f9"
+checksum = "8bd7ea32ca7eb66ff4757f83baac702ff11d469e5de365b6bc6f79f9c25d3436"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -740,9 +742,9 @@ dependencies = [
 
 [[package]]
 name = "azure_storage"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bed0ccefde57930b2886fd4aed1f70ac469c197b8c2e94828290d71bcbdb5d97"
+checksum = "83ca0a07f89fd72a006da4713e93af3d6c44a693e61a1c3c2e7985de39c182e8"
 dependencies = [
  "RustyXML",
  "async-trait",
@@ -762,9 +764,9 @@ dependencies = [
 
 [[package]]
 name = "azure_storage_blobs"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f91a52da2d192cfe43759f61e8bb31a5969f1722d5b85ac89627f356ad674ab4"
+checksum = "8096c04d370118323c42b2752aa1883e4880a56ef65239f317b359f263b6e194"
 dependencies = [
  "RustyXML",
  "azure_core",
@@ -1685,6 +1687,27 @@ name = "event-listener"
 version = "2.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0206175f82b8d6bf6652ff7d71a1e27fd2e4efde587fd368662814d6ec1d9ce0"
+
+[[package]]
+name = "event-listener"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "770d968249b5d99410d61f5bf89057f3199a077a04d087092f58e7d10692baae"
+dependencies = [
+ "concurrent-queue",
+ "parking",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "event-listener-strategy"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "958e4d70b6d5e81971bebec42271ec641e7ff4e170a6fa605f2b8a8b65cb97d3"
+dependencies = [
+ "event-listener 4.0.0",
+ "pin-project-lite",
+]
 
 [[package]]
 name = "fail"
@@ -3678,9 +3701,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eff6510e86862b57b210fd8cbe8ed3f0d7d600b9c2863cd4549a2e033c66e956"
+checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
 dependencies = [
  "memchr",
  "serde",
