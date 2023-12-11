@@ -540,6 +540,8 @@ pub async fn copy_s3_segments(
     from_segment: u64,
     to_segment: u64,
 ) -> Result<()> {
+    const SEGMENTS_PROGRESS_REPORT_INTERVAL: u64 = 1024;
+
     let storage = REMOTE_STORAGE
         .get()
         .expect("failed to get remote storage")
@@ -557,19 +559,21 @@ pub async fn copy_s3_segments(
         .filter_map(|file| file.object_name().map(ToOwned::to_owned))
         .collect::<HashSet<_>>();
 
-    info!("Found files: {:?}", files);
-    info!("Uploaded segments: {:?}", uploaded_segments);
+    debug!("these segments have already been uploaded: {:?}", uploaded_segments);
 
     let relative_src_path =
         Utf8Path::new(&src_ttid.tenant_id.to_string()).join(src_ttid.timeline_id.to_string());
 
     for segno in from_segment..to_segment {
+        if segno % SEGMENTS_PROGRESS_REPORT_INTERVAL == 0 {
+            info!("copied all segments from {} until {}", from_segment, segno);
+        }
+
         let segment_name = XLogFileName(PG_TLI, segno, wal_seg_size);
         if uploaded_segments.contains(&segment_name) {
-            info!("Segment {} already uploaded, skipping", segment_name);
             continue;
         }
-        info!("Copying segment {}", segment_name);
+        debug!("copying segment {}", segment_name);
 
         let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
         let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
@@ -577,5 +581,6 @@ pub async fn copy_s3_segments(
         storage.copy_object(&from, &to).await?;
     }
 
+    info!("finished copying segments from {} until {}", from_segment, to_segment);
     Ok(())
 }
