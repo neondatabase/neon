@@ -305,11 +305,7 @@ async fn calculate_synthetic_size_worker(
     }
 }
 
-async fn calculate_and_log(
-    tenant: &Tenant,
-    cancel: &CancellationToken,
-    ctx: &RequestContext,
-) -> () {
+async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &RequestContext) {
     const CAUSE: LogicalSizeCalculationCause =
         LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
 
