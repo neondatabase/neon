@@ -290,11 +290,12 @@ async fn calculate_synthetic_size_worker(
                     if let Some(PageReconstructError::Cancelled) =
                         e.downcast_ref::<PageReconstructError>()
                     {
-                        return Ok(());
-                    }
-                    error!(
+                        // it is being shutdown, be quiet
+                    } else {
+                        error!(
                         "failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}"
                     );
+                    }
                 }
             }
         }
