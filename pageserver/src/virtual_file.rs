@@ -467,7 +467,7 @@ impl VirtualFile {
     ///
     /// We are doing it via a macro as Rust doesn't support async closures that
     /// take on parameters with lifetimes.
-    async fn lock_file(&self) -> Result<FileGuard<'static>, Error> {
+    async fn lock_file(&self) -> Result<FileGuard, Error> {
         let open_files = get_open_files();
 
         let mut handle_guard = {
@@ -582,7 +582,7 @@ impl VirtualFile {
     }
     async fn read_exact_at0(
         &self,
-        file_guard: FileGuard<'static>,
+        file_guard: FileGuard,
         write_guard: PageWriteGuard<'static>,
         offset: u64,
     ) -> Result<PageWriteGuard<'static>, Error> {
@@ -688,11 +688,11 @@ impl VirtualFile {
     }
 }
 
-struct FileGuard<'a> {
-    slot_guard: RwLockReadGuard<'a, SlotInner>,
+struct FileGuard {
+    slot_guard: RwLockReadGuard<'static, SlotInner>,
 }
 
-impl<'a> AsRef<OwnedFd> for FileGuard<'a> {
+impl AsRef<OwnedFd> for FileGuard {
     fn as_ref(&self) -> &OwnedFd {
         // This unwrap is safe because we only create `FileGuard`s
         // if we know that the file is Some.
@@ -700,7 +700,7 @@ impl<'a> AsRef<OwnedFd> for FileGuard<'a> {
     }
 }
 
-impl<'a> FileGuard<'a> {
+impl FileGuard {
     // TODO: switch to tokio-epoll-uring native operations.
     #[deprecated]
     fn with_std_file<F, R>(&mut self, with: F) -> R
@@ -715,7 +715,7 @@ impl<'a> FileGuard<'a> {
     }
 }
 
-impl tokio_epoll_uring::IoFd for FileGuard<'static> {
+impl tokio_epoll_uring::IoFd for FileGuard {
     unsafe fn as_fd(&self) -> RawFd {
         let owned_fd: &OwnedFd = self.as_ref();
         owned_fd.as_raw_fd()
