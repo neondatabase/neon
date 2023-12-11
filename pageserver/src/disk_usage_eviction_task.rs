@@ -384,8 +384,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         loop {
             let next = if js.len() >= limit || consumed_all {
                 js.join_next().await
-            } else if js.len() > limit / 10 {
-                // TODO: next tokio version exposes this as poll_join_next
+            } else if !js.is_empty() {
+                // opportunistically consume ready result, one per each new evicted
+                //
+                // this returning Poll::Pending is handled by yielding after each spawn.
                 futures::future::FutureExt::now_or_never(js.join_next()).and_then(|x| x)
             } else {
                 None
