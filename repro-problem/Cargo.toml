@@ -8,3 +8,9 @@ license.workspace = true
 
 [dependencies]
 tokio-epoll-uring = { path = "../../tokio-epoll-uring/tokio-epoll-uring" }
+tokio.workspace = true
+camino.workspace = true
+utils = {path = "../libs/utils" }
+once_cell.workspace = true
+tracing.workspace = true
+nix.workspace = true

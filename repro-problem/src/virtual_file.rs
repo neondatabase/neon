@@ -10,7 +10,6 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 use crate::page_cache::PageWriteGuard;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
@@ -159,9 +158,7 @@ impl OpenFiles {
         if let Some(old_file) = slot_guard.file.take() {
             // the normal path of dropping VirtualFile uses `Close`, use `CloseByReplace` here to
             // distinguish the two.
-            STORAGE_IO_TIME_METRIC
-                .get(StorageIoOperation::CloseByReplace)
-                .observe_closure_duration(|| drop(old_file));
+            drop(old_file);
         }
 
         // Prepare the slot for reuse and return it
@@ -259,12 +256,7 @@ impl<T> MaybeFatalIo<T> for std::io::Result<T> {
 /// where "support" means that we measure wall clock time.
 macro_rules! observe_duration {
     ($op:expr, $($body:tt)*) => {{
-        let instant = Instant::now();
         let result = $($body)*;
-        let elapsed = instant.elapsed().as_secs_f64();
-        STORAGE_IO_TIME_METRIC
-            .get($op)
-            .observe(elapsed);
         result
     }}
 }
@@ -680,11 +672,6 @@ impl VirtualFile {
         let result = with_file!(self, StorageIoOperation::Write, |file_guard| {
             file_guard.with_std_file(|std_file| std_file.write_at(buf, offset))
         });
-        if let Ok(size) = result {
-            STORAGE_IO_SIZE
-                .with_label_values(&["write", &self.tenant_id, &self.timeline_id])
-                .add(size as i64);
-        }
         result
     }
 }
@@ -765,9 +752,7 @@ impl Drop for VirtualFile {
                 // there is also the `CloseByReplace` operation for closes done on eviction for
                 // comparison.
                 if let Some(fd) = slot_guard.file.take() {
-                    STORAGE_IO_TIME_METRIC
-                        .get(StorageIoOperation::Close)
-                        .observe_closure_duration(|| drop(fd));
+                    drop(fd);
                 }
             }
         }
@@ -821,7 +806,6 @@ pub fn init(num_slots: usize) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
-    crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }
 
 const TEST_MAX_FILE_DESCRIPTORS: usize = 10;
