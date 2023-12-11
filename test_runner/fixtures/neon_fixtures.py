@@ -1712,7 +1712,7 @@ class NeonPageserver(PgProtocol):
 
     @property
     def workdir(self) -> Path:
-        return Path(os.path.join(self.env.repo_dir, f"pageserver_{self.id}"))
+        return self.env.repo_dir / f"pageserver_{self.id}"
 
     def assert_no_errors(self):
         logfile = self.workdir / "pageserver.log"
@@ -1783,6 +1783,27 @@ class NeonPageserver(PgProtocol):
 
         client = self.http_client()
         return client.tenant_detach(tenant_id)
+
+    def tenant_location_configure(self, tenant_id: TenantId, config: dict[str, Any], **kwargs):
+        # This API is only for use when generations are enabled
+        assert self.env.attachment_service is not None
+
+        if config["mode"].startswith("Attached") and "generation" not in config:
+            config["generation"] = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+
+        client = self.http_client()
+        return client.tenant_location_conf(tenant_id, config, **kwargs)
+
+    def read_tenant_location_conf(self, tenant_id: TenantId) -> dict[str, Any]:
+        path = self.tenant_dir(tenant_id) / "config-v1"
+        log.info(f"Reading location conf from {path}")
+        bytes = open(path, "r").read()
+        try:
+            decoded: dict[str, Any] = toml.loads(bytes)
+            return decoded
+        except:
+            log.error(f"Failed to decode LocationConf, raw content ({len(bytes)} bytes): {bytes}")
+            raise
 
     def tenant_create(
         self,
@@ -2717,6 +2738,7 @@ class EndpointFactory:
         lsn: Optional[Lsn] = None,
         hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
+        pageserver_id: Optional[int] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -2736,6 +2758,7 @@ class EndpointFactory:
             lsn=lsn,
             hot_standby=hot_standby,
             config_lines=config_lines,
+            pageserver_id=pageserver_id,
         )
 
     def stop_all(self) -> "EndpointFactory":
@@ -3082,7 +3105,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"config|metadata|.+\.(?:toml|pid|json|sql)"
+    r"config|config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql)"
 )
 
 
