@@ -34,7 +34,7 @@ impl LayerManager {
     }
 
     pub(crate) fn clear(&mut self) {
-        std::mem::take(&mut self.layer_map);
+        self.layer_map = LayerMap::default();
         self.layer_fmgr.clear();
     }
 

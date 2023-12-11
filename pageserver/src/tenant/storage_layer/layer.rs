@@ -480,14 +480,11 @@ impl Drop for LayerInner {
 
         // We will only do I/O on drop if our Timeline still exists.  Otherwise, we may safely
         // leave garbage layers behind to be cleaned up the next time this Timeline is instantiated.
-        let timeline = match self.timeline.upgrade() {
-            Some(t) => t,
-            None => {
-                // no need to nag that timeline is gone: under normal situation on
-                // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
-                LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
-                return;
-            }
+        let Some(timeline) = self.timeline.upgrade() else {
+            // no need to nag that timeline is gone: under normal situation on
+            // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
+            LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
+            return;
         };
 
         // We will only do I/O during drop if our Timeline's layer_gate is open: this avoids
