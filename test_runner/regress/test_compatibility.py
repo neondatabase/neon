@@ -105,7 +105,6 @@ def test_create_snapshot(
     # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
     neon_env_builder.pg_version = pg_version
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_generations = False
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
@@ -170,7 +169,6 @@ def test_backward_compatibility(
 
     try:
         neon_env_builder.num_safekeepers = 3
-        neon_env_builder.enable_generations = False
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
         neon_env_builder.start()
 
@@ -228,7 +226,6 @@ def test_forward_compatibility(
 
     try:
         neon_env_builder.num_safekeepers = 3
-        neon_env_builder.enable_generations = False
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
             neon_binpath=compatibility_neon_bin,
