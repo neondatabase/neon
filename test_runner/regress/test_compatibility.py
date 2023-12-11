@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import pytest
-import toml  # TODO: replace with tomllib for Python >= 3.11
+import toml
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonCli,
