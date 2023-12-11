@@ -29,7 +29,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{id::TenantTimelineId, sync::gate::Gate};
+use utils::sync::gate::Gate;
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
@@ -377,9 +377,6 @@ pub enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
-    /// The operation would require downloading a layer that is missing locally.
-    NeedsDownload(TenantTimelineId, LayerFileName),
-
     /// The operation was cancelled
     Cancelled,
 
@@ -408,14 +405,6 @@ impl std::fmt::Debug for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
-                write!(
-                    f,
-                    "layer {}/{} needs download",
-                    tenant_timeline_id,
-                    layer_file_name.file_name()
-                )
-            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::AncestorStopping(timeline_id) => {
                 write!(f, "ancestor timeline {timeline_id} is being stopped")
@@ -429,14 +418,6 @@ impl std::fmt::Display for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
-                write!(
-                    f,
-                    "layer {}/{} needs download",
-                    tenant_timeline_id,
-                    layer_file_name.file_name()
-                )
-            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::AncestorStopping(timeline_id) => {
                 write!(f, "ancestor timeline {timeline_id} is being stopped")
