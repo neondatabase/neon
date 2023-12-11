@@ -142,7 +142,9 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         .collect();
 
                     if !orphan_layers.is_empty() {
-                        result.errors.push(format!(
+                        // An orphan layer is not an error: it's arguably not even a warning, but it is helpful to report
+                        // these as a hint that there is something worth cleaning up here.
+                        result.warnings.push(format!(
                             "index_part.json does not contain layers from S3: {:?}",
                             orphan_layers
                                 .iter()
