@@ -608,7 +608,7 @@ impl Tenant {
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
-            Some(tenant_shard_id.tenant_id),
+            Some(tenant_shard_id),
             None,
             "attach tenant",
             false,
@@ -1917,7 +1917,7 @@ impl Tenant {
         //
         // this will additionally shutdown and await all timeline tasks.
         tracing::debug!("Waiting for tasks...");
-        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id.tenant_id), None).await;
+        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), None).await;
 
         // Wait for any in-flight operations to complete
         self.gate.close().await;

@@ -77,7 +77,7 @@ use postgres_ffi::to_pg_timestamp;
 use utils::{
     completion,
     generation::Generation,
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
     simple_rcu::{Rcu, RcuReadGuard},
@@ -926,7 +926,7 @@ impl Timeline {
         tracing::debug!("Waiting for WalReceiverManager...");
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
         )
         .await;
@@ -977,7 +977,7 @@ impl Timeline {
         // Shut down the layer flush task before the remote client, as one depends on the other
         task_mgr::shutdown_tasks(
             Some(TaskKind::LayerFlushTask),
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
         )
         .await;
@@ -995,12 +995,7 @@ impl Timeline {
 
         tracing::debug!("Waiting for tasks...");
 
-        task_mgr::shutdown_tasks(
-            None,
-            Some(self.tenant_shard_id.tenant_id),
-            Some(self.timeline_id),
-        )
-        .await;
+        task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         // Finally wait until any gate-holders are complete
         self.gate.close().await;
@@ -1314,16 +1309,20 @@ impl Timeline {
                 &self.conf.default_tenant_conf,
             );
 
-            // TODO(sharding): make evictions state shard aware
-            // (https://github.com/neondatabase/neon/issues/5953)
             let tenant_id_str = self.tenant_shard_id.tenant_id.to_string();
+            let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
 
             let timeline_id_str = self.timeline_id.to_string();
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()
                 .unwrap()
-                .change_threshold(&tenant_id_str, &timeline_id_str, new_threshold);
+                .change_threshold(
+                    &tenant_id_str,
+                    &shard_id_str,
+                    &timeline_id_str,
+                    new_threshold,
+                );
         }
     }
 
@@ -1395,7 +1394,7 @@ impl Timeline {
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(
-                    &tenant_shard_id.tenant_id,
+                    &tenant_shard_id,
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
@@ -1496,7 +1495,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "layer flush task",
             false,
@@ -1847,7 +1846,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "initial size calculation",
             false,
@@ -2020,7 +2019,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
             false,
@@ -2461,13 +2460,7 @@ impl Timeline {
         // FIXME: It's pointless to check the cache for things that are not 8kB pages.
         // We should look at the key to determine if it's a cacheable object
         let (lsn, read_guard) = cache
-            .lookup_materialized_page(
-                self.tenant_shard_id.tenant_id,
-                self.timeline_id,
-                key,
-                lsn,
-                ctx,
-            )
+            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
             .await?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
@@ -3209,7 +3202,7 @@ impl DurationRecorder {
 #[derive(Default)]
 struct CompactLevel0Phase1StatsBuilder {
     version: Option<u64>,
-    tenant_id: Option<TenantId>,
+    tenant_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
@@ -3226,7 +3219,7 @@ struct CompactLevel0Phase1StatsBuilder {
 #[derive(serde::Serialize)]
 struct CompactLevel0Phase1Stats {
     version: u64,
-    tenant_id: TenantId,
+    tenant_id: TenantShardId,
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
@@ -3745,7 +3738,7 @@ impl Timeline {
             let ctx = ctx.attached_child();
             let mut stats = CompactLevel0Phase1StatsBuilder {
                 version: Some(2),
-                tenant_id: Some(self.tenant_shard_id.tenant_id),
+                tenant_id: Some(self.tenant_shard_id),
                 timeline_id: Some(self.timeline_id),
                 ..Default::default()
             };
@@ -4207,7 +4200,7 @@ impl Timeline {
                     let cache = page_cache::get();
                     if let Err(e) = cache
                         .memorize_materialized_page(
-                            self.tenant_shard_id.tenant_id,
+                            self.tenant_shard_id,
                             self.timeline_id,
                             key,
                             last_rec_lsn,
@@ -4251,7 +4244,7 @@ impl Timeline {
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
-            Some(self.tenant_shard_id.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "download all remote layers task",
             false,
