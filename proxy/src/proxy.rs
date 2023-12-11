@@ -671,7 +671,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
 pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra<'_>,
+    extra: &console::ConsoleReqExtra,
     creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
@@ -968,13 +968,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             allow_self_signed_compute,
         } = self;
 
+        let proto = mode.protocol_label();
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
-            application_name: params.get("application_name"),
+            application_name: format!(
+                "{}/{}",
+                params.get("application_name").unwrap_or_default(),
+                proto
+            ),
             options: neon_options(params),
         };
-
-        let mut latency_timer = LatencyTimer::new(mode.protocol_label());
+        let mut latency_timer = LatencyTimer::new(proto);
 
         let user = creds.get_user().to_owned();
         let auth_result = match creds
@@ -1012,7 +1016,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         .or_else(|e| stream.throw_error(e))
         .await?;
 
-        let proto = mode.protocol_label();
         NUM_DB_CONNECTIONS_OPENED_COUNTER
             .with_label_values(&[proto])
             .inc();

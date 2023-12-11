@@ -432,7 +432,7 @@ async fn connect_to_compute(
 
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
-        application_name: Some(APP_NAME),
+        application_name: APP_NAME.to_string(),
         options: console_options,
     };
     // TODO(anna): this is a bit hacky way, consider using console notification listener.
