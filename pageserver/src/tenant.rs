@@ -111,6 +111,7 @@ use utils::{
 
 /// Declare a failpoint that can use the `pause` failpoint action.
 /// We don't want to block the executor thread, hence, spawn_blocking + await.
+#[macro_export]
 macro_rules! pausable_failpoint {
     ($name:literal) => {
         if cfg!(feature = "testing") {

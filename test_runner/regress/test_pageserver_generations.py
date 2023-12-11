@@ -343,20 +343,15 @@ def test_deletion_queue_recovery(
 
     ps_http = env.pageserver.http_client()
 
-    failpoints = [
-        # Prevent deletion lists from being executed, to build up some backlog of deletions
-        ("deletion-queue-before-execute", "return"),
-    ]
-
     if validate_before == ValidateBefore.NO_VALIDATE:
-        failpoints.append(
-            # Prevent deletion lists from being validated, we will test that they are
-            # dropped properly during recovery.  'pause' is okay here because we kill
-            # the pageserver with immediate=true
-            ("control-plane-client-validate", "pause")
-        )
+        # Prevent deletion lists from being validated, we will test that they are
+        # dropped properly during recovery.  'pause' is okay here because we kill
+        # the pageserver with immediate=true
+        ps_http.configure_failpoints(("control-plane-client-validate-pausable", "pause"))
+    else:
+        # Prevent deletion lists from being executed, to build up some backlog of deletions
+        ps_http.configure_failpoints(("deletion-queue-before-execute", "return"))
 
-    ps_http.configure_failpoints(failpoints)
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 

@@ -173,6 +173,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
         };
 
         fail::fail_point!("control-plane-client-validate");
+        crate::pausable_failpoint!("control-plane-client-validate-pausable");
 
         let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
 
