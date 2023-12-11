@@ -112,12 +112,9 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
-    upload_cancellable(
-        &cancel,
-        storage.upload(reader, fs_size, &storage_path, None),
-    )
-    .await
-    .with_context(|| format!("upload layer from local path '{source_path}'"))?;
+    upload_cancellable(cancel, storage.upload(reader, fs_size, &storage_path, None))
+        .await
+        .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
     Ok(())
 }
@@ -137,7 +134,7 @@ pub(crate) async fn upload_initdb_dir(
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
     upload_cancellable(
-        &cancel,
+        cancel,
         storage.upload_storage_object(file, size as usize, &remote_path),
     )
     .await

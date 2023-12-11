@@ -115,7 +115,7 @@ pub async fn download_layer_file<'a>(
                     "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
                 )
             })
-            .map_err(|e| DownloadError::Other(e.into()))?
+            .map_err(DownloadError::Other)?
             {
                 Ok(b) => Ok(b),
                 Err(e) => {
@@ -132,7 +132,7 @@ pub async fn download_layer_file<'a>(
                     "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
                 )
             })
-            .map_err(|e| DownloadError::Other(e.into()))?;
+            .map_err(DownloadError::Other)?;
 
             let destination_file = destination_file.into_inner();
 

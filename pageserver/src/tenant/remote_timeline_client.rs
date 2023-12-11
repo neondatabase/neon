@@ -336,7 +336,7 @@ async fn upload_cancellable<F>(cancel: &CancellationToken, future: F) -> anyhow:
 where
     F: std::future::Future<Output = anyhow::Result<()>>,
 {
-    match timeout_cancellable(UPLOAD_TIMEOUT, &cancel, future).await {
+    match timeout_cancellable(UPLOAD_TIMEOUT, cancel, future).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),
         Err(TimeoutCancellableError::Timeout) => Err(anyhow::anyhow!("Timeout")),
@@ -351,7 +351,7 @@ async fn download_cancellable<F, R>(
 where
     F: std::future::Future<Output = Result<R, DownloadError>>,
 {
-    match timeout_cancellable(DOWNLOAD_TIMEOUT, &cancel, future).await {
+    match timeout_cancellable(DOWNLOAD_TIMEOUT, cancel, future).await {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => Err(e),
         Err(TimeoutCancellableError::Timeout) => {
