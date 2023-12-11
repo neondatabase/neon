@@ -2980,6 +2980,7 @@ impl Tenant {
                     storage,
                     &self.tenant_shard_id,
                     &existing_initdb_timeline_id,
+                    &self.cancel,
                 )
                 .await
                 .context("download initdb tar")?;

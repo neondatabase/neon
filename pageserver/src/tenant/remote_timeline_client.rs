@@ -544,6 +544,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                &self.cancel,
             )
             .measure_remote_op(
                 self.tenant_shard_id.tenant_id,

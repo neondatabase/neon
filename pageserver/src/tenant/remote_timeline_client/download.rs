@@ -46,6 +46,7 @@ pub async fn download_layer_file<'a>(
     timeline_id: TimelineId,
     layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
+    cancel: &CancellationToken,
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -112,6 +113,7 @@ pub async fn download_layer_file<'a>(
             Ok((destination_file, bytes_amount))
         },
         &format!("download {remote_path:?}"),
+        cancel,
     )
     .await?;
 
@@ -389,6 +391,7 @@ pub(crate) async fn download_initdb_tar_zst(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
+    cancel: &CancellationToken,
 ) -> Result<(Utf8PathBuf, File), DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -437,6 +440,7 @@ pub(crate) async fn download_initdb_tar_zst(
             Ok(file)
         },
         &format!("download {remote_path}"),
+        cancel,
     )
     .await
     .map_err(|e| {
@@ -460,7 +464,11 @@ pub(crate) async fn download_initdb_tar_zst(
 /// with backoff.
 ///
 /// (See similar logic for uploads in `perform_upload_task`)
-async fn download_retry<T, O, F>(op: O, description: &str) -> Result<T, DownloadError>
+async fn download_retry<T, O, F>(
+    op: O,
+    description: &str,
+    cancel: &CancellationToken,
+) -> Result<T, DownloadError>
 where
     O: FnMut() -> F,
     F: Future<Output = Result<T, DownloadError>>,
@@ -471,10 +479,7 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
-        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-        backoff::Cancel::new(CancellationToken::new(), || -> DownloadError {
-            unreachable!()
-        }),
+        backoff::Cancel::new(cancel.clone(), || DownloadError::Cancelled),
     )
     .await
 }
