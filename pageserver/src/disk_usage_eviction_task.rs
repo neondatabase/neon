@@ -495,7 +495,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
             // calling again when consumed_all is fine as evicted is fused.
             let Some((_partition, candidate)) = evicted.next() else {
-                consumed_all = true;
+                if !consumed_all {
+                    tracing::info!("all evictions started, waiting");
+                    consumed_all = true;
+                }
                 continue;
             };
 
@@ -528,6 +531,43 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
         (usage_assumed, evictions_failed)
     };
+
+    let started_at = std::time::Instant::now();
+
+    let evict_layers = async move {
+        let mut evict_layers = std::pin::pin!(evict_layers);
+
+        let maximum_expected = std::time::Duration::from_secs(10);
+        let nag_every = std::time::Duration::from_secs(2);
+
+        match tokio::time::timeout(maximum_expected, &mut evict_layers).await {
+            Ok(tuple) => return tuple,
+            Err(_timeout) => {
+                tracing::info!(
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "still ongoing"
+                );
+            }
+        };
+
+        loop {
+            match tokio::time::timeout(nag_every, &mut evict_layers).await {
+                Ok(tuple) => {
+                    tracing::info!(elapsed_ms = started_at.elapsed().as_millis(), "completed");
+                    return tuple;
+                }
+                Err(_timeout) => {
+                    tracing::info!(
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        "still ongoing"
+                    );
+                }
+            }
+        }
+    };
+
+    let evict_layers =
+        evict_layers.instrument(tracing::info_span!("evict_layers", layers=%evicted_amount));
 
     let (usage_assumed, evictions_failed) = tokio::select! {
         tuple = evict_layers => { tuple },
