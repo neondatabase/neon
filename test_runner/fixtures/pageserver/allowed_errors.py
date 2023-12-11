@@ -79,6 +79,9 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # AWS S3 may emit 500 errors for keys in a DeleteObjects response: we retry these
     # and it is not a failure of our code when it happens.
     ".*DeleteObjects.*We encountered an internal error. Please try again.*",
+    # During shutdown, DownloadError::Cancelled may be logged as an error.  Cleaning this
+    # up is tracked in https://github.com/neondatabase/neon/issues/6096
+    ".*Cancelled, shutting down.*",
 )
 
 
