@@ -1840,7 +1840,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     assert final_stats.get("START_WAL_PUSH", 0) >= 3
 
 
-@pytest.mark.parametrize("insert_rows", [0, 1000, 1000000, 5000000])
+@pytest.mark.parametrize("insert_rows", [0, 100, 100000, 500000])
 def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
     target_percents = [10, 50, 90, 100]
 
@@ -1879,13 +1879,13 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
         if new_rows == 0:
             continue
 
-        endpoint.safe_psql(f"insert into t select generate_series(1, {new_rows}), 'payload'")
+        endpoint.safe_psql(f"insert into t select generate_series(1, {new_rows}), repeat('payload!', 10)")
 
         # remember LSN right after reaching new_percent
         lsn = remember_lsn()
         log.info(f"LSN after inserting {new_rows} rows: {lsn}")
 
-    # TODO: would be also good to test cases where segments are not fully uploaded to S3
+    # TODO: would be also good to test cases where not all segments are uploaded to S3
 
     for lsn in lsns:
         new_timeline_id = TimelineId.generate()

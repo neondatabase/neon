@@ -18,8 +18,11 @@ use crate::{
     timeline::{Timeline, TimelineError},
     wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
-    GlobalTimelines,
+    GlobalTimelines, SafeKeeperConf,
 };
+
+// we don't want to have more than 10 segments on disk after copy, because they take space
+const MAX_BACKUP_LAG: u64 = 10 * WAL_SEGMENT_SIZE as u64;
 
 pub struct Request {
     pub source: Arc<Timeline>,
@@ -29,9 +32,7 @@ pub struct Request {
 
 pub async fn handle_request(request: Request) -> Result<()> {
     // TODO: request.until_lsn MUST be a valid LSN, and we cannot check it :(
-
-    // we don't want to have more than 10 segments on disk after copy, because they take space
-    const MAX_BACKUP_LAG: u64 = 10 * WAL_SEGMENT_SIZE as u64;
+    //   if lsn will point to a middle of a WAL record, timeline will be in "broken" state
 
     match GlobalTimelines::get(request.destination_ttid) {
         // timeline already exists. would be good to check that this timeline is the copy
@@ -39,7 +40,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
         Ok(_) => return Ok(()),
         // timeline not found, we are going to create it
         Err(TimelineError::NotFound(_)) => {}
-        // error, probably timeline was already cancelled
+        // error, probably timeline was deleted
         res => {
             res?;
         }
@@ -82,9 +83,9 @@ pub async fn handle_request(request: Request) -> Result<()> {
         }
 
         if backup_lsn < request.until_lsn && request.until_lsn.0 - backup_lsn.0 > MAX_BACKUP_LAG {
-            // we can try to wait here until segments will be backed up to remote storage,
-            // but it's not clear how long to wait
-            bail!("requested backup LSN is beyond the end of the timeline");
+            // we have a lot of segments that are not backed up. we can try to wait here until
+            // segments will be backed up to remote storage, but it's not clear how long to wait
+            bail!("too many segments are not backed up");
         }
     }
 
@@ -104,10 +105,12 @@ pub async fn handle_request(request: Request) -> Result<()> {
             // probably we have only one segment, it's okay to leave backup_lsn at the start
             start_lsn
         } else {
+            assert!(max_backup_lsn.segment_offset(wal_seg_size) == 0);
             max_backup_lsn
         }
     };
 
+    // all previous segments will be copied inside S3
     let first_ondisk_segment = new_backup_lsn.segment_number(wal_seg_size);
     assert!(first_ondisk_segment <= last_segment);
     assert!(first_ondisk_segment >= first_segment);
@@ -121,22 +124,66 @@ pub async fn handle_request(request: Request) -> Result<()> {
     )
     .await?;
 
+    copy_disk_segments(
+        conf,
+        &state,
+        wal_seg_size,
+        &request.source.ttid,
+        new_backup_lsn,
+        request.until_lsn,
+        &tli_dir_path,
+    )
+    .await?;
+
+    let mut new_state = SafeKeeperState::new(
+        &request.destination_ttid,
+        state.server.clone(),
+        vec![],
+        request.until_lsn,
+        start_lsn,
+    );
+    new_state.timeline_start_lsn = start_lsn;
+    new_state.peer_horizon_lsn = request.until_lsn;
+    new_state.backup_lsn = new_backup_lsn;
+
+    let mut file_storage = FileStorage::create_new(tli_dir_path.clone(), conf, new_state.clone())?;
+    file_storage.persist(&new_state).await?;
+
+    // now we have a ready timeline in a temp directory
+    validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
+    load_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
+
+    Ok(())
+}
+
+async fn copy_disk_segments(
+    conf: &SafeKeeperConf,
+    persisted_state: &SafeKeeperState,
+    wal_seg_size: usize,
+    source_ttid: &TenantTimelineId,
+    start_lsn: Lsn,
+    end_lsn: Lsn,
+    tli_dir_path: &Utf8PathBuf,
+) -> Result<()> {
     let mut wal_reader = WalReader::new(
         conf.workdir.clone(),
-        conf.timeline_dir(&request.source.ttid),
-        &state,
+        conf.timeline_dir(source_ttid),
+        &persisted_state,
         start_lsn,
         true,
     )?;
 
     let mut buf = [0u8; MAX_SEND_SIZE];
 
+    let first_segment = start_lsn.segment_number(wal_seg_size);
+    let last_segment = end_lsn.segment_number(wal_seg_size);
+
     for segment in first_segment..=last_segment {
         let segment_start = segment * wal_seg_size as u64;
         let segment_end = segment_start + wal_seg_size as u64;
 
         let copy_start = segment_start.max(start_lsn.0);
-        let copy_end = segment_end.min(request.until_lsn.0);
+        let copy_end = segment_end.min(end_lsn.0);
 
         let copy_start = copy_start - segment_start;
         let copy_end = copy_end - segment_start;
@@ -161,23 +208,6 @@ pub async fn handle_request(request: Request) -> Result<()> {
         )
         .await?;
     }
-
-    let mut new_state = SafeKeeperState::new(
-        &request.destination_ttid,
-        state.server.clone(),
-        vec![],
-        request.until_lsn,
-        start_lsn,
-    );
-    new_state.timeline_start_lsn = start_lsn;
-    new_state.peer_horizon_lsn = request.until_lsn;
-
-    let mut file_storage = FileStorage::create_new(tli_dir_path.clone(), conf, new_state.clone())?;
-    file_storage.persist(&new_state).await?;
-
-    // now we have a ready timeline in a temp directory
-    validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
-    load_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
 
     Ok(())
 }
