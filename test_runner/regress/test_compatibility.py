@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import pytest
-import toml  # TODO: replace with tomllib for Python >= 3.11
+import toml
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonCli,
@@ -411,7 +411,7 @@ def check_neon_works(
     config.initial_tenant = snapshot_config["default_tenant_id"]
     config.pg_distrib_dir = pg_distrib_dir
     config.remote_storage = None
-    config.sk_remote_storage = None
+    config.safekeepers_remote_storage = None
 
     # Use the "target" binaries to launch the storage nodes
     config_target = config
