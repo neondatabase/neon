@@ -1,3 +1,4 @@
+use page_cache::PageWriteGuard;
 use virtual_file::VirtualFile;
 
 mod page_cache;
@@ -16,6 +17,7 @@ fn main() {
         match res {
             page_cache::ReadBufResult::Found(found) => todo!(),
             page_cache::ReadBufResult::NotFound(write_guard) => {
+                let write_guard: PageWriteGuard<'static> = write_guard;
                 let file = VirtualFile::open(camino::Utf8Path::new("foo"))
                     .await
                     .unwrap();
