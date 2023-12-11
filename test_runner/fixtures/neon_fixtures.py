@@ -437,7 +437,7 @@ class NeonEnvBuilder:
         # Pageserver remote storage
         self.pageserver_remote_storage = pageserver_remote_storage
         # Safekeepers remote storage
-        self.sk_remote_storage: Optional[RemoteStorage] = None
+        self.safekeepers_remote_storage: Optional[RemoteStorage] = None
 
         self.broker = broker
         self.run_id = run_id
@@ -535,9 +535,11 @@ class NeonEnvBuilder:
         self.pageserver_remote_storage = ret
 
     def enable_safekeeper_remote_storage(self, kind: RemoteStorageKind):
-        assert self.sk_remote_storage is None, "sk_remote_storage already configured"
+        assert (
+            self.safekeepers_remote_storage is None
+        ), "safekeepers_remote_storage already configured"
 
-        self.sk_remote_storage = self._configure_and_create_remote_storage(
+        self.safekeepers_remote_storage = self._configure_and_create_remote_storage(
             kind, RemoteStorageUser.SAFEKEEPER
         )
 
@@ -590,7 +592,7 @@ class NeonEnvBuilder:
                 directory_to_clean.rmdir()
 
     def cleanup_remote_storage(self):
-        for x in [self.pageserver_remote_storage, self.sk_remote_storage]:
+        for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
             if isinstance(x, S3Storage):
                 x.do_cleanup()
 
@@ -694,7 +696,7 @@ class NeonEnv:
         self.pageservers: List[NeonPageserver] = []
         self.broker = config.broker
         self.pageserver_remote_storage = config.pageserver_remote_storage
-        self.sk_remote_storage = config.sk_remote_storage
+        self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
         # Binary path for pageserver, safekeeper, etc
         self.neon_binpath = config.neon_binpath
@@ -777,8 +779,8 @@ class NeonEnv:
             }
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
-            if self.sk_remote_storage is not None:
-                sk_cfg["remote_storage"] = self.sk_remote_storage.to_toml_inline_table()
+            if self.safekeepers_remote_storage is not None:
+                sk_cfg["remote_storage"] = self.safekeepers_remote_storage.to_toml_inline_table()
             self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
             cfg["safekeepers"].append(sk_cfg)
 
@@ -1334,8 +1336,8 @@ class NeonCli(AbstractNeonCli):
         self, id: int, extra_opts: Optional[List[str]] = None
     ) -> "subprocess.CompletedProcess[str]":
         s3_env_vars = None
-        if isinstance(self.env.sk_remote_storage, S3Storage):
-            s3_env_vars = self.env.sk_remote_storage.access_env_vars()
+        if isinstance(self.env.safekeepers_remote_storage, S3Storage):
+            s3_env_vars = self.env.safekeepers_remote_storage.access_env_vars()
 
         if extra_opts is not None:
             extra_opts = [f"-e={opt}" for opt in extra_opts]
