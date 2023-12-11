@@ -168,7 +168,7 @@ async fn copy_disk_segments(
     let mut wal_reader = WalReader::new(
         conf.workdir.clone(),
         conf.timeline_dir(source_ttid),
-        &persisted_state,
+        persisted_state,
         start_lsn,
         true,
     )?;
@@ -189,7 +189,7 @@ async fn copy_disk_segments(
         let copy_end = copy_end - segment_start;
 
         let wal_file_path = {
-            let (normal, partial) = wal_file_paths(&tli_dir_path, segment, wal_seg_size)?;
+            let (normal, partial) = wal_file_paths(tli_dir_path, segment, wal_seg_size)?;
 
             if segment == last_segment {
                 partial
