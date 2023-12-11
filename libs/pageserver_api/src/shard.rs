@@ -73,19 +73,28 @@ impl TenantShardId {
         )
     }
 
-    pub fn shard_slug(&self) -> String {
-        format!("{:02x}{:02x}", self.shard_number.0, self.shard_count.0)
+    pub fn shard_slug(&self) -> impl std::fmt::Display + '_ {
+        ShardSlug(self)
+    }
+}
+
+/// Formatting helper
+struct ShardSlug<'a>(&'a TenantShardId);
+
+impl<'a> std::fmt::Display for ShardSlug<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}{:02x}",
+            self.0.shard_number.0, self.0.shard_count.0
+        )
     }
 }
 
 impl std::fmt::Display for TenantShardId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.shard_count != ShardCount(0) {
-            write!(
-                f,
-                "{}-{:02x}{:02x}",
-                self.tenant_id, self.shard_number.0, self.shard_count.0
-            )
+            write!(f, "{}-{}", self.tenant_id, self.shard_slug())
         } else {
             // Legacy case (shard_count == 0) -- format as just the tenant id.  Note that this
             // is distinct from the normal single shard case (shard count == 1).
@@ -410,6 +419,12 @@ impl ShardIdentity {
         } else {
             String::new()
         }
+    }
+
+    /// Convenience for checking if this identity is the 0th shard in a tenant,
+    /// for special cases on shard 0 such as ingesting relation sizes.
+    pub fn is_zero(&self) -> bool {
+        self.number == ShardNumber(0)
     }
 }
 

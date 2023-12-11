@@ -1368,6 +1368,10 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending_updates.is_empty() && self.pending_deletions.is_empty()
+    }
+
     // Internal helper functions to batch the modifications
 
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {

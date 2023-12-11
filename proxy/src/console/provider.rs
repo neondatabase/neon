@@ -1,9 +1,10 @@
+#[cfg(feature = "testing")]
 pub mod mock;
 pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::ClientCredentials,
+    auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
@@ -200,11 +201,23 @@ pub struct ConsoleReqExtra<'a> {
     pub session_id: uuid::Uuid,
     /// Name of client application, if set.
     pub application_name: Option<&'a str>,
-    pub options: Option<&'a str>,
+    pub options: Vec<(String, String)>,
+}
+
+impl<'a> ConsoleReqExtra<'a> {
+    // https://swagger.io/docs/specification/serialization/ DeepObject format
+    // paramName[prop1]=value1&paramName[prop2]=value2&....
+    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
+        self.options
+            .iter()
+            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
+            .collect()
+    }
 }
 
 /// Auth secret which is managed by the cloud.
 pub enum AuthSecret {
+    #[cfg(feature = "testing")]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 
@@ -247,20 +260,20 @@ pub trait Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 

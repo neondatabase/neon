@@ -57,7 +57,7 @@ def measure_recovery_time(env: NeonCompare):
     # when we "create" the Tenant again, we will replay the WAL from the beginning.
     client.tenant_delete(env.tenant)
     wait_tenant_status_404(client, env.tenant, iterations=60, interval=0.5)
-    client.tenant_create(new_tenant_id=env.tenant)
+    env.env.pageserver.tenant_create(tenant_id=env.tenant)
 
     # Measure recovery time
     with env.record_duration("wal_recovery"):

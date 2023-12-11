@@ -39,10 +39,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
-from fixtures.remote_storage import (
-    RemoteStorageKind,
-    available_remote_storages,
-)
+from fixtures.remote_storage import RemoteStorageKind, default_remote_storage
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
@@ -298,17 +295,21 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
 
     # and wait till remote_consistent_lsn propagates to all safekeepers
     #
-    # TODO: this executes long as timeline on safekeeper is immediately
-    # deactivated once rcl reaches pageserver one, and thus we generally wait
-    # till pageserver reconnects to all safekeepers one by one here. Timeline
-    # status on safekeeper should take into account peers state as well.
+    # This timeout is long: safekeepers learn about remote_consistent_lsn updates when a pageserver
+    # connects, receives a PrimaryKeepAlive, and sends a PageserverFeedback.  So the timeout has to encompass:
+    # - pageserver deletion_queue to validate + publish the remote_consistent_lsn
+    # - pageserver to reconnect to all safekeepers one by one, with multi-second delays between
+    #
+    # TODO: timeline status on safekeeper should take into account peers state as well.
+    rcl_propagate_secs = 60
+
     started_at = time.time()
     while True:
         stat_after = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
         if all([s_after.remote_consistent_lsn >= new_rcl for s_after in stat_after]):
             break
         elapsed = time.time() - started_at
-        if elapsed > 30:
+        if elapsed > rcl_propagate_secs:
             raise RuntimeError(
                 f"timed out waiting {elapsed:.0f}s for remote_consistent_lsn propagation: status before {stat_before}, status current {stat_after}"
             )
@@ -453,10 +454,9 @@ def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId,
     return sk_wal_size_mb <= target_size_mb
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
 
     env = neon_env_builder.init_start()
 
@@ -499,11 +499,10 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     )
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
 
-    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant

@@ -57,6 +57,7 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     RemoteStorageUser,
     S3Storage,
+    default_remote_storage,
     remote_storage_to_toml_inline_table,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -456,7 +457,7 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
-        self.enable_generations = False
+        self.enable_generations = True
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
 
@@ -469,7 +470,7 @@ class NeonEnvBuilder:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
-            self.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+            self.enable_pageserver_remote_storage(default_remote_storage())
         self.env = NeonEnv(self)
         return self.env
 
@@ -1572,6 +1573,20 @@ class NeonAttachmentService:
         )
         response.raise_for_status()
 
+    def inspect(self, tenant_id: TenantId) -> Optional[tuple[int, int]]:
+        response = requests.post(
+            f"{self.env.control_plane_api}/inspect",
+            json={"tenant_id": str(tenant_id)},
+        )
+        response.raise_for_status()
+        json = response.json()
+        log.info(f"Response: {json}")
+        if json["attachment"]:
+            # Explicit int() to make python type linter happy
+            return (int(json["attachment"][0]), int(json["attachment"][1]))
+        else:
+            return None
+
     def __enter__(self) -> "NeonAttachmentService":
         return self
 
@@ -1770,13 +1785,10 @@ class NeonPageserver(PgProtocol):
         Tenant attachment passes through here to acquire a generation number before proceeding
         to call into the pageserver HTTP client.
         """
-        if self.env.attachment_service is not None:
-            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
-        else:
-            generation = None
-
         client = self.http_client()
-        return client.tenant_attach(tenant_id, config, config_null, generation=generation)
+        return client.tenant_attach(
+            tenant_id, config, config_null, generation=self.maybe_get_generation(tenant_id)
+        )
 
     def tenant_detach(self, tenant_id: TenantId):
         if self.env.attachment_service is not None:
@@ -1805,6 +1817,34 @@ class NeonPageserver(PgProtocol):
         except:
             log.error(f"Failed to decode LocationConf, raw content ({len(bytes)} bytes): {bytes}")
             raise
+
+    def tenant_create(
+        self,
+        tenant_id: TenantId,
+        conf: Optional[Dict[str, Any]] = None,
+        auth_token: Optional[str] = None,
+    ) -> TenantId:
+        client = self.http_client(auth_token=auth_token)
+        return client.tenant_create(
+            tenant_id, conf, generation=self.maybe_get_generation(tenant_id)
+        )
+
+    def tenant_load(self, tenant_id: TenantId):
+        client = self.http_client()
+        return client.tenant_load(tenant_id, generation=self.maybe_get_generation(tenant_id))
+
+    def maybe_get_generation(self, tenant_id: TenantId):
+        """
+        For tests that would like to use an HTTP client directly instead of using
+        the `tenant_attach` and `tenant_create` helpers here: issue a generation
+        number for a tenant.
+
+        Returns None if the attachment service is not enabled (legacy mode)
+        """
+        if self.env.attachment_service is not None:
+            return self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
+        else:
+            return None
 
 
 def append_pageserver_param_overrides(

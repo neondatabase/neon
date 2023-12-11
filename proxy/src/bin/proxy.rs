@@ -30,6 +30,7 @@ use clap::{Parser, ValueEnum};
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackend {
     Console,
+    #[cfg(feature = "testing")]
     Postgres,
     Link,
 }
@@ -289,6 +290,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             auth::BackendType::Console(Cow::Owned(api), ())
         }
+        #[cfg(feature = "testing")]
         AuthBackend::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);

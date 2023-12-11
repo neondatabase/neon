@@ -844,7 +844,7 @@ async fn tenant_delete_handler(
     mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
-            shard = tenant_shard_id.shard_slug()
+            shard = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
@@ -1193,7 +1193,7 @@ async fn put_tenant_location_config_handler(
             mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
                 .instrument(info_span!("tenant_detach",
                     tenant_id = %tenant_shard_id.tenant_id,
-                    shard = tenant_shard_id.shard_slug()
+                    shard = %tenant_shard_id.shard_slug()
                 ))
                 .await
         {

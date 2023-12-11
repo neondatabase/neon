@@ -4,9 +4,14 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::{borrow::Cow, sync::Arc};
+use std::{
+    borrow::Cow,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use anyhow::Context;
+use anyhow::Context as _;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
@@ -28,11 +33,10 @@ use aws_smithy_async::rt::sleep::TokioSleep;
 
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use bytes::Bytes;
+use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::io::{self, AsyncRead};
-use tokio_util::io::ReaderStream;
-use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
@@ -63,7 +67,7 @@ struct GetObjectRequest {
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
-        debug!(
+        tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
@@ -225,12 +229,15 @@ impl S3Bucket {
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
+
+                let body = object_output.body;
+                let body = ByteStreamAsStream::from(body);
+                let body = PermitCarrying::new(permit, body);
+                let body = TimedDownload::new(started_at, body);
+
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(TimedDownload::new(
-                        started_at,
-                        RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
-                    ))),
+                    download_stream: Box::pin(body),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
@@ -244,28 +251,54 @@ impl S3Bucket {
 }
 
 pin_project_lite::pin_project! {
+    struct ByteStreamAsStream {
+        #[pin]
+        inner: aws_smithy_types::byte_stream::ByteStream
+    }
+}
+
+impl From<aws_smithy_types::byte_stream::ByteStream> for ByteStreamAsStream {
+    fn from(inner: aws_smithy_types::byte_stream::ByteStream) -> Self {
+        ByteStreamAsStream { inner }
+    }
+}
+
+impl Stream for ByteStreamAsStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // this does the std::io::ErrorKind::Other conversion
+        self.project().inner.poll_next(cx).map_err(|x| x.into())
+    }
+
+    // cannot implement size_hint because inner.size_hint is remaining size in bytes, which makes
+    // sense and Stream::size_hint does not really
+}
+
+pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct RatelimitedAsyncRead<S> {
+    struct PermitCarrying<S> {
         permit: tokio::sync::OwnedSemaphorePermit,
         #[pin]
         inner: S,
     }
 }
 
-impl<S: AsyncRead> RatelimitedAsyncRead<S> {
+impl<S> PermitCarrying<S> {
     fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        RatelimitedAsyncRead { permit, inner }
+        Self { permit, inner }
     }
 }
 
-impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_read(cx, buf)
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -285,7 +318,7 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<S: AsyncRead> TimedDownload<S> {
+impl<S> TimedDownload<S> {
     fn new(started_at: std::time::Instant, inner: S) -> Self {
         TimedDownload {
             started_at,
@@ -295,25 +328,26 @@ impl<S: AsyncRead> TimedDownload<S> {
     }
 }
 
-impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use std::task::ready;
+
         let this = self.project();
-        let before = buf.filled().len();
-        let read = std::task::ready!(this.inner.poll_read(cx, buf));
 
-        let read_eof = buf.filled().len() == before;
-
-        match read {
-            Ok(()) if read_eof => *this.outcome = AttemptOutcome::Ok,
-            Ok(()) => { /* still in progress */ }
-            Err(_) => *this.outcome = AttemptOutcome::Err,
+        let res = ready!(this.inner.poll_next(cx));
+        match &res {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => *this.outcome = metrics::AttemptOutcome::Err,
+            None => *this.outcome = metrics::AttemptOutcome::Ok,
         }
 
-        std::task::Poll::Ready(read)
+        Poll::Ready(res)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -403,7 +437,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -413,7 +447,7 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(ReaderStream::new(from));
+        let body = Body::wrap_stream(from);
         let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
         let res = self

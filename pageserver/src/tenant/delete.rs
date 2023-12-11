@@ -77,8 +77,10 @@ async fn create_remote_delete_mark(
     let data: &[u8] = &[];
     backoff::retry(
         || async {
+            let data = bytes::Bytes::from_static(data);
+            let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(data, 0, &remote_mark_path, None)
+                .upload(stream, 0, &remote_mark_path, None)
                 .await
         },
         |_e| false,

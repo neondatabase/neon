@@ -19,8 +19,10 @@ use std::{collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::A
 use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 
+use bytes::Bytes;
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::{io, sync::Semaphore};
+use tokio::sync::Semaphore;
 use toml_edit::Item;
 use tracing::info;
 
@@ -179,7 +181,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
@@ -206,7 +208,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
 }
 
 pub struct Download {
-    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send + Sync>>,
+    pub download_stream: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }
@@ -300,7 +302,7 @@ impl GenericRemoteStorage {
 
     pub async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -398,7 +400,7 @@ impl GenericRemoteStorage {
     /// this path is used for the remote object id conversion only.
     pub async fn upload_storage_object(
         &self,
-        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
     ) -> anyhow::Result<()> {

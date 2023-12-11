@@ -425,7 +425,6 @@ fn start_pageserver(
     let tenant_manager = Arc::new(tenant_manager);
 
     BACKGROUND_RUNTIME.spawn({
-        let init_done_rx = init_done_rx;
         let shutdown_pageserver = shutdown_pageserver.clone();
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
@@ -560,7 +559,6 @@ fn start_pageserver(
     }
 
     if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-        let background_jobs_barrier = background_jobs_barrier;
         let metrics_ctx = RequestContext::todo_child(
             TaskKind::MetricsCollection,
             // This task itself shouldn't download anything.

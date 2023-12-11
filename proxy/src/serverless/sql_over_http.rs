@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -202,7 +202,7 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
@@ -301,7 +301,7 @@ async fn handle_inner(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
     NUM_CONNECTIONS_ACCEPTED_COUNTER
         .with_label_values(&["http"])
