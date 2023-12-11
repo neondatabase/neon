@@ -380,7 +380,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let mut usage_assumed = usage_pre;
     let mut evictions_failed = LayerCount::default();
 
-    let join_all = async move {
+    let evict_layers = async move {
         loop {
             let next = if js.len() >= limit || consumed_all {
                 js.join_next().await
@@ -439,7 +439,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     };
 
     let (usage_assumed, evictions_failed) = tokio::select! {
-        tuple = join_all => { tuple },
+        tuple = evict_layers => { tuple },
         _ = cancel.cancelled() => {
             // dropping joinset will abort all pending evict_and_waits and that is fine, our
             // requests will still stand
