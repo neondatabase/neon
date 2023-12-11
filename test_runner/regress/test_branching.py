@@ -148,11 +148,11 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     env = neon_env_builder.init_configs()
     env.start()
 
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading",
+        ]
     )
     ps_http = env.pageserver.http_client()
 
@@ -247,11 +247,11 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
     env = neon_env_builder.init_configs()
     env.start()
 
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*Error processing HTTP request: InternalServerError\\(Timeline .*/.* already exists in pageserver's memory"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*Error processing HTTP request: InternalServerError\\(Timeline .*/.* already exists in pageserver's memory",
+        ]
     )
     ps_http = env.pageserver.http_client()
 
