@@ -1879,7 +1879,9 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
         if new_rows == 0:
             continue
 
-        endpoint.safe_psql(f"insert into t select generate_series(1, {new_rows}), repeat('payload!', 10)")
+        endpoint.safe_psql(
+            f"insert into t select generate_series(1, {new_rows}), repeat('payload!', 10)"
+        )
 
         # remember LSN right after reaching new_percent
         lsn = remember_lsn()
