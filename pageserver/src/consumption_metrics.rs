@@ -287,14 +287,19 @@ async fn calculate_synthetic_size_worker(
                 // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
                 // which turns out is really handy to understand the system.
                 if let Err(e) = tenant.calculate_synthetic_size(cause, cancel, ctx).await {
-                    if let Some(PageReconstructError::Cancelled) =
-                        e.downcast_ref::<PageReconstructError>()
-                    {
-                        // it is being shutdown, be quiet
-                    } else {
-                        error!(
-                        "failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}"
+                    // this error can be returned if timeline is shutting down, but it does not
+                    // mean the synthetic size worker should terminate. we do not need any checks
+                    // in this function because `mgr::get_tenant` will error out after shutdown has
+                    // progressed to shutting down tenants.
+                    let is_cancelled = matches!(
+                        e.downcast_ref::<PageReconstructError>(),
+                        Some(PageReconstructError::Cancelled)
                     );
+
+                    if !is_cancelled {
+                        error!(
+                            "failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}"
+                        );
                     }
                 }
             }
