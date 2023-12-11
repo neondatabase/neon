@@ -29,6 +29,9 @@ from fixtures.pageserver.utils import list_prefix
 from fixtures.remote_storage import (
     RemoteStorageKind,
 )
+from fixtures.pageserver.utils import (
+    wait_for_upload_queue_empty,
+)
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import print_gc_result, wait_until
 
@@ -354,8 +357,10 @@ def test_deletion_queue_recovery(
         )
 
     ps_http.configure_failpoints(failpoints)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, tenant_id=tenant_id, timeline_id=timeline_id)
 
     # There should be entries in the deletion queue
     assert_deletion_queue(ps_http, lambda n: n > 0)
@@ -364,6 +369,9 @@ def test_deletion_queue_recovery(
 
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
+
+    # we are going to do immediate restart, so complete uploads to sure there are no future layers
+    wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
     if validate_before == ValidateBefore.VALIDATE:
         # At this point, one or more DeletionLists have been written.  We have set a failpoint
