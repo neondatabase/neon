@@ -31,6 +31,7 @@ pub mod walredo;
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
+use tenant::mgr::TenantManager;
 use tracing::info;
 
 /// Current storage format version
@@ -53,7 +54,11 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 pub use crate::metrics::preinitialize_metrics;
 
 #[tracing::instrument(skip_all, fields(%exit_code))]
-pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_code: i32) {
+pub async fn shutdown_pageserver(
+    tenant_manager: &TenantManager,
+    deletion_queue: Option<DeletionQueue>,
+    exit_code: i32,
+) {
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -67,7 +72,7 @@ pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_cod
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
     timed(
-        tenant::mgr::shutdown_all_tenants(),
+        tenant_manager.shutdown(),
         "shutdown all tenants",
         Duration::from_secs(5),
     )
