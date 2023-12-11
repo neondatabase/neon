@@ -10,7 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-// use crate::page_cache::PageWriteGuard;
+use crate::page_cache::PageWriteGuard;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File};
@@ -574,47 +574,48 @@ impl VirtualFile {
     // }
     pub async fn read_exact_at(
         &self,
-        buf: Vec<u8>,
+        write_guard: PageWriteGuard<'static>,
         offset: u64,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        let write_guard: PageWriteGuard<'static> = write_guard;
         let file_guard: FileGuard<'static> = self.lock_file().await?;
         let system = tokio_epoll_uring::thread_local_system().await;
-        // struct PageWriteGuardBuf {
-        //     buf: PageWriteGuard<'static>,
-        //     init_up_to: usize,
-        // }
-        // unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
-        //     fn stable_ptr(&self) -> *const u8 {
-        //         self.buf.as_ptr()
-        //     }
-        //     fn bytes_init(&self) -> usize {
-        //         self.init_up_to
-        //     }
-        //     fn bytes_total(&self) -> usize {
-        //         self.buf.len()
-        //     }
-        // }
-        // unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
-        //     fn stable_mut_ptr(&mut self) -> *mut u8 {
-        //         self.buf.as_mut_ptr()
-        //     }
+        struct PageWriteGuardBuf {
+            buf: PageWriteGuard<'static>,
+            init_up_to: usize,
+        }
+        unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
+            fn stable_ptr(&self) -> *const u8 {
+                self.buf.as_ptr()
+            }
+            fn bytes_init(&self) -> usize {
+                self.init_up_to
+            }
+            fn bytes_total(&self) -> usize {
+                self.buf.len()
+            }
+        }
+        unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
+            fn stable_mut_ptr(&mut self) -> *mut u8 {
+                self.buf.as_mut_ptr()
+            }
 
-        //     unsafe fn set_init(&mut self, pos: usize) {
-        //         assert!(pos <= self.buf.len());
-        //         self.init_up_to = pos;
-        //     }
-        // }
-        // let buf = PageWriteGuardBuf {
-        //     buf: write_guard,
-        //     init_up_to: 0,
-        // };
-        let ((_, write_guard), res) = system.read(file_guard, offset, buf).await;
-        // let PageWriteGuardBuf {
-        //     buf: write_guard,
-        //     init_up_to,
-        // } = buf;
+            unsafe fn set_init(&mut self, pos: usize) {
+                assert!(pos <= self.buf.len());
+                self.init_up_to = pos;
+            }
+        }
+        let buf = PageWriteGuardBuf {
+            buf: write_guard,
+            init_up_to: 0,
+        };
+        let ((_, buf), res) = system.read(file_guard, offset, buf).await;
+        let PageWriteGuardBuf {
+            buf: write_guard,
+            init_up_to,
+        } = buf;
         if let Ok(num_read) = res {
-            // assert!(init_up_to == num_read); // TODO need to deal with short reads here
+            assert!(init_up_to == num_read); // TODO need to deal with short reads here
         }
         res.map(|_| write_guard)
             .map_err(|e| Error::new(ErrorKind::Other, e))
