@@ -32,7 +32,7 @@ pub struct Request {
 
 pub async fn handle_request(request: Request) -> Result<()> {
     // TODO: request.until_lsn MUST be a valid LSN, and we cannot check it :(
-    //   if lsn will point to a middle of a WAL record, timeline will be in "broken" state
+    //   if LSN will point to the middle of a WAL record, timeline will be in "broken" state
 
     match GlobalTimelines::get(request.destination_ttid) {
         // timeline already exists. would be good to check that this timeline is the copy

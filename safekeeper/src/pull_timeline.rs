@@ -99,7 +99,7 @@ pub async fn handle_request(request: Request) -> Result<Response> {
 async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
-        "Pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
+        "pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
         ttid,
         host,
         status.commit_lsn,
@@ -129,14 +129,14 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     if dump.timelines.len() != 1 {
         bail!(
-            "Expected to fetch single timeline, got {} timelines",
+            "expected to fetch single timeline, got {} timelines",
             dump.timelines.len()
         );
     }
 
     let timeline = dump.timelines.into_iter().next().unwrap();
     let disk_content = timeline.disk_content.ok_or(anyhow::anyhow!(
-        "Timeline {} doesn't have disk content",
+        "timeline {} doesn't have disk content",
         ttid
     ))?;
 
@@ -163,7 +163,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     filenames.insert(0, "safekeeper.control".to_string());
 
     info!(
-        "Downloading {} files from safekeeper {}",
+        "downloading {} files from safekeeper {}",
         filenames.len(),
         host
     );
@@ -194,7 +194,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     // Let's create timeline from temp directory and verify that it's correct
     let (commit_lsn, flush_lsn) = validate_temp_timeline(conf, ttid, &tli_dir_path).await?;
     info!(
-        "Finished downloading timeline {}, commit_lsn={}, flush_lsn={}",
+        "finished downloading timeline {}, commit_lsn={}, flush_lsn={}",
         ttid, commit_lsn, flush_lsn
     );
     assert!(status.commit_lsn <= status.flush_lsn);
@@ -276,7 +276,7 @@ pub async fn load_temp_timeline(
     let timeline_path = conf.timeline_dir(&ttid);
 
     info!(
-        "Moving timeline {} from {} to {}",
+        "moving timeline {} from {} to {}",
         ttid, tmp_path, timeline_path
     );
     tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
@@ -287,7 +287,7 @@ pub async fn load_temp_timeline(
         .context("Failed to load timeline after copy")?;
 
     info!(
-        "Loaded timeline {}, flush_lsn={}",
+        "loaded timeline {}, flush_lsn={}",
         ttid,
         tli.get_flush_lsn().await
     );
