@@ -326,7 +326,8 @@ impl DeleteTenantFlow {
                 conf,
                 remote_storage,
                 &tenant.tenant_shard_id,
-                &tenant.cancel,
+                // Can't use tenant.cancel, it's already shut down.  TODO: wire in an appropriate token
+                &CancellationToken::new(),
             )
             .await
             .context("remote_mark")?
@@ -533,7 +534,8 @@ impl DeleteTenantFlow {
             conf,
             remote_storage.as_ref(),
             &tenant.tenant_shard_id,
-            &tenant.cancel,
+            // Can't use tenant.cancel, it's already shut down.  TODO: wire in an appropriate token
+            &CancellationToken::new(),
         )
         .await?;
 
