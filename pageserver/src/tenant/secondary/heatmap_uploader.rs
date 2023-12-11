@@ -7,7 +7,7 @@ use std::{
 use crate::{
     metrics::SECONDARY_MODE,
     tenant::{
-        mgr::TenantManager, remote_timeline_client::remote_heatmap_path,
+        config::AttachmentMode, mgr::TenantManager, remote_timeline_client::remote_heatmap_path,
         secondary::CommandResponse, Tenant,
     },
 };
@@ -272,6 +272,13 @@ impl HeatmapUploader {
                     self.scheduling_interval = std::cmp::max(period, MIN_SCHEDULING_INTERVAL);
                 }
             }
+        }
+
+        // Stale attachments do not upload anything: if we are in this state, there is probably some
+        // other attachment in mode Single or Multi running on another pageserver, and we don't
+        // want to thrash and overwrite their heatmap uploads.
+        if tenant.get_attach_mode() == AttachmentMode::Stale {
+            return;
         }
 
         // Create an entry in self.tenants if one doesn't already exist: this will later be updated
