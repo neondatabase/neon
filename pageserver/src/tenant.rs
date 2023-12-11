@@ -3020,6 +3020,7 @@ impl Tenant {
                             &timeline_id,
                             pgdata_zstd.try_clone().await?,
                             tar_zst_size,
+                            &self.cancel,
                         )
                         .await
                     },
