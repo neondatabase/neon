@@ -313,7 +313,7 @@ async fn calculate_synthetic_size_worker(
 
         let res = tokio::time::timeout_at(
             started_at + synthetic_size_calculation_interval,
-            task_mgr::shutdown_token().cancelled(),
+            cancel.cancelled(),
         )
         .await;
         if res.is_ok() {
