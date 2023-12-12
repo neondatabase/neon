@@ -481,6 +481,7 @@ class NeonEnvBuilder:
         self,
         initial_tenant_conf: Optional[Dict[str, str]] = None,
         default_remote_storage_if_missing: bool = True,
+        initial_tenant_shard_count: Optional[int] = None,
     ) -> NeonEnv:
         """
         Default way to create and start NeonEnv. Also creates the initial_tenant with root initial_timeline.
@@ -498,7 +499,10 @@ class NeonEnvBuilder:
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(
-            tenant_id=env.initial_tenant, conf=initial_tenant_conf, timeline_id=env.initial_timeline
+            tenant_id=env.initial_tenant,
+            conf=initial_tenant_conf,
+            timeline_id=env.initial_timeline,
+            shard_count=initial_tenant_shard_count,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1180,6 +1184,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
+        shard_count: Optional[int] = None,
         set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
@@ -1206,6 +1211,9 @@ class NeonCli(AbstractNeonCli):
             )
         if set_default:
             args.append("--set-default")
+
+        if shard_count is not None:
+            args.extend(["--shard-count", str(shard_count)])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -1621,6 +1629,56 @@ class NeonAttachmentService:
             return (int(json["attachment"][0]), int(json["attachment"][1]))
         else:
             return None
+
+    def node_register(self, node: NeonPageserver):
+        body = {
+            "node_id": int(node.id),
+            "listen_http_addr": "localhost",
+            "listen_http_port": node.service_port.http,
+        }
+        log.info(f"node_register({body})")
+        requests.post(f"{self.env.control_plane_api}/node", json=body).raise_for_status()
+
+    def tenant_create(
+        self,
+        tenant_id: TenantId,
+        shard_count: Optional[int] = None,
+        shard_stripe_size: Optional[int] = None,
+        tenant_config: Optional[Dict[Any, Any]] = None,
+    ):
+        body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
+
+        if shard_count is not None:
+            shard_params = {"count": shard_count}
+            if shard_stripe_size is not None:
+                shard_params["stripe_size"] = shard_stripe_size
+
+            body["shard_parameters"] = shard_params
+
+        if tenant_config is not None:
+            for k, v in tenant_config.items():
+                body[k] = v
+
+        response = requests.post(f"{self.env.control_plane_api}/tenant", json=body)
+        response.raise_for_status()
+        log.info(f"tenant_create success: {response.json()}")
+
+    def tenant_timeline_create(self, tenant_id: TenantId, timeline_id: TimelineId):
+        body: Dict[str, Any] = {"new_timeline_id": str(timeline_id)}
+
+        response = requests.post(
+            f"{self.env.control_plane_api}/tenant/{tenant_id}/timeline", json=body
+        )
+        response.raise_for_status()
+        log.info(f"tenant_timeline_create success: {response.json()}")
+
+    def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
+        response = requests.get(f"{self.env.control_plane_api}/tenant/{tenant_id}/locate")
+        response.raise_for_status()
+        body = response.json()
+        log.info(f"tenant_locate success: {body}")
+        shards: list[dict[str, Any]] = body["shards"]
+        return shards
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
@@ -3243,9 +3301,7 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 
 
 # pg is the existing and running compute node, that we want to compare with a basebackup
-def check_restored_datadir_content(
-    test_output_dir: Path, env: NeonEnv, endpoint: Endpoint, pageserver_id: Optional[int] = None
-):
+def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint: Endpoint):
     # Get the timeline ID. We need it for the 'basebackup' command
     timeline_id = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
@@ -3266,6 +3322,7 @@ def check_restored_datadir_content(
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
     psql_path = os.path.join(pg_bin.pg_bin_path, "psql")
 
+    pageserver_id = env.attachment_service.locate(endpoint.tenant_id)[0]["node_id"]
     cmd = rf"""
         {psql_path}                                    \
             --no-psqlrc                                \
@@ -3343,10 +3400,28 @@ def wait_for_last_flush_lsn(
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
+    if len(env.pageservers) > 1:
+        shards = [
+            (s["shard_id"], env.get_pageserver(s["node_id"]))
+            for s in env.attachment_service.locate(tenant)
+        ]
+    else:
+        # Assume an unsharded tenant
+        shards = [(str(tenant), env.pageserver)]
+
     last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-    return wait_for_last_record_lsn(
-        env.get_pageserver(pageserver_id).http_client(), tenant, timeline, last_flush_lsn
-    )
+
+    results = []
+    for tenant_shard_id, pageserver in shards:
+        waited = wait_for_last_record_lsn(
+            pageserver.http_client(), tenant_shard_id, timeline, last_flush_lsn
+        )
+
+        assert waited >= last_flush_lsn
+        results.append(waited)
+
+    # Return the lowest LSN that has been ingested by all shards
+    return min(results)
 
 
 def wait_for_wal_insert_lsn(
