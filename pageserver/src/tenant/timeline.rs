@@ -1903,6 +1903,7 @@ impl Timeline {
             .set((calculated_size, metrics_guard.calculation_result_saved()))
             .ok()
             .expect("only this task sets it");
+        self.current_logical_size.initialized.notify_one();
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
@@ -3103,6 +3104,24 @@ impl Timeline {
         timer.stop_and_record();
 
         Ok(image_layers)
+    }
+
+    /// Wait until the background initial logical size calculation is complete, or
+    /// this Timeline is shut down.  Calling this function will cause the initial
+    /// logical size calculation to skip waiting for the background jobs barrier.
+    pub(crate) async fn await_initial_logical_size(self: Arc<Self>) {
+        if let Some(await_bg_cancel) = self
+            .current_logical_size
+            .cancel_wait_for_background_loop_concurrency_limit_semaphore
+            .get()
+        {
+            await_bg_cancel.cancel();
+        }
+
+        tokio::select!(
+            _ = self.current_logical_size.initialized.notified() => {},
+            _ = self.cancel.cancelled() => {}
+        )
     }
 }
 

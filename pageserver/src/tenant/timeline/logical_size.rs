@@ -34,6 +34,9 @@ pub(super) struct LogicalSize {
     pub(crate) cancel_wait_for_background_loop_concurrency_limit_semaphore:
         OnceCell<CancellationToken>,
 
+    /// Once the initial logical size is initialized, this is notified.
+    pub(crate) initialized: tokio::sync::Notify,
+
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     pub initial_part_end: Option<Lsn>,
 
@@ -125,6 +128,7 @@ impl LogicalSize {
             initial_part_end: None,
             size_added_after_initial: AtomicI64::new(0),
             did_return_approximate_to_walreceiver: AtomicBool::new(false),
+            initialized: tokio::sync::Notify::new(),
         }
     }
 
@@ -135,6 +139,7 @@ impl LogicalSize {
             initial_part_end: Some(compute_to),
             size_added_after_initial: AtomicI64::new(0),
             did_return_approximate_to_walreceiver: AtomicBool::new(false),
+            initialized: tokio::sync::Notify::new(),
         }
     }
 
