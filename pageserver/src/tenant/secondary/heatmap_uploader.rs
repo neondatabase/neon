@@ -383,16 +383,22 @@ impl HeatmapUploader {
     #[instrument(skip_all, fields(tenant_id=%completion.tenant_shard_id.tenant_id, shard_id=%completion.tenant_shard_id.shard_slug()))]
     fn on_completion(&mut self, completion: WriteComplete) {
         tracing::debug!("Heatmap upload completed");
-        self.tenants_uploading.remove(&completion.tenant_shard_id);
+        let WriteComplete {
+            tenant_shard_id,
+            completed_at,
+            digest,
+            next_upload,
+        } = completion;
+        self.tenants_uploading.remove(&tenant_shard_id);
         use std::collections::hash_map::Entry;
-        match self.tenants.entry(completion.tenant_shard_id) {
+        match self.tenants.entry(tenant_shard_id) {
             Entry::Vacant(_) => {
                 // Tenant state was dropped, nothing to update.
             }
             Entry::Occupied(mut entry) => {
-                entry.get_mut().last_upload = Some(completion.completed_at);
-                entry.get_mut().last_digest = completion.digest;
-                entry.get_mut().next_upload = completion.next_upload
+                entry.get_mut().last_upload = Some(completed_at);
+                entry.get_mut().last_digest = digest;
+                entry.get_mut().next_upload = next_upload
             }
         }
     }
