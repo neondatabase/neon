@@ -28,6 +28,7 @@ import jwt
 import psycopg2
 import pytest
 import requests
+import toml
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
@@ -501,6 +502,66 @@ class NeonEnvBuilder:
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
+
+    def from_repo_dir(
+        self,
+        repo_dir: Path,
+        neon_binpath: Optional[Path] = None,
+        pg_distrib_dir: Optional[Path] = None,
+    ) -> NeonEnv:
+        """
+        A simple method to import data into the current NeonEnvBuilder from a snapshot of a repo dir.
+        """
+
+        # Setting custom `neon_binpath` and `pg_distrib_dir` is useful for compatibility tests
+        self.neon_binpath = neon_binpath or self.neon_binpath
+        self.pg_distrib_dir = pg_distrib_dir or self.pg_distrib_dir
+
+        # Get the initial tenant and timeline from the snapshot config
+        snapshot_config_toml = repo_dir / "config"
+        with snapshot_config_toml.open("r") as f:
+            snapshot_config = toml.load(f)
+
+        self.initial_tenant = TenantId(snapshot_config["default_tenant_id"])
+        self.initial_timeline = TimelineId(
+            dict(snapshot_config["branch_name_mappings"][DEFAULT_BRANCH_NAME])[
+                str(self.initial_tenant)
+            ]
+        )
+        self.env = self.init_configs()
+
+        for ps_dir in repo_dir.glob("pageserver_*"):
+            tenants_from_dir = ps_dir / "tenants"
+            tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
+
+            log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
+            shutil.copytree(tenants_from_dir, tenants_to_dir)
+
+        for sk_from_dir in (repo_dir / "safekeepers").glob("sk*"):
+            sk_to_dir = self.repo_dir / "safekeepers" / sk_from_dir.name
+            log.info(f"Copying safekeeper directory {sk_from_dir} to {sk_to_dir}")
+            sk_to_dir.rmdir()
+            shutil.copytree(sk_from_dir, sk_to_dir, ignore=shutil.ignore_patterns("*.log", "*.pid"))
+
+        shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
+        shutil.copytree(
+            repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
+        )
+
+        if (attachments_json := Path(repo_dir / "attachments.json")).exists():
+            shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
+
+        # Update the config with info about tenants and timelines
+        with (self.repo_dir / "config").open("r") as f:
+            config = toml.load(f)
+
+        config["default_tenant_id"] = snapshot_config["default_tenant_id"]
+        config["branch_name_mappings"] = snapshot_config["branch_name_mappings"]
+
+        with (self.repo_dir / "config").open("w") as f:
+            toml.dump(config, f)
+
+        return self.env
 
     def enable_scrub_on_exit(self):
         """
