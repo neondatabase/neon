@@ -142,6 +142,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -238,6 +242,20 @@ jobs:
       options: --init
 
     steps:
+      - name: Fix git ownership
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
