@@ -54,13 +54,11 @@ jobs:
         run: cat ${{ github.event_path }}
 
       - name: Checkout Repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v2
 
       - name: Check if Dockerfile.buildtool has changed
         run: |
-          updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
+          updated_files=$(git diff --name-only ${{ github.event.pull_request.head.sha }} ${{ github.event.pull_request.base.sha }})
           echo "$updated_files"
           echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
           echo "IMAGE_NAME=build-tools" >> $GITHUB_ENV
