@@ -343,14 +343,15 @@ impl HeatmapUploader {
                 }
             };
 
+            let now = Instant::now();
             let next_upload = tenant
                 .get_heatmap_period()
-                .and_then(|period| Instant::now().checked_add(period));
+                .and_then(|period| now.checked_add(period));
 
             result_tx
                 .send(WriteComplete {
                     tenant_shard_id: *tenant.get_tenant_shard_id(),
-                    completed_at: Instant::now(),
+                    completed_at: now,
                     digest,
                     next_upload,
                 })
