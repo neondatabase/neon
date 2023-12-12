@@ -8,7 +8,7 @@ use crate::{
     metrics::SECONDARY_MODE,
     tenant::{
         config::AttachmentMode, mgr::TenantManager, remote_timeline_client::remote_heatmap_path,
-        secondary::CommandResponse, Tenant,
+        secondary::CommandResponse, span::debug_assert_current_span_has_tenant_id, Tenant,
     },
 };
 
@@ -18,7 +18,7 @@ use remote_storage::GenericRemoteStorage;
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
+use tracing::instrument;
 use utils::{backoff, completion::Barrier};
 
 use super::{heatmap::HeatMapTenant, CommandRequest, UploadCommand};
@@ -332,14 +332,7 @@ impl HeatmapUploader {
             // Guard for the barrier in [`WriteInProgress`]
             let _completion = completion;
 
-            let digest = match upload_tenant_heatmap(remote_storage, &tenant, last_digest)
-                .instrument(tracing::info_span!(
-                    "upload_heatmap",
-                    tenant_id = %tenant.get_tenant_shard_id().tenant_id,
-                    shard_id = %tenant.get_tenant_shard_id().shard_slug()
-                ))
-                .await
-            {
+            let digest = match upload_tenant_heatmap(remote_storage, &tenant, last_digest).await {
                 Ok(digest) => digest,
                 Err(e) => {
                     tracing::warn!(
@@ -368,13 +361,10 @@ impl HeatmapUploader {
             .insert(tenant_shard_id, WriteInProgress { barrier });
     }
 
+    #[instrument(skip_all, fields(tenant_id=%completion.tenant_shard_id.tenant_id, shard_id=%completion.tenant_shard_id.shard_slug()))]
     fn on_completion(&mut self, completion: WriteComplete) {
-        tracing::debug!(
-            tenant_id=%completion.tenant_shard_id.tenant_id,
-            shard_id=%completion.tenant_shard_id.shard_slug(),
-            "Heatmap write task complete");
+        tracing::debug!("Heatmap upload completed");
         self.tenants_uploading.remove(&completion.tenant_shard_id);
-        tracing::debug!("Task completed for tenant {}", completion.tenant_shard_id);
         use std::collections::hash_map::Entry;
         match self.tenants.entry(completion.tenant_shard_id) {
             Entry::Vacant(_) => {
@@ -454,11 +444,14 @@ impl HeatmapUploader {
 
 /// The inner upload operation.  This will skip if `last_digest` is Some and matches the digest
 /// of the object we would have uploaded.
+#[instrument(skip_all, fields(tenant_id = %tenant.get_tenant_shard_id().tenant_id, shard_id = %tenant.get_tenant_shard_id().shard_slug()))]
 async fn upload_tenant_heatmap(
     remote_storage: GenericRemoteStorage,
     tenant: &Arc<Tenant>,
     last_digest: Option<md5::Digest>,
 ) -> anyhow::Result<Option<md5::Digest>> {
+    debug_assert_current_span_has_tenant_id();
+
     let generation = tenant.get_generation();
     if generation.is_none() {
         // We do not expect this: generations were implemented before heatmap uploads.  However,
