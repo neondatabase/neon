@@ -45,6 +45,37 @@ jobs:
         exit 1
 
 
+
+  print-event-details:
+    needs: [ check-permissions ]
+    runs-on: [ self-hosted, gen3, small ]
+    steps:
+      - name: Print Event Details
+        run: cat ${{ github.event_path }}
+
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Check if Dockerfile.buildtool has changed
+        run: |
+          updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          echo "$updated_files"
+          echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
+          if [[ $updated_files == *"Dockerfile.buildtool"* ]]; then
+            echo "condition is true"
+            echo "DOCKER_FILE_CHANGED=$true" >> $GITHUB_ENV
+            echo "IMAGE_TAG=$GITHUB_RUN_ID" >> $GITHUB_ENV
+          fi
+
+  push-buildtools-docker-file:
+    needs: [ check-permissions , print-event-details ]
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    if: ${{ github.env.DOCKER_FILE_CHANGED }}
+    with:
+      docker-file-path: Dockerfile.buildtool
+      image-name: build-tools
+    secrets: inherit
+
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
@@ -78,7 +109,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -111,7 +142,7 @@ jobs:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -178,7 +209,7 @@ jobs:
     needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       options: --init
     strategy:
       fail-fast: false
@@ -407,7 +438,7 @@ jobs:
     needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -446,7 +477,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -480,7 +511,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -526,7 +557,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
       options: --init
     strategy:
       fail-fast: false
