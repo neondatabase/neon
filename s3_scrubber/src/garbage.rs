@@ -10,15 +10,16 @@ use aws_sdk_s3::{
     Client,
 };
 use futures_util::{pin_mut, TryStreamExt};
+use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
-use utils::id::{TenantId, TenantTimelineId};
+use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
     init_remote,
     metadata_stream::{stream_listing, stream_tenant_timelines, stream_tenants},
-    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TraversingDepth,
+    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId, TraversingDepth,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,8 +30,8 @@ enum GarbageReason {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum GarbageEntity {
-    Tenant(TenantId),
-    Timeline(TenantTimelineId),
+    Tenant(TenantShardId),
+    Timeline(TenantShardTimelineId),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -142,6 +143,9 @@ async fn find_garbage_inner(
         console_projects.len()
     );
 
+    // TODO(sharding): batch calls into Console so that we only call once for each TenantId,
+    // rather than checking the same TenantId for multiple TenantShardId
+
     // Enumerate Tenants in S3, and check if each one exists in Console
     tracing::info!("Finding all tenants in bucket {}...", bucket_config.bucket);
     let tenants = stream_tenants(&s3_client, &target);
@@ -149,10 +153,10 @@ async fn find_garbage_inner(
         let api_client = cloud_admin_api_client.clone();
         let console_projects = &console_projects;
         async move {
-            match console_projects.get(&t) {
+            match console_projects.get(&t.tenant_id) {
                 Some(project_data) => Ok((t, Some(project_data.clone()))),
                 None => api_client
-                    .find_tenant_project(t)
+                    .find_tenant_project(t.tenant_id)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))
                     .map(|r| (t, r)),
@@ -166,21 +170,21 @@ async fn find_garbage_inner(
     // checks if they are enabled by the `depth` parameter.
     pin_mut!(tenants_checked);
     let mut garbage = GarbageList::new(node_kind, bucket_config);
-    let mut active_tenants: Vec<TenantId> = vec![];
+    let mut active_tenants: Vec<TenantShardId> = vec![];
     let mut counter = 0;
     while let Some(result) = tenants_checked.next().await {
-        let (tenant_id, console_result) = result?;
+        let (tenant_shard_id, console_result) = result?;
 
         // Paranoia check
         if let Some(project) = &console_result {
-            assert!(project.tenant == tenant_id);
+            assert!(project.tenant == tenant_shard_id.tenant_id);
         }
 
-        if garbage.maybe_append(GarbageEntity::Tenant(tenant_id), console_result) {
-            tracing::debug!("Tenant {tenant_id} is garbage");
+        if garbage.maybe_append(GarbageEntity::Tenant(tenant_shard_id), console_result) {
+            tracing::debug!("Tenant {tenant_shard_id} is garbage");
         } else {
-            tracing::debug!("Tenant {tenant_id} is active");
-            active_tenants.push(tenant_id);
+            tracing::debug!("Tenant {tenant_shard_id} is active");
+            active_tenants.push(tenant_shard_id);
         }
 
         counter += 1;
@@ -266,13 +270,13 @@ impl std::fmt::Display for PurgeMode {
 pub async fn get_tenant_objects(
     s3_client: &Arc<Client>,
     target: RootTarget,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
 ) -> anyhow::Result<Vec<ObjectIdentifier>> {
-    tracing::debug!("Listing objects in tenant {tenant_id}");
+    tracing::debug!("Listing objects in tenant {tenant_shard_id}");
     // TODO: apply extra validation based on object modification time.  Don't purge
     // tenants where any timeline's index_part.json has been touched recently.
 
-    let mut tenant_root = target.tenant_root(&tenant_id);
+    let mut tenant_root = target.tenant_root(&tenant_shard_id);
 
     // Remove delimiter, so that object listing lists all keys in the prefix and not just
     // common prefixes.
@@ -285,7 +289,7 @@ pub async fn get_tenant_objects(
 pub async fn get_timeline_objects(
     s3_client: &Arc<Client>,
     target: RootTarget,
-    ttid: TenantTimelineId,
+    ttid: TenantShardTimelineId,
 ) -> anyhow::Result<Vec<ObjectIdentifier>> {
     tracing::debug!("Listing objects in timeline {ttid}");
     let mut timeline_root = target.timeline_root(&ttid);

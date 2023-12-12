@@ -7,13 +7,12 @@ use utils::generation::Generation;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
-use crate::{download_object_with_retries, RootTarget};
+use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::{pin_mut, StreamExt};
 use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
 use remote_storage::RemotePath;
-use utils::id::TenantTimelineId;
 
 pub(crate) struct TimelineAnalysis {
     /// Anomalies detected
@@ -39,8 +38,8 @@ impl TimelineAnalysis {
     }
 }
 
-pub(crate) async fn branch_cleanup_and_check_errors(
-    id: &TenantTimelineId,
+pub(crate) fn branch_cleanup_and_check_errors(
+    id: &TenantShardTimelineId,
     s3_root: &RootTarget,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
@@ -238,7 +237,7 @@ fn parse_layer_object_name(name: &str) -> Result<(LayerFileName, Generation), St
 
 pub(crate) async fn list_timeline_blobs(
     s3_client: &Client,
-    id: TenantTimelineId,
+    id: TenantShardTimelineId,
     s3_root: &RootTarget,
 ) -> anyhow::Result<S3TimelineBlobData> {
     let mut s3_layers = HashSet::new();

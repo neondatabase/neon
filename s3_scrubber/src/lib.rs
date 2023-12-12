@@ -22,6 +22,7 @@ use aws_sdk_s3::{Client, Config};
 
 use clap::ValueEnum;
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
+use pageserver_api::shard::TenantShardId;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
@@ -29,7 +30,7 @@ use tokio::io::AsyncReadExt;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use utils::id::{TenantId, TenantTimelineId};
+use utils::id::TimelineId;
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -42,6 +43,35 @@ pub struct S3Target {
     /// with extra parts.
     pub prefix_in_bucket: String,
     pub delimiter: String,
+}
+
+/// Convenience for referring to timelines within a particular shard: more ergonomic
+/// than using a 2-tuple.
+///
+/// This is the shard-aware equivalent of TenantTimelineId.  It's defined here rather
+/// than somewhere more broadly exposed, because this kind of thing is rarely needed
+/// in the pageserver, as all timeline objects existing in the scope of a particular
+/// tenant: the scrubber is different in that it handles collections of data referring to many
+/// TenantShardTimelineIds in on place.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct TenantShardTimelineId {
+    tenant_shard_id: TenantShardId,
+    timeline_id: TimelineId,
+}
+
+impl TenantShardTimelineId {
+    fn new(tenant_shard_id: TenantShardId, timeline_id: TimelineId) -> Self {
+        Self {
+            tenant_shard_id,
+            timeline_id,
+        }
+    }
+}
+
+impl Display for TenantShardTimelineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.tenant_shard_id, self.timeline_id)
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,19 +140,19 @@ impl RootTarget {
         }
     }
 
-    pub fn tenant_root(&self, tenant_id: &TenantId) -> S3Target {
+    pub fn tenant_root(&self, tenant_id: &TenantShardId) -> S3Target {
         self.tenants_root().with_sub_segment(&tenant_id.to_string())
     }
 
-    pub fn timelines_root(&self, tenant_id: &TenantId) -> S3Target {
+    pub fn timelines_root(&self, tenant_id: &TenantShardId) -> S3Target {
         match self {
             Self::Pageserver(_) => self.tenant_root(tenant_id).with_sub_segment("timelines"),
             Self::Safekeeper(_) => self.tenant_root(tenant_id),
         }
     }
 
-    pub fn timeline_root(&self, id: &TenantTimelineId) -> S3Target {
-        self.timelines_root(&id.tenant_id)
+    pub fn timeline_root(&self, id: &TenantShardTimelineId) -> S3Target {
+        self.timelines_root(&id.tenant_shard_id)
             .with_sub_segment(&id.timeline_id.to_string())
     }
 
