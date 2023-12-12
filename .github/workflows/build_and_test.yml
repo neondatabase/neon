@@ -73,7 +73,7 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     # if: ${{ github.env.DOCKER_FILE_CHANGED }}
     with:
-      docker-file-path: Dockerfile.buildtool
+      docker-file-path: Dockerfile.buildtools
       image-name: build-tools
     secrets: inherit
 
