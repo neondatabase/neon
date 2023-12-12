@@ -44,11 +44,15 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options.read(true).write(true).create(true);
-            VirtualFile::open_with_options(&filename, options).await?
-        };
+        let file = VirtualFile::open_with_options(
+            &filename,
+            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .to_owned(),
+        )
+        .await?;
 
         Ok(EphemeralFile {
             page_cache_file_id: page_cache::next_file_id(),
