@@ -7,10 +7,15 @@ use crate::tenant::{
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
 
-use utils::id::TimelineId;
+use utils::{generation::Generation, id::TimelineId};
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct HeatMapTenant {
+    /// Generation of the attached location that uploaded the heatmap: this is not required
+    /// for correctness, but acts as a hint to secondary locations in order to detect thrashing
+    /// in the unlikely event that two attached locations are both uploading conflicting heatmaps.
+    pub(super) generation: Generation,
+
     pub(super) timelines: Vec<HeatMapTimeline>,
 }
 

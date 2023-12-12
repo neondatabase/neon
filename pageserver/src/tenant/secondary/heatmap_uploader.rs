@@ -451,8 +451,18 @@ async fn upload_tenant_heatmap(
     tenant: &Arc<Tenant>,
     last_digest: Option<md5::Digest>,
 ) -> anyhow::Result<Option<md5::Digest>> {
+    let generation = tenant.get_generation();
+    if generation.is_none() {
+        // We do not expect this: generations were implemented before heatmap uploads.  However,
+        // handle it so that we don't have to make the generation in the heatmap an Option<>
+        // (Generation::none is not serializable)
+        tracing::warn!("Skipping heatmap upload for tenant with generation==None");
+        return Ok(None);
+    }
+
     let mut heatmap = HeatMapTenant {
         timelines: Vec::new(),
+        generation,
     };
     let timelines = tenant.timelines.lock().unwrap().clone();
 

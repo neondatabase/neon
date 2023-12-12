@@ -2119,6 +2119,10 @@ impl Tenant {
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
+
+    pub(crate) fn get_generation(&self) -> Generation {
+        self.generation
+    }
 }
 
 /// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),

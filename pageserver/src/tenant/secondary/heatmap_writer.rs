@@ -316,8 +316,17 @@ async fn write_tenant(
     remote_storage: GenericRemoteStorage,
     tenant: &Arc<Tenant>,
 ) -> anyhow::Result<()> {
+    if tenant.get_generation().is_none() {
+        // We do not expect this: generations were implemented before heatmap uploads.  However,
+        // handle it so that we don't have to make the generation in the heatmap an Option<>
+        // (Generation::none is not serializable)
+        tracing::warn!("Skipping heatmap upload for tenant with generation==None");
+        return Ok(());
+    }
+
     let mut heatmap = HeatMapTenant {
         timelines: Vec::new(),
+        generation: tenant.get_generation(),
     };
     let timelines = tenant.timelines.lock().unwrap().clone();
 
