@@ -312,13 +312,13 @@ lfc_change_limit_hook(int newval, void *extra)
 		Assert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
-			elog(LOG, "Failed to punch hole in file: %m");
+			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
 	lfc_ctl->limit = new_size;
-	elog(DEBUG1, "set local file cache limit to %d", new_size);
+	neon_log(DEBUG1, "set local file cache limit to %d", new_size);
 
 	LWLockRelease(lfc_lock);
 }
@@ -331,7 +331,7 @@ lfc_init(void)
 	 * shared_preload_libraries.
 	 */
 	if (!process_shared_preload_libraries_in_progress)
-		elog(ERROR, "Neon module should be loaded via shared_preload_libraries");
+		neon_log(ERROR, "Neon module should be loaded via shared_preload_libraries");
 
 
 	DefineCustomIntVariable("neon.max_file_cache_size",
@@ -647,7 +647,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 			Assert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
-			elog(DEBUG2, "Swap file cache page");
+			neon_log(DEBUG2, "Swap file cache page");
 		}
 		else
 		{
@@ -850,10 +850,10 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		 * wrong) function definition though.
 		 */
 		if (get_call_result_type(fcinfo, NULL, &expected_tupledesc) != TYPEFUNC_COMPOSITE)
-			elog(ERROR, "return type must be a row type");
+			neon_log(ERROR, "return type must be a row type");
 
 		if (expected_tupledesc->natts != NUM_LOCALCACHE_PAGES_ELEM)
-			elog(ERROR, "incorrect number of output arguments");
+			neon_log(ERROR, "incorrect number of output arguments");
 
 		/* Construct a tuple descriptor for the result rows. */
 		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
