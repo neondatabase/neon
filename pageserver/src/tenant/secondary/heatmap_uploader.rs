@@ -332,13 +332,31 @@ impl HeatmapUploader {
             // Guard for the barrier in [`WriteInProgress`]
             let _completion = completion;
 
+            let started_at = Instant::now();
             let digest = match upload_tenant_heatmap(remote_storage, &tenant, last_digest).await {
-                Ok(digest) => digest,
-                Err(e) => {
+                Ok(UploadHeatmapOutcome::Uploaded(digest)) => {
+                    let duration = Instant::now().duration_since(started_at);
+                    SECONDARY_MODE
+                        .upload_heatmap_duration
+                        .observe(duration.as_secs_f64());
+                    SECONDARY_MODE.upload_heatmap.inc();
+                    Some(digest)
+                }
+                Ok(UploadHeatmapOutcome::NoChange | UploadHeatmapOutcome::Skipped) => last_digest,
+                Err(UploadHeatmapError::Upload(e)) => {
                     tracing::warn!(
                         "Failed to upload heatmap for tenant {}: {e:#}",
                         tenant.get_tenant_shard_id(),
                     );
+                    let duration = Instant::now().duration_since(started_at);
+                    SECONDARY_MODE
+                        .upload_heatmap_duration
+                        .observe(duration.as_secs_f64());
+                    SECONDARY_MODE.upload_heatmap_errors.inc();
+                    last_digest
+                }
+                Err(UploadHeatmapError::Cancelled) => {
+                    tracing::info!("Cancelled heatmap upload, shutting down");
                     last_digest
                 }
             };
@@ -443,6 +461,24 @@ impl HeatmapUploader {
     }
 }
 
+enum UploadHeatmapOutcome {
+    /// We successfully wrote to remote storage, with this digest.
+    Uploaded(md5::Digest),
+    /// We did not upload because the heatmap digest was unchanged since the last upload
+    NoChange,
+    /// We skipped the upload for some reason, such as tenant/timeline not ready
+    Skipped,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum UploadHeatmapError {
+    #[error("Cancelled")]
+    Cancelled,
+
+    #[error(transparent)]
+    Upload(#[from] anyhow::Error),
+}
+
 /// The inner upload operation.  This will skip if `last_digest` is Some and matches the digest
 /// of the object we would have uploaded.
 #[instrument(skip_all, fields(tenant_id = %tenant.get_tenant_shard_id().tenant_id, shard_id = %tenant.get_tenant_shard_id().shard_slug()))]
@@ -450,7 +486,7 @@ async fn upload_tenant_heatmap(
     remote_storage: GenericRemoteStorage,
     tenant: &Arc<Tenant>,
     last_digest: Option<md5::Digest>,
-) -> anyhow::Result<Option<md5::Digest>> {
+) -> Result<UploadHeatmapOutcome, UploadHeatmapError> {
     debug_assert_current_span_has_tenant_id();
 
     let generation = tenant.get_generation();
@@ -459,7 +495,7 @@ async fn upload_tenant_heatmap(
         // handle it so that we don't have to make the generation in the heatmap an Option<>
         // (Generation::none is not serializable)
         tracing::warn!("Skipping heatmap upload for tenant with generation==None");
-        return Ok(None);
+        return Ok(UploadHeatmapOutcome::Skipped);
     }
 
     let mut heatmap = HeatMapTenant {
@@ -477,7 +513,7 @@ async fn upload_tenant_heatmap(
         Ok(g) => g,
         Err(_) => {
             tracing::info!("Skipping heatmap upload for tenant which is shutting down");
-            return Ok(None);
+            return Err(UploadHeatmapError::Cancelled);
         }
     };
 
@@ -488,7 +524,7 @@ async fn upload_tenant_heatmap(
                 tracing::debug!(
                     "Skipping heatmap upload because timeline {timeline_id} is not ready"
                 );
-                return Ok(None);
+                return Ok(UploadHeatmapOutcome::Skipped);
             }
             Some(heatmap_timeline) => {
                 heatmap.timelines.push(heatmap_timeline);
@@ -497,13 +533,13 @@ async fn upload_tenant_heatmap(
     }
 
     // Serialize the heatmap
-    let bytes = serde_json::to_vec(&heatmap)?;
+    let bytes = serde_json::to_vec(&heatmap).map_err(|e| anyhow::anyhow!(e))?;
     let size = bytes.len();
 
     // Drop out early if nothing changed since our last upload
     let digest = md5::compute(&bytes);
     if Some(digest) == last_digest {
-        return Ok(last_digest);
+        return Ok(UploadHeatmapOutcome::NoChange);
     }
 
     let path = remote_heatmap_path(tenant.get_tenant_shard_id());
@@ -528,14 +564,13 @@ async fn upload_tenant_heatmap(
     .await
     {
         if tenant_cancel.is_cancelled() {
-            return Ok(None);
+            return Err(UploadHeatmapError::Cancelled);
         } else {
-            return Err(e);
+            return Err(e.into());
         }
     }
 
-    SECONDARY_MODE.upload_heatmap.inc();
     tracing::info!("Successfully uploaded {size} byte heatmap to {path}");
 
-    Ok(Some(digest))
+    Ok(UploadHeatmapOutcome::Uploaded(digest))
 }
