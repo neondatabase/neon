@@ -335,10 +335,10 @@ pub struct TenantConf {
     pub evictions_low_residence_duration_metric_threshold: Duration,
     pub gc_feedback: bool,
 
-    /// If set, the period between uploads of a heatmap from attached tenants.  This
+    /// If non-zero, the period between uploads of a heatmap from attached tenants.  This
     /// may be disabled if a Tenant will not have secondary locations: only secondary
     /// locations will use the heatmap uploaded by attached locations.
-    pub heatmap_period: Option<Duration>,
+    pub heatmap_period: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -492,7 +492,7 @@ impl TenantConfOpt {
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
-            heatmap_period: self.heatmap_period.map_or(global_conf.heatmap_period, Some),
+            heatmap_period: self.heatmap_period.unwrap_or(global_conf.heatmap_period),
         }
     }
 }
@@ -530,7 +530,7 @@ impl Default for TenantConf {
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
             gc_feedback: false,
-            heatmap_period: None,
+            heatmap_period: Duration::ZERO,
         }
     }
 }

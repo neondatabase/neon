@@ -2259,7 +2259,14 @@ impl Tenant {
 
     pub fn get_heatmap_period(&self) -> Option<Duration> {
         let tenant_conf = self.tenant_conf.read().unwrap().tenant_conf;
-        tenant_conf.heatmap_period
+        let heatmap_period = tenant_conf
+            .heatmap_period
+            .unwrap_or(self.conf.default_tenant_conf.heatmap_period);
+        if heatmap_period.is_zero() {
+            None
+        } else {
+            Some(heatmap_period)
+        }
     }
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
@@ -3704,7 +3711,7 @@ pub(crate) mod harness {
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
                 gc_feedback: Some(tenant_conf.gc_feedback),
-                heatmap_period: tenant_conf.heatmap_period,
+                heatmap_period: Some(tenant_conf.heatmap_period),
             }
         }
     }
