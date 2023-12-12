@@ -36,7 +36,7 @@ use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, Fi
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::Timeline;
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
@@ -649,7 +649,7 @@ impl DeltaLayer {
     {
         let file = VirtualFile::open_with_options(
             path,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            virtual_file::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .to_owned(),

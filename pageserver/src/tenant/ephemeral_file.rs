@@ -5,7 +5,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use std::cmp::min;
@@ -46,7 +46,7 @@ impl EphemeralFile {
 
         let file = VirtualFile::open_with_options(
             &filename,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            virtual_file::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)

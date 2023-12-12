@@ -892,6 +892,7 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[cfg(not(test))]
 pub(crate) mod virtual_file_descriptor_cache {
     use super::*;
 

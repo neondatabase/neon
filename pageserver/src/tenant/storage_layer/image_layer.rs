@@ -34,7 +34,7 @@ use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
 use crate::tenant::Timeline;
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -327,7 +327,7 @@ impl ImageLayer {
     {
         let file = VirtualFile::open_with_options(
             path,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            virtual_file::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .to_owned(),
@@ -496,9 +496,14 @@ impl ImageLayerWriterInner {
         );
         info!("new image layer {path}");
         let mut file = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options.write(true).create_new(true);
-            VirtualFile::open_with_options(&path, options).await?
+            VirtualFile::open_with_options(
+                &path,
+                virtual_file::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .to_owned(),
+            )
+            .await?
         };
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;

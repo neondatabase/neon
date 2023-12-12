@@ -24,6 +24,10 @@ use tokio::time::Instant;
 use tokio_epoll_uring::IoBufMut;
 use utils::fs_ext;
 
+mod io_engine;
+pub use io_engine::IoEngineKind;
+pub(crate) use io_engine::*;
+
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
 /// the underlying file is closed if the system is low on file descriptors,
@@ -56,7 +60,7 @@ pub struct VirtualFile {
     /// opened, in the VirtualFile::create() function, and strip the flag before
     /// storing it here.
     pub path: Utf8PathBuf,
-    open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
+    open_options: OpenOptions,
 
     // These are strings becase we only use them for metrics, and those expect strings.
     // It makes no sense for us to constantly turn the `TimelineId` and `TenantId` into
@@ -314,13 +318,7 @@ macro_rules! with_file {
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        Self::open_with_options(
-            path,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
-                .read(true)
-                .to_owned(),
-        )
-        .await
+        Self::open_with_options(path, OpenOptions::new().read(true).to_owned()).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
@@ -328,7 +326,7 @@ impl VirtualFile {
     pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
         Self::open_with_options(
             path,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
@@ -344,7 +342,7 @@ impl VirtualFile {
     /// on the first time. Make sure that's sane!
     pub async fn open_with_options(
         path: &Utf8Path,
-        open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
+        open_options: OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
         let path_str = path.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
@@ -360,17 +358,7 @@ impl VirtualFile {
         let (handle, mut slot_guard) = get_open_files().find_victim_slot().await;
 
         slot_guard.file = Some(observe_duration!(StorageIoOperation::Open, {
-            let system = tokio_epoll_uring::thread_local_system().await;
-            let file: OwnedFd = system
-                .open(path, &open_options)
-                .await
-                .map_err(|e| match e {
-                    tokio_epoll_uring::Error::Op(e) => e,
-                    tokio_epoll_uring::Error::System(system) => {
-                        std::io::Error::new(std::io::ErrorKind::Other, system)
-                    }
-                })?;
-            file
+            open_options.clone().open(path.as_std_path()).await?
         }));
 
         // Strip all options other than read and write.
@@ -414,7 +402,7 @@ impl VirtualFile {
         std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
         let mut file = Self::open_with_options(
             tmp_path,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            OpenOptions::new()
                 .write(true)
                 // Use `create_new` so that, if we race with ourselves or something else,
                 // we bail out instead of causing damage.
@@ -432,13 +420,9 @@ impl VirtualFile {
         // the current `find_victim_slot` impl might pick the same slot for both
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
-        let final_parent_dirfd = Self::open_with_options(
-            final_path_parent,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
-                .read(true)
-                .to_owned(),
-        )
-        .await?;
+        let final_parent_dirfd =
+            Self::open_with_options(final_path_parent, OpenOptions::new().read(true).to_owned())
+                .await?;
         final_parent_dirfd.sync_all().await?;
         Ok(())
     }
@@ -507,17 +491,10 @@ impl VirtualFile {
         // case from StorageIoOperation::Open. This helps with identifying thrashing
         // of the virtual file descriptor cache.
         let file = observe_duration!(StorageIoOperation::OpenAfterReplace, {
-            let system = tokio_epoll_uring::thread_local_system().await;
-            let file: OwnedFd = system
-                .open(&self.path, &self.open_options)
-                .await
-                .map_err(|e| match e {
-                    tokio_epoll_uring::Error::Op(e) => e,
-                    tokio_epoll_uring::Error::System(system) => {
-                        std::io::Error::new(std::io::ErrorKind::Other, system)
-                    }
-                })?;
-            file
+            self.open_options
+                .clone()
+                .open(self.path.as_std_path())
+                .await?
         });
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -677,8 +654,7 @@ impl VirtualFile {
     where
         B: tokio_epoll_uring::BoundedBufMut + Send,
     {
-        let system = tokio_epoll_uring::thread_local_system().await;
-        let ((_file_guard, buf), res) = system.read(file_guard, offset, buf).await;
+        let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
         if let Ok(size) = res {
             // TODO: don't use with_label_values on hot path
             // https://github.com/neondatabase/neon/issues/6107
@@ -847,10 +823,12 @@ impl OpenFiles {
 /// Initialize the virtual file module. This must be called once at page
 /// server startup.
 ///
-pub fn init(num_slots: usize) {
+#[cfg(not(test))]
+pub fn init(num_slots: usize, engine: IoEngineKind) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
+    io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }
 
@@ -967,16 +945,7 @@ mod tests {
     async fn test_physical_files() -> anyhow::Result<()> {
         test_files("physical_files", |path, open_options| async move {
             Ok(MaybeVirtualFile::File({
-                let system = tokio_epoll_uring::thread_local_system().await;
-                let owned_fd = system
-                    .open(path, &open_options)
-                    .await
-                    .map_err(|e| match e {
-                        tokio_epoll_uring::Error::Op(e) => e,
-                        tokio_epoll_uring::Error::System(system) => {
-                            std::io::Error::new(std::io::ErrorKind::Other, system)
-                        }
-                    })?;
+                let owned_fd = open_options.open(path.as_std_path()).await?;
                 File::from(owned_fd)
             }))
         })
@@ -985,7 +954,7 @@ mod tests {
 
     async fn test_files<OF, FT>(testname: &str, openfunc: OF) -> anyhow::Result<()>
     where
-        OF: Fn(Utf8PathBuf, tokio_epoll_uring::ops::open_at::OpenOptions) -> FT,
+        OF: Fn(Utf8PathBuf, OpenOptions) -> FT,
         FT: Future<Output = Result<MaybeVirtualFile, std::io::Error>>,
     {
         let testdir = crate::config::PageServerConf::test_repo_dir(testname);
@@ -994,7 +963,7 @@ mod tests {
         let path_a = testdir.join("file_a");
         let mut file_a = openfunc(
             path_a.clone(),
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
@@ -1007,13 +976,7 @@ mod tests {
         let _ = file_a.read_string().await.unwrap_err();
 
         // Close the file and re-open for reading
-        let mut file_a = openfunc(
-            path_a,
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
-                .read(true)
-                .to_owned(),
-        )
-        .await?;
+        let mut file_a = openfunc(path_a, OpenOptions::new().read(true).to_owned()).await?;
 
         // cannot write to a file opened in read-only mode
         let _ = file_a.write_all(b"bar").await.unwrap_err();
@@ -1050,7 +1013,7 @@ mod tests {
         let path_b = testdir.join("file_b");
         let mut file_b = openfunc(
             path_b.clone(),
-            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+            OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
@@ -1071,13 +1034,8 @@ mod tests {
 
         let mut vfiles = Vec::new();
         for _ in 0..100 {
-            let mut vfile = openfunc(
-                path_b.clone(),
-                tokio_epoll_uring::ops::open_at::OpenOptions::new()
-                    .read(true)
-                    .to_owned(),
-            )
-            .await?;
+            let mut vfile =
+                openfunc(path_b.clone(), OpenOptions::new().read(true).to_owned()).await?;
             assert_eq!("FOOBAR", vfile.read_string().await?);
             vfiles.push(vfile);
         }
@@ -1124,9 +1082,7 @@ mod tests {
         for _ in 0..VIRTUAL_FILES {
             let f = VirtualFile::open_with_options(
                 &test_file_path,
-                tokio_epoll_uring::ops::open_at::OpenOptions::new()
-                    .read(true)
-                    .to_owned(),
+                OpenOptions::new().read(true).to_owned(),
             )
             .await?;
             files.push(f);

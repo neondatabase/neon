@@ -36,10 +36,13 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
+use crate::virtual_file;
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
     TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
+
+use self::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE;
 
 pub mod defaults {
     use crate::tenant::config::defaults::*;
@@ -69,6 +72,8 @@ pub mod defaults {
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
+
+    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
 
     ///
     /// Default built-in configuration file.
@@ -100,6 +105,8 @@ pub mod defaults {
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
 
 #background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
+
+#virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -215,6 +222,8 @@ pub struct PageServerConf {
     /// If true, pageserver will make best-effort to operate without a control plane: only
     /// for use in major incidents.
     pub control_plane_emergency_mode: bool,
+
+    pub virtual_file_io_engine: virtual_file::IoEngineKind,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -293,6 +302,8 @@ struct PageServerConfigBuilder {
     control_plane_api: BuilderValue<Option<Url>>,
     control_plane_api_token: BuilderValue<Option<SecretString>>,
     control_plane_emergency_mode: BuilderValue<bool>,
+
+    virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -361,6 +372,8 @@ impl Default for PageServerConfigBuilder {
             control_plane_api: Set(None),
             control_plane_api_token: Set(None),
             control_plane_emergency_mode: Set(false),
+
+            virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
         }
     }
 }
@@ -501,6 +514,10 @@ impl PageServerConfigBuilder {
         self.control_plane_emergency_mode = BuilderValue::Set(enabled)
     }
 
+    pub fn virtual_file_io_engine(&mut self, value: virtual_file::IoEngineKind) {
+        self.virtual_file_io_engine = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
@@ -595,6 +612,9 @@ impl PageServerConfigBuilder {
             control_plane_emergency_mode: self
                 .control_plane_emergency_mode
                 .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
+            virtual_file_io_engine: self
+                .virtual_file_io_engine
+                .ok_or(anyhow!("missing virtual_file_io_engine"))?,
         })
     }
 }
@@ -828,8 +848,10 @@ impl PageServerConf {
                 },
                 "control_plane_emergency_mode" => {
                     builder.control_plane_emergency_mode(parse_toml_bool(key, item)?)
-
                 },
+                "virtual_file_io_engine" => {
+                    builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -896,6 +918,7 @@ impl PageServerConf {
             control_plane_api: None,
             control_plane_api_token: None,
             control_plane_emergency_mode: false,
+            virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
         }
     }
 }
@@ -1120,7 +1143,8 @@ background_task_maximum_delay = '334 s'
                 )?,
                 control_plane_api: None,
                 control_plane_api_token: None,
-                control_plane_emergency_mode: false
+                control_plane_emergency_mode: false,
+                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1177,7 +1201,8 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: Duration::from_secs(334),
                 control_plane_api: None,
                 control_plane_api_token: None,
-                control_plane_emergency_mode: false
+                control_plane_emergency_mode: false,
+                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"
         );

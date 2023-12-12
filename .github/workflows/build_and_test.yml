@@ -330,7 +330,9 @@ jobs:
 
       - name: Run cargo test
         run: |
-          ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES
+          for io_engine in std-fs tokio-epoll-uring ; do
+            ${cov_prefix} NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine cargo test $CARGO_FLAGS $CARGO_FEATURES
+          done
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
