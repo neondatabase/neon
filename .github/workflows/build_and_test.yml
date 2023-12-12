@@ -46,7 +46,7 @@ jobs:
 
 
 
-  print-event-details:
+  check-if-build-tools-dockerfile-changed:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     steps:
@@ -69,7 +69,7 @@ jobs:
           fi
 
   push-buildtools-docker-file:
-    needs: [ check-permissions , print-event-details ]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
     # if: ${{ github.env.DOCKER_FILE_CHANGED }}
     with:
