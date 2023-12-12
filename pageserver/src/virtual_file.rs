@@ -316,7 +316,7 @@ impl VirtualFile {
     pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
         let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
         options.read(true);
-        Self::open_with_options_async(path, options).await
+        Self::open_with_options(path, options).await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
@@ -324,7 +324,7 @@ impl VirtualFile {
     pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
         let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
         options.write(true).create(true).truncate(true);
-        Self::open_with_options_async(path, options).await
+        Self::open_with_options(path, options).await
     }
 
     /// Writes a file to the specified `final_path` in a crash safe fasion
@@ -351,7 +351,7 @@ impl VirtualFile {
                 // Use `create_new` so that, if we race with ourselves or something else,
                 // we bail out instead of causing damage.
                 .create_new(true);
-            Self::open_with_options_async(tmp_path, options).await?
+            Self::open_with_options(tmp_path, options).await?
         };
         file.write_all(content).await?;
         file.sync_all().await?;
@@ -366,7 +366,7 @@ impl VirtualFile {
         let final_parent_dirfd = {
             let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
             options.read(true);
-            Self::open_with_options_async(final_path_parent, options).await?
+            Self::open_with_options(final_path_parent, options).await?
         };
         final_parent_dirfd.sync_all().await?;
         Ok(())
@@ -377,7 +377,7 @@ impl VirtualFile {
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
     /// they will be applied also when the file is subsequently re-opened, not only
     /// on the first time. Make sure that's sane!
-    pub async fn open_with_options_async(
+    pub async fn open_with_options(
         path: &Utf8Path,
         open_options: tokio_epoll_uring::ops::open_at::OpenOptions,
     ) -> Result<VirtualFile, std::io::Error> {
@@ -944,7 +944,7 @@ mod tests {
         // native files, you will run out of file descriptors if the ulimit
         // is low enough.)
         test_files("virtual_files", |path, open_options| async move {
-            let vf = VirtualFile::open_with_options_async(&path, open_options).await?;
+            let vf = VirtualFile::open_with_options(&path, open_options).await?;
             Ok(MaybeVirtualFile::VirtualFile(vf))
         })
         .await
@@ -1109,7 +1109,7 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options_async(&test_file_path, {
+            let f = VirtualFile::open_with_options(&test_file_path, {
                 let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
                 options.read(true);
                 options

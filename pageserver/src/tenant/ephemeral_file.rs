@@ -47,7 +47,7 @@ impl EphemeralFile {
         let file = {
             let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
             options.read(true).write(true).create(true);
-            VirtualFile::open_with_options_async(&filename, options).await?
+            VirtualFile::open_with_options(&filename, options).await?
         };
 
         Ok(EphemeralFile {

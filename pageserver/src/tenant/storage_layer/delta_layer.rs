@@ -650,7 +650,7 @@ impl DeltaLayer {
         let file = {
             let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
             options.read(true).write(true);
-            VirtualFile::open_with_options_async(path, options)
+            VirtualFile::open_with_options(path, options)
                 .await
                 .with_context(|| format!("Failed to open file '{}'", path))?
         };
