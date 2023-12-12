@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use hyper::{Method, StatusCode};
 use pageserver_api::{
-    models::{TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest},
+    models::{TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest, TimelineInfo},
     shard::TenantShardId,
 };
 use postgres_connection::parse_host_port;
@@ -271,7 +271,7 @@ impl AttachmentService {
         &self,
         tenant_id: TenantId,
         req: TimelineCreateRequest,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TimelineInfo> {
         self.dispatch(
             Method::POST,
             format!("tenant/{tenant_id}/timeline"),

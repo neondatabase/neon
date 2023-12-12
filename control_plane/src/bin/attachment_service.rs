@@ -11,7 +11,7 @@ use hyper::{Method, StatusCode};
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, TenantConfig, TenantCreateRequest,
     TenantLocationConfigRequest, TenantShardSplitRequest, TenantShardSplitResponse,
-    TimelineCreateRequest,
+    TimelineCreateRequest, TimelineInfo,
 };
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
 use reqwest::Client;
@@ -225,7 +225,7 @@ impl TenantState {
         &self,
         node: &NodeState,
         req: &TimelineCreateRequest,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TimelineInfo> {
         let client = Client::new();
         let response = client
             .request(
@@ -239,9 +239,9 @@ impl TenantState {
             .json(req)
             .send()
             .await?;
-        response.error_for_status()?;
+        response.error_for_status_ref()?;
 
-        Ok(())
+        Ok(response.json().await?)
     }
 
     fn schedule(&mut self, scheduler: &mut Scheduler) -> Result<(), ScheduleError> {
@@ -620,7 +620,7 @@ async fn handle_tenant_create(mut req: Request<Body>) -> Result<Response<Body>, 
 
 async fn handle_tenant_timeline_create(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
-    let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
+    let mut create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
 
     let state = get_state(&req).inner.clone();
     let mut locked = state.write().await;
@@ -637,6 +637,8 @@ async fn handle_tenant_timeline_create(mut req: Request<Body>) -> Result<Respons
     // Take a snapshot of pageservers
     let pageservers = locked.pageservers.clone();
 
+    let mut timeline_info = None;
+
     for (_tenant_shard_id, shard) in locked
         .tenants
         .range_mut(TenantShardId::tenant_range(tenant_id))
@@ -649,13 +651,26 @@ async fn handle_tenant_timeline_create(mut req: Request<Body>) -> Result<Respons
             .get(&node_id)
             .expect("Pageservers may not be deleted while referenced");
 
-        shard
+        let shard_timeline_info = shard
             .timeline_create(node, &create_req)
             .await
             .map_err(|e| ApiError::Conflict(format!("Failed to create timeline: {e}")))?;
+
+        if timeline_info.is_none() {
+            // If the caller specified an ancestor but no ancestor LSN, we are responsible for
+            // propagating the LSN chosen by the first shard to the other shards: it is important
+            // that all shards end up with the same ancestor_start_lsn.
+            if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none()
+            {
+                create_req.ancestor_start_lsn = shard_timeline_info.ancestor_lsn;
+            }
+
+            // We will return the TimelineInfo from the first shard
+            timeline_info = Some(shard_timeline_info);
+        }
     }
 
-    json_response(StatusCode::OK, ())
+    json_response(StatusCode::OK, timeline_info)
 }
 
 async fn handle_tenant_locate(req: Request<Body>) -> Result<Response<Body>, ApiError> {

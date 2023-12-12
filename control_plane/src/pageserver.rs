@@ -498,14 +498,12 @@ impl PageServerNode {
     pub async fn timeline_create(
         &self,
         tenant_id: TenantId,
-        new_timeline_id: Option<TimelineId>,
+        new_timeline_id: TimelineId,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
         existing_initdb_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
-        // If timeline ID was not specified, generate one
-        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
         let req = models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,

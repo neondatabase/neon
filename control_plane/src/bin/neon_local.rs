@@ -603,18 +603,19 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .context("Failed to parse postgres version from the argument string")?;
 
             let new_timeline_id_opt = parse_timeline_id(create_match)?;
+            let new_timeline_id = new_timeline_id_opt.unwrap_or(TimelineId::generate());
 
-            let timeline_info = pageserver
-                .timeline_create(
-                    tenant_id,
-                    new_timeline_id_opt,
-                    None,
-                    None,
-                    Some(pg_version),
-                    None,
-                )
+            let attachment_service = AttachmentService::from_env(env);
+            let create_req = TimelineCreateRequest {
+                new_timeline_id: new_timeline_id,
+                ancestor_timeline_id: None,
+                existing_initdb_timeline_id: None,
+                ancestor_start_lsn: None,
+                pg_version: Some(pg_version),
+            };
+            let timeline_info = attachment_service
+                .tenant_timeline_create(tenant_id, create_req)
                 .await?;
-            let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
             env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
@@ -695,17 +696,18 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
-            let timeline_info = pageserver
-                .timeline_create(
-                    tenant_id,
-                    None,
-                    start_lsn,
-                    Some(ancestor_timeline_id),
-                    None,
-                    None,
-                )
+            let new_timeline_id = TimelineId::generate();
+            let attachment_service = AttachmentService::from_env(env);
+            let create_req = TimelineCreateRequest {
+                new_timeline_id: new_timeline_id,
+                ancestor_timeline_id: Some(ancestor_timeline_id),
+                existing_initdb_timeline_id: None,
+                ancestor_start_lsn: start_lsn,
+                pg_version: None,
+            };
+            let timeline_info = attachment_service
+                .tenant_timeline_create(tenant_id, create_req)
                 .await?;
-            let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
 
