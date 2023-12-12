@@ -947,7 +947,7 @@ page_server_request(void const *req)
 			tag.blockNum = ((NeonGetPageRequest *) req)->blkno;
 			break;
 		default:
-			elog(ERROR, "Unexpected request tag: %d", ((NeonRequest *) req)->tag);
+			neon_log(ERROR, "Unexpected request tag: %d", ((NeonRequest *) req)->tag);
 	}
 	shard_no = get_shard_number(&tag);
 
@@ -1041,7 +1041,7 @@ nm_pack_request(NeonRequest *msg)
 		case T_NeonErrorResponse:
 		case T_NeonDbSizeResponse:
 		default:
-			elog(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
+			neon_log(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
 	}
 	return s;
@@ -1136,7 +1136,7 @@ nm_unpack_response(StringInfo s)
 		case T_NeonGetPageRequest:
 		case T_NeonDbSizeRequest:
 		default:
-			elog(ERROR, "unexpected neon message tag 0x%02x", tag);
+			neon_log(ERROR, "unexpected neon message tag 0x%02x", tag);
 			break;
 	}
 
@@ -1328,7 +1328,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		XLogFlush(recptr);
 		lsn = recptr;
 		ereport(SmgrTrace,
-				(errmsg("Page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
+				(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
 						blocknum,
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn))));
@@ -1356,7 +1356,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		if (PageIsNew((Page) buffer))
 		{
 			ereport(SmgrTrace,
-					(errmsg("Page %u of relation %u/%u/%u.%u is all-zeros",
+					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is all-zeros",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
@@ -1364,7 +1364,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		else if (PageIsEmptyHeapPage((Page) buffer))
 		{
 			ereport(SmgrTrace,
-					(errmsg("Page %u of relation %u/%u/%u.%u is an empty heap page with no LSN",
+					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is an empty heap page with no LSN",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
@@ -1372,7 +1372,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 		else
 		{
 			ereport(PANIC,
-					(errmsg("Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
+					(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
 							blocknum,
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum)));
@@ -1381,7 +1381,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 	else
 	{
 		ereport(SmgrTrace,
-				(errmsg("Page %u of relation %u/%u/%u.%u is already wal logged at lsn=%X/%X",
+				(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is already wal logged at lsn=%X/%X",
 						blocknum,
 						RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						forknum, LSN_FORMAT_ARGS(lsn))));
@@ -1478,7 +1478,7 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 		lsn = GetLastWrittenLSN(rinfo, forknum, blkno);
 		lsn = nm_adjust_lsn(lsn);
 
-		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
+		neon_log(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
 	else
@@ -1493,7 +1493,7 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 		*latest = true;
 		lsn = GetLastWrittenLSN(rinfo, forknum, blkno);
 		Assert(lsn != InvalidXLogRecPtr);
-		elog(DEBUG1, "neon_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
+		neon_log(DEBUG1, "neon_get_request_lsn GetLastWrittenLSN lsn %X/%X ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 
 		lsn = nm_adjust_lsn(lsn);
@@ -1513,7 +1513,7 @@ neon_get_request_lsn(bool *latest, NRelFileInfo rinfo, ForkNumber forknum, Block
 #endif
 		if (lsn > flushlsn)
 		{
-			elog(DEBUG5, "last-written LSN %X/%X is ahead of last flushed LSN %X/%X",
+			neon_log(DEBUG5, "last-written LSN %X/%X is ahead of last flushed LSN %X/%X",
 				 (uint32) (lsn >> 32), (uint32) lsn,
 				 (uint32) (flushlsn >> 32), (uint32) flushlsn);
 			XLogFlush(lsn);
@@ -1557,7 +1557,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			return mdexists(reln, forkNum);
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	if (get_cached_relsize(InfoFromSMgrRel(reln), forkNum, &n_blocks))
@@ -1609,7 +1609,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+					 errmsg(NEON_TAG "could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
@@ -1618,7 +1618,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			break;
 
 		default:
-			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
 	pfree(resp);
 	return exists;
@@ -1635,7 +1635,7 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrcreate() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrcreate() on rel with unknown persistence");
 
 		case RELPERSISTENCE_PERMANENT:
 			break;
@@ -1646,10 +1646,10 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	elog(SmgrTrace, "Create relation %u/%u/%u.%u",
+	neon_log(SmgrTrace, "Create relation %u/%u/%u.%u",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum);
 
@@ -1744,7 +1744,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrextend() on rel with unknown persistence");
 
 		case RELPERSISTENCE_PERMANENT:
 			break;
@@ -1755,7 +1755,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	/*
@@ -1774,7 +1774,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
 					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("could not extend file because project size limit (%d MB) has been exceeded",
+					 errmsg(NEON_TAG "could not extend file because project size limit (%d MB) has been exceeded",
 							max_cluster_size),
 					 errhint("This limit is defined externally by the project size limit, and internally by neon.max_cluster_size GUC")));
 	}
@@ -1793,7 +1793,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
 
 	lsn = PageGetLSN((Page) buffer);
-	elog(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
+	neon_log(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
@@ -1833,7 +1833,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrextend() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrextend() on rel with unknown persistence");
 
 		case RELPERSISTENCE_PERMANENT:
 			break;
@@ -1844,7 +1844,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	if (max_cluster_size > 0 &&
@@ -1856,7 +1856,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
 					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("could not extend file because cluster size limit (%d MB) has been exceeded",
+					 errmsg(NEON_TAG "could not extend file because cluster size limit (%d MB) has been exceeded",
 							max_cluster_size),
 					 errhint("This limit is defined by neon.max_cluster_size GUC")));
 	}
@@ -1869,7 +1869,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if ((uint64) blocknum + nblocks >= (uint64) InvalidBlockNumber)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("cannot extend file \"%s\" beyond %u blocks",
+				 errmsg(NEON_TAG "cannot extend file \"%s\" beyond %u blocks",
 						relpath(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
 
@@ -1930,7 +1930,7 @@ neon_open(SMgrRelation reln)
 	mdopen(reln);
 
 	/* no work */
-	elog(SmgrTrace, "[NEON_SMGR] open noop");
+	neon_log(SmgrTrace, "open noop");
 }
 
 /*
@@ -1967,7 +1967,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			return mdprefetch(reln, forknum, blocknum);
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
@@ -2012,11 +2012,11 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	/* not implemented */
-	elog(SmgrTrace, "[NEON_SMGR] writeback noop");
+	neon_log(SmgrTrace, "writeback noop");
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2146,8 +2146,8 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
-							blkno,
+					 errmsg(NEON_TAG "[shard %d] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+							slot->shard_no, blkno,
 							RelFileInfoFmt(rinfo),
 							forkNum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
@@ -2155,7 +2155,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
 		default:
-			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
 
 	/* buffer was used, clean up for later reuse */
@@ -2179,7 +2179,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrread() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrread() on rel with unknown persistence");
 
 		case RELPERSISTENCE_PERMANENT:
 			break;
@@ -2190,7 +2190,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	/* Try to read from local file cache */
@@ -2218,7 +2218,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		{
 			if (!PageIsNew((Page) pageserver_masked))
 			{
-				elog(PANIC, "page is new in MD but not in Page Server at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
+				neon_log(PANIC, "page is new in MD but not in Page Server at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
 					 blkno,
 					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 					 forkNum,
@@ -2228,7 +2228,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		}
 		else if (PageIsNew((Page) buffer))
 		{
-			elog(PANIC, "page is new in Page Server but not in MD at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
+			neon_log(PANIC, "page is new in Page Server but not in MD at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n%s\n",
 				 blkno,
 				 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 				 forkNum,
@@ -2243,7 +2243,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 
 			if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
 			{
-				elog(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
+				neon_log(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 					 blkno,
 					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 					 forkNum,
@@ -2262,7 +2262,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 
 				if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
 				{
-					elog(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
+					neon_log(PANIC, "btree buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
 						 blkno,
 						 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 						 forkNum,
@@ -2342,13 +2342,13 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	neon_wallog_page(reln, forknum, blocknum, buffer, false);
 
 	lsn = PageGetLSN((Page) buffer);
-	elog(SmgrTrace, "smgrwrite called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
+	neon_log(SmgrTrace, "smgrwrite called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
@@ -2375,7 +2375,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrnblocks() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrnblocks() on rel with unknown persistence");
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -2386,12 +2386,12 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			return mdnblocks(reln, forknum);
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	if (get_cached_relsize(InfoFromSMgrRel(reln), forknum, &n_blocks))
 	{
-		elog(SmgrTrace, "cached nblocks for %u/%u/%u.%u: %u blocks",
+		neon_log(SmgrTrace, "cached nblocks for %u/%u/%u.%u: %u blocks",
 			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 			 forknum, n_blocks);
 		return n_blocks;
@@ -2419,7 +2419,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+					 errmsg(NEON_TAG "could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
 							RelFileInfoFmt(InfoFromSMgrRel(reln)),
 							forknum,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
@@ -2428,11 +2428,11 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			break;
 
 		default:
-			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
 	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
 
-	elog(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
+	neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forknum,
 		 (uint32) (request_lsn >> 32), (uint32) request_lsn,
@@ -2475,7 +2475,7 @@ neon_dbsize(Oid dbNode)
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg("could not read db size of db %u from page server at lsn %X/%08X",
+					 errmsg(NEON_TAG "could not read db size of db %u from page server at lsn %X/%08X",
 							dbNode,
 							(uint32) (request_lsn >> 32), (uint32) request_lsn),
 					 errdetail("page server returned error: %s",
@@ -2483,10 +2483,10 @@ neon_dbsize(Oid dbNode)
 			break;
 
 		default:
-			elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 	}
 
-	elog(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
+	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
 		 dbNode,
 		 (uint32) (request_lsn >> 32), (uint32) request_lsn,
 		 db_size);
@@ -2506,7 +2506,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrtruncate() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrtruncate() on rel with unknown persistence");
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -2518,7 +2518,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks);
@@ -2574,7 +2574,7 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgrimmedsync() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgrimmedsync() on rel with unknown persistence");
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -2586,10 +2586,10 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	elog(SmgrTrace, "[NEON_SMGR] immedsync noop");
+	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2614,17 +2614,17 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 * progress at a time. That's enough for the current usage.
 	 */
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
-		elog(ERROR, "unlogged relation build is already in progress");
+		neon_log(ERROR, "unlogged relation build is already in progress");
 	Assert(unlogged_build_rel == NULL);
 
 	ereport(SmgrTrace,
-			(errmsg("starting unlogged build of relation %u/%u/%u",
+			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			elog(ERROR, "cannot call smgr_start_unlogged_build() on rel with unknown persistence");
+			neon_log(ERROR, "cannot call smgr_start_unlogged_build() on rel with unknown persistence");
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
@@ -2637,11 +2637,11 @@ neon_start_unlogged_build(SMgrRelation reln)
 			return;
 
 		default:
-			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
 	if (smgrnblocks(reln, MAIN_FORKNUM) != 0)
-		elog(ERROR, "cannot perform unlogged index build, index is not empty ");
+		neon_log(ERROR, "cannot perform unlogged index build, index is not empty ");
 
 	unlogged_build_rel = reln;
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
@@ -2668,7 +2668,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	Assert(unlogged_build_rel == reln);
 
 	ereport(SmgrTrace,
-			(errmsg("finishing phase 1 of unlogged build of relation %u/%u/%u",
+			(errmsg(NEON_TAG "finishing phase 1 of unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
 	if (unlogged_build_phase == UNLOGGED_BUILD_NOT_PERMANENT)
@@ -2697,7 +2697,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 	Assert(unlogged_build_rel == reln);
 
 	ereport(SmgrTrace,
-			(errmsg("ending unlogged build of relation %u/%u/%u",
+			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromNInfoB(rinfob)))));
 
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_PERMANENT)
@@ -2712,7 +2712,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 		rinfob = InfoBFromSMgrRel(reln);
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
-			elog(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",
+			neon_log(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",
 				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
 				 forknum);
 
@@ -2755,7 +2755,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 				unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
-						 (errmsg("unlogged index build was not properly finished"))));
+						 (errmsg(NEON_TAG "unlogged index build was not properly finished"))));
 			}
 			break;
 	}
@@ -2854,7 +2854,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		set_cached_relsize(rinfo, forknum, relsize);
 		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
 
-		elog(SmgrTrace, "Set length to %d", relsize);
+		neon_log(SmgrTrace, "Set length to %d", relsize);
 	}
 }
 
@@ -2942,7 +2942,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 #if PG_VERSION_NUM < 150000
 	if (!XLogRecGetBlockTag(record, block_id, &rinfo, &forknum, &blkno))
-		elog(PANIC, "failed to locate backup block with ID %d", block_id);
+		neon_log(PANIC, "failed to locate backup block with ID %d", block_id);
 #else
 	XLogRecGetBlockTag(record, block_id, &rinfo, &forknum, &blkno);
 #endif
