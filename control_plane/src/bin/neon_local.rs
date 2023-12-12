@@ -427,7 +427,7 @@ async fn handle_tenant(
             let shard_count: u8 = create_match
                 .get_one::<u8>("shard-count")
                 .cloned()
-                .unwrap_or(1);
+                .unwrap_or(0);
 
             let shard_stripe_size: Option<u32> =
                 create_match.get_one::<u32>("shard-stripe-size").cloned();
@@ -909,9 +909,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
             )?;
 
             let attachment_service = AttachmentService::from_env(env);
-            let pageservers = attachment_service
-                .tenant_locate(endpoint.tenant_id)
-                .await?
+            let locate_result = attachment_service.tenant_locate(endpoint.tenant_id).await?;
+            let pageservers = locate_result
                 .shards
                 .into_iter()
                 .map(|shard| {
@@ -922,6 +921,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     )
                 })
                 .collect::<Vec<_>>();
+            let stripe_size = locate_result.shard_params.stripe_size.map(|s| s.0 as usize);
 
             let ps_conf = env.get_pageserver_conf(pageserver_id)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
@@ -934,7 +934,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint
-                .start(&auth_token, safekeepers, pageservers, remote_ext_config)
+                .start(
+                    &auth_token,
+                    safekeepers,
+                    pageservers,
+                    remote_ext_config,
+                    stripe_size,
+                )
                 .await?;
         }
         "reconfigure" => {

@@ -466,6 +466,7 @@ impl Endpoint {
         safekeepers: Vec<NodeId>,
         pageservers: Vec<(Host, u16)>,
         remote_ext_config: Option<&String>,
+        shard_stripe_size: Option<usize>,
     ) -> Result<()> {
         if self.status() == "running" {
             anyhow::bail!("The endpoint is already running");
@@ -529,6 +530,7 @@ impl Endpoint {
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
             remote_extensions,
+            shard_stripe_size,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

@@ -3,7 +3,10 @@ use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use hyper::{Method, StatusCode};
 use pageserver_api::{
-    models::{TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest, TimelineInfo},
+    models::{
+        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest,
+        TimelineInfo,
+    },
     shard::TenantShardId,
 };
 use postgres_connection::parse_host_port;
@@ -79,6 +82,7 @@ pub struct TenantLocateResponseShard {
 #[derive(Serialize, Deserialize)]
 pub struct TenantLocateResponse {
     pub shards: Vec<TenantLocateResponseShard>,
+    pub shard_params: ShardParameters,
 }
 
 impl AttachmentService {
