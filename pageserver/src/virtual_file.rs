@@ -327,51 +327,6 @@ impl VirtualFile {
         Self::open_with_options(path, options).await
     }
 
-    /// Writes a file to the specified `final_path` in a crash safe fasion
-    ///
-    /// The file is first written to the specified tmp_path, and in a second
-    /// step, the tmp path is renamed to the final path. As renames are
-    /// atomic, a crash during the write operation will never leave behind a
-    /// partially written file.
-    pub async fn crashsafe_overwrite(
-        final_path: &Utf8Path,
-        tmp_path: &Utf8Path,
-        content: &[u8],
-    ) -> std::io::Result<()> {
-        let Some(final_path_parent) = final_path.parent() else {
-            return Err(std::io::Error::from_raw_os_error(
-                nix::errno::Errno::EINVAL as i32,
-            ));
-        };
-        std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
-        let mut file = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options
-                .write(true)
-                // Use `create_new` so that, if we race with ourselves or something else,
-                // we bail out instead of causing damage.
-                .create_new(true);
-            Self::open_with_options(tmp_path, options).await?
-        };
-        file.write_all(content).await?;
-        file.sync_all().await?;
-        drop(file); // before the rename, that's important!
-                    // renames are atomic
-        std::fs::rename(tmp_path, final_path)?;
-        // Only open final path parent dirfd now, so that this operation only
-        // ever holds one VirtualFile fd at a time.  That's important because
-        // the current `find_victim_slot` impl might pick the same slot for both
-        // VirtualFile., and it eventually does a blocking write lock instead of
-        // try_lock.
-        let final_parent_dirfd = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options.read(true);
-            Self::open_with_options(final_path_parent, options).await?
-        };
-        final_parent_dirfd.sync_all().await?;
-        Ok(())
-    }
-
     /// Open a file with given options.
     ///
     /// Note: If any custom flags were set in 'open_options' through OpenOptionsExt,
@@ -428,6 +383,51 @@ impl VirtualFile {
         };
 
         Ok(vfile)
+    }
+
+    /// Writes a file to the specified `final_path` in a crash safe fasion
+    ///
+    /// The file is first written to the specified tmp_path, and in a second
+    /// step, the tmp path is renamed to the final path. As renames are
+    /// atomic, a crash during the write operation will never leave behind a
+    /// partially written file.
+    pub async fn crashsafe_overwrite(
+        final_path: &Utf8Path,
+        tmp_path: &Utf8Path,
+        content: &[u8],
+    ) -> std::io::Result<()> {
+        let Some(final_path_parent) = final_path.parent() else {
+            return Err(std::io::Error::from_raw_os_error(
+                nix::errno::Errno::EINVAL as i32,
+            ));
+        };
+        std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
+        let mut file = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options
+                .write(true)
+                // Use `create_new` so that, if we race with ourselves or something else,
+                // we bail out instead of causing damage.
+                .create_new(true);
+            Self::open_with_options(tmp_path, options).await?
+        };
+        file.write_all(content).await?;
+        file.sync_all().await?;
+        drop(file); // before the rename, that's important!
+                    // renames are atomic
+        std::fs::rename(tmp_path, final_path)?;
+        // Only open final path parent dirfd now, so that this operation only
+        // ever holds one VirtualFile fd at a time.  That's important because
+        // the current `find_victim_slot` impl might pick the same slot for both
+        // VirtualFile., and it eventually does a blocking write lock instead of
+        // try_lock.
+        let final_parent_dirfd = {
+            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
+            options.read(true);
+            Self::open_with_options(final_path_parent, options).await?
+        };
+        final_parent_dirfd.sync_all().await?;
+        Ok(())
     }
 
     /// Call File::sync_all() on the underlying File.
