@@ -408,6 +408,11 @@ fn start_pageserver(
         initial_tenant_load_remote: Some(init_done_tx),
         initial_tenant_load: Some(init_remote_done_tx),
         background_jobs_can_start: background_jobs_barrier.clone(),
+        warmup_limit: Arc::new(tokio::sync::Semaphore::new(
+            conf.concurrent_tenant_size_logical_size_queries
+                .initial_permits()
+                .get(),
+        )),
     };
 
     // Scan the local 'tenants/' directory and start loading the tenants

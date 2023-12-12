@@ -430,6 +430,12 @@ pub async fn init_tenant_mgr(
     let tenant_generations =
         init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
 
+    tracing::info!(
+        "Attaching {} tenants at startup, {} at a time",
+        tenant_configs.len(),
+        init_order.warmup_limit.available_permits()
+    );
+
     // Construct `Tenant` objects and start them running
     for (tenant_shard_id, location_conf) in tenant_configs {
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);

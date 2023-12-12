@@ -27,6 +27,8 @@ pub mod walredo;
 
 pub mod failpoint_support;
 
+use std::sync::Arc;
+
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
@@ -190,6 +192,11 @@ pub struct InitializationOrder {
     ///
     /// This can be broken up later on, but right now there is just one class of a background job.
     pub background_jobs_can_start: utils::completion::Barrier,
+
+    /// Concurrency limit for attaching tenants during startup.  This limit does not
+    /// apply to tenants that a client tries to access: those proceed to attach as fast
+    /// as they can.
+    pub warmup_limit: Arc<tokio::sync::Semaphore>,
 }
 
 /// Time the future with a warning when it exceeds a threshold.

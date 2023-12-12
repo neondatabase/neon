@@ -276,6 +276,11 @@ pub struct Tenant {
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 
+    /// If the tenant is in Activating state, notify this to encourage it
+    /// to proceed to Active as soon as possible, rather than waiting for lazy
+    /// background warmup.
+    pub(crate) activate_now: tokio::sync::Notify,
+
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 
     // Cancellation token fires when we have entered shutdown().  This is a parent of
@@ -648,6 +653,53 @@ impl Tenant {
                     .as_mut()
                     .and_then(|x| x.initial_tenant_load_remote.take());
 
+                enum AttachType<'a> {
+                    // During pageserver startup, we are attaching this tenant lazily in the background
+                    Warmup(tokio::sync::SemaphorePermit<'a>),
+                    // During pageserver startup, we are attaching this tenant as soon as we can,
+                    // because a client tried to access it.
+                    OnDemand,
+                    // During normal operations after startup, we are attaching a tenant.
+                    Normal,
+
+                }
+
+                // Before doing any I/O, wait for either or:
+                // - A client to attempt to access to this tenant (on-demand loading)
+                // - A permit to become available in the warmup semaphore (background warmup)
+                let attach_type = if let Some(init_order) = &init_order {
+                    tokio::select!(
+                        _ = tenant_clone.activate_now.notified() => {
+                            tracing::info!("Activating tenant (on-demand)");
+                            AttachType::OnDemand
+                        },
+                        permit_result = init_order.warmup_limit.acquire() => {
+                            match permit_result {
+                                Ok(p) => {
+                                    tracing::info!("Activating tenant (warmup)");
+                                    AttachType::Warmup(p)
+                                }
+                                Err(_) => {
+                                    // This is unexpected: the warmup semaphore should stay alive
+                                    // for the lifetime of init_order.  Log a warning and proceed.
+                                    tracing::warn!("warmup_limit semaphore unexpectedly closed");
+                                    AttachType::Normal
+                                }
+                            }
+
+                        }
+                        _ = tenant_clone.cancel.cancelled() => {
+                            // This is safe, but should be pretty rare: it is interesting if a tenant
+                            // stayed in Activating for such a long time that shutdown found it in
+                            // that state.
+                            tracing::info!("Tenant shut down before activation");
+                            return Ok(());
+                        },
+                    )
+                } else {
+                    AttachType::Normal
+                };
+
                 let preload = match mode {
                     SpawnMode::Create => {None},
                     SpawnMode::Normal => {
@@ -730,6 +782,27 @@ impl Tenant {
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
+
+                // If we are doing an opportunistic warmup attachment at startup, initialize
+                // logical size at the same time.  This is better than starting a bunch of idle tenants
+                // with cold caches and then coming back later to initialize their logical sizes.
+                //
+                // It also prevents the warmup proccess competing with the concurrency limit on
+                // logical size calculations: if logical size calculation semaphore is saturated,
+                // then warmup will wait for that before proceeding to the next tenant.
+                if let AttachType::Warmup(_permit) = attach_type {
+                    let mut futs = FuturesUnordered::new();
+                    let timelines: Vec<_> = tenant_clone.timelines.lock().unwrap().values().cloned().collect();
+                    for t in timelines {
+                        futs.push(t.await_initial_logical_size())
+                    }
+                    tracing::info!("Waiting for initial logical sizes while warming up...");
+                    while futs.next().await.is_some() {
+
+                    }
+                    tracing::info!("Warm-up complete");
+                }
+
                 Ok(())
             }
             .instrument({
@@ -2475,6 +2548,7 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            activate_now: tokio::sync::Notify::new(),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),
