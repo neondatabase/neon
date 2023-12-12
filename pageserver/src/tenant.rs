@@ -36,6 +36,8 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
+use utils::timeout::timeout_cancellable;
+use utils::timeout::TimeoutCancellableError;
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -1769,6 +1771,15 @@ impl Tenant {
         Ok(loaded_timeline)
     }
 
+    pub(crate) async fn delete_timeline(
+        self: Arc<Self>,
+        timeline_id: TimelineId,
+    ) -> Result<(), DeleteTimelineError> {
+        DeleteTimelineFlow::run(&self, timeline_id, false).await?;
+
+        Ok(())
+    }
+
     /// perform one garbage collection iteration, removing old data files from disk.
     /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
@@ -2200,18 +2211,35 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub(crate) async fn wait_to_become_active(&self) -> Result<(), GetActiveTenantError> {
+    pub(crate) async fn wait_to_become_active(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), GetActiveTenantError> {
+        self.activate_now.notify_one();
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
-                    receiver.changed().await.map_err(
-                        |_e: tokio::sync::watch::error::RecvError|
-                            // Tenant existed but was dropped: report it as non-existent
-                            GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_shard_id.tenant_id))
-                    )?;
+                    match timeout_cancellable(timeout, &self.cancel, receiver.changed()).await {
+                        Ok(r) => {
+                            r.map_err(
+                            |_e: tokio::sync::watch::error::RecvError|
+                                // Tenant existed but was dropped: report it as non-existent
+                                GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_shard_id.tenant_id))
+                        )?
+                        }
+                        Err(TimeoutCancellableError::Cancelled) => {
+                            return Err(GetActiveTenantError::Cancelled);
+                        }
+                        Err(TimeoutCancellableError::Timeout) => {
+                            return Err(GetActiveTenantError::WaitForActiveTimeout {
+                                latest_state: Some(self.current_state()),
+                                wait_time: timeout,
+                            });
+                        }
+                    }
                 }
                 TenantState::Active { .. } => {
                     return Ok(());

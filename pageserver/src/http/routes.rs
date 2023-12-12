@@ -38,6 +38,7 @@ use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
+use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
@@ -66,6 +67,11 @@ use utils::{
 
 // Imports only used for testing APIs
 use super::models::ConfigureFailpointsRequest;
+
+// For APIs that require an Active tenant, how long should we block waiting for that state?
+// This is not functionally necessary (clients will retry), but avoids generating a lot of
+// failed API calls while tenants are activating.
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 pub struct State {
     conf: &'static PageServerConf,
@@ -229,6 +235,19 @@ impl From<GetTenantError> for ApiError {
                 ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
             GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<GetActiveTenantError> for ApiError {
+    fn from(e: GetActiveTenantError) -> ApiError {
+        match e {
+            GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
+            GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
+            GetActiveTenantError::NotFound(gte) => gte.into(),
+            GetActiveTenantError::WaitForActiveTimeout { .. } => {
+                ApiError::ResourceUnavailable(format!("{}", e).into())
+            }
         }
     }
 }
@@ -435,7 +454,10 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, true)?;
+        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -694,11 +716,13 @@ async fn timeline_delete_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
     let state = get_state(&request);
 
-    state.tenant_manager.delete_timeline(tenant_shard_id, timeline_id, &ctx)
-        .instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id, false)?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -1136,7 +1160,10 @@ async fn tenant_create_handler(
 
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
-    if let res @ Err(_) = new_tenant.wait_to_become_active().await {
+    if let res @ Err(_) = new_tenant
+        .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
+        .await
+    {
         // This shouldn't happen because we just created the tenant directory
         // in tenant::mgr::create_tenant, and there aren't any remote timelines
         // to load, so, nothing can really fail during load.
