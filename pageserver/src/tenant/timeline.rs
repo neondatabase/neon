@@ -147,7 +147,7 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
-    pub remote_client: Option<RemoteTimelineClient>,
+    pub(crate) remote_client: Option<RemoteTimelineClient>,
     pub deletion_queue_client: DeletionQueueClient,
 }
 
@@ -212,7 +212,7 @@ pub struct Timeline {
 
     /// Remote storage client.
     /// See [`remote_timeline_client`](super::remote_timeline_client) module comment for details.
-    pub remote_client: Option<Arc<RemoteTimelineClient>>,
+    pub(crate) remote_client: Option<Arc<RemoteTimelineClient>>,
 
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
@@ -1304,8 +1304,9 @@ impl Timeline {
 
         // The threshold is embedded in the metric. So, we need to update it.
         {
+            let config_read = self.tenant_conf.read().unwrap();
             let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
-                &self.tenant_conf.read().unwrap().tenant_conf,
+                &config_read.tenant_conf,
                 &self.conf.default_tenant_conf,
             );
 
@@ -1313,6 +1314,13 @@ impl Timeline {
             let shard_id_str = format!("{}", self.tenant_shard_id.shard_slug());
 
             let timeline_id_str = self.timeline_id.to_string();
+
+            if let Some(remote_client) = &self.remote_client {
+                remote_client.update_config(&config_read.location);
+            }
+
+            drop(config_read);
+
             self.metrics
                 .evictions_with_low_residence_duration
                 .write()

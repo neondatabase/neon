@@ -1214,6 +1214,7 @@ impl Tenant {
                 self.tenant_shard_id,
                 timeline_id,
                 self.generation,
+                &self.tenant_conf.read().unwrap().location,
             );
             let cancel_clone = cancel.clone();
             part_downloads.spawn(
@@ -1686,6 +1687,10 @@ impl Tenant {
         {
             let conf = self.tenant_conf.read().unwrap();
 
+            // If we may not delete layers, then simply skip GC.  Even though a tenant
+            // in AttachedMulti state could do GC and just enqueue the blocked deletions,
+            // the only advantage to doing it is to perhaps shrink the LayerMap metadata
+            // a bit sooner than we would achieve by waiting for AttachedSingle status.
             if !conf.location.may_delete_layers_hint() {
                 info!("Skipping GC in location state {:?}", conf.location);
                 return Ok(GcResult::default());
@@ -1712,7 +1717,14 @@ impl Tenant {
 
         {
             let conf = self.tenant_conf.read().unwrap();
-            if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
+
+            // Note that compaction usually requires deletions, but we don't respect
+            // may_delete_layers_hint here: that is because tenants in AttachedMulti
+            // should proceed with compaction even if they can't do deletion, to avoid
+            // accumulating dangerously deep stacks of L0 layers.  Deletions will be
+            // enqueued inside RemoteTimelineClient, and executed layer if/when we transition
+            // to AttachedSingle state.
+            if !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
                 return Ok(());
             }
@@ -3125,6 +3137,7 @@ impl Tenant {
                 self.tenant_shard_id,
                 timeline_id,
                 self.generation,
+                &self.tenant_conf.read().unwrap().location,
             );
             Some(remote_client)
         } else {

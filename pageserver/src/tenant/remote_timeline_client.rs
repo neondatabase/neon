@@ -233,6 +233,7 @@ use utils::id::{TenantId, TimelineId};
 
 use self::index::IndexPart;
 
+use super::config::AttachedLocationConfig;
 use super::storage_layer::{Layer, LayerFileName, ResidentLayer};
 use super::upload_queue::SetDeletedFlagProgress;
 use super::Generation;
@@ -281,6 +282,37 @@ pub enum PersistIndexPartWithDeletedFlagError {
     Other(#[from] anyhow::Error),
 }
 
+/// Behavioral modes that enable seamless live migration.
+///
+/// See docs/rfcs/028-pageserver-migration.md to understand how these fit in.
+struct RemoteTimelineClientConfig {
+    /// If this is false, then update to remote_consistent_lsn are dropped rather
+    /// than being submitted to DeletionQueue for validation.  This behavior is
+    /// used when a tenant attachment is known to have a stale generation number,
+    /// such that validation attempts will always fail.  This is not necessary
+    /// for correctness, but avoids spamming error statistics with failed validations
+    /// when doing migrations of tenants.
+    process_remote_consistent_lsn_updates: bool,
+
+    /// If this is true, then object deletions are held in a buffer in RemoteTimelineClient
+    /// rather than being submitted to the DeletionQueue.  This behavior is used when a tenant
+    /// is known to be multi-attached, in order to avoid disrupting other attached tenants
+    /// whose generations' metadata refers to the deleted objects.
+    block_deletions: bool,
+}
+
+/// RemoteTimelineClientConfig's state is entirely driven by LocationConf, but we do
+/// not carry the entire LocationConf structure: it's much more than we need.  The From
+/// impl extracts the subset of the LocationConf that is interesting to RemoteTimelineClient.
+impl From<&AttachedLocationConfig> for RemoteTimelineClientConfig {
+    fn from(lc: &AttachedLocationConfig) -> Self {
+        Self {
+            block_deletions: !lc.may_delete_layers_hint(),
+            process_remote_consistent_lsn_updates: lc.may_upload_layers_hint(),
+        }
+    }
+}
+
 /// A client for accessing a timeline's data in remote storage.
 ///
 /// This takes care of managing the number of connections, and balancing them
@@ -300,7 +332,7 @@ pub enum PersistIndexPartWithDeletedFlagError {
 /// in the index part file, whenever timeline metadata is uploaded.
 ///
 /// Downloads are not queued, they are performed immediately.
-pub struct RemoteTimelineClient {
+pub(crate) struct RemoteTimelineClient {
     conf: &'static PageServerConf,
 
     runtime: tokio::runtime::Handle,
@@ -316,6 +348,8 @@ pub struct RemoteTimelineClient {
     storage_impl: GenericRemoteStorage,
 
     deletion_queue_client: DeletionQueueClient,
+
+    config: std::sync::RwLock<RemoteTimelineClientConfig>,
 }
 
 impl RemoteTimelineClient {
@@ -325,13 +359,14 @@ impl RemoteTimelineClient {
     /// Note: the caller must initialize the upload queue before any uploads can be scheduled,
     /// by calling init_upload_queue.
     ///
-    pub fn new(
+    pub(crate) fn new(
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         generation: Generation,
+        location_conf: &AttachedLocationConfig,
     ) -> RemoteTimelineClient {
         RemoteTimelineClient {
             conf,
@@ -351,6 +386,7 @@ impl RemoteTimelineClient {
                 &tenant_shard_id,
                 &timeline_id,
             )),
+            config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(location_conf)),
         }
     }
 
@@ -408,6 +444,34 @@ impl RemoteTimelineClient {
             .deleted_at = SetDeletedFlagProgress::Successful(deleted_at);
 
         Ok(())
+    }
+
+    pub(super) fn update_config(&self, location_conf: &AttachedLocationConfig) {
+        let new_conf = RemoteTimelineClientConfig::from(location_conf);
+        if !new_conf.block_deletions {
+            // If we may now delete layers, drain any that were blocked in our old
+            // configuration state
+            let mut queue_locked = self.upload_queue.lock().unwrap();
+            if let Ok(queue) = queue_locked.initialized_mut() {
+                let blocked_deletions = std::mem::take(&mut queue.blocked_deletions);
+                for d in blocked_deletions {
+                    if let Err(e) = self.deletion_queue_client.push_layers_sync(
+                        self.tenant_shard_id,
+                        self.timeline_id,
+                        self.generation,
+                        d.layers,
+                    ) {
+                        // This could happen if the pageserver is shut down while a tenant
+                        // is transitioning from a deletion-blocked state: we will leak some
+                        // S3 objects in this case.
+                        warn!("Failed to drain blocked deletions: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        *self.config.write().unwrap() = new_conf;
     }
 
     pub fn remote_consistent_lsn_projected(&self) -> Option<Lsn> {
@@ -1326,16 +1390,24 @@ impl RemoteTimelineClient {
                     res
                 }
                 UploadOp::Delete(delete) => {
-                    pausable_failpoint!("before-delete-layer-pausable");
-                    self.deletion_queue_client
-                        .push_layers(
-                            self.tenant_shard_id,
-                            self.timeline_id,
-                            self.generation,
-                            delete.layers.clone(),
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))
+                    if self.config.read().unwrap().block_deletions {
+                        let mut queue_locked = self.upload_queue.lock().unwrap();
+                        if let Ok(queue) = queue_locked.initialized_mut() {
+                            queue.blocked_deletions.push(delete.clone());
+                        }
+                        Ok(())
+                    } else {
+                        pausable_failpoint!("before-delete-layer-pausable");
+                        self.deletion_queue_client
+                            .push_layers(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                self.generation,
+                                delete.layers.clone(),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))
+                    }
                 }
                 unexpected @ UploadOp::Barrier(_) | unexpected @ UploadOp::Shutdown => {
                     // unreachable. Barrier operations are handled synchronously in
@@ -1426,8 +1498,16 @@ impl RemoteTimelineClient {
                         // Legacy mode: skip validating generation
                         upload_queue.visible_remote_consistent_lsn.store(lsn);
                         None
-                    } else {
+                    } else if self
+                        .config
+                        .read()
+                        .unwrap()
+                        .process_remote_consistent_lsn_updates
+                    {
                         Some((lsn, upload_queue.visible_remote_consistent_lsn.clone()))
+                    } else {
+                        // Our config disables remote_consistent_lsn updates: drop it.
+                        None
                     }
                 }
                 UploadOp::Delete(_) => {
@@ -1559,6 +1639,7 @@ impl RemoteTimelineClient {
                         queued_operations: VecDeque::default(),
                         #[cfg(feature = "testing")]
                         dangling_files: HashMap::default(),
+                        blocked_deletions: Vec::new(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
                     };
@@ -1705,6 +1786,7 @@ mod tests {
     use crate::{
         context::RequestContext,
         tenant::{
+            config::AttachmentMode,
             harness::{TenantHarness, TIMELINE_ID},
             storage_layer::Layer,
             Generation, Tenant, Timeline,
@@ -1791,6 +1873,10 @@ mod tests {
 
         /// Construct a RemoteTimelineClient in an arbitrary generation
         fn build_client(&self, generation: Generation) -> Arc<RemoteTimelineClient> {
+            let location_conf = AttachedLocationConfig {
+                generation,
+                attach_mode: AttachmentMode::Single,
+            };
             Arc::new(RemoteTimelineClient {
                 conf: self.harness.conf,
                 runtime: tokio::runtime::Handle::current(),
@@ -1804,6 +1890,7 @@ mod tests {
                     &self.harness.tenant_shard_id,
                     &TIMELINE_ID,
                 )),
+                config: std::sync::RwLock::new(RemoteTimelineClientConfig::from(&location_conf)),
             })
         }
 
