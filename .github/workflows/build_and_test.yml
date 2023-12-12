@@ -61,6 +61,7 @@ jobs:
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
           echo "$updated_files"
           echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
+          echo "IMAGE_NAME=build-tools" >> $GITHUB_ENV
           if [[ $updated_files == *"Dockerfile.buildtool"* ]]; then
             echo "condition is true"
             echo "DOCKER_FILE_CHANGED=$true" >> $GITHUB_ENV
@@ -70,7 +71,7 @@ jobs:
   push-buildtools-docker-file:
     needs: [ check-permissions , print-event-details ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
-    if: ${{ github.env.DOCKER_FILE_CHANGED }}
+    # if: ${{ github.env.DOCKER_FILE_CHANGED }}
     with:
       docker-file-path: Dockerfile.buildtool
       image-name: build-tools
