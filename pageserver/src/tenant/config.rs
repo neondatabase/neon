@@ -175,7 +175,7 @@ impl LocationConf {
                 generation,
                 attach_mode: AttachmentMode::Single,
             }),
-            shard: ShardIdentity::from_params(ShardNumber(0), &shard_params),
+            shard: ShardIdentity::from_params(ShardNumber(0), shard_params),
             tenant_conf,
         }
     }

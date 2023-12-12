@@ -2353,7 +2353,7 @@ impl Tenant {
 
             for child_shard in child_shards {
                 upload_index_part(
-                    &remote_storage,
+                    remote_storage,
                     child_shard,
                     &timeline.timeline_id,
                     self.generation,
@@ -3684,7 +3684,7 @@ impl Tenant {
     }
 
     pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
-        self.tenant_conf.read().unwrap().tenant_conf.clone()
+        self.tenant_conf.read().unwrap().tenant_conf
     }
 }
 

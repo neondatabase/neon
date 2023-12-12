@@ -281,18 +281,18 @@ impl TenantState {
                         let node = pageservers
                             .get(&node_id)
                             .expect("Pageserver may not be removed while referenced");
-                        self.location_config(&node, wanted_conf).await?;
+                        self.location_config(node, wanted_conf).await?;
                     }
                 }
             }
             None => {
                 // Detach everything
-                for (node_id, _old_state) in &self.observed.locations {
+                for node_id in self.observed.locations.keys() {
                     let node = pageservers
                         .get(node_id)
                         .expect("Pageserver may not be removed while referenced");
                     self.location_config(
-                        &node,
+                        node,
                         LocationConfig {
                             mode: LocationConfigMode::Detached,
                             generation: None,
@@ -474,11 +474,11 @@ struct Scheduler {
 impl Scheduler {
     fn new(persistent_state: &PersistentState) -> Self {
         let mut tenant_counts = HashMap::new();
-        for (node_id, _) in &persistent_state.pageservers {
+        for node_id in persistent_state.pageservers.keys() {
             tenant_counts.insert(*node_id, 0);
         }
 
-        for (_id, tenant) in &persistent_state.tenants {
+        for tenant in persistent_state.tenants.values() {
             if let Some(ps) = tenant.pageserver {
                 let entry = tenant_counts.entry(ps).or_insert(0);
                 *entry += 1;
@@ -840,7 +840,7 @@ async fn handle_tenant_shard_split(mut req: Request<Body>) -> Result<Response<Bo
                     tenant_shard_id: child,
                     shard: child_shard,
                     pageserver: Some(pageserver),
-                    generation: generation,
+                    generation,
                     observed: ObservedState {
                         locations: child_observed,
                     },

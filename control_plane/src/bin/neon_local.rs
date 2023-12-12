@@ -607,7 +607,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
 
             let attachment_service = AttachmentService::from_env(env);
             let create_req = TimelineCreateRequest {
-                new_timeline_id: new_timeline_id,
+                new_timeline_id,
                 ancestor_timeline_id: None,
                 existing_initdb_timeline_id: None,
                 ancestor_start_lsn: None,
@@ -699,7 +699,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
             let new_timeline_id = TimelineId::generate();
             let attachment_service = AttachmentService::from_env(env);
             let create_req = TimelineCreateRequest {
-                new_timeline_id: new_timeline_id,
+                new_timeline_id,
                 ancestor_timeline_id: Some(ancestor_timeline_id),
                 existing_initdb_timeline_id: None,
                 ancestor_start_lsn: start_lsn,

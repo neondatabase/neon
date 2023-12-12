@@ -1128,7 +1128,7 @@ impl TenantManager {
             anyhow::bail!("Requested shard count is not an increase");
         }
         let expansion_factor = new_shard_count.0 / effective_old_shard_count;
-        if !(expansion_factor & (expansion_factor - 1) == 0) {
+        if expansion_factor & (expansion_factor - 1) != 0 {
             anyhow::bail!("Requested split is not a power of two");
         }
 
