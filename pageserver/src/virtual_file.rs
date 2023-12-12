@@ -314,17 +314,27 @@ macro_rules! with_file {
 impl VirtualFile {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-        options.read(true);
-        Self::open_with_options(path, options).await
+        Self::open_with_options(
+            path,
+            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+                .read(true)
+                .to_owned(),
+        )
+        .await
     }
 
     /// Create a new file for writing. If the file exists, it will be truncated.
     /// Like File::create.
     pub async fn create(path: &Utf8Path) -> Result<VirtualFile, std::io::Error> {
-        let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        Self::open_with_options(path, options).await
+        Self::open_with_options(
+            path,
+            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .to_owned(),
+        )
+        .await
     }
 
     /// Open a file with given options.
@@ -402,15 +412,16 @@ impl VirtualFile {
             ));
         };
         std::fs::remove_file(tmp_path).or_else(fs_ext::ignore_not_found)?;
-        let mut file = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options
+        let mut file = Self::open_with_options(
+            tmp_path,
+            tokio_epoll_uring::ops::open_at::OpenOptions::new()
                 .write(true)
                 // Use `create_new` so that, if we race with ourselves or something else,
                 // we bail out instead of causing damage.
-                .create_new(true);
-            Self::open_with_options(tmp_path, options).await?
-        };
+                .create_new(true)
+                .to_owned(),
+        )
+        .await?;
         file.write_all(content).await?;
         file.sync_all().await?;
         drop(file); // before the rename, that's important!
@@ -421,11 +432,13 @@ impl VirtualFile {
         // the current `find_victim_slot` impl might pick the same slot for both
         // VirtualFile., and it eventually does a blocking write lock instead of
         // try_lock.
-        let final_parent_dirfd = {
-            let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-            options.read(true);
-            Self::open_with_options(final_path_parent, options).await?
-        };
+        let final_parent_dirfd = Self::open_with_options(
+            final_path_parent,
+            tokio_epoll_uring::ops::open_at::OpenOptions::new()
+                .read(true)
+                .to_owned(),
+        )
+        .await?;
         final_parent_dirfd.sync_all().await?;
         Ok(())
     }
@@ -1109,11 +1122,12 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(&test_file_path, {
-                let mut options = tokio_epoll_uring::ops::open_at::OpenOptions::new();
-                options.read(true);
-                options
-            })
+            let f = VirtualFile::open_with_options(
+                &test_file_path,
+                tokio_epoll_uring::ops::open_at::OpenOptions::new()
+                    .read(true)
+                    .to_owned(),
+            )
             .await?;
             files.push(f);
         }
