@@ -217,9 +217,13 @@ impl HeatmapUploader {
         // Used a fixed 'now' through the following loop, for efficiency and fairness.
         let now = Instant::now();
 
+        // While iterating over the potentially-long list of tenants, we will periodically yield
+        // to avoid blocking executor.
+        const YIELD_ITERATIONS: usize = 1000;
+
         // Iterate over tenants looking for work to do.
         let tenants = self.tenant_manager.get_attached_active_tenant_shards();
-        for tenant in tenants {
+        for (i, tenant) in tenants.into_iter().enumerate() {
             // Process is shutting down, drop out
             if self.cancel.is_cancelled() {
                 return Ok(());
@@ -234,6 +238,10 @@ impl HeatmapUploader {
             }
 
             self.maybe_schedule_upload(&now, tenant);
+
+            if i + 1 % YIELD_ITERATIONS == 0 {
+                tokio::task::yield_now().await;
+            }
         }
 
         // Spawn tasks for as many of our pending tenants as we can.
