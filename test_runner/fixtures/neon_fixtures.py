@@ -552,6 +552,9 @@ class NeonEnvBuilder:
             repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
         )
 
+        if (attachments_json := Path(repo_dir / "attachments.json")).exists():
+            shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
+
         # Update the config with info about tenants and timelines
         with (self.repo_dir / "config").open("r") as f:
             config = toml.load(f)
