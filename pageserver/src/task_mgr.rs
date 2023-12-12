@@ -518,12 +518,13 @@ pub async fn shutdown_tasks(
             {
                 // allow some time to elapse before logging to cut down the number of log
                 // lines.
-                info!("waiting for {} to shut down", task.name);
+                info!("waiting for task {} to shut down", task.name);
                 // we never handled this return value, but:
                 // - we don't deschedule which would lead to is_cancelled
                 // - panics are already logged (is_panicked)
                 // - task errors are already logged in the wrapper
                 let _ = join_handle.await;
+                info!("task {} completed", task.name);
             }
         } else {
             // Possibly one of:

@@ -319,6 +319,7 @@ async fn build_timeline_info_common(
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+    let initdb_lsn = timeline.initdb_lsn;
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();
@@ -359,6 +360,7 @@ async fn build_timeline_info_common(
         disk_consistent_lsn: timeline.get_disk_consistent_lsn(),
         remote_consistent_lsn: remote_consistent_lsn_projected,
         remote_consistent_lsn_visible,
+        initdb_lsn,
         last_record_lsn,
         prev_record_lsn: Some(timeline.get_prev_record_lsn()),
         latest_gc_cutoff_lsn: *timeline.get_latest_gc_cutoff_lsn(),
@@ -506,7 +508,7 @@ async fn timeline_list_handler(
         }
         Ok::<Vec<TimelineInfo>, ApiError>(response_data)
     }
-    .instrument(info_span!("timeline_list", 
+    .instrument(info_span!("timeline_list",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug()))
     .await?;
@@ -545,7 +547,7 @@ async fn timeline_detail_handler(
 
         Ok::<_, ApiError>(timeline_info)
     }
-    .instrument(info_span!("timeline_detail", 
+    .instrument(info_span!("timeline_detail",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug(),
                 %timeline_id))
@@ -843,7 +845,7 @@ async fn tenant_status(
             attachment_status: state.attachment_status(),
         })
     }
-    .instrument(info_span!("tenant_status_handler", 
+    .instrument(info_span!("tenant_status_handler",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug()))
     .await?;
