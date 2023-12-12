@@ -271,8 +271,7 @@ impl RemoteStorage for AzureBlobStorage {
 
         let mut builder = blob_client.get();
 
-        let range: Range =
-        if let Some(end_exclusive) = end_exclusive {
+        let range: Range = if let Some(end_exclusive) = end_exclusive {
             (start_inclusive..end_exclusive).into()
         } else {
             (start_inclusive..).into()
