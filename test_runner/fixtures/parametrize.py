@@ -8,7 +8,7 @@ from _pytest.python import Metafunc
 from fixtures.pg_version import PgVersion
 
 """
-Dynamically parametrize tests by Postgres version and build type (debug/release/remote)
+Dynamically parametrize tests by Postgres version, build type (debug/release/remote), and possibly by other parameters
 """
 
 
@@ -31,6 +31,15 @@ def build_type(request: FixtureRequest) -> Optional[str]:
     return None
 
 
+@pytest.fixture(scope="function", autouse=True)
+def io_engine(request: FixtureRequest) -> Optional[str]:
+    # Do not parametrize performance tests yet, we need to prepare grafana charts first
+    if "test_runner/performance" in str(request.node.path):
+        return os.environ.get("IO_ENGINE", "").lower()
+
+    return None
+
+
 def pytest_generate_tests(metafunc: Metafunc):
     # Do not parametrize performance tests yet, we need to prepare grafana charts first
     if "test_runner/performance" in metafunc.definition._nodeid:
@@ -46,5 +55,11 @@ def pytest_generate_tests(metafunc: Metafunc):
     else:
         build_types = [bt.lower()]
 
+    if (io_engine := os.environ.get("IO_ENGINE")) is None:
+        io_engines = ["std-fs", "tokio-epoll-uring"]
+    else:
+        io_engines = [io_engine.lower()]
+
     metafunc.parametrize("build_type", build_types)
     metafunc.parametrize("pg_version", pg_versions, ids=map(lambda v: f"pg{v}", pg_versions))
+    metafunc.parametrize("io_engine", io_engines)
