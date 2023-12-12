@@ -358,7 +358,7 @@ pub enum TenantAttachmentStatus {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
-    pub id: TenantId,
+    pub id: TenantShardId,
     // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
@@ -370,7 +370,7 @@ pub struct TenantInfo {
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
-    pub tenant_id: TenantId,
+    pub tenant_id: TenantShardId,
     pub timeline_id: TimelineId,
 
     pub ancestor_timeline_id: Option<TimelineId>,
@@ -385,6 +385,9 @@ pub struct TimelineInfo {
 
     /// The LSN that we are advertizing to safekeepers
     pub remote_consistent_lsn_visible: Lsn,
+
+    /// The LSN from the start of the root timeline (never changes)
+    pub initdb_lsn: Lsn,
 
     pub current_logical_size: u64,
     pub current_logical_size_is_accurate: bool,
@@ -824,7 +827,7 @@ mod tests {
     fn test_tenantinfo_serde() {
         // Test serialization/deserialization of TenantInfo
         let original_active = TenantInfo {
-            id: TenantId::generate(),
+            id: TenantShardId::unsharded(TenantId::generate()),
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
@@ -841,7 +844,7 @@ mod tests {
         });
 
         let original_broken = TenantInfo {
-            id: TenantId::generate(),
+            id: TenantShardId::unsharded(TenantId::generate()),
             state: TenantState::Broken {
                 reason: "reason".into(),
                 backtrace: "backtrace info".into(),

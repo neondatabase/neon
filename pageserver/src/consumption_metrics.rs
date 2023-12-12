@@ -269,24 +269,38 @@ async fn calculate_synthetic_size_worker(
             }
         };
 
-        for (tenant_id, tenant_state) in tenants {
+        for (tenant_shard_id, tenant_state) in tenants {
             if tenant_state != TenantState::Active {
                 continue;
             }
 
-            if let Ok(tenant) = mgr::get_tenant(tenant_id, true) {
+            if !tenant_shard_id.is_zero() {
+                // We only send consumption metrics from shard 0, so don't waste time calculating
+                // synthetic size on other shards.
+                continue;
+            }
+
+            if let Ok(tenant) = mgr::get_tenant(tenant_shard_id, true) {
                 // TODO should we use concurrent_background_tasks_rate_limit() here, like the other background tasks?
                 // We can put in some prioritization for consumption metrics.
                 // Same for the loop that fetches computed metrics.
                 // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
                 // which turns out is really handy to understand the system.
                 if let Err(e) = tenant.calculate_synthetic_size(cause, cancel, ctx).await {
-                    if let Some(PageReconstructError::Cancelled) =
-                        e.downcast_ref::<PageReconstructError>()
-                    {
-                        return Ok(());
+                    // this error can be returned if timeline is shutting down, but it does not
+                    // mean the synthetic size worker should terminate. we do not need any checks
+                    // in this function because `mgr::get_tenant` will error out after shutdown has
+                    // progressed to shutting down tenants.
+                    let is_cancelled = matches!(
+                        e.downcast_ref::<PageReconstructError>(),
+                        Some(PageReconstructError::Cancelled)
+                    );
+
+                    if !is_cancelled {
+                        error!(
+                            "failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}"
+                        );
                     }
-                    error!("failed to calculate synthetic size for tenant {tenant_id}: {e:#}");
                 }
             }
         }
@@ -299,7 +313,7 @@ async fn calculate_synthetic_size_worker(
 
         let res = tokio::time::timeout_at(
             started_at + synthetic_size_calculation_interval,
-            task_mgr::shutdown_token().cancelled(),
+            cancel.cancelled(),
         )
         .await;
         if res.is_ok() {

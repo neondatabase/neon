@@ -822,10 +822,7 @@ impl<'a> DatadirModification<'a> {
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
         // Create AuxFilesDirectory
-        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-            files: HashMap::new(),
-        })?;
-        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+        self.init_aux_dir()?;
 
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
@@ -933,10 +930,7 @@ impl<'a> DatadirModification<'a> {
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // Create AuxFilesDirectory as well
-            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-                files: HashMap::new(),
-            })?;
-            self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+            self.init_aux_dir()?;
         }
         if r.is_none() {
             // Create RelDirectory
@@ -1258,6 +1252,14 @@ impl<'a> DatadirModification<'a> {
         // Delete it
         self.delete(twophase_key_range(xid));
 
+        Ok(())
+    }
+
+    pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
 
@@ -1766,6 +1768,13 @@ const AUX_FILES_KEY: Key = Key {
 
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
+
+// AUX_FILES currently stores only data for logical replication (slots etc), and
+// we don't preserve these on a branch because safekeepers can't follow timeline
+// switch (and generally it likely should be optional), so ignore these.
+pub fn is_inherited_key(key: Key) -> bool {
+    key != AUX_FILES_KEY
+}
 
 pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
     Ok(match key.field1 {
