@@ -9,6 +9,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     check_restored_datadir_content,
 )
+from fixtures.remote_storage import s3_storage
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -29,6 +30,8 @@ def test_pg_regress(
     """
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
     # Connect to postgres and create a database called "regression".
@@ -85,6 +88,8 @@ def test_isolation(
 ):
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
     # Connect to postgres and create a database called "regression".
@@ -139,6 +144,8 @@ def test_sql_regress(
 ):
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
     # Connect to postgres and create a database called "regression".
