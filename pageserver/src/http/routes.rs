@@ -338,7 +338,8 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size = timeline.get_current_logical_size(ctx);
+    let current_logical_size =
+        timeline.get_current_logical_size(tenant::timeline::GetLogicalSizePriority::User, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -708,6 +709,26 @@ async fn tenant_detach_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn tenant_reset_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let drop_cache: Option<bool> = parse_query_param(&request, "drop_cache")?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+    let state = get_state(&request);
+    state
+        .tenant_manager
+        .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn tenant_load_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -823,7 +844,7 @@ async fn tenant_delete_handler(
     mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
-            shard = tenant_shard_id.shard_slug()
+            shard = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
@@ -1172,7 +1193,7 @@ async fn put_tenant_location_config_handler(
             mgr::detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
                 .instrument(info_span!("tenant_detach",
                     tenant_id = %tenant_shard_id.tenant_id,
-                    shard = tenant_shard_id.shard_slug()
+                    shard = %tenant_shard_id.shard_slug()
                 ))
                 .await
         {
@@ -1826,6 +1847,9 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_id/detach", |r| {
             api_handler(r, tenant_detach_handler)
+        })
+        .post("/v1/tenant/:tenant_shard_id/reset", |r| {
+            api_handler(r, tenant_reset_handler)
         })
         .post("/v1/tenant/:tenant_id/load", |r| {
             api_handler(r, tenant_load_handler)

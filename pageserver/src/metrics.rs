@@ -285,19 +285,68 @@ pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheS
     },
 });
 
+pub(crate) mod page_cache_eviction_metrics {
+    use std::num::NonZeroUsize;
+
+    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Outcome {
+        FoundSlotUnused { iters: NonZeroUsize },
+        FoundSlotEvicted { iters: NonZeroUsize },
+        ItersExceeded { iters: NonZeroUsize },
+    }
+
+    static ITERS_TOTAL_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_iters_total",
+            "Counter for the number of iterations in the find_victim loop",
+            &["outcome"],
+        )
+        .expect("failed to define a metric")
+    });
+
+    static CALLS_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_calls",
+            "Incremented at the end of each find_victim() call.\
+             Filter by outcome to get e.g., eviction rate.",
+            &["outcome"]
+        )
+        .unwrap()
+    });
+
+    pub(crate) fn observe(outcome: Outcome) {
+        macro_rules! dry {
+            ($label:literal, $iters:expr) => {{
+                static LABEL: &'static str = $label;
+                static ITERS_TOTAL: Lazy<IntCounter> =
+                    Lazy::new(|| ITERS_TOTAL_VEC.with_label_values(&[LABEL]));
+                static CALLS: Lazy<IntCounter> =
+                    Lazy::new(|| CALLS_VEC.with_label_values(&[LABEL]));
+                ITERS_TOTAL.inc_by(($iters.get()) as u64);
+                CALLS.inc();
+            }};
+        }
+        match outcome {
+            Outcome::FoundSlotUnused { iters } => dry!("found_empty", iters),
+            Outcome::FoundSlotEvicted { iters } => {
+                dry!("found_evicted", iters)
+            }
+            Outcome::ItersExceeded { iters } => {
+                dry!("err_iters_exceeded", iters);
+                super::page_cache_errors_inc(super::PageCacheErrorKind::EvictIterLimit);
+            }
+        }
+    }
+}
+
 pub(crate) static PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_page_cache_acquire_pinned_slot_seconds",
         "Time spent acquiring a pinned slot in the page cache",
         CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric")
-});
-
-pub(crate) static PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "pageserver_page_cache_find_victim_iters_total",
-        "Counter for the number of iterations in the find_victim loop",
     )
     .expect("failed to define a metric")
 });
@@ -407,16 +456,14 @@ pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
 
-    use crate::task_mgr::TaskKind;
-
     pub(crate) struct StartCalculation(IntCounterVec);
     pub(crate) static START_CALCULATION: Lazy<StartCalculation> = Lazy::new(|| {
         StartCalculation(
             register_int_counter_vec!(
                 "pageserver_initial_logical_size_start_calculation",
                 "Incremented each time we start an initial logical size calculation attempt. \
-                 The `task_kind` label is for the task kind that caused this attempt.",
-                &["attempt", "task_kind"]
+                 The `circumstances` label provides some additional details.",
+                &["attempt", "circumstances"]
             )
             .unwrap(),
         )
@@ -464,19 +511,24 @@ pub(crate) mod initial_logical_size {
         inc_drop_calculation: Option<IntCounter>,
     }
 
+    #[derive(strum_macros::IntoStaticStr)]
+    pub(crate) enum StartCircumstances {
+        EmptyInitial,
+        SkippedConcurrencyLimiter,
+        AfterBackgroundTasksRateLimit,
+    }
+
     impl StartCalculation {
-        pub(crate) fn first(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
-            let task_kind_label: &'static str =
-                causing_task_kind.map(|k| k.into()).unwrap_or_default();
-            self.0.with_label_values(&["first", task_kind_label]);
+        pub(crate) fn first(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0.with_label_values(&["first", circumstances_label]);
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
             }
         }
-        pub(crate) fn retry(&self, causing_task_kind: Option<TaskKind>) -> OngoingCalculationGuard {
-            let task_kind_label: &'static str =
-                causing_task_kind.map(|k| k.into()).unwrap_or_default();
-            self.0.with_label_values(&["retry", task_kind_label]);
+        pub(crate) fn retry(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0.with_label_values(&["retry", circumstances_label]);
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
             }
@@ -771,6 +823,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
 )]
 pub(crate) enum StorageIoOperation {
     Open,
+    OpenAfterReplace,
     Close,
     CloseByReplace,
     Read,
@@ -784,6 +837,7 @@ impl StorageIoOperation {
     pub fn as_str(&self) -> &'static str {
         match self {
             StorageIoOperation::Open => "open",
+            StorageIoOperation::OpenAfterReplace => "open-after-replace",
             StorageIoOperation::Close => "close",
             StorageIoOperation::CloseByReplace => "close-by-replace",
             StorageIoOperation::Read => "read",
@@ -837,6 +891,25 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub(crate) mod virtual_file_descriptor_cache {
+    use super::*;
+
+    pub(crate) static SIZE_MAX: Lazy<UIntGauge> = Lazy::new(|| {
+        register_uint_gauge!(
+            "pageserver_virtual_file_descriptor_cache_size_max",
+            "Maximum number of open file descriptors in the cache."
+        )
+        .unwrap()
+    });
+
+    // SIZE_CURRENT: derive it like so:
+    // ```
+    // sum (pageserver_io_operations_seconds_count{operation=~"^(open|open-after-replace)$")
+    // -ignoring(operation)
+    // sum(pageserver_io_operations_seconds_count{operation=~"^(close|close-by-replace)$"}
+    // ```
+}
 
 #[derive(Debug)]
 struct GlobalAndPerTimelineHistogram {
@@ -1164,6 +1237,30 @@ pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
 }
 });
 
+pub(crate) struct WalIngestMetrics {
+    pub(crate) records_received: IntCounter,
+    pub(crate) records_committed: IntCounter,
+    pub(crate) records_filtered: IntCounter,
+}
+
+pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+    records_received: register_int_counter!(
+        "pageserver_wal_ingest_records_received",
+        "Number of WAL records received from safekeepers"
+    )
+    .expect("failed to define a metric"),
+    records_committed: register_int_counter!(
+        "pageserver_wal_ingest_records_committed",
+        "Number of WAL records which resulted in writes to pageserver storage"
+    )
+    .expect("failed to define a metric"),
+    records_filtered: register_int_counter!(
+        "pageserver_wal_ingest_records_filtered",
+        "Number of WAL records filtered out due to sharding"
+    )
+    .expect("failed to define a metric"),
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
@@ -1385,6 +1482,8 @@ pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = 
 pub(crate) struct WalRedoProcessCounters {
     pub(crate) started: IntCounter,
     pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) active_stderr_logger_tasks_started: IntCounter,
+    pub(crate) active_stderr_logger_tasks_finished: IntCounter,
 }
 
 #[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
@@ -1408,6 +1507,19 @@ impl Default for WalRedoProcessCounters {
             &["cause"],
         )
         .unwrap();
+
+        let active_stderr_logger_tasks_started = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_started_total",
+            "Number of active walredo stderr logger tasks that have started",
+        )
+        .unwrap();
+
+        let active_stderr_logger_tasks_finished = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_finished_total",
+            "Number of active walredo stderr logger tasks that have finished",
+        )
+        .unwrap();
+
         Self {
             started,
             killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
@@ -1415,6 +1527,8 @@ impl Default for WalRedoProcessCounters {
                 let cause_str: &'static str = cause.into();
                 killed.with_label_values(&[cause_str])
             })),
+            active_stderr_logger_tasks_started,
+            active_stderr_logger_tasks_finished,
         }
     }
 }
@@ -2073,6 +2187,8 @@ pub fn preinitialize_metrics() {
 
     // Tenant manager stats
     Lazy::force(&TENANT_MANAGER);
+
+    Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
 
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]

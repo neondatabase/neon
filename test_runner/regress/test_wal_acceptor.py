@@ -30,6 +30,7 @@ from fixtures.neon_fixtures import (
     Safekeeper,
     SafekeeperHttpClient,
     SafekeeperPort,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -38,10 +39,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
-from fixtures.remote_storage import (
-    RemoteStorageKind,
-    available_remote_storages,
-)
+from fixtures.remote_storage import RemoteStorageKind, default_remote_storage
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 
@@ -286,28 +284,46 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
     stat_before = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
-    log.info(f"statuses is {stat_before}")
+    log.info(f"statuses before insert: {stat_before}")
 
     endpoint.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
-    # force checkpoint in pageserver to advance remote_consistent_lsn
-    wait_lsn_force_checkpoint(tenant_id, timeline_id, endpoint, env.pageserver)
+    # wait for remote_consistent_lsn to reach flush_lsn, forcing it with checkpoint
+    new_rcl = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    log.info(f"new_rcl: {new_rcl}")
+    endpoint.stop()
 
     # and wait till remote_consistent_lsn propagates to all safekeepers
+    #
+    # This timeout is long: safekeepers learn about remote_consistent_lsn updates when a pageserver
+    # connects, receives a PrimaryKeepAlive, and sends a PageserverFeedback.  So the timeout has to encompass:
+    # - pageserver deletion_queue to validate + publish the remote_consistent_lsn
+    # - pageserver to reconnect to all safekeepers one by one, with multi-second delays between
+    #
+    # TODO: timeline status on safekeeper should take into account peers state as well.
+    rcl_propagate_secs = 60
+
     started_at = time.time()
     while True:
         stat_after = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
-        if all(
-            s_after.remote_consistent_lsn > s_before.remote_consistent_lsn
-            for s_after, s_before in zip(stat_after, stat_before)
-        ):
+        if all([s_after.remote_consistent_lsn >= new_rcl for s_after in stat_after]):
             break
         elapsed = time.time() - started_at
-        if elapsed > 20:
+        if elapsed > rcl_propagate_secs:
             raise RuntimeError(
                 f"timed out waiting {elapsed:.0f}s for remote_consistent_lsn propagation: status before {stat_before}, status current {stat_after}"
             )
         time.sleep(1)
+
+    # Ensure that safekeepers don't lose remote_consistent_lsn on restart.
+    # Control file is persisted each 5s. TODO: do that on shutdown and remove sleep.
+    time.sleep(6)
+    for sk in env.safekeepers:
+        sk.stop()
+        sk.start()
+    stat_after_restart = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
+    log.info(f"statuses after {stat_after_restart}")
+    assert all([s.remote_consistent_lsn >= new_rcl for s in stat_after_restart])
 
 
 # Test that old WAL consumed by peers and pageserver is removed from safekeepers.
@@ -438,10 +454,9 @@ def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId,
     return sk_wal_size_mb <= target_size_mb
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
-    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
 
     env = neon_env_builder.init_start()
 
@@ -484,11 +499,10 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     )
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
 
-    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant

@@ -2,7 +2,8 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::key::Key;
+use pageserver_api::shard::{ShardIdentity, ShardNumber, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -130,6 +131,18 @@ pub(crate) enum TenantsMapRemoveResult {
     InProgress(utils::completion::Barrier),
 }
 
+/// When resolving a TenantId to a shard, we may be looking for the 0th
+/// shard, or we might be looking for whichever shard holds a particular page.
+pub(crate) enum ShardSelector {
+    /// Only return the 0th shard, if it is present.  If a non-0th shard is present,
+    /// ignore it.
+    Zero,
+    /// Pick the first shard we find for the TenantId
+    First,
+    /// Pick the shard that holds this key
+    Page(Key),
+}
+
 impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
@@ -140,6 +153,49 @@ impl TenantsMap {
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 // TODO(sharding): callers of get() should be shard-aware.
                 exactly_one_or_none(m, tenant_id).and_then(|(_, slot)| slot.get_attached())
+            }
+        }
+    }
+
+    /// A page service client sends a TenantId, and to look up the correct Tenant we must
+    /// resolve this to a fully qualified TenantShardId.
+    fn resolve_shard(
+        &self,
+        tenant_id: &TenantId,
+        selector: ShardSelector,
+    ) -> Option<TenantShardId> {
+        let mut want_shard = None;
+        match self {
+            TenantsMap::Initializing => None,
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
+                for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
+                    match selector {
+                        ShardSelector::First => return Some(*slot.0),
+                        ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
+                            return Some(*slot.0)
+                        }
+                        ShardSelector::Page(key) => {
+                            if let Some(tenant) = slot.1.get_attached() {
+                                // First slot we see for this tenant, calculate the expected shard number
+                                // for the key: we will use this for checking if this and subsequent
+                                // slots contain the key, rather than recalculating the hash each time.
+                                if want_shard.is_none() {
+                                    want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                                }
+
+                                if Some(tenant.shard_identity.number) == want_shard {
+                                    return Some(*slot.0);
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+
+                // Fall through: we didn't find an acceptable shard
+                None
             }
         }
     }
@@ -213,49 +269,6 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
     Lazy::new(|| std::sync::RwLock::new(TenantsMap::Initializing));
-
-/// Create a directory, including parents.  This does no fsyncs and makes
-/// no guarantees about the persistence of the resulting metadata: for
-/// use when creating dirs for use as cache.
-async fn unsafe_create_dir_all(path: &Utf8PathBuf) -> std::io::Result<()> {
-    let mut dirs_to_create = Vec::new();
-    let mut path: &Utf8Path = path.as_ref();
-
-    // Figure out which directories we need to create.
-    loop {
-        let meta = tokio::fs::metadata(path).await;
-        match meta {
-            Ok(metadata) if metadata.is_dir() => break,
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!("non-directory found in path: {path}"),
-                ));
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-
-        dirs_to_create.push(path);
-
-        match path.parent() {
-            Some(parent) => path = parent,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("can't find parent of path '{path}'"),
-                ));
-            }
-        }
-    }
-
-    // Create directories from parent to child.
-    for &path in dirs_to_create.iter().rev() {
-        tokio::fs::create_dir(path).await?;
-    }
-
-    Ok(())
-}
 
 /// The TenantManager is responsible for storing and mutating the collection of all tenants
 /// that this pageserver process has state for.  Every Tenant and SecondaryTenant instance
@@ -515,12 +528,14 @@ pub async fn init_tenant_mgr(
         location_conf.attach_in_generation(generation);
         Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
+        let shard_identity = location_conf.shard;
         match tenant_spawn(
             conf,
             tenant_shard_id,
             &tenant_dir_path,
             resources.clone(),
             AttachedTenantConf::try_from(location_conf)?,
+            shard_identity,
             Some(init_order.clone()),
             &TENANTS,
             SpawnMode::Normal,
@@ -561,6 +576,7 @@ pub(crate) fn tenant_spawn(
     tenant_path: &Utf8Path,
     resources: TenantSharedResources,
     location_conf: AttachedTenantConf,
+    shard_identity: ShardIdentity,
     init_order: Option<InitializationOrder>,
     tenants: &'static std::sync::RwLock<TenantsMap>,
     mode: SpawnMode,
@@ -587,12 +603,19 @@ pub(crate) fn tenant_spawn(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
-    info!("Attaching tenant {tenant_shard_id}");
+    info!(
+        tenant_id = %tenant_shard_id.tenant_id,
+        shard_id = %tenant_shard_id.shard_slug(),
+        generation = ?location_conf.location.generation,
+        attach_mode = ?location_conf.location.attach_mode,
+        "Attaching tenant"
+    );
     let tenant = match Tenant::spawn(
         conf,
         tenant_shard_id,
         resources,
         location_conf,
+        shard_identity,
         init_order,
         tenants,
         mode,
@@ -762,12 +785,14 @@ pub(crate) async fn create_tenant(
         tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
     let tenant_path = super::create_tenant_files(conf, &location_conf, &tenant_shard_id).await?;
 
+    let shard_identity = location_conf.shard;
     let created_tenant = tenant_spawn(
         conf,
         tenant_shard_id,
         &tenant_path,
         resources,
         AttachedTenantConf::try_from(location_conf)?,
+        shard_identity,
         None,
         &TENANTS,
         SpawnMode::Create,
@@ -860,6 +885,7 @@ impl TenantManager {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(crate) async fn upsert_location(
         &self,
         tenant_shard_id: TenantShardId,
@@ -972,7 +998,7 @@ impl TenantManager {
             LocationMode::Secondary(_) => {
                 // Directory doesn't need to be fsync'd because if we crash it can
                 // safely be recreated next time this tenant location is configured.
-                unsafe_create_dir_all(&tenant_path)
+                tokio::fs::create_dir_all(&tenant_path)
                     .await
                     .with_context(|| format!("Creating {tenant_path}"))?;
 
@@ -988,7 +1014,7 @@ impl TenantManager {
                 // Directory doesn't need to be fsync'd because we do not depend on
                 // it to exist after crashes: it may be recreated when tenant is
                 // re-attached, see https://github.com/neondatabase/neon/issues/5550
-                unsafe_create_dir_all(&timelines_path)
+                tokio::fs::create_dir_all(&tenant_path)
                     .await
                     .with_context(|| format!("Creating {timelines_path}"))?;
 
@@ -996,12 +1022,14 @@ impl TenantManager {
                     .await
                     .map_err(SetNewTenantConfigError::Persist)?;
 
+                let shard_identity = new_location_config.shard;
                 let tenant = tenant_spawn(
                     self.conf,
                     tenant_shard_id,
                     &tenant_path,
                     self.resources.clone(),
                     AttachedTenantConf::try_from(new_location_config)?,
+                    shard_identity,
                     None,
                     self.tenants,
                     SpawnMode::Normal,
@@ -1013,6 +1041,81 @@ impl TenantManager {
         };
 
         slot_guard.upsert(new_slot)?;
+
+        Ok(())
+    }
+
+    /// Resetting a tenant is equivalent to detaching it, then attaching it again with the same
+    /// LocationConf that was last used to attach it.  Optionally, the local file cache may be
+    /// dropped before re-attaching.
+    ///
+    /// This is not part of a tenant's normal lifecycle: it is used for debug/support, in situations
+    /// where an issue is identified that would go away with a restart of the tenant.
+    ///
+    /// This does not have any special "force" shutdown of a tenant: it relies on the tenant's tasks
+    /// to respect the cancellation tokens used in normal shutdown().
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %drop_cache))]
+    pub(crate) async fn reset_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+        drop_cache: bool,
+        ctx: RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let Some(old_slot) = slot_guard.get_old_value() else {
+            anyhow::bail!("Tenant not found when trying to reset");
+        };
+
+        let Some(tenant) = old_slot.get_attached() else {
+            slot_guard.revert();
+            anyhow::bail!("Tenant is not in attached state");
+        };
+
+        let (_guard, progress) = utils::completion::channel();
+        match tenant.shutdown(progress, false).await {
+            Ok(()) => {
+                slot_guard.drop_old_value()?;
+            }
+            Err(_barrier) => {
+                slot_guard.revert();
+                anyhow::bail!("Cannot reset Tenant, already shutting down");
+            }
+        }
+
+        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+        let timelines_path = self.conf.timelines_path(&tenant_shard_id);
+        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+
+        if drop_cache {
+            tracing::info!("Dropping local file cache");
+
+            match tokio::fs::read_dir(&timelines_path).await {
+                Err(e) => {
+                    tracing::warn!("Failed to list timelines while dropping cache: {}", e);
+                }
+                Ok(mut entries) => {
+                    while let Some(entry) = entries.next_entry().await? {
+                        tokio::fs::remove_dir_all(entry.path()).await?;
+                    }
+                }
+            }
+        }
+
+        let shard_identity = config.shard;
+        let tenant = tenant_spawn(
+            self.conf,
+            tenant_shard_id,
+            &tenant_path,
+            self.resources.clone(),
+            AttachedTenantConf::try_from(config)?,
+            shard_identity,
+            None,
+            self.tenants,
+            SpawnMode::Normal,
+            &ctx,
+        )?;
+
+        slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
         Ok(())
     }
@@ -1100,6 +1203,7 @@ pub(crate) enum GetActiveTenantError {
 /// then wait for up to `timeout` (minus however long we waited for the slot).
 pub(crate) async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
+    shard_selector: ShardSelector,
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
@@ -1108,15 +1212,17 @@ pub(crate) async fn get_active_tenant_with_timeout(
         Tenant(Arc<Tenant>),
     }
 
-    // TODO(sharding): make page service interface sharding-aware (page service should apply ShardIdentity to the key
-    // to decide which shard services the request)
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
     let wait_start = Instant::now();
     let deadline = wait_start + timeout;
 
-    let wait_for = {
+    let (wait_for, tenant_shard_id) = {
         let locked = TENANTS.read().unwrap();
+
+        // Resolve TenantId to TenantShardId
+        let tenant_shard_id = locked.resolve_shard(&tenant_id, shard_selector).ok_or(
+            GetActiveTenantError::NotFound(GetTenantError::NotFound(tenant_id)),
+        )?;
+
         let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
             .map_err(GetTenantError::MapState)?;
         match peek_slot {
@@ -1126,7 +1232,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
                         // Fast path: we don't need to do any async waiting.
                         return Ok(tenant.clone());
                     }
-                    _ => WaitFor::Tenant(tenant.clone()),
+                    _ => (WaitFor::Tenant(tenant.clone()), tenant_shard_id),
                 }
             }
             Some(TenantSlot::Secondary) => {
@@ -1134,7 +1240,9 @@ pub(crate) async fn get_active_tenant_with_timeout(
                     tenant_id,
                 )))
             }
-            Some(TenantSlot::InProgress(barrier)) => WaitFor::Barrier(barrier.clone()),
+            Some(TenantSlot::InProgress(barrier)) => {
+                (WaitFor::Barrier(barrier.clone()), tenant_shard_id)
+            }
             None => {
                 return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
                     tenant_id,
@@ -1219,8 +1327,7 @@ pub(crate) async fn delete_tenant(
     // See https://github.com/neondatabase/neon/issues/5080
 
     // TODO(sharding): make delete API sharding-aware
-    let mut slot_guard =
-        tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+    let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
 
     // unwrap is safe because we used MustExist mode when acquiring
     let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
@@ -1377,12 +1484,14 @@ pub(crate) async fn load_tenant(
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf).await?;
 
+    let shard_identity = location_conf.shard;
     let new_tenant = tenant_spawn(
         conf,
         tenant_shard_id,
         &tenant_path,
         resources,
         AttachedTenantConf::try_from(location_conf)?,
+        shard_identity,
         None,
         &TENANTS,
         SpawnMode::Normal,
@@ -1472,12 +1581,14 @@ pub(crate) async fn attach_tenant(
     // TODO: tenant directory remains on disk if we bail out from here on.
     //       See https://github.com/neondatabase/neon/issues/4233
 
+    let shard_identity = location_conf.shard;
     let attached_tenant = tenant_spawn(
         conf,
         tenant_shard_id,
         &tenant_dir,
         resources,
         AttachedTenantConf::try_from(location_conf)?,
+        shard_identity,
         None,
         &TENANTS,
         SpawnMode::Normal,
@@ -1543,9 +1654,10 @@ pub enum TenantSlotUpsertError {
     MapState(#[from] TenantMapError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum TenantSlotDropError {
     /// It is only legal to drop a TenantSlot if its contents are fully shut down
+    #[error("Tenant was not shut down")]
     NotShutdown,
 }
 
@@ -1605,9 +1717,9 @@ impl SlotGuard {
         }
     }
 
-    /// Take any value that was present in the slot before we acquired ownership
+    /// Get any value that was present in the slot before we acquired ownership
     /// of it: in state transitions, this will be the old state.
-    fn get_old_value(&mut self) -> &Option<TenantSlot> {
+    fn get_old_value(&self) -> &Option<TenantSlot> {
         &self.old_value
     }
 
@@ -1825,7 +1937,7 @@ fn tenant_map_acquire_slot_impl(
     METRICS.tenant_slot_writes.inc();
 
     let mut locked = tenants.write().unwrap();
-    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard=tenant_shard_id.shard_slug());
+    let span = tracing::info_span!("acquire_slot", tenant_id=%tenant_shard_id.tenant_id, shard = %tenant_shard_id.shard_slug());
     let _guard = span.enter();
 
     let m = match &mut *locked {

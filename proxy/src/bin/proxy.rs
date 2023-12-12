@@ -30,6 +30,7 @@ use clap::{Parser, ValueEnum};
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackend {
     Console,
+    #[cfg(feature = "testing")]
     Postgres,
     Link,
 }
@@ -103,7 +104,7 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
     /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
     #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
@@ -289,6 +290,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let api = console::provider::neon::Api::new(endpoint, caches, locks);
             auth::BackendType::Console(Cow::Owned(api), ())
         }
+        #[cfg(feature = "testing")]
         AuthBackend::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);

@@ -84,8 +84,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    client = env.pageserver.http_client()
-    client.tenant_create(tenant)
+    env.pageserver.tenant_create(tenant)
 
     env.pageserver.allowed_errors.extend(
         [
@@ -149,6 +148,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
     )
 
+    client = env.pageserver.http_client()
     timeline_delete_wait_completed(client, tenant, timeline)
 
     # Importing correct backup works
@@ -292,7 +292,7 @@ def _import(
     # Import to pageserver
     endpoint_id = "ep-import_from_pageserver"
     client = env.pageserver.http_client()
-    client.tenant_create(tenant)
+    env.pageserver.tenant_create(tenant)
     env.neon_cli.raw_cli(
         [
             "timeline",

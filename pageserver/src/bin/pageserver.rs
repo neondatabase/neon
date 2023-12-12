@@ -402,15 +402,11 @@ fn start_pageserver(
     let (init_remote_done_tx, init_remote_done_rx) = utils::completion::channel();
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
-    let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
-
     let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
 
     let order = pageserver::InitializationOrder {
         initial_tenant_load_remote: Some(init_done_tx),
         initial_tenant_load: Some(init_remote_done_tx),
-        initial_logical_size_can_start: init_done_rx.clone(),
-        initial_logical_size_attempt: Some(init_logical_size_done_tx),
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
@@ -429,7 +425,6 @@ fn start_pageserver(
     let tenant_manager = Arc::new(tenant_manager);
 
     BACKGROUND_RUNTIME.spawn({
-        let init_done_rx = init_done_rx;
         let shutdown_pageserver = shutdown_pageserver.clone();
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
@@ -464,31 +459,11 @@ fn start_pageserver(
             });
 
             let WaitForPhaseResult {
-                timeout_remaining: timeout,
+                timeout_remaining: _timeout,
                 skipped: init_load_skipped,
             } = wait_for_phase("initial_tenant_load", init_load_done, timeout).await;
 
             // initial logical sizes can now start, as they were waiting on init_done_rx.
-
-            scopeguard::ScopeGuard::into_inner(guard);
-
-            let guard = scopeguard::guard_on_success((), |_| {
-                tracing::info!("Cancelled before initial logical sizes completed")
-            });
-
-            let logical_sizes_done = std::pin::pin!(async {
-                init_logical_size_done_rx.wait().await;
-                startup_checkpoint(
-                    started_startup_at,
-                    "initial_logical_sizes",
-                    "Initial logical sizes completed",
-                );
-            });
-
-            let WaitForPhaseResult {
-                timeout_remaining: _,
-                skipped: logical_sizes_skipped,
-            } = wait_for_phase("initial_logical_sizes", logical_sizes_done, timeout).await;
 
             scopeguard::ScopeGuard::into_inner(guard);
 
@@ -512,9 +487,6 @@ fn start_pageserver(
                 f.await;
             }
             if let Some(f) = init_load_skipped {
-                f.await;
-            }
-            if let Some(f) = logical_sizes_skipped {
                 f.await;
             }
             scopeguard::ScopeGuard::into_inner(guard);
@@ -587,7 +559,6 @@ fn start_pageserver(
     }
 
     if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-        let background_jobs_barrier = background_jobs_barrier;
         let metrics_ctx = RequestContext::todo_child(
             TaskKind::MetricsCollection,
             // This task itself shouldn't download anything.

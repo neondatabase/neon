@@ -637,8 +637,8 @@ walprop_connect_start(Safekeeper *sk)
 	 */
 	sk->conn = palloc(sizeof(WalProposerConn));
 	sk->conn->pg_conn = pg_conn;
-	sk->conn->is_nonblocking = false;	/* connections always start in blocking
-									 * mode */
+	sk->conn->is_nonblocking = false;	/* connections always start in
+										 * blocking mode */
 	sk->conn->recvbuf = NULL;
 }
 
@@ -1291,10 +1291,11 @@ XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr)
 	/*
 	 * Apart from walproposer, basebackup LSN page is also written out by
 	 * postgres itself which writes WAL only in pages, and in basebackup it is
-	 * inherently dummy (only safekeepers have historic WAL). Update WAL buffers
-	 * here to avoid dummy page overwriting correct one we download here. Ugly,
-	 * but alternatives are about the same ugly. We won't need that if we switch
-	 * to on-demand WAL download from safekeepers, without writing to disk.
+	 * inherently dummy (only safekeepers have historic WAL). Update WAL
+	 * buffers here to avoid dummy page overwriting correct one we download
+	 * here. Ugly, but alternatives are about the same ugly. We won't need
+	 * that if we switch to on-demand WAL download from safekeepers, without
+	 * writing to disk.
 	 *
 	 * https://github.com/neondatabase/neon/issues/5749
 	 */
@@ -1681,17 +1682,17 @@ walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
 static void
 walprop_pg_after_election(WalProposer *wp)
 {
-	FILE* f;
-	XLogRecPtr lrRestartLsn;
+	FILE	   *f;
+	XLogRecPtr	lrRestartLsn;
 
-	/* We don't need to do anything in syncSafekeepers mode.*/
+	/* We don't need to do anything in syncSafekeepers mode. */
 	if (wp->config->syncSafekeepers)
 		return;
 
 	/*
-	 * If there are active logical replication subscription we need
-	 * to provide enough WAL for their WAL senders based on th position
-	 * of their replication slots.
+	 * If there are active logical replication subscription we need to provide
+	 * enough WAL for their WAL senders based on th position of their
+	 * replication slots.
 	 */
 	f = fopen("restart.lsn", "rb");
 	if (f != NULL && !wp->config->syncSafekeepers)
@@ -1700,8 +1701,12 @@ walprop_pg_after_election(WalProposer *wp)
 		fclose(f);
 		if (lrRestartLsn != InvalidXLogRecPtr)
 		{
-			elog(LOG, "Logical replication restart LSN %X/%X",  LSN_FORMAT_ARGS(lrRestartLsn));
-			/* start from the beginning of the segment to fetch page headers verifed by XLogReader */
+			elog(LOG, "Logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
+
+			/*
+			 * start from the beginning of the segment to fetch page headers
+			 * verifed by XLogReader
+			 */
 			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
 			wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
 		}

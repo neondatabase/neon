@@ -15,7 +15,6 @@ use crate::{
     context::RequestContext,
     task_mgr::{self, TaskKind},
     tenant::mgr::{TenantSlot, TenantsMapRemoveResult},
-    InitializationOrder,
 };
 
 use super::{
@@ -78,8 +77,10 @@ async fn create_remote_delete_mark(
     let data: &[u8] = &[];
     backoff::retry(
         || async {
+            let data = bytes::Bytes::from_static(data);
+            let stream = futures::stream::once(futures::future::ready(Ok(data)));
             remote_storage
-                .upload(data, 0, &remote_mark_path, None)
+                .upload(stream, 0, &remote_mark_path, None)
                 .await
         },
         |_e| false,
@@ -390,7 +391,6 @@ impl DeleteTenantFlow {
         tenant: &Arc<Tenant>,
         preload: Option<TenantPreload>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
-        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Result<(), DeleteTenantError> {
         let (_, progress) = completion::channel();
@@ -400,10 +400,7 @@ impl DeleteTenantFlow {
             .await
             .expect("cant be stopping or broken");
 
-        tenant
-            .attach(init_order, preload, ctx)
-            .await
-            .context("attach")?;
+        tenant.attach(preload, ctx).await.context("attach")?;
 
         Self::background(
             guard,

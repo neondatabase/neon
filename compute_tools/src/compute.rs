@@ -22,7 +22,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeMode, ComputeSpec};
+use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
 use remote_storage::{DownloadError, RemotePath};
@@ -252,7 +252,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                     IF NOT EXISTS (
                         SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
                     THEN
-                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION IN ROLE pg_read_all_data, pg_write_all_data;
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION BYPASSRLS IN ROLE pg_read_all_data, pg_write_all_data;
                         IF array_length(roles, 1) IS NOT NULL THEN
                             EXECUTE format('GRANT neon_superuser TO %s',
                                            array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
@@ -277,6 +277,17 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
 }
 
 impl ComputeNode {
+    /// Check that compute node has corresponding feature enabled.
+    pub fn has_feature(&self, feature: ComputeFeature) -> bool {
+        let state = self.state.lock().unwrap();
+
+        if let Some(s) = state.pspec.as_ref() {
+            s.spec.features.contains(&feature)
+        } else {
+            false
+        }
+    }
+
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
         state.status = status;

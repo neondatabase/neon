@@ -88,7 +88,11 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::{context::RequestContext, metrics::PageCacheSizeMetrics, repository::Key};
+use crate::{
+    context::RequestContext,
+    metrics::{page_cache_eviction_metrics, PageCacheSizeMetrics},
+    repository::Key,
+};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
@@ -897,8 +901,10 @@ impl PageCache {
                             // Note that just yielding to tokio during iteration without such
                             // priority boosting is likely counter-productive. We'd just give more opportunities
                             // for B to bump usage count, further starving A.
-                            crate::metrics::page_cache_errors_inc(
-                                crate::metrics::PageCacheErrorKind::EvictIterLimit,
+                            page_cache_eviction_metrics::observe(
+                                page_cache_eviction_metrics::Outcome::ItersExceeded {
+                                    iters: iters.try_into().unwrap(),
+                                },
                             );
                             anyhow::bail!("exceeded evict iter limit");
                         }
@@ -909,8 +915,18 @@ impl PageCache {
                     // remove mapping for old buffer
                     self.remove_mapping(old_key);
                     inner.key = None;
+                    page_cache_eviction_metrics::observe(
+                        page_cache_eviction_metrics::Outcome::FoundSlotEvicted {
+                            iters: iters.try_into().unwrap(),
+                        },
+                    );
+                } else {
+                    page_cache_eviction_metrics::observe(
+                        page_cache_eviction_metrics::Outcome::FoundSlotUnused {
+                            iters: iters.try_into().unwrap(),
+                        },
+                    );
                 }
-                crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
                 return Ok((slot_idx, inner));
             }
         }

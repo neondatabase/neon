@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::{
-    auth::{self, backend::AuthSuccess},
+    auth,
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
@@ -24,7 +24,7 @@ use prometheus::{
     IntGaugeVec,
 };
 use regex::Regex;
-use std::{error::Error, io, net::SocketAddr, ops::ControlFlow, sync::Arc, time::Instant};
+use std::{error::Error, io, net::IpAddr, ops::ControlFlow, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -134,9 +134,9 @@ pub static ALLOWED_IPS_BY_CACHE_OUTCOME: Lazy<IntCounterVec> = Lazy::new(|| {
 
 pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
-        "semaphore_control_plane_token_acquire_seconds",
+        "proxy_control_plane_token_acquire_seconds",
         "Time it took for proxy to establish a connection to the compute endpoint",
-        // largest bucket = 3^16 * 0.00005ms = 2.15s
+        // largest bucket = 3^16 * 0.05ms = 2.15s
         exponential_buckets(0.00005, 3.0, 16).unwrap(),
     )
     .unwrap()
@@ -277,6 +277,21 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub async fn run_until_cancelled<F: std::future::Future>(
+    f: F,
+    cancellation_token: &CancellationToken,
+) -> Option<F::Output> {
+    match futures::future::select(
+        std::pin::pin!(f),
+        std::pin::pin!(cancellation_token.cancelled()),
+    )
+    .await
+    {
+        futures::future::Either::Left((f, _)) => Some(f),
+        futures::future::Either::Right(((), _)) => None,
+    }
+}
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
@@ -290,71 +305,62 @@ pub async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
-    let mut connections = tokio::task::JoinSet::new();
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let cancel_map = Arc::clone(&cancel_map);
-                connections.spawn(
-                    async move {
-                        info!("accepted postgres client connection");
+        let session_id = uuid::Uuid::new_v4();
+        let cancel_map = Arc::clone(&cancel_map);
+        connections.spawn(
+            async move {
+                info!("accepted postgres client connection");
 
-                        let mut socket = WithClientIp::new(socket);
-                        let mut peer_addr = peer_addr;
-                        if let Some(ip) = socket.wait_for_addr().await? {
-                            peer_addr = ip;
-                            tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
-                        } else if config.require_client_ip {
-                            bail!("missing required client IP");
-                        }
-
-                        socket
-                            .inner
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
-
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr).await
-                    }
-                    .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
-                    .unwrap_or_else(move |e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!(?session_id, "per-client task finished with an error: {e:#}");
-                    }),
-                );
-            }
-            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
-            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
-            // This only counts for this loop and it will be enabled again on next `select!`.
-            //
-            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
-            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
-            // not get called again, even if there are more connections to remove.
-            Some(res) = connections.join_next() => {
-                if let Err(e) = res {
-                    if !e.is_panic() && !e.is_cancelled() {
-                        warn!("unexpected error from joined connection task: {e:?}");
-                    }
+                let mut socket = WithClientIp::new(socket);
+                let mut peer_addr = peer_addr;
+                if let Some(ip) = socket.wait_for_addr().await? {
+                    peer_addr = ip;
+                    tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                } else if config.require_client_ip {
+                    bail!("missing required client IP");
                 }
+
+                socket
+                    .inner
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
+
+                handle_client(
+                    config,
+                    &cancel_map,
+                    session_id,
+                    socket,
+                    ClientMode::Tcp,
+                    peer_addr.ip(),
+                )
+                .await
             }
-            _ = cancellation_token.cancelled() => {
-                drop(listener);
-                break;
-            }
-        }
+            .instrument(info_span!(
+                "handle_client",
+                ?session_id,
+                peer_addr = tracing::field::Empty
+            ))
+            .unwrap_or_else(move |e| {
+                // Acknowledge that the task has finished with an error.
+                error!(?session_id, "per-client task finished with an error: {e:#}");
+            }),
+        );
     }
+
+    connections.close();
+    drop(listener);
+
     // Drain connections
-    while let Some(res) = connections.join_next().await {
-        if let Err(e) = res {
-            if !e.is_panic() && !e.is_cancelled() {
-                warn!("unexpected error from joined connection task: {e:?}");
-            }
-        }
-    }
+    connections.wait().await;
+
     Ok(())
 }
 
@@ -408,7 +414,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -666,7 +672,7 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra<'_>,
-    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+    creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
@@ -696,10 +702,12 @@ where
     let node_info = loop {
         let wake_res = match creds {
             auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+            #[cfg(feature = "testing")]
             auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend
+            #[cfg(test)]
             auth::BackendType::Test(x) => x.wake_compute(),
         };
 
@@ -838,20 +846,12 @@ pub fn retry_after(num_retries: u32) -> time::Duration {
 #[tracing::instrument(skip_all)]
 async fn prepare_client_connection(
     node: &compute::PostgresConnection,
-    reported_auth_ok: bool,
     session: cancellation::Session<'_>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> anyhow::Result<()> {
     // Register compute's query cancellation token and produce a new, unique one.
     // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
-
-    // Report authentication success if we haven't done this already.
-    // Note that we do this only (for the most part) after we've connected
-    // to a compute (see above) which performs its own authentication.
-    if !reported_auth_ok {
-        stream.write_message_noflush(&Be::AuthenticationOk)?;
-    }
 
     // Forward all postgres connection params to the client.
     // Right now the implementation is very hacky and inefficent (ideally,
@@ -921,7 +921,7 @@ struct Client<'a, S> {
     /// The underlying libpq protocol stream.
     stream: PqStream<Stream<S>>,
     /// Client credentials that we care about.
-    creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
+    creds: auth::BackendType<'a, auth::ClientCredentials>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
     /// Unique connection ID.
@@ -934,7 +934,7 @@ impl<'a, S> Client<'a, S> {
     /// Construct a new connection context.
     fn new(
         stream: PqStream<Stream<S>>,
-        creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
+        creds: auth::BackendType<'a, auth::ClientCredentials>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
         allow_self_signed_compute: bool,
@@ -953,7 +953,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     // Instrumentation logs endpoint name everywhere. Doesn't work for link
     // auth; strictly speaking we don't know endpoint name in its case.
-    #[tracing::instrument(name = "", fields(ep = self.creds.get_endpoint().unwrap_or("".to_owned())), skip_all)]
+    #[tracing::instrument(name = "", fields(ep = %self.creds.get_endpoint().unwrap_or_default()), skip_all)]
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,
@@ -962,22 +962,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
-            mut creds,
+            creds,
             params,
             session_id,
             allow_self_signed_compute,
         } = self;
 
-        let console_options = neon_options(params);
-
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
-            options: console_options.as_deref(),
+            options: neon_options(params),
         };
 
         let mut latency_timer = LatencyTimer::new(mode.protocol_label());
 
+        let user = creds.get_user().to_owned();
         let auth_result = match creds
             .authenticate(
                 &extra,
@@ -990,7 +989,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         {
             Ok(auth_result) => auth_result,
             Err(e) => {
-                let user = creds.get_user();
                 let db = params.get("database");
                 let app = params.get("application_name");
                 let params_span = tracing::info_span!("", ?user, ?db, ?app);
@@ -999,10 +997,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         };
 
-        let AuthSuccess {
-            reported_auth_ok,
-            value: mut node_info,
-        } = auth_result;
+        let (mut node_info, creds) = auth_result;
 
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
@@ -1025,7 +1020,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
         }
 
-        prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+        prepare_client_connection(&node, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the
         // PqStream input buffer. Normally there is none, but our serverless npm
         // driver in pipeline mode sends startup, password and first query
@@ -1036,26 +1031,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     }
 }
 
-pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
+pub fn neon_options(params: &StartupMessageParams) -> Vec<(String, String)> {
     #[allow(unstable_name_collisions)]
-    let options: String = params
-        .options_raw()?
-        .filter(|opt| is_neon_param(opt))
-        .sorted() // we sort it to use as cache key
-        .intersperse(" ") // TODO: use impl from std once it's stabilized
-        .collect();
-
-    // Don't even bother with empty options.
-    if options.is_empty() {
-        return None;
+    match params.options_raw() {
+        Some(options) => options.filter_map(neon_option).collect(),
+        None => vec![],
     }
-
-    Some(options)
 }
 
-pub fn is_neon_param(bytes: &str) -> bool {
-    static RE: OnceCell<Regex> = OnceCell::new();
-    RE.get_or_init(|| Regex::new(r"^neon_\w+:").unwrap());
+pub fn neon_options_str(params: &StartupMessageParams) -> String {
+    #[allow(unstable_name_collisions)]
+    neon_options(params)
+        .iter()
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .sorted() // we sort it to use as cache key
+        .intersperse(" ".to_owned())
+        .collect()
+}
 
-    RE.get().unwrap().is_match(bytes)
+pub fn neon_option(bytes: &str) -> Option<(String, String)> {
+    static RE: OnceCell<Regex> = OnceCell::new();
+    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
+
+    let cap = re.captures(bytes)?;
+    let (_, [k, v]) = cap.extract();
+    Some((k.to_owned(), v.to_owned()))
 }

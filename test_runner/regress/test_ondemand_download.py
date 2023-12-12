@@ -5,7 +5,6 @@ import time
 from collections import defaultdict
 from typing import Any, DefaultDict, Dict, Tuple
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -19,7 +18,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_for_upload_queue_empty,
 )
-from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
@@ -45,13 +44,7 @@ def get_num_downloaded_layers(client: PageserverHttpClient):
 # If you have a large relation, check that the pageserver downloads parts of it as
 # require by queries.
 #
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_ondemand_download_large_rel(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
+def test_ondemand_download_large_rel(neon_env_builder: NeonEnvBuilder):
     # thinking about using a shared environment? the test assumes that global
     # metrics are for single tenant.
     env = neon_env_builder.init_start(
@@ -145,13 +138,7 @@ def test_ondemand_download_large_rel(
 # If you have a relation with a long history of updates, the pageserver downloads the layer
 # files containing the history as needed by timetravel queries.
 #
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_ondemand_download_timetravel(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
+def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     # thinking about using a shared environment? the test assumes that global
     # metrics are for single tenant.
 
@@ -229,8 +216,7 @@ def test_ondemand_download_timetravel(
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     # Wait until generated image layers are uploaded to S3
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
 
     env.pageserver.stop()
 
@@ -384,7 +370,7 @@ def test_download_remote_layers_api(
     env.pageserver.allowed_errors.extend(
         [
             ".*download failed: downloading evicted layer file failed.*",
-            f".*initial size calculation.*{tenant_id}.*{timeline_id}.*Failed to calculate logical size",
+            f".*initial_size_calculation.*{tenant_id}.*{timeline_id}.*initial size calculation failed: downloading evicted layer file failed",
         ]
     )
 

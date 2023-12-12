@@ -12,13 +12,13 @@
 //!
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models::TimelineState;
+use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -68,6 +68,7 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
+use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::InitializationOrder;
@@ -236,6 +237,9 @@ pub struct Tenant {
 
     tenant_shard_id: TenantShardId,
 
+    // The detailed sharding information, beyond the number/count in tenant_shard_id
+    shard_identity: ShardIdentity,
+
     /// The remote storage generation, used to protect S3 objects from split-brain.
     /// Does not change over the lifetime of the [`Tenant`] object.
     ///
@@ -312,6 +316,9 @@ impl WalRedoManager {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn request_redo(
         &self,
         key: crate::repository::Key,
@@ -469,7 +476,6 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        init_order: Option<&InitializationOrder>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -479,7 +485,6 @@ impl Tenant {
             &metadata,
             ancestor.clone(),
             resources,
-            init_order,
             CreateTimelineCause::Load,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
@@ -567,6 +572,7 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         resources: TenantSharedResources,
         attached_conf: AttachedTenantConf,
+        shard_identity: ShardIdentity,
         init_order: Option<InitializationOrder>,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
@@ -588,6 +594,7 @@ impl Tenant {
             TenantState::Attaching,
             conf,
             attached_conf,
+            shard_identity,
             wal_redo_manager,
             tenant_shard_id,
             remote_storage.clone(),
@@ -680,10 +687,6 @@ impl Tenant {
                     // as we are no longer loading, signal completion by dropping
                     // the completion while we resume deletion
                     drop(_completion);
-                    // do not hold to initial_logical_size_attempt as it will prevent loading from proceeding without timeout
-                    let _ = init_order
-                        .as_mut()
-                        .and_then(|x| x.initial_logical_size_attempt.take());
                     let background_jobs_can_start =
                         init_order.as_ref().map(|x| &x.background_jobs_can_start);
                     if let Some(background) = background_jobs_can_start {
@@ -697,7 +700,6 @@ impl Tenant {
                         &tenant_clone,
                         preload,
                         tenants,
-                        init_order,
                         &ctx,
                     )
                     .await
@@ -710,7 +712,7 @@ impl Tenant {
                     }
                 }
 
-                match tenant_clone.attach(init_order, preload, &ctx).await {
+                match tenant_clone.attach(preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         tenant_clone.activate(broker_client, None, &ctx);
@@ -773,7 +775,6 @@ impl Tenant {
     ///
     async fn attach(
         self: &Arc<Tenant>,
-        init_order: Option<InitializationOrder>,
         preload: Option<TenantPreload>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -786,7 +787,7 @@ impl Tenant {
             None => {
                 // Deprecated dev mode: load from local disk state instead of remote storage
                 // https://github.com/neondatabase/neon/issues/5624
-                return self.load_local(init_order, ctx).await;
+                return self.load_local(ctx).await;
             }
         };
 
@@ -881,7 +882,6 @@ impl Tenant {
                 &index_part.metadata,
                 Some(remote_timeline_client),
                 self.deletion_queue_client.clone(),
-                None,
             )
             .await
             .context("resume_deletion")
@@ -1006,10 +1006,6 @@ impl Tenant {
             None
         };
 
-        // we can load remote timelines during init, but they are assumed to be so rare that
-        // initialization order is not passed to here.
-        let init_order = None;
-
         // timeline loading after attach expects to find metadata file for each metadata
         save_metadata(
             self.conf,
@@ -1027,7 +1023,6 @@ impl Tenant {
             Some(index_part),
             remote_metadata,
             ancestor,
-            init_order,
             ctx,
         )
         .await
@@ -1051,6 +1046,9 @@ impl Tenant {
             },
             conf,
             AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
+            // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
+            // to occupy the slot for this TenantShardId.
+            ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
             wal_redo_manager,
             tenant_shard_id,
             None,
@@ -1269,11 +1267,7 @@ impl Tenant {
     /// files on disk. Used at pageserver startup.
     ///
     /// No background tasks are started as part of this routine.
-    async fn load_local(
-        self: &Arc<Tenant>,
-        init_order: Option<InitializationOrder>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    async fn load_local(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
@@ -1299,7 +1293,7 @@ impl Tenant {
         // Process loadable timelines first
         for (timeline_id, local_metadata) in scan.sorted_timelines_to_load {
             if let Err(e) = self
-                .load_local_timeline(timeline_id, local_metadata, init_order.as_ref(), ctx, false)
+                .load_local_timeline(timeline_id, local_metadata, ctx, false)
                 .await
             {
                 match e {
@@ -1333,13 +1327,7 @@ impl Tenant {
                 }
                 Some(local_metadata) => {
                     if let Err(e) = self
-                        .load_local_timeline(
-                            timeline_id,
-                            local_metadata,
-                            init_order.as_ref(),
-                            ctx,
-                            true,
-                        )
+                        .load_local_timeline(timeline_id, local_metadata, ctx, true)
                         .await
                     {
                         match e {
@@ -1367,12 +1355,11 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, init_order, ctx))]
+    #[instrument(skip(self, local_metadata, ctx))]
     async fn load_local_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
-        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
         found_delete_mark: bool,
     ) -> Result<(), LoadLocalTimelineError> {
@@ -1389,7 +1376,6 @@ impl Tenant {
                 &local_metadata,
                 None,
                 self.deletion_queue_client.clone(),
-                init_order,
             )
             .await
             .context("resume deletion")
@@ -1406,17 +1392,9 @@ impl Tenant {
             None
         };
 
-        self.timeline_init_and_sync(
-            timeline_id,
-            resources,
-            None,
-            local_metadata,
-            ancestor,
-            init_order,
-            ctx,
-        )
-        .await
-        .map_err(LoadLocalTimelineError::Load)
+        self.timeline_init_and_sync(timeline_id, resources, None, local_metadata, ancestor, ctx)
+            .await
+            .map_err(LoadLocalTimelineError::Load)
     }
 
     pub(crate) fn tenant_id(&self) -> TenantId {
@@ -2311,7 +2289,6 @@ impl Tenant {
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
-        init_order: Option<&InitializationOrder>,
         cause: CreateTimelineCause,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
@@ -2326,9 +2303,6 @@ impl Tenant {
             CreateTimelineCause::Delete => TimelineState::Stopping,
         };
 
-        let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
-        let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
-
         let pg_version = new_metadata.pg_version();
 
         let timeline = Timeline::new(
@@ -2339,11 +2313,10 @@ impl Tenant {
             new_timeline_id,
             self.tenant_shard_id,
             self.generation,
+            self.shard_identity,
             Arc::clone(&self.walredo_mgr),
             resources,
             pg_version,
-            initial_logical_size_can_start.cloned(),
-            initial_logical_size_attempt.cloned().flatten(),
             state,
             self.cancel.child_token(),
         );
@@ -2358,6 +2331,7 @@ impl Tenant {
         state: TenantState,
         conf: &'static PageServerConf,
         attached_conf: AttachedTenantConf,
+        shard_identity: ShardIdentity,
         walredo_mgr: Arc<WalRedoManager>,
         tenant_shard_id: TenantShardId,
         remote_storage: Option<GenericRemoteStorage>,
@@ -2419,6 +2393,7 @@ impl Tenant {
 
         Tenant {
             tenant_shard_id,
+            shard_identity,
             generation: attached_conf.location.generation,
             conf,
             // using now here is good enough approximation to catch tenants with really long
@@ -2540,7 +2515,7 @@ impl Tenant {
             }
         }
 
-        info!("persisting tenantconf to {config_path}");
+        debug!("persisting tenantconf to {config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
@@ -2575,7 +2550,7 @@ impl Tenant {
         target_config_path: &Utf8Path,
         tenant_conf: &TenantConfOpt,
     ) -> anyhow::Result<()> {
-        info!("persisting tenantconf to {target_config_path}");
+        debug!("persisting tenantconf to {target_config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
@@ -2974,10 +2949,10 @@ impl Tenant {
         };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
+
+        let timelines_path = self.conf.timelines_path(&self.tenant_shard_id);
         let pgdata_path = path_with_suffix_extension(
-            self.conf
-                .timelines_path(&self.tenant_shard_id)
-                .join(format!("basebackup-{timeline_id}")),
+            timelines_path.join(format!("basebackup-{timeline_id}")),
             TEMP_FILE_SUFFIX,
         );
 
@@ -3008,31 +2983,43 @@ impl Tenant {
                 )
                 .await
                 .context("download initdb tar")?;
-            let buf_read = Box::pin(BufReader::new(initdb_tar_zst));
+            let buf_read =
+                BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
             import_datadir::extract_tar_zst(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
 
-            if initdb_tar_zst_path.exists() {
-                tokio::fs::remove_file(&initdb_tar_zst_path)
-                    .await
-                    .context("tempfile removal")?;
-            }
+            tokio::fs::remove_file(&initdb_tar_zst_path)
+                .await
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        // If something else already removed the file, ignore the error
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
             if let Some(storage) = &self.remote_storage {
-                let pgdata_zstd = import_datadir::create_tar_zst(&pgdata_path).await?;
-                let pgdata_zstd = Bytes::from(pgdata_zstd);
+                let temp_path = timelines_path.join(format!(
+                    "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
+                ));
+
+                let (pgdata_zstd, tar_zst_size) =
+                    import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
                 backoff::retry(
                     || async {
                         self::remote_timeline_client::upload_initdb_dir(
                             storage,
                             &self.tenant_shard_id.tenant_id,
                             &timeline_id,
-                            pgdata_zstd.clone(),
+                            pgdata_zstd.try_clone().await?,
+                            tar_zst_size,
                         )
                         .await
                     },
@@ -3044,6 +3031,18 @@ impl Tenant {
                     backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
                 )
                 .await?;
+
+                tokio::fs::remove_file(&temp_path)
+                    .await
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            // If something else already removed the file, ignore the error
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .with_context(|| format!("tempfile removal {temp_path}"))?;
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
@@ -3165,7 +3164,6 @@ impl Tenant {
                 new_metadata,
                 ancestor,
                 resources,
-                None,
                 CreateTimelineCause::Load,
             )
             .context("Failed to create timeline data structure")?;
@@ -3831,6 +3829,8 @@ pub(crate) mod harness {
                     self.generation,
                 ))
                 .unwrap(),
+                // This is a legacy/test code path: sharding isn't supported here.
+                ShardIdentity::unsharded(),
                 walredo_mgr,
                 self.tenant_shard_id,
                 Some(self.remote_storage.clone()),
@@ -3840,7 +3840,7 @@ pub(crate) mod harness {
             match mode {
                 LoadMode::Local => {
                     tenant
-                        .load_local(None, ctx)
+                        .load_local(ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                 }
@@ -3850,7 +3850,7 @@ pub(crate) mod harness {
                         .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                     tenant
-                        .attach(None, Some(preload), ctx)
+                        .attach(Some(preload), ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                 }
@@ -3893,6 +3893,9 @@ pub(crate) mod harness {
     pub(crate) struct TestRedoManager;
 
     impl TestRedoManager {
+        /// # Cancel-Safety
+        ///
+        /// This method is cancellation-safe.
         pub async fn request_redo(
             &self,
             key: Key,

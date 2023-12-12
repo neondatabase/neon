@@ -314,7 +314,11 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     assert not config_path.exists(), "detach did not remove config file"
 
-    http_client.tenant_attach(tenant_id)
+    # The re-attach's increment of the generation number may invalidate deletion queue
+    # updates in flight from the previous attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
+
+    env.pageserver.tenant_attach(tenant_id)
     wait_until(
         number_of_iterations=5,
         interval=1,
