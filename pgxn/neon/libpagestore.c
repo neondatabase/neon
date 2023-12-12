@@ -165,7 +165,7 @@ load_shard_map(shardno_t shard_no, char* connstr)
 
 		n_shards = shard_map->n_shards;
 		if (shard_no >= n_shards)
-			elog(ERROR, "Shard %d is greater or equal than number of shards %d", shard_no, n_shards);
+			neon_log(ERROR, "Shard %d is greater or equal than number of shards %d", shard_no, n_shards);
 
 		if (connstr)
 			strncpy(connstr, shard_map->shard_connstr[shard_no], MAX_PS_CONNSTR_LEN);
