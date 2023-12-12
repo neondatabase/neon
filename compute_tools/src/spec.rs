@@ -731,7 +731,7 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
 #[instrument(skip_all)]
 pub fn handle_migrations(client: &mut Client) -> Result<()> {
     info!("handle migrations");
-    let migrations = vec![
+    let migrations = [
         "ALTER ROLE neon_superuser BYPASSRLS",
         r#"
 DO $$
