@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
+use url::Host;
 use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -671,7 +672,6 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 None,
                 pg_version,
                 ComputeMode::Primary,
-                DEFAULT_PAGESERVER_ID,
             )?;
             println!("Done");
         }
@@ -830,13 +830,6 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .copied()
                 .unwrap_or(false);
 
-            let pageserver_id =
-                if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
-                    NodeId(id_str.parse().context("while parsing pageserver id")?)
-                } else {
-                    DEFAULT_PAGESERVER_ID
-                };
-
             let mode = match (lsn, hot_standby) {
                 (Some(lsn), false) => ComputeMode::Static(lsn),
                 (None, true) => ComputeMode::Replica,
@@ -864,7 +857,6 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 http_port,
                 pg_version,
                 mode,
-                pageserver_id,
             )?;
         }
         "start" => {
@@ -912,7 +904,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .tenant_locate(endpoint.tenant_id)?
                 .shards
                 .into_iter()
-                .map(|shard| (shard.listen_pg_addr, shard.listen_pg_port))
+                .map(|shard| {
+                    (
+                        Host::parse(&shard.listen_pg_addr)
+                            .expect("Attachment service reported bad hostname"),
+                        shard.listen_pg_port,
+                    )
+                })
                 .collect::<Vec<_>>();
 
             let ps_conf = env.get_pageserver_conf(pageserver_id)?;
@@ -937,15 +935,30 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let pageserver_id =
+            let pageservers =
                 if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
-                    Some(NodeId(
-                        id_str.parse().context("while parsing pageserver id")?,
-                    ))
+                    let ps_id = NodeId(id_str.parse().context("while parsing pageserver id")?);
+                    let pageserver = PageServerNode::from_env(env, env.get_pageserver_conf(ps_id)?);
+                    vec![(
+                        pageserver.pg_connection_config.host().clone(),
+                        pageserver.pg_connection_config.port(),
+                    )]
                 } else {
-                    None
+                    let attachment_service = AttachmentService::from_env(env);
+                    attachment_service
+                        .tenant_locate(endpoint.tenant_id)?
+                        .shards
+                        .into_iter()
+                        .map(|shard| {
+                            (
+                                Host::parse(&shard.listen_pg_addr)
+                                    .expect("Attachment service reported malformed host"),
+                                shard.listen_pg_port,
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 };
-            endpoint.reconfigure(pageserver_id).await?;
+            endpoint.reconfigure(pageservers).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
