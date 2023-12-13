@@ -65,8 +65,8 @@ jobs:
           echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
           echo "IMAGE_NAME=build-tools" >> $GITHUB_ENV
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            echo "DOCKER_FILE_CHANGED=$true" >> $GITHUB_ENV
             ${{ github.env.IMAGE_TAG }}=$GITHUB_RUN_ID
+            echo "DOCKER_FILE_CHANGED=true" >> $GITHUB_ENV
           fi
 
   push-buildtools-docker-file:
