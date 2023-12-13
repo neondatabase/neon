@@ -5,6 +5,7 @@ use std::sync::{
 
 use anyhow::bail;
 use dashmap::DashMap;
+use itertools::Itertools;
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
@@ -91,10 +92,28 @@ impl std::str::FromStr for RateBucketInfo {
 }
 
 impl RateBucketInfo {
-    pub const DEFAULT_SET: [Self; 2] = [
+    pub const DEFAULT_SET: [Self; 3] = [
         Self::new(300, Duration::from_secs(1)),
-        Self::new(100, Duration::from_secs(10)),
+        Self::new(20, Duration::from_secs(60)),
+        Self::new(10, Duration::from_secs(600)),
     ];
+
+    pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
+        info.sort_unstable_by_key(|info| info.interval);
+        let invalid = info
+            .iter()
+            .tuple_windows()
+            .find(|(a, b)| a.max_rpi > b.max_rpi);
+        if let Some((a, b)) = invalid {
+            bail!(
+                "invalid endpoint RPS limits. {b} allows fewer requests per bucket than {a} ({} vs {})",
+                b.max_rpi,
+                a.max_rpi,
+            );
+        }
+
+        Ok(())
+    }
 
     pub const fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
@@ -606,5 +625,21 @@ mod tests {
         assert_eq!(rate_bucket.interval, Duration::from_secs(60));
         assert_eq!(rate_bucket.max_rpi, 100 * 60);
         assert_eq!(rate_bucket.to_string(), "100@1m");
+    }
+
+    #[test]
+    fn default_rate_buckets() {
+        let mut defaults = RateBucketInfo::DEFAULT_SET;
+        RateBucketInfo::validate(&mut defaults[..]).unwrap();
+    }
+
+    #[test]
+    #[should_panic = "invalid endpoint RPS limits. 10@10s allows fewer requests per bucket than 300@1s (100 vs 300)"]
+    fn rate_buckets_validate() {
+        let mut rates: Vec<RateBucketInfo> = ["300@1s", "10@10s"]
+            .into_iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        RateBucketInfo::validate(&mut rates).unwrap();
     }
 }

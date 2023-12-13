@@ -1,5 +1,4 @@
 use futures::future::Either;
-use itertools::Itertools;
 use proxy::auth;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
@@ -324,18 +323,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
 
     let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
-    endpoint_rps_limit.sort_unstable_by_key(|s| s.interval);
-    if let Some((a, b)) = endpoint_rps_limit
-        .iter()
-        .tuple_windows()
-        .find(|(a, b)| a.max_rpi > b.max_rpi)
-    {
-        bail!(
-            "invalid endpoint RPS limits. {b} allows fewer requests per bucket than {a} ({} vs {})",
-            b.max_rpi,
-            a.max_rpi,
-        );
-    }
+    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
