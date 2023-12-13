@@ -42,7 +42,7 @@ pub struct EndpointRateLimiter {
 impl EndpointRateLimiter {
     pub fn new(max_rps: u32) -> Self {
         Self {
-            map: DashMap::new(),
+            map: DashMap::with_shard_amount(64),
             max_rps,
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
         }
@@ -51,9 +51,9 @@ impl EndpointRateLimiter {
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, endpoint: SmolStr) -> bool {
         // do a partial GC every 16k requests
-        // (worst case memory usage is about 16384 * shard_count * size_of::<(SmolStr, (Instant, u32))>
-        //    = 16384 * 8 * 48B = 6MB)
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 16384 == 0 {
+        // (worst case memory usage is about 2048 * shard_count * size_of::<(SmolStr, (Instant, u32))>
+        //    = 2048 * 64 * 48B = 6MB)
+        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
             self.do_gc();
         }
 
