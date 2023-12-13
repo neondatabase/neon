@@ -33,23 +33,10 @@ def build_type(request: FixtureRequest) -> Optional[str]:
 
 @pytest.fixture(scope="function", autouse=True)
 def pageserver_virtual_file_io_engine(request: FixtureRequest) -> Optional[str]:
-    # Do not parametrize performance tests yet, we need to prepare grafana charts first
-    if "test_runner/performance" in str(request.node.path):
-        return os.environ.get("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "").lower()
-
     return None
 
 
 def pytest_generate_tests(metafunc: Metafunc):
-    # Do not parametrize performance tests yet, we need to prepare grafana charts first
-    if "test_runner/performance" in metafunc.definition._nodeid:
-
-        # A hacky way to parametrize performance tests only for `pageserver_virtual_file_io_engine=tokio-epoll-uring`
-        # And do not change test name for default `pageserver_virtual_file_io_engine=std-fs` to keep perf tests statistics
-        if os.environ.get("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "") not in ("", "std-fs"):
-            metafunc.parametrize("pageserver_virtual_file_io_engine", ["tokio-epoll-uring"])
-        return
-
     if (v := os.environ.get("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]
     else:
@@ -60,11 +47,14 @@ def pytest_generate_tests(metafunc: Metafunc):
     else:
         build_types = [bt.lower()]
 
-    if (io_engine := os.environ.get("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")) is None:
-        pageserver_virtual_file_io_engines = ["std-fs", "tokio-epoll-uring"]
-    else:
-        pageserver_virtual_file_io_engines = [io_engine.lower()]
+    # A hacky way to parametrize performance tests only for `pageserver_virtual_file_io_engine=tokio-epoll-uring`
+    # And do not change test name for default `pageserver_virtual_file_io_engine=std-fs` to keep perf tests statistics
+    if (io_engine := os.environ.get("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "")) not in ("", "std-fs"):
+        metafunc.parametrize("pageserver_virtual_file_io_engine", [io_engine])
+
+    # Do not parametrize performance tests yet by Postgres version or build type, we need to prepare grafana charts first
+    if "test_runner/performance" in metafunc.definition._nodeid:
+        return
 
     metafunc.parametrize("build_type", build_types)
     metafunc.parametrize("pg_version", pg_versions, ids=map(lambda v: f"pg{v}", pg_versions))
-    metafunc.parametrize("pageserver_virtual_file_io_engine", pageserver_virtual_file_io_engines)
