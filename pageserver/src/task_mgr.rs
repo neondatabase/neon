@@ -327,6 +327,7 @@ struct PageServerTask {
 /// Launch a new task
 /// Note: if shutdown_process_on_error is set to true failure
 ///   of the task will lead to shutdown of entire process
+#[allow(clippy::too_many_arguments)]
 pub fn spawn<F>(
     runtime: &tokio::runtime::Handle,
     kind: TaskKind,
