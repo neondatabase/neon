@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 
+use anyhow::bail;
 use dashmap::DashMap;
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
@@ -26,13 +27,9 @@ use super::{
 // saw SNI, before doing TLS handshake. User-side error messages in that case
 // does not look very nice (`SSL SYSCALL error: Undefined error: 0`), so for now
 // I went with a more expensive way that yields user-friendlier error messages.
-//
-// TODO: add a better bucketing here, e.g. not more than 300 requests per second,
-//       and not more than 1000 requests per 10 seconds, etc. Short bursts of reconnects
-//       are normal during redeployments, so we should not block them.
 pub struct EndpointRateLimiter {
     map: DashMap<SmolStr, Vec<RateBucket>>,
-    info: Vec<RateBucketInfo>,
+    info: &'static [RateBucketInfo],
     access_count: AtomicUsize,
 }
 
@@ -60,14 +57,46 @@ impl RateBucket {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct RateBucketInfo {
     interval: Duration,
     // requests per interval
     max_rpi: u32,
 }
 
+impl std::fmt::Display for RateBucketInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let rps = self.max_rpi * self.interval.as_millis() as u32 / 1000;
+        write!(f, "{rps}@{}", humantime::format_duration(self.interval))
+    }
+}
+
+impl std::fmt::Debug for RateBucketInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl std::str::FromStr for RateBucketInfo {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let Some((max_rps, interval)) = s.split_once('@') else {
+            bail!("invalid rate info")
+        };
+        let max_rps = max_rps.parse()?;
+        let interval = humantime::parse_duration(interval)?;
+        Ok(Self::new(max_rps, interval))
+    }
+}
+
 impl RateBucketInfo {
-    pub fn new(max_rps: u32, interval: Duration) -> Self {
+    pub const DEFAULT_SET: [Self; 2] = [
+        Self::new(300, Duration::from_secs(1)),
+        Self::new(100, Duration::from_secs(10)),
+    ];
+
+    pub const fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
             interval,
             max_rpi: max_rps * 1000 / interval.as_millis() as u32,
@@ -76,9 +105,10 @@ impl RateBucketInfo {
 }
 
 impl EndpointRateLimiter {
-    pub fn new(info: impl IntoIterator<Item = RateBucketInfo>) -> Self {
+    pub fn new(info: &'static [RateBucketInfo]) -> Self {
+        info!(buckets = ?info, "endpoint rate limiter");
         Self {
-            info: info.into_iter().collect(),
+            info,
             map: DashMap::with_shard_amount(64),
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
         }
@@ -107,7 +137,7 @@ impl EndpointRateLimiter {
 
         let should_allow_request = entry
             .iter_mut()
-            .zip(&self.info)
+            .zip(self.info)
             .all(|(bucket, info)| bucket.should_allow_request(info, now));
 
         if should_allow_request {

@@ -9,7 +9,7 @@ use crate::{
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     protocol2::WithClientIp,
-    rate_limiter::{EndpointRateLimiter, RateBucketInfo},
+    rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     usage_metrics::{Ids, USAGE_METRICS},
 };
@@ -297,6 +297,7 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -308,10 +309,6 @@ pub async fn task_main(
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new([RateBucketInfo::new(
-        config.endpoint_rps_limit,
-        time::Duration::from_secs(1),
-    )]));
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
