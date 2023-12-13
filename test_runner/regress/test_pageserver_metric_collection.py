@@ -64,13 +64,13 @@ def test_metric_collection(
     # spin up neon,  after http server is ready
     env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     # httpserver is shut down before pageserver during passing run
-    env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
-    # we have a fast rate of calculation, these can happen at shutdown
-    env.pageserver.allowed_errors.append(
-        ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*metrics endpoint refused the sent metrics*",
+            # we have a fast rate of calculation, these can happen at shutdown
+            ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*",
+            ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes",
+        ]
     )
 
     tenant_id = env.initial_tenant
@@ -212,13 +212,13 @@ def test_metric_collection_cleans_up_tempfile(
     pageserver_http = env.pageserver.http_client()
 
     # httpserver is shut down before pageserver during passing run
-    env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
-    # we have a fast rate of calculation, these can happen at shutdown
-    env.pageserver.allowed_errors.append(
-        ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*metrics endpoint refused the sent metrics*",
+            # we have a fast rate of calculation, these can happen at shutdown
+            ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*",
+            ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes",
+        ]
     )
 
     tenant_id = env.initial_tenant

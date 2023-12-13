@@ -3,6 +3,7 @@ use crate::{
     config::ProxyConfig,
     error::io_error,
     proxy::{handle_client, ClientMode},
+    rate_limiter::EndpointRateLimiter,
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream};
@@ -13,6 +14,7 @@ use pin_project_lite::pin_project;
 use std::{
     net::IpAddr,
     pin::Pin,
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
@@ -134,6 +136,7 @@ pub async fn serve_websocket(
     session_id: uuid::Uuid,
     hostname: Option<String>,
     peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     handle_client(
@@ -143,6 +146,7 @@ pub async fn serve_websocket(
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         peer_addr,
+        endpoint_rate_limiter,
     )
     .await?;
     Ok(())

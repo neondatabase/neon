@@ -99,12 +99,13 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         ]
     )
 
-    # FIXME: we should clean up pageserver to not print this
-    env.pageserver.allowed_errors.append(".*exited with error: unexpected message type: CopyData.*")
-
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            # FIXME: we should clean up pageserver to not print this
+            ".*exited with error: unexpected message type: CopyData.*",
+            # FIXME: Is this expected?
+            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
+        ]
     )
 
     def import_tar(base, wal):

@@ -9,6 +9,7 @@ use crate::{
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     protocol2::WithClientIp,
+    rate_limiter::EndpointRateLimiter,
     stream::{PqStream, Stream},
     usage_metrics::{Ids, USAGE_METRICS},
 };
@@ -307,6 +308,7 @@ pub async fn task_main(
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(config.endpoint_rps_limit));
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await
@@ -315,6 +317,8 @@ pub async fn task_main(
 
         let session_id = uuid::Uuid::new_v4();
         let cancel_map = Arc::clone(&cancel_map);
+        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
+
         connections.spawn(
             async move {
                 info!("accepted postgres client connection");
@@ -340,6 +344,7 @@ pub async fn task_main(
                     socket,
                     ClientMode::Tcp,
                     peer_addr.ip(),
+                    endpoint_rate_limiter,
                 )
                 .await
             }
@@ -415,6 +420,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
     peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -463,6 +469,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         &params,
         session_id,
         mode.allow_self_signed_compute(config),
+        endpoint_rate_limiter,
     );
     cancel_map
         .with_session(|session| client.connect_to_db(session, mode, &config.authentication_config))
@@ -671,7 +678,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
 pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra<'_>,
+    extra: &console::ConsoleReqExtra,
     creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
@@ -928,6 +935,8 @@ struct Client<'a, S> {
     session_id: uuid::Uuid,
     /// Allow self-signed certificates (for testing).
     allow_self_signed_compute: bool,
+    /// Rate limiter for endpoints
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -938,6 +947,7 @@ impl<'a, S> Client<'a, S> {
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
         allow_self_signed_compute: bool,
+        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         Self {
             stream,
@@ -945,6 +955,7 @@ impl<'a, S> Client<'a, S> {
             params,
             session_id,
             allow_self_signed_compute,
+            endpoint_rate_limiter,
         }
     }
 }
@@ -966,15 +977,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             params,
             session_id,
             allow_self_signed_compute,
+            endpoint_rate_limiter,
         } = self;
 
+        // check rate limit
+        if let Some(ep) = creds.get_endpoint() {
+            if !endpoint_rate_limiter.check(ep) {
+                return stream
+                    .throw_error(auth::AuthError::too_many_connections())
+                    .await;
+            }
+        }
+
+        let proto = mode.protocol_label();
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
-            application_name: params.get("application_name"),
+            application_name: format!(
+                "{}/{}",
+                params.get("application_name").unwrap_or_default(),
+                proto
+            ),
             options: neon_options(params),
         };
-
-        let mut latency_timer = LatencyTimer::new(mode.protocol_label());
+        let mut latency_timer = LatencyTimer::new(proto);
 
         let user = creds.get_user().to_owned();
         let auth_result = match creds
@@ -1012,7 +1037,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         .or_else(|e| stream.throw_error(e))
         .await?;
 
-        let proto = mode.protocol_label();
         NUM_DB_CONNECTIONS_OPENED_COUNTER
             .with_label_values(&[proto])
             .inc();

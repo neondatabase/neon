@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import boto3
+import toml
 from mypy_boto3_s3 import S3Client
 
 from fixtures.log_helper import log
@@ -133,7 +134,10 @@ class LocalFsStorage:
             return json.load(f)
 
     def to_toml_inline_table(self) -> str:
-        return f"local_path='{self.root}'"
+        rv = {
+            "local_path": str(self.root),
+        }
+        return toml.TomlEncoder().dump_inline_table(rv)
 
     def cleanup(self):
         # no cleanup is done here, because there's NeonEnvBuilder.cleanup_local_storage which will remove everything, including localfs files
@@ -174,18 +178,18 @@ class S3Storage:
         )
 
     def to_toml_inline_table(self) -> str:
-        s = [
-            f"bucket_name='{self.bucket_name}'",
-            f"bucket_region='{self.bucket_region}'",
-        ]
+        rv = {
+            "bucket_name": self.bucket_name,
+            "bucket_region": self.bucket_region,
+        }
 
         if self.prefix_in_bucket is not None:
-            s.append(f"prefix_in_bucket='{self.prefix_in_bucket}'")
+            rv["prefix_in_bucket"] = self.prefix_in_bucket
 
         if self.endpoint is not None:
-            s.append(f"endpoint='{self.endpoint}'")
+            rv["endpoint"] = self.endpoint
 
-        return ",".join(s)
+        return toml.TomlEncoder().dump_inline_table(rv)
 
     def do_cleanup(self):
         if not self.cleanup:
@@ -384,4 +388,4 @@ def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
     if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
         raise Exception("invalid remote storage type")
 
-    return f"{{{remote_storage.to_toml_inline_table()}}}"
+    return remote_storage.to_toml_inline_table()
