@@ -91,7 +91,6 @@ jobs:
         id: dockerfile
         run: |
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
-          echo "$updated_files"
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
