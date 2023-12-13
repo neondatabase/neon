@@ -6,6 +6,7 @@ members = [
     "pageserver",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/pagebench",
     "proxy",
     "safekeeper",
     "storage_broker",
