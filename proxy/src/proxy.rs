@@ -9,7 +9,7 @@ use crate::{
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     protocol2::WithClientIp,
-    rate_limiter::EndpointRateLimiter,
+    rate_limiter::{EndpointRateLimiter, RateBucketInfo},
     stream::{PqStream, Stream},
     usage_metrics::{Ids, USAGE_METRICS},
 };
@@ -308,7 +308,10 @@ pub async fn task_main(
 
     let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(config.endpoint_rps_limit));
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new([RateBucketInfo::new(
+        config.endpoint_rps_limit,
+        time::Duration::from_secs(1),
+    )]));
 
     while let Some(accept_result) =
         run_until_cancelled(listener.accept(), &cancellation_token).await

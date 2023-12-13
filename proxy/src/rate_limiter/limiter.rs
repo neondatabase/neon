@@ -1,16 +1,13 @@
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
-use tokio::time::{timeout, Instant};
+use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
 use super::{
@@ -32,57 +29,106 @@ use super::{
 //
 // TODO: add a better bucketing here, e.g. not more than 300 requests per second,
 //       and not more than 1000 requests per 10 seconds, etc. Short bursts of reconnects
-//       are noramal during redeployments, so we should not block them.
+//       are normal during redeployments, so we should not block them.
 pub struct EndpointRateLimiter {
-    map: DashMap<SmolStr, Arc<Mutex<(chrono::NaiveTime, u32)>>>,
-    max_rps: u32,
+    map: DashMap<SmolStr, Vec<RateBucket>>,
+    info: Vec<RateBucketInfo>,
     access_count: AtomicUsize,
 }
 
-impl EndpointRateLimiter {
-    pub fn new(max_rps: u32) -> Self {
+#[derive(Clone, Copy)]
+struct RateBucket {
+    start: Instant,
+    count: u32,
+}
+
+impl RateBucket {
+    fn should_allow_request(&mut self, info: &RateBucketInfo, now: Instant) -> bool {
+        if now - self.start < info.interval {
+            self.count < info.max_rpi
+        } else {
+            // bucket expired, reset
+            self.count = 0;
+            self.start = now;
+
+            true
+        }
+    }
+
+    fn inc(&mut self) {
+        self.count += 1;
+    }
+}
+
+pub struct RateBucketInfo {
+    interval: Duration,
+    // requests per interval
+    max_rpi: u32,
+}
+
+impl RateBucketInfo {
+    pub fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
-            map: DashMap::new(),
-            max_rps,
+            interval,
+            max_rpi: max_rps * 1000 / interval.as_millis() as u32,
+        }
+    }
+}
+
+impl EndpointRateLimiter {
+    pub fn new(info: impl IntoIterator<Item = RateBucketInfo>) -> Self {
+        Self {
+            info: info.into_iter().collect(),
+            map: DashMap::with_shard_amount(64),
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
         }
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, endpoint: SmolStr) -> bool {
-        // do GC every 100k requests (worst case memory usage is about 10MB)
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 100_000 == 0 {
+        // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
+        // worst case memory usage is about:
+        //    = 2 * 2048 * 64 * (48B + 72B)
+        //    = 30MB
+        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
             self.do_gc();
         }
 
-        let now = chrono::Utc::now().naive_utc().time();
-        let entry = self
-            .map
-            .entry(endpoint)
-            .or_insert_with(|| Arc::new(Mutex::new((now, 0))));
-        let mut entry = entry.lock();
-        let (last_time, count) = *entry;
+        let now = Instant::now();
+        let mut entry = self.map.entry(endpoint).or_insert_with(|| {
+            vec![
+                RateBucket {
+                    start: now,
+                    count: 0,
+                };
+                self.info.len()
+            ]
+        });
 
-        if now - last_time < chrono::Duration::seconds(1) {
-            if count >= self.max_rps {
-                return false;
-            }
-            *entry = (last_time, count + 1);
-        } else {
-            *entry = (now, 1);
+        let should_allow_request = entry
+            .iter_mut()
+            .zip(&self.info)
+            .all(|(bucket, info)| bucket.should_allow_request(info, now));
+
+        if should_allow_request {
+            // only increment the bucket counts if the request will actually be accepted
+            entry.iter_mut().for_each(RateBucket::inc);
         }
-        true
+
+        should_allow_request
     }
 
-    /// Clean the map. Simple strategy: remove all entries. At worst, we'll
-    /// double the effective max_rps during the cleanup. But that way deletion
-    /// does not aquire mutex on each entry access.
+    /// Clean the map. Simple strategy: remove all entries in a random shard.
+    /// At worst, we'll double the effective max_rps during the cleanup.
+    /// But that way deletion does not aquire mutex on each entry access.
     pub fn do_gc(&self) {
         info!(
             "cleaning up endpoint rate limiter, current size = {}",
             self.map.len()
         );
-        self.map.clear();
+        let n = self.map.shards().len();
+        let shard = thread_rng().gen_range(0..n);
+        self.map.shards()[shard].write().clear();
     }
 }
 
