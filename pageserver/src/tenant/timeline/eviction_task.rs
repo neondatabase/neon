@@ -30,7 +30,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        tasks::{BackgroundLoopKind, RateLimitError},
+        tasks::BackgroundLoopKind,
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },

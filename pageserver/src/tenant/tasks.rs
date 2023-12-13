@@ -54,23 +54,6 @@ impl BackgroundLoopKind {
     }
 }
 
-pub(crate) enum RateLimitError {
-    Cancelled,
-}
-
-pub(crate) async fn concurrent_background_tasks_rate_limit(
-    loop_kind: BackgroundLoopKind,
-    _ctx: &RequestContext,
-    cancel: &CancellationToken,
-) -> Result<impl Drop, RateLimitError> {
-    tokio::select! {
-        permit = concurrent_background_tasks_rate_limit_permit(loop_kind, _ctx) => Ok(permit),
-        _ = cancel.cancelled() => {
-            Err(RateLimitError::Cancelled)
-        }
-    }
-}
-
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
