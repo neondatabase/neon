@@ -1783,22 +1783,22 @@ impl Timeline {
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
                 let cancel = task_mgr::shutdown_token();
-                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit(
+                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
-                    &cancel,
                 );
 
                 use crate::metrics::initial_logical_size::StartCircumstances;
                 let (_maybe_permit, circumstances) = tokio::select! {
-                    res = wait_for_permit => {
-                        match res {
-                            Ok(permit) => (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit),
-                            Err(RateLimitError::Cancelled) => {
-                                return Err(BackgroundCalculationError::Cancelled);
-                            }
-                        }
+                    permit = wait_for_permit => {
+                        (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
+                    _ = self_ref.cancel.cancelled() => {
+                        return Err(BackgroundCalculationError::Cancelled);
+                    }
+                    _ = cancel.cancelled() => {
+                        return Err(BackgroundCalculationError::Cancelled);
+                    },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
                         // => break out of the rate limit
