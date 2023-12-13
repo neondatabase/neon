@@ -139,7 +139,7 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
-  check-codestyle-build-tools
+  check-codestyle-build-tools:
     needs: [ check-permissions, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, large ]
     container:
