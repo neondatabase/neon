@@ -55,7 +55,7 @@ impl RateBucket {
         }
     }
 
-    fn count(&mut self) {
+    fn inc(&mut self) {
         self.count += 1;
     }
 }
@@ -112,7 +112,7 @@ impl EndpointRateLimiter {
 
         if should_allow_request {
             // only increment the bucket counts if the request will actually be accepted
-            entry.iter_mut().for_each(RateBucket::count);
+            entry.iter_mut().for_each(RateBucket::inc);
         }
 
         should_allow_request
