@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Instant};
@@ -34,7 +34,7 @@ use super::{
 //       and not more than 1000 requests per 10 seconds, etc. Short bursts of reconnects
 //       are noramal during redeployments, so we should not block them.
 pub struct EndpointRateLimiter {
-    map: DashMap<SmolStr, Arc<Mutex<(chrono::NaiveTime, u32)>>>,
+    map: DashMap<SmolStr, (Instant, u32)>,
     max_rps: u32,
     access_count: AtomicUsize,
 }
@@ -50,20 +50,17 @@ impl EndpointRateLimiter {
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, endpoint: SmolStr) -> bool {
-        // do GC every 100k requests (worst case memory usage is about 10MB)
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 100_000 == 0 {
+        // do a partial GC every 16k requests
+        // (worst case memory usage is about 16384 * shard_count * size_of::<(SmolStr, (Instant, u32))>
+        //    = 16384 * 8 * 48B = 6MB)
+        if self.access_count.fetch_add(1, Ordering::AcqRel) % 16384 == 0 {
             self.do_gc();
         }
 
-        let now = chrono::Utc::now().naive_utc().time();
-        let entry = self
-            .map
-            .entry(endpoint)
-            .or_insert_with(|| Arc::new(Mutex::new((now, 0))));
-        let mut entry = entry.lock();
+        let now = Instant::now();
+        let mut entry = self.map.entry(endpoint).or_insert_with(|| (now, 0));
         let (last_time, count) = *entry;
-
-        if now - last_time < chrono::Duration::seconds(1) {
+        if now - last_time < std::time::Duration::from_secs(1) {
             if count >= self.max_rps {
                 return false;
             }
@@ -74,15 +71,17 @@ impl EndpointRateLimiter {
         true
     }
 
-    /// Clean the map. Simple strategy: remove all entries. At worst, we'll
-    /// double the effective max_rps during the cleanup. But that way deletion
-    /// does not aquire mutex on each entry access.
+    /// Clean the map. Simple strategy: remove all entries in a random shard.
+    /// At worst, we'll double the effective max_rps during the cleanup.
+    /// But that way deletion does not aquire mutex on each entry access.
     pub fn do_gc(&self) {
         info!(
             "cleaning up endpoint rate limiter, current size = {}",
             self.map.len()
         );
-        self.map.clear();
+        let n = self.map.shards().len();
+        let shard = thread_rng().gen_range(0..n);
+        self.map.shards()[shard].write().clear();
     }
 }
 
