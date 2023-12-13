@@ -640,6 +640,61 @@ impl std::ops::Deref for TimelineKey {
     }
 }
 
+/// A totally ordered f32 subset we can use with sorting functions.
+mod finite_f32 {
+
+    #[derive(Clone, Copy, PartialEq)]
+    pub struct FiniteF32(f32);
+
+    impl std::fmt::Debug for FiniteF32 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Debug::fmt(&self.0, f)
+        }
+    }
+
+    impl std::fmt::Display for FiniteF32 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Display::fmt(&self.0, f)
+        }
+    }
+
+    impl std::cmp::Eq for FiniteF32 {}
+
+    impl std::cmp::PartialOrd for FiniteF32 {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl std::cmp::Ord for FiniteF32 {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.partial_cmp(&other.0).expect("both are finite")
+        }
+    }
+
+    impl TryFrom<f32> for FiniteF32 {
+        type Error = f32;
+
+        fn try_from(value: f32) -> Result<Self, Self::Error> {
+            if value.is_finite() {
+                Ok(FiniteF32(value))
+            } else {
+                Err(value)
+            }
+        }
+    }
+
+    impl FiniteF32 {
+        pub fn try_from_normalized(value: f32) -> Result<Self, f32> {
+            if (0.0..=1.0).contains(&value) {
+                Ok(FiniteF32(value))
+            } else {
+                Err(value)
+            }
+        }
+    }
+}
+
 mod filesystem_level_usage {
     use anyhow::Context;
     use camino::Utf8Path;
