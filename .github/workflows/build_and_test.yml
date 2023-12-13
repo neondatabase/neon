@@ -87,19 +87,14 @@ jobs:
 
   check-if-build-tools-dockerfile-changed:
     needs: [ check-permissions ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: ubuntu-latest
     outputs:
       docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
       - name: Check if Dockerfile.buildtools has changed
         id: dockerfile
         run: |
-          updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
+          updated_files=$(gh pr diff ${{ github.event.pull_request.number }} --name-only)
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
