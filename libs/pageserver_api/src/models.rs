@@ -370,6 +370,14 @@ pub struct TenantInfo {
     pub attachment_status: TenantAttachmentStatus,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TenantDetails {
+    #[serde(flatten)]
+    pub tenant_info: TenantInfo,
+
+    pub timelines: Vec<TimelineId>,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
