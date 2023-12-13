@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 on:
   workflow_call:
     inputs:
-      docker-file-path:
+      dockerfile-path:
         required: true
         type: string
       image-name:
