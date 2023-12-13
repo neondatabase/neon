@@ -1,11 +1,12 @@
 pub mod heatmap;
 mod heatmap_uploader;
+mod scheduler;
 
 use std::sync::Arc;
 
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 
-use self::heatmap_uploader::heatmap_uploader_task;
+use self::{heatmap_uploader::heatmap_uploader_task, scheduler::TenantScoped};
 
 use super::mgr::TenantManager;
 
@@ -17,6 +18,14 @@ use utils::completion::Barrier;
 
 enum UploadCommand {
     Upload(TenantShardId),
+}
+
+impl TenantScoped for UploadCommand {
+    fn get_tenant_shard_id(&self) -> &TenantShardId {
+        match self {
+            Self::Upload(id) => &id,
+        }
+    }
 }
 
 struct CommandRequest<T> {
@@ -89,7 +98,9 @@ pub fn spawn_tasks(
                 background_jobs_can_start,
                 cancel,
             )
-            .await
+            .await;
+
+            Ok(())
         },
     );
 
