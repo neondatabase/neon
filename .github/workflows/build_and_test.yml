@@ -66,12 +66,13 @@ jobs:
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
             echo "IMAGE_TAG=$GITHUB_RUN_ID" >> $GITHUB_ENV
             echo "DOCKER_FILE_CHANGED=true" >> $GITHUB_ENV
+            echo "::set-output name=docker_file_changed::true"
           fi
 
   push-buildtools-docker-file:
     needs: [ check-permissions , check-if-build-tools-dockerfile-changed ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
-    if: github.env.DOCKER_FILE_CHANGED  == true
+    if: ${{steps.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed}} == true
     with:
       docker-file-path: Dockerfile.buildtools
       image-name: build-tools
