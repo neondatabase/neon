@@ -3057,6 +3057,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pagebench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "pageserver",
+ "utils",
+]
+
+[[package]]
 name = "pagectl"
 version = "0.1.0"
 dependencies = [
