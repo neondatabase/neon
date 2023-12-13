@@ -18,7 +18,7 @@ use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
 use pageserver::tenant::storage_layer::range_overlaps;
-use pageserver::virtual_file::{VirtualFile, self};
+use pageserver::virtual_file::{self, VirtualFile};
 
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
