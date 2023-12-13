@@ -28,7 +28,7 @@
 //! Page cache maps from a cache key to a buffer slot.
 //! The cache key uniquely identifies the piece of data that is being cached.
 //!
-//! The cache key for **materialized pages** is  [`TenantId`], [`TimelineId`], [`Key`], and [`Lsn`].
+//! The cache key for **materialized pages** is  [`TenantShardId`], [`TimelineId`], [`Key`], and [`Lsn`].
 //! Use [`PageCache::memorize_materialized_page`] and [`PageCache::lookup_materialized_page`] for fill & access.
 //!
 //! The cache key for **immutable file** pages is [`FileId`] and a block number.
@@ -83,10 +83,8 @@ use std::{
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use pageserver_api::shard::TenantShardId;
+use utils::{id::TimelineId, lsn::Lsn};
 
 use crate::{
     context::RequestContext,
@@ -154,7 +152,13 @@ enum CacheKey {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct MaterializedPageHashKey {
-    tenant_id: TenantId,
+    /// Why is this TenantShardId rather than TenantId?
+    ///
+    /// Usually, the materialized value of a page@lsn is identical on any shard in the same tenant.  However, this
+    /// this not the case for certain internally-generated pages (e.g. relation sizes).  In future, we may make this
+    /// key smaller by omitting the shard, if we ensure that reads to such pages always skip the cache, or are
+    /// special-cased in some other way.
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     key: Key,
 }
@@ -378,7 +382,7 @@ impl PageCache {
     /// returned page.
     pub async fn lookup_materialized_page(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         key: &Key,
         lsn: Lsn,
@@ -395,7 +399,7 @@ impl PageCache {
 
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
-                tenant_id,
+                tenant_shard_id,
                 timeline_id,
                 key: *key,
             },
@@ -436,7 +440,7 @@ impl PageCache {
     ///
     pub async fn memorize_materialized_page(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         key: Key,
         lsn: Lsn,
@@ -444,7 +448,7 @@ impl PageCache {
     ) -> anyhow::Result<()> {
         let cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
-                tenant_id,
+                tenant_shard_id,
                 timeline_id,
                 key,
             },

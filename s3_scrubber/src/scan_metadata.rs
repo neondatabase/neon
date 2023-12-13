@@ -174,6 +174,10 @@ Timeline layer count: {6}
     pub fn is_fatal(&self) -> bool {
         !self.with_errors.is_empty()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 /// Scan the pageserver metadata in an S3 bucket, reporting errors and statistics.

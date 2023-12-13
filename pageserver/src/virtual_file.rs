@@ -654,6 +654,7 @@ pub fn init(num_slots: usize) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
+    crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }
 
 const TEST_MAX_FILE_DESCRIPTORS: usize = 10;

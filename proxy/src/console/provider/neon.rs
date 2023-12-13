@@ -48,7 +48,7 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -60,9 +60,9 @@ impl Api {
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(&creds.endpoint)),
-                    ("role", Some(&creds.inner.user)),
+                    ("application_name", extra.application_name.as_str()),
+                    ("project", creds.endpoint.as_str()),
+                    ("role", creds.inner.user.as_str()),
                 ])
                 .build()?;
 
@@ -101,23 +101,28 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
-            let request = self
+            let mut request_builder = self
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(&creds.endpoint)),
-                    ("options", extra.options),
-                ])
-                .build()?;
+                    ("application_name", extra.application_name.as_str()),
+                    ("project", creds.endpoint.as_str()),
+                ]);
+
+            request_builder = if extra.options.is_empty() {
+                request_builder
+            } else {
+                request_builder.query(&extra.options_as_deep_object())
+            };
+            let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
@@ -156,7 +161,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_auth_info(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         self.do_get_auth_info(extra, creds).await
@@ -164,7 +169,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         let key: &str = &creds.endpoint;
@@ -187,7 +192,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key: &str = &creds.inner.cache_key;

@@ -9,6 +9,7 @@ use crate::{
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     protocol2::WithClientIp,
+    rate_limiter::{EndpointRateLimiter, RateBucketInfo},
     stream::{PqStream, Stream},
     usage_metrics::{Ids, USAGE_METRICS},
 };
@@ -277,6 +278,21 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub async fn run_until_cancelled<F: std::future::Future>(
+    f: F,
+    cancellation_token: &CancellationToken,
+) -> Option<F::Output> {
+    match futures::future::select(
+        std::pin::pin!(f),
+        std::pin::pin!(cancellation_token.cancelled()),
+    )
+    .await
+    {
+        futures::future::Either::Left((f, _)) => Some(f),
+        futures::future::Either::Right(((), _)) => None,
+    }
+}
+
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
@@ -290,71 +306,69 @@ pub async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
-    let mut connections = tokio::task::JoinSet::new();
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
     let cancel_map = Arc::new(CancelMap::default());
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new([RateBucketInfo::new(
+        config.endpoint_rps_limit,
+        time::Duration::from_secs(1),
+    )]));
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let cancel_map = Arc::clone(&cancel_map);
-                connections.spawn(
-                    async move {
-                        info!("accepted postgres client connection");
+        let session_id = uuid::Uuid::new_v4();
+        let cancel_map = Arc::clone(&cancel_map);
+        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
-                        let mut socket = WithClientIp::new(socket);
-                        let mut peer_addr = peer_addr;
-                        if let Some(ip) = socket.wait_for_addr().await? {
-                            peer_addr = ip;
-                            tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
-                        } else if config.require_client_ip {
-                            bail!("missing required client IP");
-                        }
+        connections.spawn(
+            async move {
+                info!("accepted postgres client connection");
 
-                        socket
-                            .inner
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
-
-                        handle_client(config, &cancel_map, session_id, socket, ClientMode::Tcp, peer_addr.ip()).await
-                    }
-                    .instrument(info_span!("handle_client", ?session_id, peer_addr = tracing::field::Empty))
-                    .unwrap_or_else(move |e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!(?session_id, "per-client task finished with an error: {e:#}");
-                    }),
-                );
-            }
-            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
-            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
-            // This only counts for this loop and it will be enabled again on next `select!`.
-            //
-            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
-            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
-            // not get called again, even if there are more connections to remove.
-            Some(res) = connections.join_next() => {
-                if let Err(e) = res {
-                    if !e.is_panic() && !e.is_cancelled() {
-                        warn!("unexpected error from joined connection task: {e:?}");
-                    }
+                let mut socket = WithClientIp::new(socket);
+                let mut peer_addr = peer_addr;
+                if let Some(ip) = socket.wait_for_addr().await? {
+                    peer_addr = ip;
+                    tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                } else if config.require_client_ip {
+                    bail!("missing required client IP");
                 }
+
+                socket
+                    .inner
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
+
+                handle_client(
+                    config,
+                    &cancel_map,
+                    session_id,
+                    socket,
+                    ClientMode::Tcp,
+                    peer_addr.ip(),
+                    endpoint_rate_limiter,
+                )
+                .await
             }
-            _ = cancellation_token.cancelled() => {
-                drop(listener);
-                break;
-            }
-        }
+            .instrument(info_span!(
+                "handle_client",
+                ?session_id,
+                peer_addr = tracing::field::Empty
+            ))
+            .unwrap_or_else(move |e| {
+                // Acknowledge that the task has finished with an error.
+                error!(?session_id, "per-client task finished with an error: {e:#}");
+            }),
+        );
     }
+
+    connections.close();
+    drop(listener);
+
     // Drain connections
-    while let Some(res) = connections.join_next().await {
-        if let Err(e) = res {
-            if !e.is_panic() && !e.is_cancelled() {
-                warn!("unexpected error from joined connection task: {e:?}");
-            }
-        }
-    }
+    connections.wait().await;
+
     Ok(())
 }
 
@@ -409,6 +423,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mode: ClientMode,
     peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     info!(
         protocol = mode.protocol_label(),
@@ -457,6 +472,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         &params,
         session_id,
         mode.allow_self_signed_compute(config),
+        endpoint_rate_limiter,
     );
     cancel_map
         .with_session(|session| client.connect_to_db(session, mode, &config.authentication_config))
@@ -665,7 +681,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
 pub async fn connect_to_compute<M: ConnectMechanism>(
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra<'_>,
+    extra: &console::ConsoleReqExtra,
     creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
     mut latency_timer: LatencyTimer,
 ) -> Result<M::Connection, M::Error>
@@ -922,6 +938,8 @@ struct Client<'a, S> {
     session_id: uuid::Uuid,
     /// Allow self-signed certificates (for testing).
     allow_self_signed_compute: bool,
+    /// Rate limiter for endpoints
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -932,6 +950,7 @@ impl<'a, S> Client<'a, S> {
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
         allow_self_signed_compute: bool,
+        endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
         Self {
             stream,
@@ -939,6 +958,7 @@ impl<'a, S> Client<'a, S> {
             params,
             session_id,
             allow_self_signed_compute,
+            endpoint_rate_limiter,
         }
     }
 }
@@ -960,17 +980,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             params,
             session_id,
             allow_self_signed_compute,
+            endpoint_rate_limiter,
         } = self;
 
-        let console_options = neon_options(params);
+        // check rate limit
+        if let Some(ep) = creds.get_endpoint() {
+            if !endpoint_rate_limiter.check(ep) {
+                return stream
+                    .throw_error(auth::AuthError::too_many_connections())
+                    .await;
+            }
+        }
 
+        let proto = mode.protocol_label();
         let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
-            application_name: params.get("application_name"),
-            options: console_options.as_deref(),
+            application_name: format!(
+                "{}/{}",
+                params.get("application_name").unwrap_or_default(),
+                proto
+            ),
+            options: neon_options(params),
         };
-
-        let mut latency_timer = LatencyTimer::new(mode.protocol_label());
+        let mut latency_timer = LatencyTimer::new(proto);
 
         let user = creds.get_user().to_owned();
         let auth_result = match creds
@@ -1008,7 +1040,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         .or_else(|e| stream.throw_error(e))
         .await?;
 
-        let proto = mode.protocol_label();
         NUM_DB_CONNECTIONS_OPENED_COUNTER
             .with_label_values(&[proto])
             .inc();
@@ -1027,26 +1058,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     }
 }
 
-pub fn neon_options(params: &StartupMessageParams) -> Option<String> {
+pub fn neon_options(params: &StartupMessageParams) -> Vec<(String, String)> {
     #[allow(unstable_name_collisions)]
-    let options: String = params
-        .options_raw()?
-        .filter(|opt| is_neon_param(opt))
-        .sorted() // we sort it to use as cache key
-        .intersperse(" ") // TODO: use impl from std once it's stabilized
-        .collect();
-
-    // Don't even bother with empty options.
-    if options.is_empty() {
-        return None;
+    match params.options_raw() {
+        Some(options) => options.filter_map(neon_option).collect(),
+        None => vec![],
     }
-
-    Some(options)
 }
 
-pub fn is_neon_param(bytes: &str) -> bool {
-    static RE: OnceCell<Regex> = OnceCell::new();
-    RE.get_or_init(|| Regex::new(r"^neon_\w+:").unwrap());
+pub fn neon_options_str(params: &StartupMessageParams) -> String {
+    #[allow(unstable_name_collisions)]
+    neon_options(params)
+        .iter()
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .sorted() // we sort it to use as cache key
+        .intersperse(" ".to_owned())
+        .collect()
+}
 
-    RE.get().unwrap().is_match(bytes)
+pub fn neon_option(bytes: &str) -> Option<(String, String)> {
+    static RE: OnceCell<Regex> = OnceCell::new();
+    let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
+
+    let cap = re.captures(bytes)?;
+    let (_, [k, v]) = cap.extract();
+    Some((k.to_owned(), v.to_owned()))
 }

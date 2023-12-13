@@ -650,7 +650,7 @@ static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(||
         "pageserver_evictions_with_low_residence_duration",
         "If a layer is evicted that was resident for less than `low_threshold`, it is counted to this counter. \
          Residence duration is determined using the `residence_duration_data_source`.",
-        &["tenant_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
+        &["tenant_id", "shard_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
     )
     .expect("failed to define a metric")
 });
@@ -714,10 +714,16 @@ impl EvictionsWithLowResidenceDurationBuilder {
         }
     }
 
-    fn build(&self, tenant_id: &str, timeline_id: &str) -> EvictionsWithLowResidenceDuration {
+    fn build(
+        &self,
+        tenant_id: &str,
+        shard_id: &str,
+        timeline_id: &str,
+    ) -> EvictionsWithLowResidenceDuration {
         let counter = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
             .get_metric_with_label_values(&[
                 tenant_id,
+                shard_id,
                 timeline_id,
                 self.data_source,
                 &EvictionsWithLowResidenceDuration::threshold_label_value(self.threshold),
@@ -748,21 +754,24 @@ impl EvictionsWithLowResidenceDuration {
     pub fn change_threshold(
         &mut self,
         tenant_id: &str,
+        shard_id: &str,
         timeline_id: &str,
         new_threshold: Duration,
     ) {
         if new_threshold == self.threshold {
             return;
         }
-        let mut with_new =
-            EvictionsWithLowResidenceDurationBuilder::new(self.data_source, new_threshold)
-                .build(tenant_id, timeline_id);
+        let mut with_new = EvictionsWithLowResidenceDurationBuilder::new(
+            self.data_source,
+            new_threshold,
+        )
+        .build(tenant_id, shard_id, timeline_id);
         std::mem::swap(self, &mut with_new);
-        with_new.remove(tenant_id, timeline_id);
+        with_new.remove(tenant_id, shard_id, timeline_id);
     }
 
     // This could be a `Drop` impl, but, we need the `tenant_id` and `timeline_id`.
-    fn remove(&mut self, tenant_id: &str, timeline_id: &str) {
+    fn remove(&mut self, tenant_id: &str, shard_id: &str, timeline_id: &str) {
         let Some(_counter) = self.counter.take() else {
             return;
         };
@@ -771,6 +780,7 @@ impl EvictionsWithLowResidenceDuration {
 
         let removed = EVICTIONS_WITH_LOW_RESIDENCE_DURATION.remove_label_values(&[
             tenant_id,
+            shard_id,
             timeline_id,
             self.data_source,
             &threshold,
@@ -891,6 +901,26 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub(crate) mod virtual_file_descriptor_cache {
+    use super::*;
+
+    pub(crate) static SIZE_MAX: Lazy<UIntGauge> = Lazy::new(|| {
+        register_uint_gauge!(
+            "pageserver_virtual_file_descriptor_cache_size_max",
+            "Maximum number of open file descriptors in the cache."
+        )
+        .unwrap()
+    });
+
+    // SIZE_CURRENT: derive it like so:
+    // ```
+    // sum (pageserver_io_operations_seconds_count{operation=~"^(open|open-after-replace)$")
+    // -ignoring(operation)
+    // sum(pageserver_io_operations_seconds_count{operation=~"^(close|close-by-replace)$"}
+    // ```
+}
+
 #[derive(Debug)]
 struct GlobalAndPerTimelineHistogram {
     global: Histogram,
@@ -1583,6 +1613,7 @@ impl StorageTimeMetrics {
 #[derive(Debug)]
 pub struct TimelineMetrics {
     tenant_id: String,
+    shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
@@ -1603,11 +1634,12 @@ pub struct TimelineMetrics {
 
 impl TimelineMetrics {
     pub fn new(
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
     ) -> Self {
-        let tenant_id = tenant_id.to_string();
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
         let flush_time_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
@@ -1644,11 +1676,12 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let evictions_with_low_residence_duration =
-            evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
+        let evictions_with_low_residence_duration = evictions_with_low_residence_duration_builder
+            .build(&tenant_id, &shard_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
+            shard_id,
             timeline_id,
             flush_time_histo,
             compact_time_histo,
@@ -1694,6 +1727,7 @@ impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
+        let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
@@ -1707,7 +1741,7 @@ impl Drop for TimelineMetrics {
         self.evictions_with_low_residence_duration
             .write()
             .unwrap()
-            .remove(tenant_id, timeline_id);
+            .remove(tenant_id, shard_id, timeline_id);
 
         // The following metrics are born outside of the TimelineMetrics lifecycle but still
         // removed at the end of it. The idea is to have the metrics outlive the

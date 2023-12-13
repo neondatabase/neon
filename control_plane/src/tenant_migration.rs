@@ -165,7 +165,7 @@ pub fn migrate_tenant(
         let found = other_ps_tenants
             .into_iter()
             .map(|t| t.id)
-            .any(|i| i == tenant_id);
+            .any(|i| i.tenant_id == tenant_id);
         if !found {
             continue;
         }

@@ -252,8 +252,6 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         let action = if let Some(r) = pg_role {
             if (r.encrypted_password.is_none() && role.encrypted_password.is_some())
                 || (r.encrypted_password.is_some() && role.encrypted_password.is_none())
-                || !r.bypassrls.unwrap_or(false)
-                || !r.replication.unwrap_or(false)
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
@@ -285,14 +283,22 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         match action {
             RoleAction::None => {}
             RoleAction::Update => {
-                let mut query: String =
-                    format!("ALTER ROLE {} BYPASSRLS REPLICATION", name.pg_quote());
+                // This can be run on /every/ role! Not just ones created through the console.
+                // This means that if you add some funny ALTER here that adds a permission,
+                // this will get run even on user-created roles! This will result in different
+                // behavior before and after a spec gets reapplied. The below ALTER as it stands
+                // now only grants LOGIN and changes the password. Please do not allow this branch
+                // to do anything silly.
+                let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
             RoleAction::Create => {
+                // This branch only runs when roles are created through the console, so it is
+                // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
+                // from neon_superuser.
                 let mut query: String = format!(
-                    "CREATE ROLE {} CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);

@@ -2,7 +2,6 @@ use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogi
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
-use pageserver_api::shard::ShardNumber;
 use std::{sync::Arc, time::SystemTime};
 use utils::{
     id::{TenantId, TimelineId},
@@ -198,12 +197,12 @@ pub(super) async fn collect_all_metrics(
     };
 
     let tenants = futures::stream::iter(tenants).filter_map(|(id, state)| async move {
-        if state != TenantState::Active {
+        if state != TenantState::Active || !id.is_zero() {
             None
         } else {
             crate::tenant::mgr::get_tenant(id, true)
                 .ok()
-                .map(|tenant| (id, tenant))
+                .map(|tenant| (id.tenant_id, tenant))
         }
     });
 
@@ -228,11 +227,6 @@ where
 
     while let Some((tenant_id, tenant)) = tenants.next().await {
         let mut tenant_resident_size = 0;
-
-        // Sharded tenants report all consumption metrics from shard zero
-        if tenant.tenant_shard_id().shard_number != ShardNumber(0) {
-            continue;
-        }
 
         for timeline in tenant.list_timelines() {
             let timeline_id = timeline.timeline_id;
