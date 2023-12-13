@@ -63,7 +63,6 @@ jobs:
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
           echo "$updated_files"
           echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
-          echo "IMAGE_NAME=build-tools" >> $GITHUB_ENV
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
             echo "IMAGE_TAG=$GITHUB_RUN_ID" >> $GITHUB_ENV
             echo "DOCKER_FILE_CHANGED=true" >> $GITHUB_ENV
@@ -108,10 +107,10 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -140,11 +139,11 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
-  check-codestyle-rust:
-    needs: [ check-permissions ]
+  check-codestyle-build-tools
+    needs: [ check-permissions, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -208,10 +207,10 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, tag, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       options: --init
     strategy:
       fail-fast: false
@@ -440,7 +439,7 @@ jobs:
     needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -479,7 +478,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -508,12 +507,12 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks ]
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, push-buildtools-docker-file ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -559,7 +558,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
       options: --init
     strategy:
       fail-fast: false
