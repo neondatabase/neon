@@ -259,7 +259,6 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
-            .instrument(tracing::debug_span!("get_value_reconstruct_data", layer=%self))
             .await
     }
 
@@ -1283,7 +1282,7 @@ impl DownloadedLayer {
                     // TODO(#5815): we are not logging all errors, so temporarily log them **once**
                     // here as well
                     let permanent = permanent.context("load layer");
-                    tracing::error!("layer loading failed permanently: {permanent:#}");
+                    tracing::error!("layer loading failed permanently for {owner}: {permanent:#}");
                     Ok(Err(permanent))
                 }
             }
