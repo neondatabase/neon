@@ -66,13 +66,10 @@ jobs:
         run: |
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
           echo "$updated_files"
-          echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
           echo "image_tag=pinned" >> $GITHUB_OUTPUT
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            echo "IMAGE_TAG=$GITHUB_RUN_ID" >> $GITHUB_ENV
-            echo "DOCKER_FILE_CHANGED=true" >> $GITHUB_ENV
             echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
-            echo "docker_file_changed=$true" >> $GITHUB_OUTPUT
+            echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
 
   push-buildtools-docker-file:
