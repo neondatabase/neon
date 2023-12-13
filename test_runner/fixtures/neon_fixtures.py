@@ -1870,11 +1870,12 @@ class NeonPageserver(PgProtocol):
         tenant_id: TenantId,
         conf: Optional[Dict[str, Any]] = None,
         auth_token: Optional[str] = None,
+        generation: Optional[int] = None,
     ) -> TenantId:
+        if generation is None:
+            generation = self.maybe_get_generation(tenant_id)
         client = self.http_client(auth_token=auth_token)
-        return client.tenant_create(
-            tenant_id, conf, generation=self.maybe_get_generation(tenant_id)
-        )
+        return client.tenant_create(tenant_id, conf, generation=generation)
 
     def tenant_load(self, tenant_id: TenantId):
         client = self.http_client()
