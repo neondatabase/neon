@@ -85,6 +85,7 @@ pub fn start_background_loops(
         None,
         &format!("compactor for tenant {tenant_shard_id}"),
         false,
+        tenant.cancel.child_token(),
         {
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();
@@ -108,6 +109,7 @@ pub fn start_background_loops(
         None,
         &format!("garbage collector for tenant {tenant_shard_id}"),
         false,
+        tenant.cancel.child_token(),
         {
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();

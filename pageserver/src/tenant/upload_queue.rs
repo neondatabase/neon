@@ -8,6 +8,7 @@ use std::fmt::Debug;
 
 use chrono::NaiveDateTime;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::lsn::AtomicLsn;
 
@@ -98,6 +99,8 @@ pub(crate) struct UploadQueueInitialized {
     /// wait on until one of them stops the queue. The semaphore is closed when
     /// `RemoteTimelineClient::launch_queued_tasks` encounters `UploadOp::Shutdown`.
     pub(crate) shutdown_ready: Arc<tokio::sync::Semaphore>,
+
+    pub(crate) cancel: CancellationToken,
 }
 
 impl UploadQueueInitialized {
@@ -130,6 +133,7 @@ impl UploadQueue {
     pub(crate) fn initialize_empty_remote(
         &mut self,
         metadata: &TimelineMetadata,
+        cancel: CancellationToken,
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
@@ -158,6 +162,7 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancel,
         };
 
         *self = UploadQueue::Initialized(state);
@@ -167,6 +172,7 @@ impl UploadQueue {
     pub(crate) fn initialize_with_current_remote_index_part(
         &mut self,
         index_part: &IndexPart,
+        cancel: CancellationToken,
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
@@ -207,6 +213,7 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancel,
         };
 
         *self = UploadQueue::Initialized(state);

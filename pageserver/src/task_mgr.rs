@@ -327,6 +327,7 @@ struct PageServerTask {
 /// Launch a new task
 /// Note: if shutdown_process_on_error is set to true failure
 ///   of the task will lead to shutdown of entire process
+#[allow(clippy::too_many_arguments)]
 pub fn spawn<F>(
     runtime: &tokio::runtime::Handle,
     kind: TaskKind,
@@ -334,12 +335,13 @@ pub fn spawn<F>(
     timeline_id: Option<TimelineId>,
     name: &str,
     shutdown_process_on_error: bool,
+    cancel: CancellationToken,
     future: F,
 ) -> PageserverTaskId
 where
     F: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
-    let cancel = CancellationToken::new();
+    // let cancel = CancellationToken::new();
     let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
     let task = Arc::new(PageServerTask {
         task_id: PageserverTaskId(task_id),

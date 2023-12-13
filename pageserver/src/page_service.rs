@@ -166,6 +166,7 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
+                    cancel.child_token(),
                     page_service_conn_main(
                         conf,
                         broker_client.clone(),

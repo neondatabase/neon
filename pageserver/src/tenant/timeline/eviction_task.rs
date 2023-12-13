@@ -67,6 +67,7 @@ impl Timeline {
                 self.tenant_shard_id, self.timeline_id
             ),
             false,
+            self.cancel.child_token(),
             async move {
                 let cancel = task_mgr::shutdown_token();
                 tokio::select! {
@@ -166,7 +167,6 @@ impl Timeline {
         let _permit = tokio::select! {
             permit = acquire_permit => permit,
             _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
         // If we evict layers but keep cached values derived from those layers, then

@@ -49,11 +49,22 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
+/// The main cancellation token for the process.
+///
+/// Should only ever be used to create child tokens.
+pub static PAGESERVER_SHUTDOWN_TOKEN: std::sync::OnceLock<tokio_util::sync::CancellationToken> =
+    std::sync::OnceLock::new();
+
 pub use crate::metrics::preinitialize_metrics;
 
 #[tracing::instrument(skip_all, fields(%exit_code))]
 pub async fn shutdown_pageserver(deletion_queue: Option<DeletionQueue>, exit_code: i32) {
     use std::time::Duration;
+
+    if let Some(token) = PAGESERVER_SHUTDOWN_TOKEN.get() {
+        token.cancel();
+    }
+
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
     timed(

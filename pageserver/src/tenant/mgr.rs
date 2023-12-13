@@ -283,7 +283,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
+    } else if let Some(client) = ControlPlaneClient::new(conf, cancel.child_token()) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach().await {
@@ -1352,6 +1352,11 @@ pub(crate) async fn detach_tenant(
     // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
     let task_tenant_id = None;
+    let cancel = crate::PAGESERVER_SHUTDOWN_TOKEN
+        .get()
+        .cloned()
+        .unwrap_or_default()
+        .child_token();
     task_mgr::spawn(
         task_mgr::BACKGROUND_RUNTIME.handle(),
         TaskKind::MgmtRequest,
@@ -1359,6 +1364,7 @@ pub(crate) async fn detach_tenant(
         None,
         "tenant_files_delete",
         false,
+        cancel,
         async move {
             fs::remove_dir_all(tmp_path.as_path())
                 .await
@@ -2086,6 +2092,7 @@ pub(crate) async fn immediate_gc(
         Some(timeline_id),
         &format!("timeline_gc_handler garbage collection run for tenant {tenant_shard_id} timeline {timeline_id}"),
         false,
+        tenant.cancel.child_token(),
         async move {
             fail::fail_point!("immediate_gc_task_pre");
 

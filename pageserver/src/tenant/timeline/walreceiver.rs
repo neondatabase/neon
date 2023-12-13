@@ -87,6 +87,7 @@ impl WalReceiver {
             Some(timeline_id),
             &format!("walreceiver for timeline {tenant_shard_id}/{timeline_id}"),
             false,
+            timeline.cancel.child_token(),
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
                 debug!("WAL receiver manager started, connecting to broker");

@@ -460,6 +460,12 @@ impl DeleteTenantFlow {
     ) {
         let tenant_shard_id = tenant.tenant_shard_id;
 
+        let cancel = crate::PAGESERVER_SHUTDOWN_TOKEN
+            .get()
+            .cloned()
+            .unwrap_or_default()
+            .child_token();
+
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
@@ -467,6 +473,7 @@ impl DeleteTenantFlow {
             None,
             "tenant_delete",
             false,
+            cancel,
             async move {
                 if let Err(err) =
                     Self::background(guard, conf, remote_storage, tenants, &tenant).await

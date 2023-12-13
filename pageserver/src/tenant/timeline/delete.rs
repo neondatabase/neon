@@ -6,6 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument, Span};
 use utils::{crashsafe, fs_ext, id::TimelineId};
 
@@ -406,6 +407,7 @@ impl DeleteTimelineFlow {
         local_metadata: &TimelineMetadata,
         remote_client: Option<RemoteTimelineClient>,
         deletion_queue_client: DeletionQueueClient,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
@@ -421,6 +423,7 @@ impl DeleteTimelineFlow {
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
+                cancel,
             )
             .context("create_timeline_struct")?;
 
@@ -532,6 +535,7 @@ impl DeleteTimelineFlow {
             Some(timeline_id),
             "timeline_delete",
             false,
+            tenant.cancel.child_token(),
             async move {
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline).await {
                     error!("Error: {err:#}");

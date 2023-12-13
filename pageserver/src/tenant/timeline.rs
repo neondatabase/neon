@@ -1397,6 +1397,7 @@ impl Timeline {
             Some(self.timeline_id),
             "layer flush task",
             false,
+            self.cancel.child_token(),
             async move {
                 let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
@@ -1748,6 +1749,7 @@ impl Timeline {
             Some(self.timeline_id),
             "initial size calculation",
             false,
+            self.cancel.child_token(),
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -1792,9 +1794,6 @@ impl Timeline {
                 let (_maybe_permit, circumstances) = tokio::select! {
                     permit = wait_for_permit => {
                         (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
-                    }
-                    _ = self_ref.cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
                     }
                     _ = cancel.cancelled() => {
                         return Err(BackgroundCalculationError::Cancelled);
@@ -1921,6 +1920,7 @@ impl Timeline {
             Some(self.timeline_id),
             "ondemand logical size calculation",
             false,
+            self.cancel.child_token(),
             async move {
                 let res = self_clone
                     .logical_size_calculation_task(lsn, cause, &ctx)
@@ -4153,6 +4153,7 @@ impl Timeline {
             Some(self.timeline_id),
             "download all remote layers task",
             false,
+            self.cancel.child_token(),
             async move {
                 self_clone.download_all_remote_layers(request).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
