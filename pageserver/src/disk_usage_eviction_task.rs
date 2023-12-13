@@ -86,7 +86,8 @@ enum EvictionOrder {
     /// Order the layers to be evicted by how recently they have been accessed in absolute
     /// time.
     ///
-    /// This strategy is unfair when some tenants grow faster than others.
+    /// This strategy is unfair when some tenants grow faster than others towards the slower
+    /// growing.
     #[default]
     AbsoluteAccessed,
 
@@ -94,7 +95,23 @@ enum EvictionOrder {
     /// the set of resident layers of a tenant.
     ///
     /// This strategy will always evict some layers of all of the tenants, but it is untested.
-    RelativeAccessed,
+    RelativeAccessed {
+        #[serde(default)]
+        highest_layer_count_loses_first: bool,
+    },
+}
+
+impl EvictionOrder {
+    /// Return true, if with [`Self::RelativeAccessed`] order the tenants with the highest layer
+    /// counts should lose their layers first.
+    fn highest_layer_count_loses_first(&self) -> bool {
+        match self {
+            EvictionOrder::AbsoluteAccessed => false,
+            EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first,
+            } => *highest_layer_count_loses_first,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -623,11 +640,21 @@ async fn collect_eviction_candidates(
             .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
 
-        // this is used to divide, but do not add a -1 here because not doing that will make a 10
-        // layer vs. 100 layer tenants layers:
-        // - 0.1..=1.0
-        // - 0.01..=1.0
-        let total = tenant_candidates.len();
+        // keeping the -1 or not decides if every tenant should lose their least recently accessed
+        // layer OR if this should happen in the order of having highest layer count:
+        //
+        // relative_age vs. tenant layer count without - 1:
+        // - 0.1..=1.0 (10 layers)
+        // - 0.01..=1.0 (100 layers)
+        // - 0.001..=1.0 (1000 layers)
+        let fudge = if eviction_order.highest_layer_count_loses_first() {
+            0
+        } else {
+            1
+        };
+
+        let total = tenant_candidates.len() - fudge;
+        let divider = total as f32;
 
         for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
             let file_size = layer_info.file_size();
@@ -636,7 +663,7 @@ async fn collect_eviction_candidates(
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
                 relative_last_activity: finite_f32::FiniteF32::try_from_normalized(
-                    (total - i) as f32 / total as f32,
+                    (total - i) as f32 / divider,
                 )
                 .expect("value out of range"),
             };
@@ -659,7 +686,7 @@ async fn collect_eviction_candidates(
                 (*partition, candidate.last_activity_ts)
             });
         }
-        EvictionOrder::RelativeAccessed => {
+        EvictionOrder::RelativeAccessed { .. } => {
             candidates.sort_unstable_by_key(|(partition, candidate)| {
                 (*partition, candidate.relative_last_activity)
             });
