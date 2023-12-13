@@ -1,18 +1,19 @@
 use clap::Parser;
 
+pub(crate) mod util;
+
+mod basebackup;
+
 /// Component-level performance test for pageserver.
 #[derive(clap::Parser)]
 enum Args {
-    Help,
+    Basebackup(basebackup::Args),
 }
 
 fn main() {
     let args = Args::parse();
     match args {
-        Args::Help => {
-            eprintln!("use flag --help");
-            anyhow::Ok(())
-        }
+        Args::Basebackup(args) => basebackup::main(args),
     }
     .unwrap()
 }
