@@ -12,10 +12,8 @@ on:
 
 jobs:
   kaniko:
-    name: 'kaniko'
     runs-on: [ self-hosted, dev, x64 ]
     container: gcr.io/kaniko-project/executor:v1.7.0-debug
-    environment: dev
 
     steps:
       - name: Checkout
@@ -28,10 +26,8 @@ jobs:
         run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.docker-file-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-amd64
 
   kaniko-arm:
-    name: 'kaniko-arm'
     runs-on: [ self-hosted, dev, arm64 ]
     container: gcr.io/kaniko-project/executor:v1.7.0-debug
-    environment: dev
 
     steps:
       - name: Checkout
@@ -46,7 +42,6 @@ jobs:
   manifest:
     name: 'manifest'
     runs-on: [ self-hosted, dev, x64 ]
-    environment: dev
     needs:
       - kaniko
       - kaniko-arm
