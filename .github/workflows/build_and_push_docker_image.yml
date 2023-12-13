@@ -37,7 +37,7 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.docker-file-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-arm64
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-arm64
 
   manifest:
     name: 'manifest'
