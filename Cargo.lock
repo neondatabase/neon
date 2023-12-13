@@ -5764,6 +5764,7 @@ dependencies = [
  "serde",
  "serde_assert",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "signal-hook",
  "strum",
