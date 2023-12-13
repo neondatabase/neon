@@ -9,7 +9,7 @@ use crate::{
     console::{self, errors::WakeComputeError, messages::MetricsAuxInfo, Api},
     http::StatusCode,
     protocol2::WithClientIp,
-    rate_limiter::{RateBucketInfo, EndpointRateLimiter},
+    rate_limiter::{EndpointRateLimiter, RateBucketInfo},
     stream::{PqStream, Stream},
     usage_metrics::{Ids, USAGE_METRICS},
 };
