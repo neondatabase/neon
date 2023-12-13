@@ -1,16 +1,13 @@
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use dashmap::DashMap;
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
-use tokio::time::{timeout, Instant};
+use tokio::time::{timeout, Duration, Instant};
 use tracing::info;
 
 use super::{
@@ -32,25 +29,28 @@ use super::{
 //
 // TODO: add a better bucketing here, e.g. not more than 300 requests per second,
 //       and not more than 1000 requests per 10 seconds, etc. Short bursts of reconnects
-//       are noramal during redeployments, so we should not block them.
+//       are normal during redeployments, so we should not block them.
 pub struct EndpointRateLimiter {
     map: DashMap<SmolStr, (Instant, u32)>,
-    max_rps: u32,
+    interval: Duration,
+    // requests per interval
+    max_rpi: u32,
     access_count: AtomicUsize,
 }
 
 impl EndpointRateLimiter {
-    pub fn new(max_rps: u32) -> Self {
+    pub fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
             map: DashMap::with_shard_amount(64),
-            max_rps,
+            interval,
+            max_rpi: max_rps * 1000 / interval.as_millis() as u32,
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
         }
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub fn check(&self, endpoint: SmolStr) -> bool {
-        // do a partial GC every 16k requests
+        // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // (worst case memory usage is about 2048 * shard_count * size_of::<(SmolStr, (Instant, u32))>
         //    = 2048 * 64 * 48B = 6MB)
         if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
@@ -60,8 +60,8 @@ impl EndpointRateLimiter {
         let now = Instant::now();
         let mut entry = self.map.entry(endpoint).or_insert_with(|| (now, 0));
         let (last_time, count) = *entry;
-        if now - last_time < std::time::Duration::from_secs(1) {
-            if count >= self.max_rps {
+        if now - last_time < self.interval {
+            if count >= self.max_rpi {
                 return false;
             }
             *entry = (last_time, count + 1);

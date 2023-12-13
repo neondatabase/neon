@@ -10,6 +10,7 @@ use anyhow::bail;
 use hyper::StatusCode;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tokio::time;
 use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
@@ -44,7 +45,10 @@ pub async fn task_main(
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(config.endpoint_rps_limit));
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(
+        config.endpoint_rps_limit,
+        time::Duration::from_secs(1),
+    ));
 
     // shutdown the connection pool
     tokio::spawn({
