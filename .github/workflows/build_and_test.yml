@@ -49,6 +49,9 @@ jobs:
   check-if-build-tools-dockerfile-changed:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
+    outputs:
+      image_tag: ${{ steps.dockerfile.outputs.image_tag }}
+      docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
       - name: Print Event Details
         run: cat ${{ github.event_path }}
@@ -59,20 +62,23 @@ jobs:
           fetch-depth: 0
 
       - name: Check if Dockerfile.buildtools has changed
+        id: dockerfile
         run: |
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
           echo "$updated_files"
           echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
+          echo "image_tag=pinned" >> $GITHUB_OUTPUT
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
             echo "IMAGE_TAG=$GITHUB_RUN_ID" >> $GITHUB_ENV
             echo "DOCKER_FILE_CHANGED=true" >> $GITHUB_ENV
-            echo "::set-output name=docker_file_changed::true"
+            echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+            echo "docker_file_changed=$true" >> $GITHUB_OUTPUT
           fi
 
   push-buildtools-docker-file:
     needs: [ check-permissions , check-if-build-tools-dockerfile-changed ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
-    if: ${{steps.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed}} == true
+    if: ${{ needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed }} == true
     with:
       docker-file-path: Dockerfile.buildtools
       image-name: build-tools
@@ -111,7 +117,7 @@ jobs:
     needs: [ check-permissions, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -144,7 +150,7 @@ jobs:
     needs: [ check-permissions, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -211,7 +217,7 @@ jobs:
     needs: [ check-permissions, tag, push-buildtools-docker-file ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       options: --init
     strategy:
       fail-fast: false
@@ -444,7 +450,7 @@ jobs:
     needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -483,7 +489,7 @@ jobs:
     needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -517,7 +523,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       options: --init
 
     steps:
@@ -563,7 +569,7 @@ jobs:
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools${{ github.env.IMAGE_TAG }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ github.env.IMAGE_TAG }}
       options: --init
     strategy:
       fail-fast: false
