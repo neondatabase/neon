@@ -1795,9 +1795,6 @@ impl Timeline {
                     permit = wait_for_permit => {
                         (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
-                    _ = self_ref.cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
-                    }
                     _ = cancel.cancelled() => {
                         return Err(BackgroundCalculationError::Cancelled);
                     },

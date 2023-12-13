@@ -72,7 +72,6 @@ impl Timeline {
                 let cancel = task_mgr::shutdown_token();
                 tokio::select! {
                     _ = cancel.cancelled() => { return Ok(()); }
-                    _ = self_clone.cancel.cancelled() => { return Ok(()); }
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
@@ -168,7 +167,6 @@ impl Timeline {
         let _permit = tokio::select! {
             permit = acquire_permit => permit,
             _ = cancel.cancelled() => return ControlFlow::Break(()),
-            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
         // If we evict layers but keep cached values derived from those layers, then
