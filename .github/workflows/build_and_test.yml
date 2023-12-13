@@ -58,16 +58,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check if Dockerfile.buildtool has changed
+      - name: Check if Dockerfile.buildtools has changed
         run: |
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
           echo "$updated_files"
           echo "IMAGE_TAG=pinned" >> $GITHUB_ENV
           echo "IMAGE_NAME=build-tools" >> $GITHUB_ENV
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            echo "condition is true"
             echo "DOCKER_FILE_CHANGED=$true" >> $GITHUB_ENV
-            echo "IMAGE_TAG=$GITHUB_RUN_ID" >> $GITHUB_ENV
+            ${{ github.env.IMAGE_TAG }}=$GITHUB_RUN_ID
           fi
 
   push-buildtools-docker-file:
