@@ -192,33 +192,31 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key: &str = &creds.inner.cache_key;
+        let key = &creds.inner.cache_key;
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(key) {
-            info!(key = key, "found cached compute node info");
+        if let Some(cached) = self.caches.node_info.get(&**key) {
+            info!(key = &**key, "found cached compute node info");
             return Ok(cached);
         }
 
-        let key: Arc<str> = key.into();
-
-        let permit = self.locks.get_wake_compute_permit(&key).await?;
+        let permit = self.locks.get_permit(key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
-            if let Some(cached) = self.caches.node_info.get(&key) {
-                info!(key = &*key, "found cached compute node info");
+            if let Some(cached) = self.caches.node_info.get(&**key) {
+                info!(key = &**key, "found cached compute node info");
                 return Ok(cached);
             }
         }
 
         let node = self.do_wake_compute(extra, creds).await?;
-        let (_, cached) = self.caches.node_info.insert(key.clone(), node);
-        info!(key = &*key, "created a cache entry for compute node info");
+        let (_, cached) = self.caches.node_info.insert(key.as_str().into(), node);
+        info!(key = &**key, "created a cache entry for compute node info");
 
         Ok(cached)
     }

@@ -9,7 +9,7 @@ use pbkdf2::{
 };
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::{collections::HashMap, net::IpAddr, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -23,7 +23,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
-    console,
+    console::{self, locks::ApiLocks},
     proxy::{
         neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
         NUM_DB_CONNECTIONS_OPENED_COUNTER,
@@ -114,17 +114,32 @@ pub struct GlobalConnPool {
     // Using a lock to remove any race conditions.
     // Eg cleaning up connections while a new connection is returned
     closed: RwLock<bool>,
+
+    // semaphore guarding unauthenticated postgres connections
+    connection_lock: ApiLocks,
 }
 
 impl GlobalConnPool {
     pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
-        Arc::new(Self {
+        let connection_lock =
+            ApiLocks::new("http_connect_lock", 2, 32, Duration::from_secs(10)).unwrap();
+        let this = Arc::new(Self {
             global_pool: DashMap::new(),
             global_pool_size: AtomicUsize::new(0),
             max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
             proxy_config: config,
             closed: RwLock::new(false),
-        })
+            connection_lock,
+        });
+
+        let this2 = this.clone();
+        tokio::spawn(async move {
+            this2
+                .connection_lock
+                .garbage_collect_worker(Duration::from_secs(600))
+                .await
+        });
+        this
     }
 
     pub fn shutdown(&self) {
@@ -221,6 +236,11 @@ impl GlobalConnPool {
                 return Ok(Client::new(client, pool).await);
             }
         } else {
+            // acquire a permit for un-authenticated access to the compute.
+            // to be clear, postgres will authenticate, but we want to limit the connections
+            // that have potential to be unauthenticated.
+            let _permit = self.connection_lock.get_permit(&conn_info.hostname).await?;
+
             let conn_id = uuid::Uuid::new_v4();
             info!(%conn_id, "pool: opening a new connection '{conn_info}'");
             connect_to_compute(

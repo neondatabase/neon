@@ -10,6 +10,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
+use smol_str::SmolStr;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -285,10 +286,10 @@ pub struct ApiCaches {
     pub allowed_ips: TimedLru<Arc<str>, Arc<Vec<IpPattern>>>,
 }
 
-/// Various caches for [`console`](super).
+/// Per-endpoint semaphore
 pub struct ApiLocks {
     name: &'static str,
-    node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
+    node_locks: DashMap<SmolStr, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
     registered: prometheus::IntCounter,
@@ -354,9 +355,9 @@ impl ApiLocks {
         })
     }
 
-    pub async fn get_wake_compute_permit(
+    pub async fn get_permit(
         &self,
-        key: &Arc<str>,
+        key: &SmolStr,
     ) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });
