@@ -329,6 +329,6 @@ async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &Re
 
     if !shutting_down {
         let tenant_shard_id = tenant.tenant_shard_id();
-        error!(%tenant_shard_id, "failed to calculate synthetic size for tenant: {e:#}");
+        error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
     }
 }
