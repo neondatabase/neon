@@ -102,7 +102,7 @@ jobs:
   push-buildtools-docker-file:
     needs: [ check-permissions , check-if-build-tools-dockerfile-changed ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
-    if: ${{ ! needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed }}
+    if: ${{ needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed }} == 'true'
     with:
       docker-file-path: Dockerfile.buildtools
       image-name: build-tools
