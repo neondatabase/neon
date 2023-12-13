@@ -525,24 +525,24 @@ enum EvictionCandidates {
 /// order. A caller that evicts in that order, until pressure is relieved, implements
 /// the eviction policy outlined in the module comment.
 ///
-/// # Example
+/// # Example with EvictionOrder::AbsoluteAccessed
 ///
 /// Imagine that there are two tenants, A and B, with five layers each, a-e.
 /// Each layer has size 100, and both tenant's min_resident_size is 150.
 /// The eviction order would be
 ///
 /// ```text
-/// partition last_activity_ts    tenant/layer
-/// Above     18:30               A/c
-/// Above     19:00               A/b
-/// Above     18:29               B/c
-/// Above     19:05               B/b
-/// Above     20:00               B/a
-/// Above     20:03               A/a
-/// Below     20:30               A/d
-/// Below     20:40               B/d
-/// Below     20:45               B/e
-/// Below     20:58               A/e
+/// partition last_activity_ts tenant/layer
+/// Above     18:30            A/c
+/// Above     19:00            A/b
+/// Above     18:29            B/c
+/// Above     19:05            B/b
+/// Above     20:00            B/a
+/// Above     20:03            A/a
+/// Below     20:30            A/d
+/// Below     20:40            B/d
+/// Below     20:45            B/e
+/// Below     20:58            A/e
 /// ```
 ///
 /// Now, if we need to evict 300 bytes to relieve pressure, we'd evict `A/c, A/b, B/c`.
@@ -552,6 +552,75 @@ enum EvictionCandidates {
 /// `A/c, A/b, B/c, B/b, B/a, A/a, A/d, B/d, B/e`, reaching into the `Below` partition
 /// after exhauting the `Above` partition.
 /// So, we did not respect each tenant's min_resident_size.
+///
+/// # Example with EvictionOrder::RelativeAccessed
+///
+/// ```text
+/// partition relative_age last_activity_ts tenant/layer
+/// Above     0/4          18:30            A/c
+/// Above     0/4          18:29            B/c
+/// Above     1/4          19:00            A/b
+/// Above     1/4          19:05            B/b
+/// Above     2/4          20:00            B/a
+/// Above     2/4          20:03            A/a
+/// Below     3/4          20:30            A/d
+/// Below     3/4          20:40            B/d
+/// Below     4/4          20:45            B/e
+/// Below     4/4          20:58            A/e
+/// ```
+///
+/// With tenants having the same number of layers the picture does not change much. The same with
+/// A having many more layers **resident** (not all of them listed):
+///
+/// ```text
+/// Above       0/100      18:30            A/c
+/// Above       0/4        18:29            B/c
+/// Above       1/100      19:00            A/b
+/// Above       2/100      20:03            A/a
+/// Above       3/100      20:03            A/nth_3
+/// Above       4/100      20:03            A/nth_4
+///             ...
+/// Above       1/4        19:05            B/b
+/// Above      25/100      20:04            A/nth_25
+///             ...
+/// Above       2/4        20:00            B/a
+/// Above      50/100      20:10            A/nth_50
+///             ...
+/// Below       3/4        20:40            B/d
+/// Below      99/100      20:30            A/nth_99
+/// Below       4/4        20:45            B/e
+/// Below     100/100      20:58            A/nth_100
+/// ```
+///
+/// Now it's easier to see that because A has grown fast it has more layers to get evicted. What is
+/// difficult to see is what happens on the next round assuming the evicting 23 from the above list
+/// relieves the pressure (22 A layers gone, 1 B layers gone) but a new fast growing tenant C has
+/// appeared:
+///
+/// ```text
+/// Above       0/87       20:04            A/nth_23
+/// Above       0/3        19:05            B/b
+/// Above       0/50       20:59            C/nth_0
+/// Above       1/87       20:04            A/nth_24
+/// Above       1/50       21:00            C/nth_1
+/// Above       2/87       20:04            A/nth_25
+///             ...
+/// Above      16/50       21:02            C/nth_16
+/// Above       1/3        20:00            B/a
+/// Above      27/87       20:10            A/nth_50
+///             ...
+/// Below       2/3        20:40            B/d
+/// Below      49/50       21:05            C/nth_49
+/// Below      86/87       20:30            A/nth_99
+/// Below       3/3        20:45            B/e
+/// Below      50/50       21:05            C/nth_50
+/// Below      87/87       20:58            A/nth_100
+/// ```
+///
+/// Now relieving pressure with 23 layers would cost:
+/// - tenant A 14 layers
+/// - tenant B 1 layer
+/// - tenant C 8 layers
 async fn collect_eviction_candidates(
     eviction_order: EvictionOrder,
     cancel: &CancellationToken,
