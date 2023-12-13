@@ -28,6 +28,19 @@ impl Client {
         Ok(serde_json::from_slice(&body)?)
     }
 
+    pub async fn tenant_details(
+        &self,
+        tenant_id: TenantId,
+    ) -> anyhow::Result<pageserver_api::models::TenantDetails> {
+        let uri = Uri::try_from(format!("{}/v1/tenant/{tenant_id}", self.mgmt_api_endpoint))?;
+        let resp = self.get(uri).await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("status error");
+        }
+        let body = hyper::body::to_bytes(resp).await?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+
     pub async fn list_timelines(
         &self,
         tenant_id: TenantId,
