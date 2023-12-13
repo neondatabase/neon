@@ -25,7 +25,7 @@ impl Client {
             anyhow::bail!("status error");
         }
         let body = hyper::body::to_bytes(resp).await?;
-        Ok(serde_json::from_slice(&body)?)
+        serde_json::from_slice(&body).context("deserialize")
     }
 
     pub async fn list_timelines(
@@ -41,7 +41,7 @@ impl Client {
             anyhow::bail!("status error");
         }
         let body = hyper::body::to_bytes(resp).await?;
-        Ok(serde_json::from_slice(&body)?)
+        serde_json::from_slice(&body).context("deserialize")
     }
 
     pub async fn timeline_info(
@@ -58,7 +58,7 @@ impl Client {
             anyhow::bail!("status error");
         }
         let body = hyper::body::to_bytes(resp).await?;
-        Ok(serde_json::from_slice(&body)?)
+        serde_json::from_slice(&body).context("deserialize")
     }
 
     pub async fn keyspace(
@@ -75,7 +75,7 @@ impl Client {
             anyhow::bail!("status error");
         }
         let body = hyper::body::to_bytes(resp).await?;
-        Ok(serde_json::from_slice(&body).context("deserialize")?)
+        serde_json::from_slice(&body).context("deserialize")
     }
 
     async fn get(&self, uri: Uri) -> hyper::Result<hyper::Response<hyper::Body>> {
