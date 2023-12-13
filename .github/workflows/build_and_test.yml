@@ -88,6 +88,8 @@ jobs:
   check-if-build-tools-dockerfile-changed:
     needs: [ check-permissions ]
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     outputs:
       docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
