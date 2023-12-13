@@ -19,9 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
-        with:
-          ref: ${{ github.ref }}
+        uses: actions/checkout@v1
 
       - name: Configure ECR login
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
