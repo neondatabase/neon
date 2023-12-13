@@ -94,8 +94,8 @@ impl std::str::FromStr for RateBucketInfo {
 impl RateBucketInfo {
     pub const DEFAULT_SET: [Self; 3] = [
         Self::new(300, Duration::from_secs(1)),
-        Self::new(20, Duration::from_secs(60)),
-        Self::new(10, Duration::from_secs(600)),
+        Self::new(200, Duration::from_secs(60)),
+        Self::new(100, Duration::from_secs(600)),
     ];
 
     pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
