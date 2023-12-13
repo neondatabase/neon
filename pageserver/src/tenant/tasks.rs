@@ -63,22 +63,29 @@ pub(crate) async fn concurrent_background_tasks_rate_limit(
     _ctx: &RequestContext,
     cancel: &CancellationToken,
 ) -> Result<impl Drop, RateLimitError> {
-    crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT
-        .with_label_values(&[loop_kind.as_static_str()])
-        .inc();
-    scopeguard::defer!(
-        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT.with_label_values(&[loop_kind.as_static_str()]).inc();
-    );
     tokio::select! {
-        permit = CONCURRENT_BACKGROUND_TASKS.acquire() => {
-            match permit {
-                Ok(permit) => Ok(permit),
-                Err(_closed) => unreachable!("we never close the semaphore"),
-            }
-        },
+        permit = concurrent_background_tasks_rate_limit_permit(loop_kind, _ctx) => Ok(permit),
         _ = cancel.cancelled() => {
             Err(RateLimitError::Cancelled)
         }
+    }
+}
+
+pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
+    loop_kind: BackgroundLoopKind,
+    _ctx: &RequestContext,
+) -> impl Drop {
+    crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT
+        .with_label_values(&[loop_kind.as_static_str()])
+        .inc();
+
+    scopeguard::defer!(
+        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT.with_label_values(&[loop_kind.as_static_str()]).inc();
+    );
+
+    match CONCURRENT_BACKGROUND_TASKS.acquire().await {
+        Ok(permit) => permit,
+        Err(_closed) => unreachable!("we never close the semaphore"),
     }
 }
 
