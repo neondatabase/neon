@@ -841,6 +841,7 @@ impl LayerInner {
             Some(self.desc.timeline_id),
             &task_name,
             false,
+            timeline.cancel.child_token(),
             async move {
 
                 let client = timeline

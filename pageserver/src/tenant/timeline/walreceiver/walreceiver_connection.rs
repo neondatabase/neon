@@ -167,6 +167,7 @@ pub(super) async fn handle_walreceiver_connection(
         Some(timeline.timeline_id),
         "walreceiver connection",
         false,
+        cancellation.clone(),
         async move {
             debug_assert_current_span_has_tenant_and_timeline_id();
 

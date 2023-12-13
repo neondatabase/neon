@@ -65,6 +65,7 @@ pub async fn collect_metrics(
         None,
         "synthetic size calculation",
         false,
+        cancel.child_token(),
         async move {
             calculate_synthetic_size_worker(
                 synthetic_size_calculation_interval,

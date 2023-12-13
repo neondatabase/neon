@@ -87,6 +87,7 @@ pub fn launch_disk_usage_global_eviction_task(
     storage: GenericRemoteStorage,
     state: Arc<State>,
     background_jobs_barrier: completion::Barrier,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -102,6 +103,7 @@ pub fn launch_disk_usage_global_eviction_task(
         None,
         "disk usage based eviction",
         false,
+        cancel,
         async move {
             let cancel = task_mgr::shutdown_token();
 

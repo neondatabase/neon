@@ -370,6 +370,11 @@ fn start_pageserver(
     // Top-level cancellation token for the process
     let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
 
+    pageserver::PAGESERVER_SHUTDOWN_TOKEN
+        .set(shutdown_pageserver.clone())
+        .map_err(|_| ())
+        .expect("cannot be set already");
+
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
@@ -516,6 +521,7 @@ fn start_pageserver(
             remote_storage.clone(),
             disk_usage_eviction_state.clone(),
             background_jobs_barrier.clone(),
+            shutdown_pageserver.child_token(),
         )?;
     }
 
@@ -536,13 +542,16 @@ fn start_pageserver(
             )
             .context("Failed to initialize router state")?,
         );
+
+        let cancel = shutdown_pageserver.child_token();
+
         let router = http::make_router(router_state, launch_ts, http_auth.clone())?
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
-            .with_graceful_shutdown(task_mgr::shutdown_watcher());
+            .with_graceful_shutdown(cancel.clone().cancelled_owned());
 
         task_mgr::spawn(
             MGMT_REQUEST_RUNTIME.handle(),
@@ -551,6 +560,7 @@ fn start_pageserver(
             None,
             "http endpoint listener",
             true,
+            cancel,
             async {
                 server.await?;
                 Ok(())
@@ -576,6 +586,7 @@ fn start_pageserver(
             None,
             "consumption metrics collection",
             true,
+            shutdown_pageserver.child_token(),
             async move {
                 // first wait until background jobs are cleared to launch.
                 //
@@ -624,6 +635,7 @@ fn start_pageserver(
             None,
             "libpq endpoint listener",
             true,
+            shutdown_pageserver.child_token(),
             async move {
                 page_service::libpq_listener_main(
                     conf,
@@ -657,9 +669,8 @@ fn start_pageserver(
                 signal.name()
             );
 
-            // This cancels the `shutdown_pageserver` cancellation tree.
-            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
-            // The plan is to change that over time.
+            // This cancels the `shutdown_pageserver` cancellation tree and signals cancellation to
+            // all tasks in the system.
             shutdown_pageserver.take();
             let bg_remote_storage = remote_storage.clone();
             let bg_deletion_queue = deletion_queue.clone();

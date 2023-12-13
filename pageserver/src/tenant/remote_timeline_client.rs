@@ -357,9 +357,13 @@ impl RemoteTimelineClient {
     /// Initialize the upload queue for a remote storage that already received
     /// an index file upload, i.e., it's not empty.
     /// The given `index_part` must be the one on the remote.
-    pub fn init_upload_queue(&self, index_part: &IndexPart) -> anyhow::Result<()> {
+    pub fn init_upload_queue(
+        &self,
+        index_part: &IndexPart,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_with_current_remote_index_part(index_part)?;
+        upload_queue.initialize_with_current_remote_index_part(index_part, cancel)?;
         self.update_remote_physical_size_gauge(Some(index_part));
         info!(
             "initialized upload queue from remote index with {} layer files",
@@ -373,9 +377,10 @@ impl RemoteTimelineClient {
     pub fn init_upload_queue_for_empty_remote(
         &self,
         local_metadata: &TimelineMetadata,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         let mut upload_queue = self.upload_queue.lock().unwrap();
-        upload_queue.initialize_empty_remote(local_metadata)?;
+        upload_queue.initialize_empty_remote(local_metadata, cancel)?;
         self.update_remote_physical_size_gauge(None);
         info!("initialized upload queue as empty");
         Ok(())
@@ -386,6 +391,7 @@ impl RemoteTimelineClient {
     pub fn init_upload_queue_stopped_to_continue_deletion(
         &self,
         index_part: &IndexPart,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         // FIXME: consider newtype for DeletedIndexPart.
         let deleted_at = index_part.deleted_at.ok_or(anyhow::anyhow!(
@@ -394,7 +400,7 @@ impl RemoteTimelineClient {
 
         {
             let mut upload_queue = self.upload_queue.lock().unwrap();
-            upload_queue.initialize_with_current_remote_index_part(index_part)?;
+            upload_queue.initialize_with_current_remote_index_part(index_part, cancel)?;
             self.update_remote_physical_size_gauge(Some(index_part));
         }
         // also locks upload queue, without dropping the guard above it will be a deadlock
@@ -1227,6 +1233,7 @@ impl RemoteTimelineClient {
                 Some(self.timeline_id),
                 "remote upload",
                 false,
+                upload_queue.cancel.child_token(),
                 async move {
                     self_rc.perform_upload_task(task).await;
                     Ok(())
@@ -1561,6 +1568,13 @@ impl RemoteTimelineClient {
                         dangling_files: HashMap::default(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+                        // TODO: this is the only place where we cannot reasonably continue the
+                        // tree
+                        cancel: crate::PAGESERVER_SHUTDOWN_TOKEN
+                            .get()
+                            .cloned()
+                            .unwrap_or_default()
+                            .child_token(),
                     };
 
                     let upload_queue = std::mem::replace(

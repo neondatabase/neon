@@ -486,6 +486,7 @@ impl Tenant {
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
+            self.cancel.child_token(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -503,7 +504,7 @@ impl Tenant {
                 .remote_client
                 .as_ref()
                 .unwrap()
-                .init_upload_queue(index_part)?;
+                .init_upload_queue(index_part, timeline.cancel.child_token())?;
         } else if self.remote_storage.is_some() {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -511,7 +512,7 @@ impl Tenant {
             // If control plane retries timeline creation in the meantime, the mgmt API handler
             // for timeline creation will coalesce on the upload we queue here.
             let rtc = timeline.remote_client.as_ref().unwrap();
-            rtc.init_upload_queue_for_empty_remote(&metadata)?;
+            rtc.init_upload_queue_for_empty_remote(&metadata, timeline.cancel.child_token())?;
             rtc.schedule_index_upload_for_metadata_update(&metadata)?;
         }
 
@@ -605,6 +606,12 @@ impl Tenant {
         let tenant_clone = Arc::clone(&tenant);
 
         let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
+        let cancel = crate::PAGESERVER_SHUTDOWN_TOKEN
+            .get()
+            .cloned()
+            .unwrap_or_default()
+            .child_token();
+
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
@@ -612,6 +619,7 @@ impl Tenant {
             None,
             "attach tenant",
             false,
+            cancel,
             async move {
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
                 let make_broken =
@@ -871,8 +879,10 @@ impl Tenant {
 
         // Walk through deleted timelines, resume deletion
         for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
+            let cancel = self.cancel.child_token();
+
             remote_timeline_client
-                .init_upload_queue_stopped_to_continue_deletion(&index_part)
+                .init_upload_queue_stopped_to_continue_deletion(&index_part, cancel.child_token())
                 .context("init queue stopped")
                 .map_err(LoadLocalTimelineError::ResumeDeletion)?;
 
@@ -882,6 +892,7 @@ impl Tenant {
                 &index_part.metadata,
                 Some(remote_timeline_client),
                 self.deletion_queue_client.clone(),
+                cancel,
             )
             .await
             .context("resume_deletion")
@@ -1215,7 +1226,7 @@ impl Tenant {
                 timeline_id,
                 self.generation,
             );
-            let cancel_clone = cancel.clone();
+            let cancel_clone = cancel.child_token();
             part_downloads.spawn(
                 async move {
                     debug!("starting index part download");
@@ -1376,6 +1387,7 @@ impl Tenant {
                 &local_metadata,
                 None,
                 self.deletion_queue_client.clone(),
+                self.cancel.child_token(),
             )
             .await
             .context("resume deletion")
@@ -2290,6 +2302,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
+        cancel: CancellationToken,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -2318,7 +2331,7 @@ impl Tenant {
             resources,
             pg_version,
             state,
-            self.cancel.child_token(),
+            cancel,
         );
 
         Ok(timeline)
@@ -2391,6 +2404,12 @@ impl Tenant {
             }
         });
 
+        let cancel = crate::PAGESERVER_SHUTDOWN_TOKEN
+            .get()
+            .cloned()
+            .unwrap_or_default()
+            .child_token();
+
         Tenant {
             tenant_shard_id,
             shard_identity,
@@ -2410,7 +2429,7 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
-            cancel: CancellationToken::default(),
+            cancel,
             gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),
         }
     }
@@ -3154,8 +3173,11 @@ impl Tenant {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
+
+        let cancel = self.cancel.child_token();
+
         if let Some(remote_client) = &resources.remote_client {
-            remote_client.init_upload_queue_for_empty_remote(new_metadata)?;
+            remote_client.init_upload_queue_for_empty_remote(new_metadata, cancel.child_token())?;
         }
 
         let timeline_struct = self
@@ -3165,6 +3187,7 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
+                cancel,
             )
             .context("Failed to create timeline data structure")?;
 

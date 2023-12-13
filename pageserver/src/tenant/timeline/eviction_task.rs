@@ -67,10 +67,12 @@ impl Timeline {
                 self.tenant_shard_id, self.timeline_id
             ),
             false,
+            self.cancel.child_token(),
             async move {
                 let cancel = task_mgr::shutdown_token();
                 tokio::select! {
                     _ = cancel.cancelled() => { return Ok(()); }
+                    _ = self_clone.cancel.cancelled() => { return Ok(()); }
                     _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
                 };
 
