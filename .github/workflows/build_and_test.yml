@@ -82,9 +82,6 @@ jobs:
     outputs:
       docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
-      - name: Print Event Details
-        run: cat ${{ github.event_path }}
-
       - name: Checkout Repository
         uses: actions/checkout@v3
         with:
