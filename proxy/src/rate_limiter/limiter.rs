@@ -476,7 +476,7 @@ mod tests {
     use futures::{task::noop_waker_ref, Future};
 
     use super::{Limiter, Outcome};
-    use crate::rate_limiter::RateLimitAlgorithm;
+    use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm};
 
     #[tokio::test]
     async fn it_works() {
@@ -584,5 +584,27 @@ mod tests {
         assert_eq!(state.in_flight(), 2); // For disabled limiter, it's expected.
         limiter.release(token1, None).await;
         limiter.release(token2, None).await;
+    }
+
+    #[test]
+    fn rate_bucket_rpi() {
+        let rate_bucket = RateBucketInfo::new(50, Duration::from_secs(5));
+        assert_eq!(rate_bucket.max_rpi, 50 * 5);
+
+        let rate_bucket = RateBucketInfo::new(50, Duration::from_millis(500));
+        assert_eq!(rate_bucket.max_rpi, 50 / 2);
+    }
+
+    #[test]
+    fn rate_bucket_parse() {
+        let rate_bucket: RateBucketInfo = "100@10s".parse().unwrap();
+        assert_eq!(rate_bucket.interval, Duration::from_secs(10));
+        assert_eq!(rate_bucket.max_rpi, 100 * 10);
+        assert_eq!(rate_bucket.to_string(), "100@10s");
+
+        let rate_bucket: RateBucketInfo = "100@1m".parse().unwrap();
+        assert_eq!(rate_bucket.interval, Duration::from_secs(60));
+        assert_eq!(rate_bucket.max_rpi, 100 * 60);
+        assert_eq!(rate_bucket.to_string(), "100@1m");
     }
 }
