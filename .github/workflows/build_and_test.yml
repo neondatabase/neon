@@ -111,7 +111,7 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
     with:
-      docker-file-path: Dockerfile.buildtools
+      dockerfile-path: Dockerfile.buildtools
       image-name: build-tools
     secrets: inherit
 
