@@ -36,6 +36,8 @@ pub(crate) struct Args {
     runtime: Option<humantime::Duration>,
     #[clap(long)]
     per_target_rate_limit: Option<usize>,
+    #[clap(long)]
+    limit_to_first_n_targets: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -213,23 +215,26 @@ async fn main_impl(
                 async move {
                     (
                         tenant_id,
-                        mgmt_api_client.list_timelines(tenant_id).await.unwrap(),
+                        mgmt_api_client.tenant_details(tenant_id).await.unwrap(),
                     )
                 }
             });
         }
         while let Some(res) = js.join_next().await {
-            let (tenant_id, tl_infos) = res.unwrap();
-            for tl in tl_infos {
+            let (tenant_id, details) = res.unwrap();
+            for timeline_id in details.timelines {
                 timelines.push(TenantTimelineId {
                     tenant_id,
-                    timeline_id: tl.timeline_id,
+                    timeline_id,
                 });
             }
         }
     }
 
     info!("timelines:\n{:?}", timelines);
+    info!("number of timelines:\n{:?}", timelines.len());
+
+
 
     let mut js = JoinSet::new();
     for timeline in &timelines {
@@ -345,40 +350,42 @@ async fn main_impl(
         Some(rps_limit) => Box::pin(async move {
             let period = Duration::from_secs_f64(1.0 / (rps_limit as f64));
 
-            let make_timeline_task: &dyn Fn(TenantTimelineId) -> Pin<Box<dyn Send + Future<Output = ()>>> =
-                &|timeline| {
-                    let sender = work_senders.get(&timeline).unwrap();
-                    let ranges: Vec<KeyRange> = all_ranges
-                        .iter()
-                        .filter(|r| r.timeline == timeline)
-                        .cloned()
-                        .collect();
-                    let weights = rand::distributions::weighted::WeightedIndex::new(
-                        ranges.iter().map(|v| v.len()),
-                    )
-                    .unwrap();
+            let make_timeline_task: &dyn Fn(
+                TenantTimelineId,
+            )
+                -> Pin<Box<dyn Send + Future<Output = ()>>> = &|timeline| {
+                let sender = work_senders.get(&timeline).unwrap();
+                let ranges: Vec<KeyRange> = all_ranges
+                    .iter()
+                    .filter(|r| r.timeline == timeline)
+                    .cloned()
+                    .collect();
+                let weights = rand::distributions::weighted::WeightedIndex::new(
+                    ranges.iter().map(|v| v.len()),
+                )
+                .unwrap();
 
-                    Box::pin(async move {
-                        let mut ticker = tokio::time::interval(period);
-                        ticker.set_missed_tick_behavior(
-                            /* TODO review this choice */
-                            tokio::time::MissedTickBehavior::Burst,
-                        );
-                        loop {
-                            ticker.tick().await;
-                            let (range, key) = {
-                                let mut rng = rand::thread_rng();
-                                let r = &ranges[weights.sample(&mut rng)];
-                                let key: i128 = rng.gen_range(r.start..r.end);
-                                let key = repository::Key::from_i128(key);
-                                let (rel_tag, block_no) = key_to_rel_block(key)
-                                    .expect("we filter non-rel-block keys out above");
-                                (r, RelTagBlockNo { rel_tag, block_no })
-                            };
-                            sender.send((key, range.timeline_lsn)).await.ok().unwrap();
-                        }
-                    })
-                };
+                Box::pin(async move {
+                    let mut ticker = tokio::time::interval(period);
+                    ticker.set_missed_tick_behavior(
+                        /* TODO review this choice */
+                        tokio::time::MissedTickBehavior::Burst,
+                    );
+                    loop {
+                        ticker.tick().await;
+                        let (range, key) = {
+                            let mut rng = rand::thread_rng();
+                            let r = &ranges[weights.sample(&mut rng)];
+                            let key: i128 = rng.gen_range(r.start..r.end);
+                            let key = repository::Key::from_i128(key);
+                            let (rel_tag, block_no) = key_to_rel_block(key)
+                                .expect("we filter non-rel-block keys out above");
+                            (r, RelTagBlockNo { rel_tag, block_no })
+                        };
+                        sender.send((key, range.timeline_lsn)).await.ok().unwrap();
+                    }
+                })
+            };
 
             let tasks: Vec<_> = work_senders
                 .keys()
