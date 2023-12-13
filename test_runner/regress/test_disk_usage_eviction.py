@@ -439,6 +439,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     cold_size = later_du_by_timeline[cold]
     cold_upper = 2 * env.layer_size
 
+    log.info(f"tenants: warm={warm[0]}, cold={cold[0]}")
     log.info(
         f"expecting for warm tenant: {human_bytes(warm_lower)} < {human_bytes(warm_size)} < {human_bytes(warm_upper)}"
     )
