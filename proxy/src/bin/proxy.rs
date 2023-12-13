@@ -112,6 +112,9 @@ struct ProxyCliArgs {
     /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     rate_limiter_timeout: tokio::time::Duration,
+    /// Endpoint rate limiter max number of requests per second.
+    #[clap(long, default_value_t = 300)]
+    endpoint_rps_limit: u32,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
     initial_limit: usize,
@@ -317,6 +320,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         authentication_config,
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
+        endpoint_rps_limit: args.endpoint_rps_limit,
     }));
 
     Ok(config)
