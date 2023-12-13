@@ -15,7 +15,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
-use crate::rate_limiter::EndpointRateLimiter;
+use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
@@ -45,10 +45,10 @@ pub async fn task_main(
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new([RateBucketInfo::new(
         config.endpoint_rps_limit,
         time::Duration::from_secs(1),
-    ));
+    )]));
 
     // shutdown the connection pool
     tokio::spawn({
