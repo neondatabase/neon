@@ -339,3 +339,30 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+    use proxy::rate_limiter::RateBucketInfo;
+
+    #[test]
+    fn parse_endpoint_rps_limit() {
+        let config = super::ProxyCliArgs::parse_from([
+            "proxy",
+            "--endpoint-rps-limit",
+            "100@1s",
+            "--endpoint-rps-limit",
+            "20@30s",
+        ]);
+
+        assert_eq!(
+            config.endpoint_rps_limit,
+            vec![
+                RateBucketInfo::new(100, Duration::from_secs(1)),
+                RateBucketInfo::new(20, Duration::from_secs(30)),
+            ]
+        );
+    }
+}

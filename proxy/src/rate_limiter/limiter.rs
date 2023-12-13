@@ -58,7 +58,7 @@ impl RateBucket {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct RateBucketInfo {
     pub interval: Duration,
     // requests per interval
@@ -493,8 +493,10 @@ mod tests {
     use std::{pin::pin, task::Context, time::Duration};
 
     use futures::{task::noop_waker_ref, Future};
+    use smol_str::SmolStr;
+    use tokio::time;
 
-    use super::{Limiter, Outcome};
+    use super::{EndpointRateLimiter, Limiter, Outcome};
     use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm};
 
     #[tokio::test]
@@ -641,5 +643,51 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         RateBucketInfo::validate(&mut rates).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_rate_limits() {
+        let mut rates: Vec<RateBucketInfo> = ["100@1s", "20@30s"]
+            .into_iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        RateBucketInfo::validate(&mut rates).unwrap();
+        let limiter = EndpointRateLimiter::new(Vec::leak(rates));
+
+        let endpoint = SmolStr::from("ep-my-endpoint-1234");
+
+        time::pause();
+
+        for _ in 0..100 {
+            assert!(limiter.check(endpoint.clone()));
+        }
+        // more connections fail
+        assert!(!limiter.check(endpoint.clone()));
+
+        // fail even after 500ms as it's in the same bucket
+        time::advance(time::Duration::from_millis(500)).await;
+        assert!(!limiter.check(endpoint.clone()));
+
+        // after a full 1s, 100 requests are allowed again
+        time::advance(time::Duration::from_millis(500)).await;
+        for _ in 1..6 {
+            for _ in 0..100 {
+                assert!(limiter.check(endpoint.clone()));
+            }
+            time::advance(time::Duration::from_millis(1000)).await;
+        }
+
+        // more connections after 600 will exceed the 20rps@30s limit
+        assert!(!limiter.check(endpoint.clone()));
+
+        // will still fail before the 30 second limit
+        time::advance(time::Duration::from_millis(30_000 - 6_000 - 1)).await;
+        assert!(!limiter.check(endpoint.clone()));
+
+        // after the full 30 seconds, 100 requests are allowed again
+        time::advance(time::Duration::from_millis(1)).await;
+        for _ in 0..100 {
+            assert!(limiter.check(endpoint.clone()));
+        }
     }
 }
