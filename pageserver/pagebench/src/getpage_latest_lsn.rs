@@ -37,6 +37,8 @@ pub(crate) struct Args {
     runtime: Option<humantime::Duration>,
     #[clap(long)]
     per_target_rate_limit: Option<usize>,
+    #[clap(long)]
+    limit_to_first_n_targets: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -218,23 +220,26 @@ async fn main_impl(
                 async move {
                     (
                         tenant_id,
-                        mgmt_api_client.list_timelines(tenant_id).await.unwrap(),
+                        mgmt_api_client.tenant_details(tenant_id).await.unwrap(),
                     )
                 }
             });
         }
         while let Some(res) = js.join_next().await {
-            let (tenant_id, tl_infos) = res.unwrap();
-            for tl in tl_infos {
+            let (tenant_id, details) = res.unwrap();
+            for timeline_id in details.timelines {
                 timelines.push(TenantTimelineId {
                     tenant_id,
-                    timeline_id: tl.timeline_id,
+                    timeline_id,
                 });
             }
         }
     }
 
     info!("timelines:\n{:?}", timelines);
+    info!("number of timelines:\n{:?}", timelines.len());
+
+
 
     let mut js = JoinSet::new();
     for timeline in &timelines {
