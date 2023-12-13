@@ -283,7 +283,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
+    } else if let Some(client) = ControlPlaneClient::new(conf, cancel.child_token()) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach().await {

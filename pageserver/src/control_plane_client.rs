@@ -40,7 +40,7 @@ pub trait ControlPlaneGenerationsApi {
 impl ControlPlaneClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
-    pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
+    pub fn new(conf: &'static PageServerConf, cancel: CancellationToken) -> Option<Self> {
         let mut url = match conf.control_plane_api.as_ref() {
             Some(u) => u.clone(),
             None => return None,
@@ -67,7 +67,7 @@ impl ControlPlaneClient {
             http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
-            cancel: cancel.clone(),
+            cancel,
         })
     }
 

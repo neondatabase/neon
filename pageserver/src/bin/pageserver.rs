@@ -376,7 +376,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        ControlPlaneClient::new(conf, shutdown_pageserver.child_token()),
         conf,
     );
     if let Some(deletion_workers) = deletion_workers {
@@ -420,12 +420,12 @@ fn start_pageserver(
             deletion_queue_client,
         },
         order,
-        shutdown_pageserver.clone(),
+        shutdown_pageserver.child_token(),
     ))?;
     let tenant_manager = Arc::new(tenant_manager);
 
     BACKGROUND_RUNTIME.spawn({
-        let shutdown_pageserver = shutdown_pageserver.clone();
+        let shutdown_pageserver = shutdown_pageserver.child_token();
         let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
             let guard = scopeguard::guard_on_success((), |_| {
