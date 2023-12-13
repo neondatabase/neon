@@ -74,6 +74,27 @@ pub struct DiskUsageEvictionTaskConfig {
     pub period: Duration,
     #[cfg(feature = "testing")]
     pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
+    /// Select sorting for evicted layers
+    #[serde(default)]
+    pub eviction_order: EvictionOrder,
+}
+
+/// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
+/// partitioning.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum EvictionOrder {
+    /// Order the layers to be evicted by how recently they have been accessed in absolute
+    /// time.
+    ///
+    /// This strategy is unfair when some tenants grow faster than others.
+    #[default]
+    AbsoluteAccessed,
+
+    /// Order the layers to be evicted by how recently they have been accessed relatively within
+    /// the set of resident layers of a tenant.
+    ///
+    /// This strategy will always evict some layers of all of the tenants, but it is untested.
+    RelativeAccessed,
 }
 
 #[derive(Default)]
@@ -192,7 +213,14 @@ async fn disk_usage_eviction_task_iteration(
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
-    let res = disk_usage_eviction_task_iteration_impl(state, storage, usage_pre, cancel).await;
+    let res = disk_usage_eviction_task_iteration_impl(
+        state,
+        storage,
+        usage_pre,
+        task_config.eviction_order,
+        cancel,
+    )
+    .await;
     match res {
         Ok(outcome) => {
             debug!(?outcome, "disk_usage_eviction_iteration finished");
@@ -278,6 +306,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     state: &State,
     _storage: &GenericRemoteStorage,
     usage_pre: U,
+    eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
     // use tokio's mutex to get a Sync guard (instead of std::sync::Mutex)
@@ -297,7 +326,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let candidates = match collect_eviction_candidates(cancel).await? {
+    let candidates = match collect_eviction_candidates(eviction_order, cancel).await? {
         EvictionCandidates::Cancelled => {
             return Ok(IterationOutcome::Cancelled);
         }
@@ -507,6 +536,7 @@ enum EvictionCandidates {
 /// after exhauting the `Above` partition.
 /// So, we did not respect each tenant's min_resident_size.
 async fn collect_eviction_candidates(
+    eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
     // get a snapshot of the list of tenants
@@ -622,9 +652,19 @@ async fn collect_eviction_candidates(
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
-    candidates.sort_unstable_by_key(|(partition, candidate)| {
-        (*partition, candidate.relative_last_activity)
-    });
+
+    match eviction_order {
+        EvictionOrder::AbsoluteAccessed => {
+            candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.last_activity_ts)
+            });
+        }
+        EvictionOrder::RelativeAccessed => {
+            candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.relative_last_activity)
+            });
+        }
+    }
 
     Ok(EvictionCandidates::Finished(candidates))
 }
