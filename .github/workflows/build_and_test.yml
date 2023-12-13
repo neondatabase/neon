@@ -442,7 +442,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, tag ]
+    needs: [ check-permissions, build-neon, push-buildtools-docker-file, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
@@ -481,7 +481,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    needs: [ check-permissions, build-neon ,tag]
+    needs: [ check-permissions, build-neon, push-buildtools-docker-file, tag]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
@@ -560,7 +560,7 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, tag ]
+    needs: [ check-permissions, regress-tests, push-buildtools-docker-file, tag ]
 
     runs-on: [ self-hosted, gen3, small ]
     container:
