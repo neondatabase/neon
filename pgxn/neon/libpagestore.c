@@ -637,7 +637,7 @@ pg_init_libpagestore(void)
 							   check_neon_id, NULL, NULL);
 
 	DefineCustomIntVariable("neon.stripe_size",
-							"sharding sripe size",
+							"sharding stripe size",
 							NULL,
 							&stripe_size,
 							256, 1, INT_MAX,
