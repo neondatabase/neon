@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use anyhow::Context;
-use metrics::IntCounter;
+use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
 
@@ -25,7 +25,7 @@ impl LogFormat {
     }
 }
 
-struct TracingEventCount {
+struct TracingEventCountMetric {
     error: IntCounter,
     warn: IntCounter,
     info: IntCounter,
@@ -33,23 +33,27 @@ struct TracingEventCount {
     trace: IntCounter,
 }
 
-static TRACING_EVENT_COUNT: Lazy<TracingEventCount> = Lazy::new(|| {
+static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
     let vec = metrics::register_int_counter_vec!(
         "libmetrics_tracing_event_count",
         "Number of tracing events, by level",
         &["level"]
     )
     .expect("failed to define metric");
-    TracingEventCount {
-        error: vec.with_label_values(&["error"]),
-        warn: vec.with_label_values(&["warn"]),
-        info: vec.with_label_values(&["info"]),
-        debug: vec.with_label_values(&["debug"]),
-        trace: vec.with_label_values(&["trace"]),
-    }
+    TracingEventCountMetric::new(vec)
 });
 
-impl TracingEventCount {
+impl TracingEventCountMetric {
+    fn new(vec: IntCounterVec) -> Self {
+        Self {
+            error: vec.with_label_values(&["error"]),
+            warn: vec.with_label_values(&["warn"]),
+            info: vec.with_label_values(&["info"]),
+            debug: vec.with_label_values(&["debug"]),
+            trace: vec.with_label_values(&["trace"]),
+        }
+    }
+
     fn inc_for_level(&self, level: tracing::Level) {
         let counter = match level {
             tracing::Level::ERROR => &self.error,
@@ -62,7 +66,7 @@ impl TracingEventCount {
     }
 }
 
-struct TracingEventCountLayer;
+struct TracingEventCountLayer(&'static TracingEventCountMetric);
 
 impl<S> tracing_subscriber::layer::Layer<S> for TracingEventCountLayer
 where
@@ -73,7 +77,7 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        TRACING_EVENT_COUNT.inc_for_level(*event.metadata().level());
+        self.0.inc_for_level(*event.metadata().level());
     }
 }
 
@@ -127,7 +131,9 @@ pub fn init(
         };
         log_layer.with_filter(rust_log_env_filter())
     });
-    let r = r.with(TracingEventCountLayer.with_filter(rust_log_env_filter()));
+    let r = r.with(
+        TracingEventCountLayer(&TRACING_EVENT_COUNT_METRIC).with_filter(rust_log_env_filter()),
+    );
     match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => r
             .with(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
@@ -278,14 +284,14 @@ impl std::fmt::Debug for SecretString {
 mod tests {
     use metrics::{core::Opts, IntCounterVec};
 
-    use super::TracingEventCountLayer;
+    use crate::logging::{TracingEventCountLayer, TracingEventCountMetric};
 
     #[test]
     fn tracing_event_count_metric() {
         let counter_vec =
             IntCounterVec::new(Opts::new("testmetric", "testhelp"), &["level"]).unwrap();
-        let counter_vec = Box::leak(Box::new(counter_vec)); // make it 'static
-        let layer = TracingEventCountLayer(counter_vec);
+        let metric = Box::leak(Box::new(TracingEventCountMetric::new(counter_vec.clone())));
+        let layer = TracingEventCountLayer(metric);
         use tracing_subscriber::prelude::*;
 
         tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
