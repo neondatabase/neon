@@ -59,14 +59,14 @@ impl RateBucket {
 
 #[derive(Clone, Copy)]
 pub struct RateBucketInfo {
-    interval: Duration,
+    pub interval: Duration,
     // requests per interval
-    max_rpi: u32,
+    pub max_rpi: u32,
 }
 
 impl std::fmt::Display for RateBucketInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rps = self.max_rpi * self.interval.as_millis() as u32 / 1000;
+        let rps = self.max_rpi * 1000 / self.interval.as_millis() as u32;
         write!(f, "{rps}@{}", humantime::format_duration(self.interval))
     }
 }
@@ -99,7 +99,7 @@ impl RateBucketInfo {
     pub const fn new(max_rps: u32, interval: Duration) -> Self {
         Self {
             interval,
-            max_rpi: max_rps * 1000 / interval.as_millis() as u32,
+            max_rpi: max_rps * interval.as_millis() as u32 / 1000,
         }
     }
 }
