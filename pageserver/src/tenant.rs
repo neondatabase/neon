@@ -1552,6 +1552,10 @@ impl Tenant {
             .collect()
     }
 
+    pub fn list_timeline_ids(&self) -> Vec<TimelineId> {
+        self.timelines.lock().unwrap().keys().cloned().collect()
+    }
+
     /// This is used to create the initial 'main' timeline during bootstrapping,
     /// or when importing a new base backup. The caller is expected to load an
     /// initial image of the datadir to the new timeline after this.
