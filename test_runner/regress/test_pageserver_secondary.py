@@ -1,9 +1,11 @@
 import random
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
+from fixtures.pageserver.utils import assert_prefix_empty, tenant_delete_wait_completed
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
@@ -374,3 +376,143 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     log.info(f"Read back heatmap: {heatmap_second}")
     assert heatmap_second != heatmap_first
     validate_heatmap(heatmap_second)
+
+
+def list_layers(pageserver, tenant_id: TenantId, timeline_id: TimelineId) -> list[Path]:
+    """
+    Inspect local storage on a pageserver to discover which layer files are present.
+
+    :return: list of relative paths to layers, from the timeline root.
+    """
+    timeline_path = pageserver.timeline_dir(tenant_id, timeline_id)
+
+    def relative(p: Path) -> Path:
+        return p.relative_to(timeline_path)
+
+    return sorted(
+        list(
+            map(
+                relative,
+                filter(
+                    lambda path: path.name != "metadata"
+                    and "ephemeral" not in path.name
+                    and "temp" not in path.name,
+                    timeline_path.glob("*"),
+                ),
+            )
+        )
+    )
+
+
+def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
+    """
+    Test the overall data flow in secondary mode:
+     - Heatmap uploads from the attached location
+     - Heatmap & layer downloads from the secondary location
+     - Eviction of layers on the attached location results in deletion
+       on the secondary location as well.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+    )
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    assert env.attachment_service is not None
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    ps_attached = env.pageservers[0]
+    ps_secondary = env.pageservers[1]
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init(env.pageservers[0].id)
+    workload.write_rows(256, ps_attached.id)
+
+    # Configure a secondary location
+    log.info("Setting up secondary location...")
+    ps_secondary.tenant_location_configure(
+        tenant_id,
+        {
+            "mode": "Secondary",
+            "secondary_conf": {"warm": True},
+            "tenant_conf": {},
+        },
+    )
+    readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
+    log.info(f"Read back conf: {readback_conf}")
+
+    # Explicit upload/download cycle
+    # ==============================
+    log.info("Synchronizing after initial write...")
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+
+    ps_secondary.http_client().tenant_secondary_download(tenant_id)
+
+    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
+        ps_secondary, tenant_id, timeline_id
+    )
+
+    # Make changes on attached pageserver, check secondary downloads them
+    # ===================================================================
+    log.info("Synchronizing after subsequent write...")
+    workload.churn_rows(128, ps_attached.id)
+
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+    ps_secondary.http_client().tenant_secondary_download(tenant_id)
+
+    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
+        ps_secondary, tenant_id, timeline_id
+    )
+
+    # FIXME: this sleep is needed to avoid on-demand promotion of the layers we evict, while
+    # walreceiver is still doing something.
+    import time
+
+    time.sleep(5)
+
+    # Do evictions on attached pageserver, check secondary follows along
+    # ==================================================================
+    log.info("Evicting a layer...")
+    layer_to_evict = list_layers(ps_attached, tenant_id, timeline_id)[0]
+    ps_attached.http_client().evict_layer(tenant_id, timeline_id, layer_name=layer_to_evict.name)
+
+    log.info("Synchronizing after eviction...")
+    ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+    ps_secondary.http_client().tenant_secondary_download(tenant_id)
+
+    assert layer_to_evict not in list_layers(ps_attached, tenant_id, timeline_id)
+    assert list_layers(ps_attached, tenant_id, timeline_id) == list_layers(
+        ps_secondary, tenant_id, timeline_id
+    )
+
+    # Scrub the remote storage
+    # ========================
+    # This confirms that the scrubber isn't upset by the presence of the heatmap
+    S3Scrubber(neon_env_builder.test_output_dir, neon_env_builder).scan_metadata()
+
+    # Detach secondary and delete tenant
+    # ===================================
+    # This confirms that the heatmap gets cleaned up as well as other normal content.
+    log.info("Detaching secondary location...")
+    ps_secondary.tenant_location_configure(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+        },
+    )
+
+    log.info("Deleting tenant...")
+    tenant_delete_wait_completed(ps_attached.http_client(), tenant_id, 10)
+
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
