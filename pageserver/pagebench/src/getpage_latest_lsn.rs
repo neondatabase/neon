@@ -3,15 +3,14 @@ use futures::future::join_all;
 use pageserver::pgdatadir_mapping::key_to_rel_block;
 use pageserver::repository;
 use pageserver_api::key::is_rel_block_key;
-use pageserver_api::shard::TenantShardId;
 use pageserver_client::page_service::RelTagBlockNo;
+use utils::id::TenantId;
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
 use tracing::{info, instrument};
-use utils::id::TenantShardId;
 use utils::logging;
 
 use std::cell::RefCell;
@@ -202,12 +201,16 @@ async fn main_impl(
     if args.targets.is_some() {
         timelines = args.targets.clone().unwrap();
     } else {
-        let tenants: Vec<TenantShardId> = mgmt_api_client
-            .list_tenants()
-            .await?
-            .into_iter()
-            .map(|ti| ti.id)
-            .collect();
+        let mut tenants: Vec<TenantId> = Vec::new();
+        for ti in mgmt_api_client.list_tenants().await? {
+            if !ti.id.is_unsharded() {
+                anyhow::bail!(
+                    "only unsharded tenants are supported at this time: {}",
+                    ti.id
+                );
+            }
+            tenants.push(ti.id.tenant_id)
+        }
         let mut js = JoinSet::new();
         for tenant_id in tenants {
             js.spawn({
@@ -224,7 +227,7 @@ async fn main_impl(
             let (tenant_id, tl_infos) = res.unwrap();
             for tl in tl_infos {
                 timelines.push(TenantTimelineId {
-                    tenant_shard_id: tenant_id,
+                    tenant_id,
                     timeline_id: tl.timeline_id,
                 });
             }
@@ -240,7 +243,7 @@ async fn main_impl(
             let timeline = *timeline;
             async move {
                 let partitioning = mgmt_api_client
-                    .keyspace(timeline.tenant_shard_id, timeline.timeline_id)
+                    .keyspace(timeline.tenant_id, timeline.timeline_id)
                     .await?;
                 let lsn = partitioning.at_lsn;
 
@@ -443,7 +446,7 @@ async fn client(
         .await
         .unwrap();
     let mut client = client
-        .pagestream(timeline.tenant_shard_id, timeline.timeline_id)
+        .pagestream(timeline.tenant_id, timeline.timeline_id)
         .await
         .unwrap();
 
