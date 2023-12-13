@@ -715,19 +715,27 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        let _g = self.compaction_lock.lock().await;
+        // most likely the cancellation token is from background task, but in tests it could be the
+        // request task as well.
+
+        let prepare = async move {
+            let guard = self.compaction_lock.lock().await;
+
+            let permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
+                BackgroundLoopKind::Compaction,
+                ctx,
+            )
+            .await;
+
+            (guard, permit)
+        };
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
-        let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
-            BackgroundLoopKind::Compaction,
-            ctx,
-            cancel,
-        )
-        .await
-        {
-            Ok(permit) => permit,
-            Err(RateLimitError::Cancelled) => return Ok(()),
+        let (_guard, _permit) = tokio::select! {
+            tuple = prepare => { tuple },
+            _ = self.cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Ok(()),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
