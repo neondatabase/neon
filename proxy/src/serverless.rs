@@ -14,6 +14,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
@@ -43,6 +44,7 @@ pub async fn task_main(
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(config.endpoint_rps_limit));
 
     // shutdown the connection pool
     tokio::spawn({
@@ -91,6 +93,7 @@ pub async fn task_main(
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
             let ws_connections = ws_connections.clone();
+            let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
             async move {
                 let peer_addr = match client_addr {
@@ -103,6 +106,7 @@ pub async fn task_main(
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
                         let ws_connections = ws_connections.clone();
+                        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
                         async move {
                             let cancel_map = Arc::new(CancelMap::default());
@@ -117,6 +121,7 @@ pub async fn task_main(
                                 session_id,
                                 sni_name,
                                 peer_addr.ip(),
+                                endpoint_rate_limiter,
                             )
                             .instrument(info_span!(
                                 "serverless",
@@ -190,6 +195,7 @@ async fn request_handler(
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
     peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()
@@ -214,6 +220,7 @@ async fn request_handler(
                     session_id,
                     host,
                     peer_addr,
+                    endpoint_rate_limiter,
                 )
                 .await
                 {
