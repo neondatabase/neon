@@ -553,7 +553,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	 * Load shard map only at Postmaster.
 	 * If old page server is not available, then backends can be blocked in attempts to reconnect to it and do not reload config in this loop
 	 */
-	if (shard_map != NULL && (MyProcPid == PostmasterPid || shard_map->n_shards == 0))
+	if (shard_map != NULL && UsedShmemSegAddr != NULL && (MyProcPid == PostmasterPid || shard_map->n_shards == 0))
 	{
 		char const* shard_connstr = newval;
 		char const* sep;
