@@ -81,6 +81,10 @@ impl TenantShardId {
     pub fn is_zero(&self) -> bool {
         self.shard_number == ShardNumber(0)
     }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+    }
 }
 
 /// Formatting helper
