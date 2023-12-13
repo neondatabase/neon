@@ -70,7 +70,7 @@ def test_metric_collection(
         ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*"
     )
     env.pageserver.allowed_errors.append(
-        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
+        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes.*"
     )
 
     tenant_id = env.initial_tenant
@@ -218,7 +218,7 @@ def test_metric_collection_cleans_up_tempfile(
         ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*"
     )
     env.pageserver.allowed_errors.append(
-        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes"
+        ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes.*"
     )
 
     tenant_id = env.initial_tenant
