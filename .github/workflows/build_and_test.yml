@@ -44,13 +44,42 @@ jobs:
 
         exit 1
 
+  tag:
+    needs: [ check-permissions ]
+    runs-on: [ self-hosted, gen3, small ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    outputs:
+      build-tag: ${{steps.build-tag.outputs.tag}}
+      build-tools-tag: ${{steps.build-tag.outputs.tag}}
 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get build tag
+        run: |
+          echo run:$GITHUB_RUN_ID
+          echo ref:$GITHUB_REF_NAME
+          echo rev:$(git rev-list --count HEAD)
+          echo "image_tag=pinned" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+        id: build-tag
 
   check-if-build-tools-dockerfile-changed:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     outputs:
-      image_tag: ${{ steps.dockerfile.outputs.image_tag }}
       docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
       - name: Print Event Details
@@ -66,9 +95,7 @@ jobs:
         run: |
           updated_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.pull_request.base.sha }})
           echo "$updated_files"
-          echo "image_tag=pinned" >> $GITHUB_OUTPUT
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
 
@@ -81,40 +108,11 @@ jobs:
       image-name: build-tools
     secrets: inherit
 
-  tag:
-    needs: [ check-permissions ]
-    runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-    outputs:
-      build-tag: ${{steps.build-tag.outputs.tag}}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Get build tag
-        run: |
-          echo run:$GITHUB_RUN_ID
-          echo ref:$GITHUB_REF_NAME
-          echo rev:$(git rev-list --count HEAD)
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
-          fi
-        shell: bash
-        id: build-tag
-
   check-codestyle-python:
-    needs: [ check-permissions, push-buildtools-docker-file, check-if-build-tools-dockerfile-changed ]
+    needs: [ check-permissions, push-buildtools-docker-file , tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -144,10 +142,10 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-build-tools:
-    needs: [ check-permissions, push-buildtools-docker-file, check-if-build-tools-dockerfile-changed ]
+    needs: [ check-permissions, push-buildtools-docker-file, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -211,10 +209,10 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    needs: [ check-permissions, tag, push-buildtools-docker-file, check-if-build-tools-dockerfile-changed ]
+    needs: [ check-permissions, tag, push-buildtools-docker-file, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -444,10 +442,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, tag , check-if-build-tools-dockerfile-changed ]
+    needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -483,10 +481,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    needs: [ check-permissions, build-neon ,check-if-build-tools-dockerfile-changed]
+    needs: [ check-permissions, build-neon ,tag]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -515,12 +513,12 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, push-buildtools-docker-file , check-if-build-tools-dockerfile-changed]
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, push-buildtools-docker-file , tag]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -562,11 +560,11 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, check-if-build-tools-dockerfile-changed ]
+    needs: [ check-permissions, regress-tests, tag ]
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.check-if-build-tools-dockerfile-changed.outputs.image_tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
