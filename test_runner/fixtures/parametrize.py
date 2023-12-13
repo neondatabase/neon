@@ -43,6 +43,11 @@ def pageserver_virtual_file_io_engine(request: FixtureRequest) -> Optional[str]:
 def pytest_generate_tests(metafunc: Metafunc):
     # Do not parametrize performance tests yet, we need to prepare grafana charts first
     if "test_runner/performance" in metafunc.definition._nodeid:
+
+        # A hacky way to parametrize performance tests only for `pageserver_virtual_file_io_engine=tokio-epoll-uring`
+        # And do not change test name for default `pageserver_virtual_file_io_engine=std-fs` to keep perf tests statistics
+        if os.environ.get("PAGESERVER_VIRTUAL_FILE_IO_ENGINE", "") not in ("", "std-fs"):
+            metafunc.parametrize("pageserver_virtual_file_io_engine", ["tokio-epoll-uring"])
         return
 
     if (v := os.environ.get("DEFAULT_PG_VERSION")) is None:

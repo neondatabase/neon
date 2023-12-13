@@ -461,6 +461,7 @@ jobs:
       matrix:
         pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -477,6 +478,7 @@ jobs:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: "${{ matrix.pageserver_virtual_file_io_engine }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
