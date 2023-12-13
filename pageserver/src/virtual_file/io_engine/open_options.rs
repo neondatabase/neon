@@ -2,7 +2,7 @@
 
 use std::{os::fd::OwnedFd, path::Path};
 
-use super::{IoEngineKind, IO_ENGINE};
+use super::IoEngineKind;
 
 #[derive(Debug, Clone)]
 pub enum OpenOptions {
@@ -12,7 +12,7 @@ pub enum OpenOptions {
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        match IO_ENGINE.get().unwrap() {
+        match super::get() {
             IoEngineKind::StdFs => Self::StdFs(std::fs::OpenOptions::new()),
             IoEngineKind::TokioEpollUring => {
                 Self::TokioEpollUring(tokio_epoll_uring::ops::open_at::OpenOptions::new())
