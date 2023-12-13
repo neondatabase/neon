@@ -50,7 +50,7 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
-      build-tools-tag: ${{steps.build-tag.outputs.tag}}
+      build-tools-tag: ${{steps.buildtools-tag.outputs.tag}}
 
     steps:
       - name: Checkout
@@ -75,6 +75,15 @@ jobs:
           fi
         shell: bash
         id: build-tag
+
+      - name: Get buildtools tag
+        run: |
+          echo "image_tag=pinned" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_REF_NAME" != "main" && "$GITHUB_REF_NAME" != "release" ]]; then
+            echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+        id: buildtools-tag
 
   check-if-build-tools-dockerfile-changed:
     needs: [ check-permissions ]
