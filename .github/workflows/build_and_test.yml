@@ -95,7 +95,7 @@ jobs:
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
 
-  push-buildtools-docker-file:
+  build-buildtools-image:
     needs: [ check-permissions , check-if-build-tools-dockerfile-changed ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
