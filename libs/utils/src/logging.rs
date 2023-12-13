@@ -1,8 +1,14 @@
-use std::{io::BufWriter, str::FromStr, sync::{Arc, Mutex}};
+use std::{
+    io::BufWriter,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
+
+use super::env_config;
 
 #[derive(EnumString, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy)]
 #[strum(serialize_all = "snake_case")]
@@ -100,26 +106,6 @@ pub fn init(
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
     };
 
-    // WIP: lift it up as an argument
-    let enable_tracing_chrome = match std::env::var("NEON_PAGESERVER_ENABLE_TRACING_CHROME") {
-        Ok(s) if s != "0" => true,
-        Ok(_s) => false,
-        Err(std::env::VarError::NotPresent) => false,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("env var NEON_PAGESERVER_ENABLE_TRACING_CHROME not unicode")
-        }
-    };
-
-    // WIP: lift it up as an argument
-    let enable_tracing_flame = match std::env::var("NEON_PAGESERVER_ENABLE_TRACING_FLAME") {
-        Ok(s) if s != "0" => true,
-        Ok(_s) => false,
-        Err(std::env::VarError::NotPresent) => false,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("env var NEON_PAGESERVER_ENABLE_TRACING_FLAME not unicode")
-        }
-    };
-
     // NB: the order of the with() calls does not matter.
     // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
     use tracing_subscriber::prelude::*;
@@ -165,7 +151,12 @@ pub fn init(
     layers
         .add_layer(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
 
-    let tracing_chrome_layer_flush_guard = if enable_tracing_chrome {
+    let tracing_chrome_layer_flush_guard = if env_config::var(
+        "NEON_UTILS_LOGGING_ENABLE_TRACING_CHROME",
+        env_config::Bool::new_const::<false>,
+    )
+    .into()
+    {
         let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
             .trace_style(tracing_chrome::TraceStyle::Async)
             .build();
@@ -175,7 +166,12 @@ pub fn init(
         None
     };
 
-    let tracing_flame_flush_guard = if enable_tracing_flame {
+    let tracing_flame_flush_guard = if env_config::var(
+        "NEON_UTILS_LOGGING_ENABLE_TRACING_FLAME",
+        env_config::Bool::new_const::<false>,
+    )
+    .into()
+    {
         let (layer, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
         let layer = layer
             .with_empty_samples(false)
