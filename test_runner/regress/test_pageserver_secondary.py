@@ -255,14 +255,15 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
         flush_ms=5000,
     )
 
+    # Encourage the new location to download while still in secondary mode
+    pageserver_b.http_client().tenant_secondary_download(tenant_id)
+
     migrated_generation = env.attachment_service.attach_hook_issue(tenant_id, pageserver_b.id)
     log.info(f"Acquired generation {migrated_generation} for destination pageserver")
     assert migrated_generation == initial_generation + 1
 
     # Writes and reads still work in AttachedStale.
     workload.validate(pageserver_a.id)
-
-    # TODO: call into secondary mode API hooks to do an upload/download sync
 
     # Generate some more dirty writes: we expect the origin to ingest WAL in
     # in AttachedStale
