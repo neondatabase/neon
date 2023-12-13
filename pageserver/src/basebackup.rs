@@ -166,71 +166,111 @@ where
             }
         }
 
-        // Gather non-relational files from object storage pages.
+        debug!("Gather non-relational files from object storage pages");
         for kind in [
             SlruKind::Clog,
             SlruKind::MultiXactOffsets,
             SlruKind::MultiXactMembers,
         ] {
-            for segno in self
-                .timeline
-                .list_slru_segments(kind, self.lsn, self.ctx)
-                .await?
-            {
-                self.add_slru_segment(kind, segno).await?;
+            async {
+                debug!("list slru segments");
+                for segno in self
+                    .timeline
+                    .list_slru_segments(kind, self.lsn, self.ctx)
+                    .await?
+                {
+                    async {
+                        debug!("add slru segment");
+                        self.add_slru_segment(kind, segno).await?;
+                        anyhow::Ok(())
+                    }
+                    .instrument(debug_span!("slru segment", ?segno))
+                    .await?;
+                }
+                anyhow::Ok(())
             }
+            .instrument(debug_span!("non-rel file", ?kind))
+            .await?;
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
-        // Create tablespace directories
+        debug!("Create tablespace directories");
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
         {
-            self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
+            async {
+                debug!("iter");
+                self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
-            // If full backup is requested, include all relation files.
-            // Otherwise only include init forks of unlogged relations.
-            let rels = self
-                .timeline
-                .list_rels(spcnode, dbnode, self.lsn, self.ctx)
-                .await?;
-            for &rel in rels.iter() {
-                // Send init fork as main fork to provide well formed empty
-                // contents of UNLOGGED relations. Postgres copies it in
-                // `reinit.c` during recovery.
-                if rel.forknum == INIT_FORKNUM {
-                    // I doubt we need _init fork itself, but having it at least
-                    // serves as a marker relation is unlogged.
-                    self.add_rel(rel, rel).await?;
-                    self.add_rel(rel, rel.with_forknum(MAIN_FORKNUM)).await?;
-                    continue;
-                }
+                // If full backup is requested, include all relation files.
+                // Otherwise only include init forks of unlogged relations.
+                debug!("list rels");
+                let rels = self
+                    .timeline
+                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                    .await?;
+                for &rel in rels.iter() {
+                    async {
+                        debug!("iter");
+                        // Send init fork as main fork to provide well formed empty
+                        // contents of UNLOGGED relations. Postgres copies it in
+                        // `reinit.c` during recovery.
+                        if rel.forknum == INIT_FORKNUM {
+                            // I doubt we need _init fork itself, but having it at least
+                            // serves as a marker relation is unlogged.
+                            self.add_rel(rel, rel).await?;
+                            self.add_rel(rel, rel.with_forknum(MAIN_FORKNUM)).await?;
+                            return Ok(());
+                        }
 
-                if self.full_backup {
-                    if rel.forknum == MAIN_FORKNUM && rels.contains(&rel.with_forknum(INIT_FORKNUM))
-                    {
-                        // skip this, will include it when we reach the init fork
-                        continue;
+                        if self.full_backup {
+                            if rel.forknum == MAIN_FORKNUM
+                                && rels.contains(&rel.with_forknum(INIT_FORKNUM))
+                            {
+                                // skip this, will include it when we reach the init fork
+                                return Ok(());
+                            }
+                            self.add_rel(rel, rel).await?;
+                        }
+                        anyhow::Ok(())
                     }
-                    self.add_rel(rel, rel).await?;
+                    .instrument(debug_span!("process rel", ?rel))
+                    .await?;
                 }
-            }
 
-            for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
-                if path.starts_with("pg_replslot") {
-                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
-                    let restart_lsn = Lsn(u64::from_le_bytes(
-                        content[offs..offs + 8].try_into().unwrap(),
-                    ));
-                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
-                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                debug!("list aux files");
+                for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
+                    async {
+                        debug!("iter");
+                        if path.starts_with("pg_replslot") {
+                            let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                            let restart_lsn = Lsn(u64::from_le_bytes(
+                                content[offs..offs + 8].try_into().unwrap(),
+                            ));
+                            info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                            min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                        }
+                        let header = new_tar_header(&path, content.len() as u64)?;
+                        self.ar
+                            .append(&header, &*content)
+                            .await
+                            .context("could not add aux file to basebackup tarball")?;
+                        anyhow::Ok(())
+                    }
+                    .instrument(debug_span!("process aux file", ?path))
+                    .await?;
                 }
-                let header = new_tar_header(&path, content.len() as u64)?;
-                self.ar
-                    .append(&header, &*content)
-                    .await
-                    .context("could not add aux file to basebackup tarball")?;
+
+                debug!("done");
+
+                anyhow::Ok(())
             }
+            .instrument(debug_span!(
+                "process tablespace directory",
+                ?spcnode,
+                ?dbnode
+            ))
+            .await?;
         }
         if min_restart_lsn != Lsn::MAX {
             info!(
@@ -244,19 +284,25 @@ where
                 .await
                 .context("could not add restart.lsn file to basebackup tarball")?;
         }
+        debug!("list twophase files");
         for xid in self
             .timeline
             .list_twophase_files(self.lsn, self.ctx)
             .await?
         {
-            self.add_twophase_file(xid).await?;
+            async {
+                self.add_twophase_file(xid).await?;
+                anyhow::Ok(())
+            }
+            .instrument(debug_span!("process twophase file", ?xid))
+            .await?;
         }
 
         fail_point!("basebackup-before-control-file", |_| {
             bail!("failpoint basebackup-before-control-file")
         });
 
-        // Generate pg_control and bootstrap WAL segment.
+        debug!("Generate pg_control and bootstrap WAL segment.");
         self.add_pgcontrol_file().await?;
         self.ar.finish().await?;
         debug!("all tarred up!");
