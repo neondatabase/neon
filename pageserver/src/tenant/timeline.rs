@@ -51,7 +51,7 @@ use crate::tenant::storage_layer::{
     LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
     ValueReconstructState,
 };
-use crate::tenant::tasks::{BackgroundLoopKind, RateLimitError};
+use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
