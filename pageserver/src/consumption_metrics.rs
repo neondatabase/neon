@@ -3,7 +3,7 @@
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::tasks::BackgroundLoopKind;
-use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError};
+use crate::tenant::{mgr, LogicalSizeCalculationCause, PageReconstructError, Tenant};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
 use pageserver_api::models::TenantState;
@@ -256,8 +256,6 @@ async fn calculate_synthetic_size_worker(
         info!("calculate_synthetic_size_worker stopped");
     };
 
-    let cause = LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
-
     loop {
         let started_at = Instant::now();
 
@@ -280,29 +278,14 @@ async fn calculate_synthetic_size_worker(
                 continue;
             }
 
-            if let Ok(tenant) = mgr::get_tenant(tenant_shard_id, true) {
-                // TODO should we use concurrent_background_tasks_rate_limit() here, like the other background tasks?
-                // We can put in some prioritization for consumption metrics.
-                // Same for the loop that fetches computed metrics.
-                // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
-                // which turns out is really handy to understand the system.
-                if let Err(e) = tenant.calculate_synthetic_size(cause, cancel, ctx).await {
-                    // this error can be returned if timeline is shutting down, but it does not
-                    // mean the synthetic size worker should terminate. we do not need any checks
-                    // in this function because `mgr::get_tenant` will error out after shutdown has
-                    // progressed to shutting down tenants.
-                    let is_cancelled = matches!(
-                        e.downcast_ref::<PageReconstructError>(),
-                        Some(PageReconstructError::Cancelled)
-                    );
+            let Ok(tenant) = mgr::get_tenant(tenant_shard_id, true) else {
+                continue;
+            };
 
-                    if !is_cancelled {
-                        error!(
-                            "failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}"
-                        );
-                    }
-                }
-            }
+            // there is never any reason to exit calculate_synthetic_size_worker following any
+            // return value -- we don't need to care about shutdown because no tenant is found when
+            // pageserver is shut down.
+            calculate_and_log(&tenant, cancel, ctx).await;
         }
 
         crate::tenant::tasks::warn_when_period_overrun(
@@ -319,5 +302,33 @@ async fn calculate_synthetic_size_worker(
         if res.is_ok() {
             return Ok(());
         }
+    }
+}
+
+async fn calculate_and_log(tenant: &Tenant, cancel: &CancellationToken, ctx: &RequestContext) {
+    const CAUSE: LogicalSizeCalculationCause =
+        LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize;
+
+    // TODO should we use concurrent_background_tasks_rate_limit() here, like the other background tasks?
+    // We can put in some prioritization for consumption metrics.
+    // Same for the loop that fetches computed metrics.
+    // By using the same limiter, we centralize metrics collection for "start" and "finished" counters,
+    // which turns out is really handy to understand the system.
+    let Err(e) = tenant.calculate_synthetic_size(CAUSE, cancel, ctx).await else {
+        return;
+    };
+
+    // this error can be returned if timeline is shutting down, but it does not
+    // mean the synthetic size worker should terminate. we do not need any checks
+    // in this function because `mgr::get_tenant` will error out after shutdown has
+    // progressed to shutting down tenants.
+    let shutting_down = matches!(
+        e.downcast_ref::<PageReconstructError>(),
+        Some(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
+    );
+
+    if !shutting_down {
+        let tenant_shard_id = tenant.tenant_shard_id();
+        error!("failed to calculate synthetic size for tenant {tenant_shard_id}: {e:#}");
     }
 }
