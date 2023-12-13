@@ -567,16 +567,17 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         };
 
         loop {
-            match tokio::time::timeout(nag_every, &mut evict_layers).await {
+            let res = tokio::time::timeout(nag_every, &mut evict_layers).await;
+
+            let elapsed_ms = started_at.elapsed().as_millis();
+
+            match res {
                 Ok(tuple) => {
-                    tracing::info!(elapsed_ms = started_at.elapsed().as_millis(), "completed");
+                    tracing::info!(%elapsed_ms, "completed");
                     return tuple;
                 }
                 Err(_timeout) => {
-                    tracing::info!(
-                        elapsed_ms = started_at.elapsed().as_millis(),
-                        "still ongoing"
-                    );
+                    tracing::info!(%elapsed_ms, "still ongoing");
                 }
             }
         }
