@@ -82,7 +82,8 @@ pub struct DiskUsageEvictionTaskConfig {
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum EvictionOrder {
+#[serde(tag = "type", content = "args")]
+pub enum EvictionOrder {
     /// Order the layers to be evicted by how recently they have been accessed in absolute
     /// time.
     ///
@@ -94,7 +95,7 @@ enum EvictionOrder {
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
     ///
-    /// This strategy will always evict some layers of all of the tenants, but it is untested.
+    /// This strategy will evict layers more fairly but is untested.
     RelativeAccessed {
         #[serde(default)]
         highest_layer_count_loses_first: bool,
@@ -925,6 +926,7 @@ mod filesystem_level_usage {
 
     #[test]
     fn max_usage_pct_pressure() {
+        use super::EvictionOrder;
         use super::Usage as _;
         use std::time::Duration;
         use utils::serde_percent::Percent;
@@ -936,6 +938,7 @@ mod filesystem_level_usage {
                 period: Duration::MAX,
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
+                eviction_order: EvictionOrder::default(),
             },
             total_bytes: 100_000,
             avail_bytes: 0,
