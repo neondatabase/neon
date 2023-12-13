@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use anyhow::Context;
+use metrics::IntCounter;
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
 
@@ -24,16 +25,44 @@ impl LogFormat {
     }
 }
 
-static TRACING_EVENT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-    metrics::register_int_counter_vec!(
+struct TracingEventCount {
+    error: IntCounter,
+    warn: IntCounter,
+    info: IntCounter,
+    debug: IntCounter,
+    trace: IntCounter,
+}
+
+static TRACING_EVENT_COUNT: Lazy<TracingEventCount> = Lazy::new(|| {
+    let vec = metrics::register_int_counter_vec!(
         "libmetrics_tracing_event_count",
         "Number of tracing events, by level",
         &["level"]
     )
-    .expect("failed to define metric")
+    .expect("failed to define metric");
+    TracingEventCount {
+        error: vec.with_label_values(&["error"]),
+        warn: vec.with_label_values(&["warn"]),
+        info: vec.with_label_values(&["info"]),
+        debug: vec.with_label_values(&["debug"]),
+        trace: vec.with_label_values(&["trace"]),
+    }
 });
 
-struct TracingEventCountLayer(&'static metrics::IntCounterVec);
+impl TracingEventCount {
+    fn inc_for_level(&self, level: tracing::Level) {
+        let counter = match level {
+            tracing::Level::ERROR => &self.error,
+            tracing::Level::WARN => &self.warn,
+            tracing::Level::INFO => &self.info,
+            tracing::Level::DEBUG => &self.debug,
+            tracing::Level::TRACE => &self.trace,
+        };
+        counter.inc();
+    }
+}
+
+struct TracingEventCountLayer;
 
 impl<S> tracing_subscriber::layer::Layer<S> for TracingEventCountLayer
 where
@@ -44,15 +73,7 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let level = event.metadata().level();
-        let level = match *level {
-            tracing::Level::ERROR => "error",
-            tracing::Level::WARN => "warn",
-            tracing::Level::INFO => "info",
-            tracing::Level::DEBUG => "debug",
-            tracing::Level::TRACE => "trace",
-        };
-        self.0.with_label_values(&[level]).inc();
+        TRACING_EVENT_COUNT.inc_for_level(*event.metadata().level());
     }
 }
 
@@ -106,7 +127,7 @@ pub fn init(
         };
         log_layer.with_filter(rust_log_env_filter())
     });
-    let r = r.with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
+    let r = r.with(TracingEventCountLayer.with_filter(rust_log_env_filter()));
     match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => r
             .with(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
