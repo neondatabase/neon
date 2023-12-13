@@ -1616,9 +1616,7 @@ async fn disk_usage_eviction_run(
         }
     }
 
-    let config = json_request::<Config>(&mut r)
-        .await
-        .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
+    let config = json_request::<Config>(&mut r).await?;
 
     let usage = Usage {
         config,
