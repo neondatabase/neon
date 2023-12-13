@@ -307,16 +307,16 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // Debug-log the list of candidates
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
+        let nth = i + 1;
         let desc = candidate.layer.layer_desc();
+        let total_candidates = candidates.len();
+        let size = desc.file_size;
+        let rel = candidate.relative_last_activity;
         debug!(
-            "cand {}/{}: size={}, no_access_for={}us, partition={:?}, {}/{}/{}",
-            i + 1,
-            candidates.len(),
-            desc.file_size,
+            "cand {nth}/{total_candidates}: size={size}, rel_last_activity={rel}, no_access_for={}us, partition={partition:?}, {}/{}/{}",
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
-            partition,
             desc.tenant_shard_id,
             desc.timeline_id,
             candidate.layer,
@@ -459,6 +459,7 @@ struct EvictionCandidate {
     timeline: Arc<Timeline>,
     layer: Layer,
     last_activity_ts: SystemTime,
+    relative_last_activity: finite_f32::FiniteF32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -591,12 +592,23 @@ async fn collect_eviction_candidates(
         tenant_candidates
             .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
-        for (timeline, layer_info) in tenant_candidates.into_iter() {
+
+        // this is used to divide, but do not add a -1 here because not doing that will make a 10
+        // layer vs. 100 layer tenants layers:
+        // - 0.1..=1.0
+        // - 0.01..=1.0
+        let total = tenant_candidates.len();
+
+        for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
             let file_size = layer_info.file_size();
             let candidate = EvictionCandidate {
                 timeline,
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
+                relative_last_activity: finite_f32::FiniteF32::try_from_normalized(
+                    (total - i) as f32 / total as f32,
+                )
+                .expect("value out of range"),
             };
             let partition = if cumsum > min_resident_size as i128 {
                 MinResidentSizePartition::Above
@@ -610,8 +622,9 @@ async fn collect_eviction_candidates(
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
-    candidates
-        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
+    candidates.sort_unstable_by_key(|(partition, candidate)| {
+        (*partition, candidate.relative_last_activity)
+    });
 
     Ok(EvictionCandidates::Finished(candidates))
 }
