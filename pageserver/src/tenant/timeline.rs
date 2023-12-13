@@ -3804,7 +3804,14 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
-        let _g = self.gc_lock.lock().await;
+        // this is most likely the background tasks, but it might be the spawned task from
+        // immediate_gc
+        let cancel = crate::task_mgr::shutdown_token();
+        let _g = tokio::select! {
+            guard = self.gc_lock.lock() => guard,
+            _ = self.cancel.cancelled() => return Ok(GcResult::default()),
+            _ = cancel.cancelled() => return Ok(GcResult::default()),
+        };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
