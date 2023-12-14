@@ -2848,24 +2848,24 @@ impl Tenant {
     /// Branch an existing timeline.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn branch_timeline<'t>(
-        &'t self,
+    async fn branch_timeline(
+        &self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_uninit_mark: TimelineUninitMark<'t>,
+        timeline_uninit_mark: TimelineUninitMark<'_>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_uninit_mark, ctx)
             .await
     }
 
-    async fn branch_timeline_impl<'t>(
-        &'t self,
+    async fn branch_timeline_impl(
+        &self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_uninit_mark: TimelineUninitMark<'t>,
+        timeline_uninit_mark: TimelineUninitMark<'_>,
         _ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
@@ -2997,12 +2997,12 @@ impl Tenant {
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn bootstrap_timeline<'t>(
-        &'t self,
+    async fn bootstrap_timeline(
+        &self,
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
-        timeline_uninit_mark: TimelineUninitMark<'t>,
+        timeline_uninit_mark: TimelineUninitMark<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
@@ -3201,11 +3201,11 @@ impl Tenant {
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
     /// `finish_creation` to insert the Timeline into the timelines map and to remove the
     /// uninit mark file.
-    async fn prepare_new_timeline<'t>(
-        &'t self,
+    async fn prepare_new_timeline<'a>(
+        &'a self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        uninit_mark: TimelineUninitMark<'t>,
+        uninit_mark: TimelineUninitMark<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
