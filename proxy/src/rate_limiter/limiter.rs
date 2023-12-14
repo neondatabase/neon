@@ -1,12 +1,16 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    collections::hash_map::RandomState,
+    hash::BuildHasher,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use anyhow::bail;
 use dashmap::DashMap;
 use itertools::Itertools;
-use rand::{thread_rng, Rng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::{timeout, Duration, Instant};
@@ -28,10 +32,11 @@ use super::{
 // saw SNI, before doing TLS handshake. User-side error messages in that case
 // does not look very nice (`SSL SYSCALL error: Undefined error: 0`), so for now
 // I went with a more expensive way that yields user-friendlier error messages.
-pub struct EndpointRateLimiter {
-    map: DashMap<SmolStr, Vec<RateBucket>>,
+pub struct EndpointRateLimiter<Rand = StdRng, Hasher = RandomState> {
+    map: DashMap<SmolStr, Vec<RateBucket>, Hasher>,
     info: &'static [RateBucketInfo],
     access_count: AtomicUsize,
+    rand: Mutex<Rand>,
 }
 
 #[derive(Clone, Copy)]
@@ -125,11 +130,18 @@ impl RateBucketInfo {
 
 impl EndpointRateLimiter {
     pub fn new(info: &'static [RateBucketInfo]) -> Self {
+        Self::new_with_rand_and_hasher(info, StdRng::from_entropy(), RandomState::new())
+    }
+}
+
+impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
+    fn new_with_rand_and_hasher(info: &'static [RateBucketInfo], rand: R, hasher: S) -> Self {
         info!(buckets = ?info, "endpoint rate limiter");
         Self {
             info,
-            map: DashMap::with_shard_amount(64),
+            map: DashMap::with_hasher_and_shard_amount(hasher, 64),
             access_count: AtomicUsize::new(1), // start from 1 to avoid GC on the first request
+            rand: Mutex::new(rand),
         }
     }
 
@@ -176,7 +188,7 @@ impl EndpointRateLimiter {
             self.map.len()
         );
         let n = self.map.shards().len();
-        let shard = thread_rng().gen_range(0..n);
+        let shard = self.rand.lock().unwrap().gen_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }
@@ -219,7 +231,6 @@ pub struct Token<'t> {
 #[derive(Debug, Clone, Copy)]
 pub struct LimiterState {
     limit: usize,
-    available: usize,
     in_flight: usize,
 }
 
@@ -397,11 +408,7 @@ impl Limiter {
     pub fn state(&self) -> LimiterState {
         let limit = self.limits.load(Ordering::Relaxed);
         let in_flight = self.in_flight.load(Ordering::Relaxed);
-        LimiterState {
-            limit,
-            available: limit.saturating_sub(in_flight),
-            in_flight,
-        }
+        LimiterState { limit, in_flight }
     }
 }
 
@@ -412,13 +419,6 @@ impl<'t> Token<'t> {
             start: Instant::now(),
             in_flight,
         }
-    }
-
-    #[cfg(test)]
-    pub fn set_latency(&mut self, latency: Duration) {
-        use std::ops::Sub;
-
-        self.start = Instant::now().sub(latency);
     }
 
     pub fn forget(&mut self) {
@@ -438,10 +438,6 @@ impl LimiterState {
     /// The current concurrency limit.
     pub fn limit(&self) -> usize {
         self.limit
-    }
-    /// The amount of concurrency available to use.
-    pub fn available(&self) -> usize {
-        self.available
     }
     /// The number of jobs in flight.
     pub fn in_flight(&self) -> usize {
@@ -490,9 +486,11 @@ impl reqwest_middleware::Middleware for Limiter {
 
 #[cfg(test)]
 mod tests {
-    use std::{pin::pin, task::Context, time::Duration};
+    use std::{hash::BuildHasherDefault, pin::pin, task::Context, time::Duration};
 
     use futures::{task::noop_waker_ref, Future};
+    use rand::SeedableRng;
+    use rustc_hash::FxHasher;
     use smol_str::SmolStr;
     use tokio::time;
 
@@ -689,5 +687,21 @@ mod tests {
         for _ in 0..100 {
             assert!(limiter.check(endpoint.clone()));
         }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limits_gc() {
+        let rand = rand::rngs::StdRng::from_seed([1; 32]);
+        let hasher = BuildHasherDefault::<FxHasher>::default();
+
+        let limiter = EndpointRateLimiter::new_with_rand_and_hasher(
+            &RateBucketInfo::DEFAULT_SET,
+            rand,
+            hasher,
+        );
+        for i in 0..1_000_000 {
+            limiter.check(format!("{i}").into());
+        }
+        assert!(limiter.map.len() < 150_000);
     }
 }
