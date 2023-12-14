@@ -1457,7 +1457,7 @@ impl Tenant {
     /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
     /// minimum amount of keys required to get a writable timeline.
     /// (Without it, `put` might fail due to `repartition` failing.)
-    pub async fn create_empty_timeline(
+    pub(crate) async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
@@ -1549,7 +1549,7 @@ impl Tenant {
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
     /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_timeline(
+    pub(crate) async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
@@ -2932,11 +2932,24 @@ impl Tenant {
         Ok(new_timeline)
     }
 
+    /// For unit tests, make this visible so that other modules can directly create timelines
+    #[cfg(test)]
+    pub(crate) async fn bootstrap_timeline_test(
+        &self,
+        timeline_id: TimelineId,
+        pg_version: u32,
+        load_existing_initdb: Option<TimelineId>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        self.bootstrap_timeline(timeline_id, pg_version, load_existing_initdb, ctx)
+            .await
+    }
+
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
-    pub(crate) async fn bootstrap_timeline(
+    async fn bootstrap_timeline(
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
