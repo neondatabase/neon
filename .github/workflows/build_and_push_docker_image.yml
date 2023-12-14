@@ -9,6 +9,9 @@ on:
       image-name:
         required: true
         type: string
+      tag:
+        required: true
+        type: string
 
 jobs:
   kaniko:
@@ -23,7 +26,7 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-amd64
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ inputs.tag }}-amd64
 
   kaniko-arm:
     runs-on: [ self-hosted, dev, arm64 ]
@@ -37,7 +40,7 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-arm64
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --dockerfile ${{ inputs.dockerfile-path }} --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ inputs.tag }}-arm64
 
   manifest:
     name: 'manifest'
@@ -48,7 +51,7 @@ jobs:
 
     steps:
       - name: Create manifest
-        run: docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-amd64 --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID-arm64
+        run: docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ inputs.tag }} --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ inputs.tag }}-amd64 --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ inputs.tag }}-arm64
 
       - name: Push manifest
-        run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:$GITHUB_RUN_ID
+        run: docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${{ inputs.image-name }}:${{ inputs.tag }}

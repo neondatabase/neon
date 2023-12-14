@@ -107,12 +107,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-buildtools-image:
-    needs: [ check-permissions , check-if-build-tools-dockerfile-changed ]
+    needs: [ check-permissions , check-if-build-tools-dockerfile-changed, tag]
     uses: ./.github/workflows/build_and_push_docker_image.yml
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
     with:
       dockerfile-path: Dockerfile.buildtools
       image-name: build-tools
+      tag: ${{ needs.tag.outputs.build-tools-tag}}
     secrets: inherit
 
   check-codestyle-python:
