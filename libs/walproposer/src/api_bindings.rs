@@ -14,7 +14,6 @@ use crate::bindings::PGAsyncWriteResult;
 use crate::bindings::Safekeeper;
 use crate::bindings::Size;
 use crate::bindings::StringInfoData;
-use crate::bindings::TimeLineID;
 use crate::bindings::TimestampTz;
 use crate::bindings::WalProposer;
 use crate::bindings::WalProposerConnStatusType;
@@ -179,16 +178,11 @@ extern "C" fn conn_blocking_write(
     }
 }
 
-extern "C" fn recovery_download(
-    sk: *mut Safekeeper,
-    _timeline: TimeLineID,
-    startpos: XLogRecPtr,
-    endpos: XLogRecPtr,
-) -> bool {
+extern "C" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bool {
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).recovery_download(&mut (*sk), startpos, endpos)
+        (*api).recovery_download(&mut (*wp), &mut (*sk))
     }
 }
 
@@ -354,14 +348,6 @@ extern "C" fn log_internal(
     }
 }
 
-extern "C" fn after_election(wp: *mut WalProposer) {
-    unsafe {
-        let callback_data = (*(*wp).config).callback_data;
-        let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).after_election(&mut (*wp))
-    }
-}
-
 #[derive(Debug)]
 pub enum Level {
     Debug5,
@@ -435,7 +421,6 @@ pub(crate) fn create_api() -> walproposer_api {
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         confirm_wal_streamed: Some(confirm_wal_streamed),
         log_internal: Some(log_internal),
-        after_election: Some(after_election),
     }
 }
 

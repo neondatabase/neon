@@ -485,8 +485,11 @@ typedef struct walproposer_api
 	/* Blocking CopyData write, aka PQputCopyData + PQflush. */
 	bool		(*conn_blocking_write) (Safekeeper *sk, void const *buf, size_t size);
 
-	/* Download WAL from startpos to endpos and make it available locally. */
-	bool		(*recovery_download) (Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos);
+	/*
+	 * Download WAL before basebackup for logical walsenders from sk, if
+	 * needed
+	 */
+	bool		(*recovery_download) (WalProposer *wp, Safekeeper *sk);
 
 	/* Allocate WAL reader. */
 	void		(*wal_reader_allocate) (Safekeeper *sk);
@@ -556,14 +559,6 @@ typedef struct walproposer_api
 	 * handled by elog().
 	 */
 	void		(*log_internal) (WalProposer *wp, int level, const char *line);
-
-	/*
-	 * Called right after the proposer was elected, but before it started
-	 * recovery and sent ProposerElected message to the safekeepers.
-	 *
-	 * Used by logical replication to update truncateLsn.
-	 */
-	void		(*after_election) (WalProposer *wp);
 } walproposer_api;
 
 /*
