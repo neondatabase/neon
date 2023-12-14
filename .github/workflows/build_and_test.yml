@@ -735,7 +735,7 @@ jobs:
             }"
 
   neon-image:
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
