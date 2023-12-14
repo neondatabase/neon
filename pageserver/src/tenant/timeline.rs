@@ -98,8 +98,9 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
 use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -2054,6 +2055,55 @@ impl Timeline {
         }
 
         None
+    }
+
+    /// The timeline heatmap is a hint to secondary locations from the primary location,
+    /// indicating which layers are currently on-disk on the primary.
+    ///
+    /// None is returned if the Timeline is in a state where uploading a heatmap
+    /// doesn't make sense, such as shutting down or initializing.  The caller
+    /// should treat this as a cue to simply skip doing any heatmap uploading
+    /// for this timeline.
+    pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
+        let eviction_info = self.get_local_layers_for_disk_usage_eviction().await;
+
+        let remote_client = match &self.remote_client {
+            Some(c) => c,
+            None => return None,
+        };
+
+        let layer_file_names = eviction_info
+            .resident_layers
+            .iter()
+            .map(|l| l.layer.layer_desc().filename())
+            .collect::<Vec<_>>();
+
+        let decorated = match remote_client.get_layers_metadata(layer_file_names) {
+            Ok(d) => d,
+            Err(_) => {
+                // Getting metadata only fails on Timeline in bad state.
+                return None;
+            }
+        };
+
+        let heatmap_layers = std::iter::zip(
+            eviction_info.resident_layers.into_iter(),
+            decorated.into_iter(),
+        )
+        .filter_map(|(layer, remote_info)| {
+            remote_info.map(|remote_info| {
+                HeatMapLayer::new(
+                    layer.layer.layer_desc().filename(),
+                    IndexLayerMetadata::from(remote_info),
+                    layer.last_activity_ts,
+                )
+            })
+        });
+
+        Some(HeatMapTimeline::new(
+            self.timeline_id,
+            heatmap_layers.collect(),
+        ))
     }
 }
 

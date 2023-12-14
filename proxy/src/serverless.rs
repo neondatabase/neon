@@ -8,12 +8,13 @@ mod websocket;
 
 use anyhow::bail;
 use hyper::StatusCode;
+use metrics::IntCounterPairGuard;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
-use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
+use crate::proxy::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
@@ -149,22 +150,17 @@ pub async fn task_main(
 
 struct MetricService<S> {
     inner: S,
+    _gauge: IntCounterPairGuard,
 }
 
 impl<S> MetricService<S> {
     fn new(inner: S) -> MetricService<S> {
-        NUM_CLIENT_CONNECTION_OPENED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
-        MetricService { inner }
-    }
-}
-
-impl<S> Drop for MetricService<S> {
-    fn drop(&mut self) {
-        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
+        MetricService {
+            inner,
+            _gauge: NUM_CLIENT_CONNECTION_GAUGE
+                .with_label_values(&["http"])
+                .guard(),
+        }
     }
 }
 

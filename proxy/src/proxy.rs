@@ -17,7 +17,10 @@ use anyhow::{bail, Context};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
-use metrics::{exponential_buckets, register_int_counter_vec, IntCounterVec};
+use metrics::{
+    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec,
+    IntCounterPairVec, IntCounterVec,
+};
 use once_cell::sync::{Lazy, OnceCell};
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use prometheus::{
@@ -44,17 +47,10 @@ const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-pub static NUM_DB_CONNECTIONS_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "proxy_opened_db_connections_total",
         "Number of opened connections to a database.",
-        &["protocol"],
-    )
-    .unwrap()
-});
-
-pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
         "proxy_closed_db_connections_total",
         "Number of closed connections to a database.",
         &["protocol"],
@@ -62,17 +58,10 @@ pub static NUM_DB_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(||
     .unwrap()
 });
 
-pub static NUM_CLIENT_CONNECTION_OPENED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "proxy_opened_client_connections_total",
         "Number of opened connections from a client.",
-        &["protocol"],
-    )
-    .unwrap()
-});
-
-pub static NUM_CLIENT_CONNECTION_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
         "proxy_closed_client_connections_total",
         "Number of closed connections from a client.",
         &["protocol"],
@@ -80,17 +69,10 @@ pub static NUM_CLIENT_CONNECTION_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new
     .unwrap()
 });
 
-pub static NUM_CONNECTIONS_ACCEPTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static NUM_CONNECTION_REQUESTS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "proxy_accepted_connections_total",
         "Number of client connections accepted.",
-        &["protocol"],
-    )
-    .unwrap()
-});
-
-pub static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
         "proxy_closed_connections_total",
         "Number of client connections closed.",
         &["protocol"],
@@ -428,16 +410,12 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     );
 
     let proto = mode.protocol_label();
-    NUM_CLIENT_CONNECTION_OPENED_COUNTER
+    let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE
         .with_label_values(&[proto])
-        .inc();
-    NUM_CONNECTIONS_ACCEPTED_COUNTER
+        .guard();
+    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&[proto])
-        .inc();
-    scopeguard::defer! {
-        NUM_CLIENT_CONNECTION_CLOSED_COUNTER.with_label_values(&[proto]).inc();
-        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
-    }
+        .guard();
 
     let tls = config.tls_config.as_ref();
 
@@ -584,12 +562,13 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
     timeout: time::Duration,
+    proto: &'static str,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
     let allow_self_signed_compute = node_info.allow_self_signed_compute;
 
     node_info
         .config
-        .connect(allow_self_signed_compute, timeout)
+        .connect(allow_self_signed_compute, timeout, proto)
         .await
 }
 
@@ -610,6 +589,7 @@ pub trait ConnectMechanism {
 pub struct TcpMechanism<'a> {
     /// KV-dictionary with PostgreSQL connection params.
     pub params: &'a StartupMessageParams,
+    pub proto: &'static str,
 }
 
 #[async_trait]
@@ -623,7 +603,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
-        connect_to_compute_once(node_info, timeout).await
+        connect_to_compute_once(node_info, timeout, self.proto).await
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
@@ -1028,7 +1008,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let aux = node_info.aux.clone();
         let mut node = connect_to_compute(
-            &TcpMechanism { params },
+            &TcpMechanism { params, proto },
             node_info,
             &extra,
             &creds,
@@ -1036,13 +1016,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         )
         .or_else(|e| stream.throw_error(e))
         .await?;
-
-        NUM_DB_CONNECTIONS_OPENED_COUNTER
-            .with_label_values(&[proto])
-            .inc();
-        scopeguard::defer! {
-            NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&[proto]).inc();
-        }
 
         prepare_client_connection(&node, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the

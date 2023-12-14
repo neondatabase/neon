@@ -2,9 +2,10 @@ use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
@@ -1270,6 +1271,28 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     )
     .expect("failed to define a metric"),
 });
+pub(crate) struct SecondaryModeMetrics {
+    pub(crate) upload_heatmap: IntCounter,
+    pub(crate) upload_heatmap_errors: IntCounter,
+    pub(crate) upload_heatmap_duration: Histogram,
+}
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+    upload_heatmap: register_int_counter!(
+        "pageserver_secondary_upload_heatmap",
+        "Number of heatmaps written to remote storage by attached tenants"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_errors: register_int_counter!(
+        "pageserver_secondary_upload_heatmap_errors",
+        "Failures writing heatmap to remote storage"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_duration: register_histogram!(
+        "pageserver_secondary_upload_heatmap_duration",
+        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+    )
+    .expect("failed to define a metric"),
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
@@ -1321,25 +1344,16 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_start_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls started",
-            &["task"],
-        )
-        .unwrap()
-    });
-
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_finish_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
-            &["task"],
-        )
-        .unwrap()
-    });
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_background_loop_semaphore_wait_start_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls started",
+        "pageserver_background_loop_semaphore_wait_finish_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+        &["task"],
+    )
+    .unwrap()
+});
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
