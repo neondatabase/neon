@@ -244,7 +244,7 @@ impl<'t> TimelineUninitMark<'t> {
     }
 }
 
-impl<'t> Drop for TimelineUninitMark<'t> {
+impl Drop for TimelineUninitMark<'_> {
     fn drop(&mut self) {
         if !self.uninit_mark_deleted {
             if self.timeline_path.exists() {
