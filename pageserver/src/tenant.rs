@@ -1682,8 +1682,6 @@ impl Tenant {
         // not send a success to the caller until it is.  The same applies to handling retries,
         // see the handling of [`TimelineExclusionError::AlreadyExists`] above.
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
-            // Wait for the upload of the 'index_part.json` file to finish, so that when we return
-            // Ok, the timeline is durable in remote storage.
             let kind = ancestor_timeline_id
                 .map(|_| "branched")
                 .unwrap_or("bootstrapped");
