@@ -79,7 +79,7 @@ jobs:
           crane tag "${IMAGE}:${FROM_TAG}" "${TO_TAG}"
 
   rollback-tag-image:
-    needs: [ prepare-matrix, tag-image ]
+    needs:  tag-image
     if: ${{ !success() }}
 
     runs-on: [ self-hosted, gen3, small ]
@@ -103,8 +103,8 @@ jobs:
 
       - name: Restore previous tag if needed
         run: |
-          NEXT_DIGEST="${{ needs.tag-image.outputs.next-digestrust }}"
-          PREV_DIGEST="${{ needs.tag-image.outputs.prev-digestrust }}"
+          NEXT_DIGEST="${{ needs.tag-image.outputs.next-digest-buildtools }}"
+          PREV_DIGEST="${{ needs.tag-image.outputs.prev-digest-buildtools }}"
 
           if [ -z "${NEXT_DIGEST}" ]; then
             echo >&2 "Image ${IMAGE}:${FROM_TAG} does not exist, nothing to rollback"
