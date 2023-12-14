@@ -24,7 +24,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    proxy::{neon_options, DbConnectionGauge, LatencyTimer},
+    proxy::{neon_options, LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -475,7 +475,9 @@ async fn connect_to_compute_once(
         .connect(tokio_postgres::NoTls)
         .await?;
 
-    let conn_gauge = DbConnectionGauge::new("http");
+    let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
+        .with_label_values(&["http"])
+        .guard();
 
     tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
 

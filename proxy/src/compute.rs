@@ -3,10 +3,11 @@ use crate::{
     cancellation::CancelClosure,
     console::errors::WakeComputeError,
     error::UserFacingError,
-    proxy::{neon_option, DbConnectionGauge},
+    proxy::{neon_option, NUM_DB_CONNECTIONS_GAUGE},
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
+use metrics::CounterPairGuard;
 use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
@@ -227,7 +228,7 @@ pub struct PostgresConnection {
     /// Query cancellation token.
     pub cancel_closure: CancelClosure,
 
-    _guage: DbConnectionGauge,
+    _guage: CounterPairGuard,
 }
 
 impl ConnCfg {
@@ -270,7 +271,7 @@ impl ConnCfg {
             stream,
             params,
             cancel_closure,
-            _guage: DbConnectionGauge::new(proto),
+            _guage: NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).guard(),
         };
 
         Ok(connection)

@@ -29,7 +29,7 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::config::HttpConfig;
-use crate::proxy::ConnectionRequestGauge;
+use crate::proxy::NUM_CONNECTION_REQUESTS_GAUGE;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -303,7 +303,9 @@ async fn handle_inner(
     session_id: uuid::Uuid,
     peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
-    let _request_gauge = ConnectionRequestGauge::new("http");
+    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
+        .with_label_values(&["http"])
+        .guard();
 
     //
     // Determine the destination and connection params

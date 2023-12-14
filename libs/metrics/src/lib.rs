@@ -132,3 +132,72 @@ fn get_rusage_stats() -> libc::rusage {
         rusage.assume_init()
     }
 }
+
+/// Create an [`CounterPairVec`] and registers to default registry.
+#[macro_export(local_inner_macros)]
+macro_rules! register_counter_pair_vec {
+    ($NAME1:expr, $HELP1:expr, $NAME2:expr, $HELP2:expr, $LABELS_NAMES:expr $(,)?) => {{
+        match (
+            $crate::register_int_counter_vec!($NAME1, $HELP1, $LABELS_NAMES),
+            $crate::register_int_counter_vec!($NAME2, $HELP2, $LABELS_NAMES),
+        ) {
+            (Ok(inc), Ok(dec)) => Ok($crate::CounterPairVec::new(inc, dec)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        }
+    }};
+}
+/// Create an [`CounterPair`] and registers to default registry.
+#[macro_export(local_inner_macros)]
+macro_rules! register_counter_pair {
+    ($NAME1:expr, $HELP1:expr, $NAME2:expr, $HELP2:expr $(,)?) => {{
+        match (
+            $crate::register_int_counter!($NAME1, $HELP1),
+            $crate::register_int_counter!($NAME2, $HELP2),
+        ) {
+            (Ok(inc), Ok(dec)) => Ok($crate::CounterPair::new(inc, dec)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        }
+    }};
+}
+
+pub struct CounterPairVec {
+    inc: IntCounterVec,
+    dec: IntCounterVec,
+}
+
+pub struct CounterPair {
+    inc: IntCounter,
+    dec: IntCounter,
+}
+
+impl CounterPairVec {
+    pub fn new(inc: IntCounterVec, dec: IntCounterVec) -> Self {
+        Self { inc, dec }
+    }
+
+    pub fn with_label_values(&self, vals: &[&str]) -> CounterPair {
+        CounterPair {
+            inc: self.inc.with_label_values(vals),
+            dec: self.dec.with_label_values(vals),
+        }
+    }
+}
+
+impl CounterPair {
+    pub fn new(inc: IntCounter, dec: IntCounter) -> Self {
+        Self { inc, dec }
+    }
+
+    pub fn guard(&self) -> CounterPairGuard {
+        self.inc.inc();
+        CounterPairGuard(self.dec.clone())
+    }
+}
+
+pub struct CounterPairGuard(IntCounter);
+
+impl Drop for CounterPairGuard {
+    fn drop(&mut self) {
+        self.0.inc();
+    }
+}
