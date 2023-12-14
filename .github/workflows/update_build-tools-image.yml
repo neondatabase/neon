@@ -1,4 +1,4 @@
-name: 'Update build tools images tag'
+name: 'Update build tools image tag'
 
 # This workflow it used to update tag of build tools in ECR.
 # The most common use case is adding/moving `pinned` tag to `${GITHUB_RUN_IT}` image.
