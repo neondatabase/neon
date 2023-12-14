@@ -91,15 +91,10 @@ jobs:
     outputs:
       docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
       - name: Check if Dockerfile.buildtools has changed
         id: dockerfile
         run: |
-          updated_files=$(gh pr diff ${{ github.event.pull_request.number }} --name-only)
+          updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi

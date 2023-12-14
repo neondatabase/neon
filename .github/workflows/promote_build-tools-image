@@ -1,4 +1,4 @@
-name: 'Update images tag'
+name: 'Update build tools images tag'
 
 # This workflow it used to update tag of build tools in ECR.
 # The most common use case is adding/moving `pinned` tag to `${GITHUB_RUN_IT}` image.
@@ -15,10 +15,6 @@ on:
         required: true
         type: string
         default: 'pinned'
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
 
 defaults:
   run:
