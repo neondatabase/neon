@@ -1270,6 +1270,28 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     )
     .expect("failed to define a metric"),
 });
+pub(crate) struct SecondaryModeMetrics {
+    pub(crate) upload_heatmap: IntCounter,
+    pub(crate) upload_heatmap_errors: IntCounter,
+    pub(crate) upload_heatmap_duration: Histogram,
+}
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+    upload_heatmap: register_int_counter!(
+        "pageserver_secondary_upload_heatmap",
+        "Number of heatmaps written to remote storage by attached tenants"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_errors: register_int_counter!(
+        "pageserver_secondary_upload_heatmap_errors",
+        "Failures writing heatmap to remote storage"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_duration: register_histogram!(
+        "pageserver_secondary_upload_heatmap_duration",
+        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+    )
+    .expect("failed to define a metric"),
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {

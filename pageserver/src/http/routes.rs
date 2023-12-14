@@ -42,6 +42,7 @@ use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
@@ -75,9 +76,11 @@ pub struct State {
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
+    secondary_controller: SecondaryController,
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
@@ -86,6 +89,7 @@ impl State {
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
+        secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
@@ -100,6 +104,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
+            secondary_controller,
         })
     }
 
@@ -1647,6 +1652,21 @@ async fn disk_usage_eviction_run(
     json_response(StatusCode::OK, res)
 }
 
+async fn secondary_upload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    state
+        .secondary_controller
+        .upload_tenant(tenant_shard_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1906,6 +1926,9 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
         )
+        .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
+            api_handler(r, secondary_upload_handler)
+        })
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
         })
