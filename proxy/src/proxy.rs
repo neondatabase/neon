@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
 use metrics::{
-    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec, IntCounterPairVec,
-    IntCounterVec,
+    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec,
+    IntCounterPairVec, IntCounterVec,
 };
 use once_cell::sync::{Lazy, OnceCell};
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
