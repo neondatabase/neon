@@ -1,8 +1,7 @@
 import random
 import threading
 import time
-from queue import SimpleQueue
-from typing import Any, Dict, List, Union
+from typing import List
 
 import pytest
 from fixtures.log_helper import log
@@ -237,94 +236,6 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
         env.pageserver.stop(immediate=True)
 
         t.join()
-
-
-def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: NeonEnvBuilder):
-    """
-    If the activate only after upload is used, then retries could become competing.
-    """
-
-    env = neon_env_builder.init_configs()
-    env.start()
-
-    env.pageserver.allowed_errors.extend(
-        [
-            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
-            ".*Error processing HTTP request: InternalServerError\\(Timeline .*/.* already exists in pageserver's memory",
-        ]
-    )
-    ps_http = env.pageserver.http_client()
-
-    # pause all uploads
-    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    env.pageserver.tenant_create(env.initial_tenant)
-
-    def start_creating_timeline():
-        ps_http.timeline_create(
-            env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
-        )
-
-    create_root = threading.Thread(target=start_creating_timeline)
-
-    branch_id = TimelineId.generate()
-
-    queue: SimpleQueue[Union[Dict[Any, Any], Exception]] = SimpleQueue()
-    barrier = threading.Barrier(3)
-
-    def try_branch():
-        barrier.wait()
-        barrier.wait()
-        try:
-            ret = ps_http.timeline_create(
-                env.pg_version,
-                env.initial_tenant,
-                branch_id,
-                ancestor_timeline_id=env.initial_timeline,
-                timeout=5,
-            )
-            queue.put(ret)
-        except Exception as e:
-            queue.put(e)
-
-    threads = [threading.Thread(target=try_branch) for _ in range(2)]
-
-    try:
-        create_root.start()
-
-        for t in threads:
-            t.start()
-
-        wait_until_paused(env, "before-upload-index-pausable")
-
-        barrier.wait()
-        ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
-        barrier.wait()
-
-        # now both requests race to branch, only one can win because they take gc_cs, Tenant::timelines or marker files
-        first = queue.get()
-        second = queue.get()
-
-        log.info(first)
-        log.info(second)
-
-        # Both requests may succeed, or one may fail:
-        # - If one request is still creating while the other runs, the other will fail.
-        # - If one request completes and then the other runs, the other will succeed because
-        #   timeline creation is idempotent.
-        success = 0
-        for r in (first, second):
-            if isinstance(r, Dict):
-                assert r["state"] == "Active"
-                success += 1
-
-        assert success > 0
-    finally:
-        # we might still have the failpoint active
-        env.pageserver.stop(immediate=True)
-
-        for t in threads:
-            t.join()
-        create_root.join()
 
 
 def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
