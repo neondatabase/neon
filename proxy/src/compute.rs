@@ -1,6 +1,9 @@
 use crate::{
-    auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
-    error::UserFacingError, proxy::neon_option,
+    auth::parse_endpoint_param,
+    cancellation::CancelClosure,
+    console::errors::WakeComputeError,
+    error::UserFacingError,
+    proxy::{neon_option, DbConnectionGauge},
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
@@ -223,6 +226,8 @@ pub struct PostgresConnection {
     pub params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
     pub cancel_closure: CancelClosure,
+
+    _guage: DbConnectionGauge,
 }
 
 impl ConnCfg {
@@ -231,6 +236,7 @@ impl ConnCfg {
         &self,
         allow_self_signed_compute: bool,
         timeout: Duration,
+        proto: &'static str,
     ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
 
@@ -264,6 +270,7 @@ impl ConnCfg {
             stream,
             params,
             cancel_closure,
+            _guage: DbConnectionGauge::new(proto),
         };
 
         Ok(connection)
