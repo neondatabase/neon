@@ -773,7 +773,8 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-                           --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tools-tag }}
+                           --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+                           --build-arg TAG=${{ needs.tag.outputs.build-tools-tag }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
