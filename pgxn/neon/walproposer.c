@@ -809,7 +809,7 @@ RecvVoteResponse(Safekeeper *sk)
 	}
 	else if (wp->n_votes > wp->quorum)
 	{
-		/* recovery already performed, just start streaming */
+		/* already elected, start streaming */
 		SendProposerElected(sk);
 	}
 	else
@@ -835,21 +835,16 @@ HandleElectedProposer(WalProposer *wp)
 	DetermineEpochStartLsn(wp);
 
 	/*
-	 * Check if not all safekeepers are up-to-date, we need to download WAL
-	 * needed to synchronize them
+	 * Synchronously download WAL from the most advanced safekeeper. We do
+	 * that only for logical replication (and switching logical walsenders to
+	 * neon_walreader is a todo.)
 	 */
-	if (wp->truncateLsn < wp->propEpochStartLsn)
+	if (!wp->api.recovery_download(wp, &wp->safekeeper[wp->donor]))
 	{
-		walprop_log(LOG,
-					"start recovery because truncateLsn=%X/%X is not "
-					"equal to epochStartLsn=%X/%X",
-					LSN_FORMAT_ARGS(wp->truncateLsn),
-					LSN_FORMAT_ARGS(wp->propEpochStartLsn));
-		/* Perform recovery */
-		if (!wp->api.recovery_download(&wp->safekeeper[wp->donor], wp->greetRequest.timeline, wp->truncateLsn, wp->propEpochStartLsn))
-			walprop_log(FATAL, "Failed to recover state");
+		walprop_log(FATAL, "failed to download WAL for logical replicaiton");
 	}
-	else if (wp->config->syncSafekeepers)
+
+	if (wp->truncateLsn == wp->propEpochStartLsn && wp->config->syncSafekeepers)
 	{
 		/* Sync is not needed: just exit */
 		wp->api.finish_sync_safekeepers(wp, wp->propEpochStartLsn);
@@ -1047,13 +1042,6 @@ DetermineEpochStartLsn(WalProposer *wp)
 		}
 		walprop_shared->mineLastElectedTerm = wp->propTerm;
 	}
-
-	/*
-	 * WalProposer has just elected itself and initialized history, so we can
-	 * call election callback. Usually it updates truncateLsn to fetch WAL for
-	 * logical replication.
-	 */
-	wp->api.after_election(wp);
 }
 
 /*

@@ -101,6 +101,8 @@ static void add_nwr_event_set(Safekeeper *sk, uint32 events);
 static void update_nwr_event_set(Safekeeper *sk, uint32 events);
 static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
 
+static XLogRecPtr GetLogRepRestartLSN(WalProposer *wp);
+
 static void
 init_walprop_config(bool syncSafekeepers)
 {
@@ -1211,16 +1213,38 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	}
 }
 
-/*
- * Receive WAL from most advanced safekeeper
- */
+/* Download WAL before basebackup for logical walsenders from sk, if needed */
 static bool
-WalProposerRecovery(Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XLogRecPtr endpos)
+WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 {
 	char	   *err;
 	WalReceiverConn *wrconn;
 	WalRcvStreamOptions options;
 	char		conninfo[MAXCONNINFO];
+	TimeLineID	timeline;
+	XLogRecPtr	startpos;
+	XLogRecPtr	endpos;
+	uint64		download_range_mb;
+
+	startpos = GetLogRepRestartLSN(wp);
+	if (startpos == InvalidXLogRecPtr)
+		return true;			/* recovery not needed */
+	endpos = wp->propEpochStartLsn;
+
+	/*
+	 * If we need to download more than a max_slot_wal_keep_size, cap to it to
+	 * avoid risk of exploding pg_wal. Logical replication won't work until
+	 * recreated, but at least compute would start; this also follows
+	 * max_slot_wal_keep_size semantics.
+	 */
+	download_range_mb = (endpos - startpos) / 1024 / 1024;
+	if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
+	{
+		startpos = endpos - max_slot_wal_keep_size_mb * 1024 * 1024;
+		walprop_log(WARNING, "capped WAL download for logical replication to %X/%X as max_slot_wal_keep_size=%dMB",
+					LSN_FORMAT_ARGS(startpos), max_slot_wal_keep_size_mb);
+	}
+	timeline = wp->greetRequest.timeline;
 
 	if (!neon_auth_token)
 	{
@@ -1250,7 +1274,7 @@ WalProposerRecovery(Safekeeper *sk, TimeLineID timeline, XLogRecPtr startpos, XL
 		return false;
 	}
 	elog(LOG,
-		 "start recovery from %s:%s starting from %X/%08X till %X/%08X timeline "
+		 "start recovery for logical replication from %s:%s starting from %X/%08X till %X/%08X timeline "
 		 "%d",
 		 sk->host, sk->port, (uint32) (startpos >> 32),
 		 (uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
@@ -1928,15 +1952,15 @@ walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
 	elog(FATAL, "unexpected log_internal message at level %d: %s", level, line);
 }
 
-static void
-walprop_pg_after_election(WalProposer *wp)
+static XLogRecPtr
+GetLogRepRestartLSN(WalProposer *wp)
 {
 	FILE	   *f;
-	XLogRecPtr	lrRestartLsn;
+	XLogRecPtr	lrRestartLsn = InvalidXLogRecPtr;
 
 	/* We don't need to do anything in syncSafekeepers mode. */
 	if (wp->config->syncSafekeepers)
-		return;
+		return InvalidXLogRecPtr;
 
 	/*
 	 * If there are active logical replication subscription we need to provide
@@ -1944,25 +1968,40 @@ walprop_pg_after_election(WalProposer *wp)
 	 * replication slots.
 	 */
 	f = fopen("restart.lsn", "rb");
-	if (f != NULL && !wp->config->syncSafekeepers)
+	if (f != NULL)
 	{
-		size_t rc = fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
+		size_t		rc = fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
+
 		fclose(f);
 		if (rc == 1 && lrRestartLsn != InvalidXLogRecPtr)
 		{
-			elog(LOG, "Logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
+			uint64		download_range_mb;
 
-			if (max_slot_wal_keep_size_mb <= 0 || lrRestartLsn + max_slot_wal_keep_size_mb*MB > wp->truncateLsn)
+			elog(LOG, "logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
+
+			/*
+			 * If we need to download more than a max_slot_wal_keep_size,
+			 * don't do it to avoid risk of exploding pg_wal. Logical
+			 * replication won't work until recreated, but at least compute
+			 * would start; this also follows max_slot_wal_keep_size
+			 * semantics.
+			 */
+			download_range_mb = (wp->propEpochStartLsn - lrRestartLsn) / MB;
+			if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
 			{
-				/*
-				 * start from the beginning of the segment to fetch page headers
-				 * verifed by XLogReader
-				 */
-				lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
-				wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
+				walprop_log(WARNING, "not downloading WAL for logical replication since %X/%X as max_slot_wal_keep_size=%dMB",
+							LSN_FORMAT_ARGS(lrRestartLsn), max_slot_wal_keep_size_mb);
+				return InvalidXLogRecPtr;
 			}
+
+			/*
+			 * start from the beginning of the segment to fetch page headers
+			 * verifed by XLogReader
+			 */
+			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
 		}
 	}
+	return lrRestartLsn;
 }
 
 static const walproposer_api walprop_pg = {
@@ -1997,5 +2036,4 @@ static const walproposer_api walprop_pg = {
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.confirm_wal_streamed = walprop_pg_confirm_wal_streamed,
 	.log_internal = walprop_pg_log_internal,
-	.after_election = walprop_pg_after_election,
 };

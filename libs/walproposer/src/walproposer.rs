@@ -86,7 +86,7 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn recovery_download(&self, _sk: &mut Safekeeper, _startpos: u64, _endpos: u64) -> bool {
+    fn recovery_download(&self, _wp: &mut WalProposer, _sk: &mut Safekeeper) -> bool {
         todo!()
     }
 
@@ -361,6 +361,14 @@ mod tests {
         fn conn_blocking_write(&self, _: &mut crate::bindings::Safekeeper, buf: &[u8]) -> bool {
             println!("conn_blocking_write: {:?}", buf);
             self.check_walproposer_msg(buf);
+            true
+        }
+
+        fn recovery_download(
+            &self,
+            _wp: &mut crate::bindings::WalProposer,
+            _sk: &mut crate::bindings::Safekeeper,
+        ) -> bool {
             true
         }
 
