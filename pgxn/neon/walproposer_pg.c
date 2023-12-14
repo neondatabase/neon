@@ -820,8 +820,7 @@ walprop_flush(Safekeeper *sk)
 PGAsyncReadResult
 libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount)
 {
-
-	int			result;
+	int			rawlen;
 
 	if (conn->recvbuf != NULL)
 	{
@@ -829,12 +828,19 @@ libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount)
 		conn->recvbuf = NULL;
 	}
 
-	/* Call PQconsumeInput so that we have the data we need */
-	if (!PQconsumeInput(conn->pg_conn))
+	/* Try to receive a CopyData message */
+	rawlen = PQgetCopyData(conn->pg_conn, &conn->recvbuf, true);
+	if (rawlen == 0)
 	{
-		*amount = 0;
-		*buf = NULL;
-		return PG_ASYNC_READ_FAIL;
+		/* Try consuming some data. */
+		if (!PQconsumeInput(conn->pg_conn))
+		{
+			*amount = 0;
+			*buf = NULL;
+			return PG_ASYNC_READ_FAIL;
+		}
+		/* Now that we've consumed some input, try again */
+		rawlen = PQgetCopyData(conn->pg_conn, &conn->recvbuf, true);
 	}
 
 	/*
@@ -848,7 +854,7 @@ libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount)
 	 * sometimes be triggered by the server returning an ErrorResponse (which
 	 * also happens to have the effect that the copy is done).
 	 */
-	switch (result = PQgetCopyData(conn->pg_conn, &conn->recvbuf, true))
+	switch (rawlen)
 	{
 		case 0:
 			*amount = 0;
@@ -883,7 +889,7 @@ libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount)
 			return PG_ASYNC_READ_FAIL;
 		default:
 			/* Positive values indicate the size of the returned result */
-			*amount = result;
+			*amount = rawlen;
 			*buf = conn->recvbuf;
 			return PG_ASYNC_READ_SUCCESS;
 	}
