@@ -10,7 +10,6 @@ on:
         description: 'Source tag'
         required: true
         type: string
-        default: '7212398291'
       to-tag:
         description: 'Destination tag'
         required: true
@@ -35,8 +34,10 @@ jobs:
 
     env:
       IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools
-      FROM_TAG: ${{ inputs.from-tag }}
-      TO_TAG: ${{ inputs.to-tag }}
+      # FROM_TAG: ${{ inputs.from-tag }}
+      # TO_TAG: ${{ inputs.to-tag }}
+      FROM_TAG: '7212449689'
+      TO_TAG: 'pinned'
     outputs:
       next-digest-buildtools: ${{ steps.next-digest.outputs.next-digest-buildtools }}
       prev-digest-buildtools: ${{ steps.prev-digest.outputs.prev-digest-buildtools }}
