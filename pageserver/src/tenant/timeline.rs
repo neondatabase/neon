@@ -445,6 +445,12 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
 }
 
+impl std::fmt::Debug for Timeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Timeline<{}>", self.timeline_id)
+    }
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created

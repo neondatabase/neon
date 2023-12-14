@@ -448,7 +448,7 @@ async fn timeline_create_handler(
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
-            Err(tenant::CreateTimelineError::AlreadyExists) => {
+            Err(tenant::CreateTimelineError::Conflict) | Err(tenant::CreateTimelineError::AlreadyCreating)=> {
                 json_response(StatusCode::CONFLICT, ())
             }
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => {

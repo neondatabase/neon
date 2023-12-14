@@ -48,6 +48,7 @@ use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::mgr::TenantsMap;
 use self::remote_timeline_client::RemoteTimelineClient;
+use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
@@ -87,7 +88,6 @@ use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -248,6 +248,12 @@ pub struct Tenant {
     generation: Generation,
 
     timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
+
+    /// During timeline creation, we first insert the TimelineId to the
+    /// creating map, then `timelines`, then remove it from the creating map.
+    /// **Lock order**: if acquring both, acquire`timelines` before `timelines_creating`
+    timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
+
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -406,8 +412,10 @@ impl Debug for SetStoppingError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CreateTimelineError {
-    #[error("a timeline with the given ID already exists")]
-    AlreadyExists,
+    #[error("creation of timeline with the given ID is in progress")]
+    AlreadyCreating,
+    #[error("timeline already exists with different parameters")]
+    Conflict,
     #[error(transparent)]
     AncestorLsn(anyhow::Error),
     #[error("ancestor timeline is not active")]
@@ -1469,10 +1477,7 @@ impl Tenant {
             "Cannot create empty timelines on inactive tenant"
         );
 
-        let timeline_uninit_mark = {
-            let timelines = self.timelines.lock().unwrap();
-            self.create_timeline_uninit_mark(new_timeline_id, &timelines)?
-        };
+        let timeline_uninit_mark = self.create_timeline_uninit_mark(new_timeline_id)?;
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
             // make it valid, before calling finish_creation()
@@ -1570,26 +1575,49 @@ impl Tenant {
             .enter()
             .map_err(|_| CreateTimelineError::ShuttingDown)?;
 
-        if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
-            debug!("timeline {new_timeline_id} already exists");
-
-            if let Some(remote_client) = existing.remote_client.as_ref() {
-                // Wait for uploads to complete, so that when we return Ok, the timeline
-                // is known to be durable on remote storage. Just like we do at the end of
-                // this function, after we have created the timeline ourselves.
-                //
-                // We only really care that the initial version of `index_part.json` has
-                // been uploaded. That's enough to remember that the timeline
-                // exists. However, there is no function to wait specifically for that so
-                // we just wait for all in-progress uploads to finish.
-                remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for timeline uploads to complete")?;
+        // Get exclusive access to the timeline ID: this ensures that it does not already exist,
+        // and that no other creation attempts will be allowed in while we are working.  The
+        // uninit_mark is a guard.
+        let uninit_mark = match self.create_timeline_uninit_mark(new_timeline_id) {
+            Ok(m) => m,
+            Err(TimelineExclusionError::AlreadyCreating) => {
+                // Creation is in progress, we cannot create it again, and we cannot
+                // check if this request matches the existing one, so caller must try
+                // again later.
+                return Err(CreateTimelineError::AlreadyCreating);
             }
+            Err(TimelineExclusionError::Other(e)) => {
+                return Err(CreateTimelineError::Other(e));
+            }
+            Err(TimelineExclusionError::AlreadyExists(existing)) => {
+                debug!("timeline {new_timeline_id} already exists");
 
-            return Err(CreateTimelineError::AlreadyExists);
-        }
+                // Idempotency: creating the same timeline twice is not an error, unless
+                // the second creation has different parameters.
+                if existing.get_ancestor_timeline_id() != ancestor_timeline_id
+                    || existing.pg_version != pg_version
+                {
+                    return Err(CreateTimelineError::Conflict);
+                }
+
+                if let Some(remote_client) = existing.remote_client.as_ref() {
+                    // Wait for uploads to complete, so that when we return Ok, the timeline
+                    // is known to be durable on remote storage. Just like we do at the end of
+                    // this function, after we have created the timeline ourselves.
+                    //
+                    // We only really care that the initial version of `index_part.json` has
+                    // been uploaded. That's enough to remember that the timeline
+                    // exists. However, there is no function to wait specifically for that so
+                    // we just wait for all in-progress uploads to finish.
+                    remote_client
+                        .wait_completion()
+                        .await
+                        .context("wait for timeline uploads to complete")?;
+                }
+
+                return Ok(existing);
+            }
+        };
 
         let loaded_timeline = match ancestor_timeline_id {
             Some(ancestor_timeline_id) => {
@@ -1626,15 +1654,31 @@ impl Tenant {
                     ancestor_timeline.wait_lsn(*lsn, ctx).await?;
                 }
 
-                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, ctx)
-                    .await?
+                self.branch_timeline(
+                    &ancestor_timeline,
+                    new_timeline_id,
+                    ancestor_start_lsn,
+                    uninit_mark,
+                    ctx,
+                )
+                .await?
             }
             None => {
-                self.bootstrap_timeline(new_timeline_id, pg_version, load_existing_initdb, ctx)
-                    .await?
+                self.bootstrap_timeline(
+                    new_timeline_id,
+                    pg_version,
+                    load_existing_initdb,
+                    uninit_mark,
+                    ctx,
+                )
+                .await?
             }
         };
 
+        // At this point we have dropped our guard on [`Self::timelines_creating`], and
+        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
+        // not send a success to the caller until it is.  The same applies to handling retries,
+        // see the handling of [`TimelineExclusionError::AlreadyExists`] above.
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
             // Ok, the timeline is durable in remote storage.
@@ -2401,6 +2445,7 @@ impl Tenant {
             loading_started_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
+            timelines_creating: Mutex::new(HashSet::new()),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -2792,8 +2837,9 @@ impl Tenant {
         start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
+        let uninit_mark = self.create_timeline_uninit_mark(dst_id).unwrap();
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
+            .branch_timeline_impl(src_timeline, dst_id, start_lsn, uninit_mark, ctx)
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -2802,22 +2848,24 @@ impl Tenant {
     /// Branch an existing timeline.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn branch_timeline(
-        &self,
+    async fn branch_timeline<'t>(
+        &'t self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
+        timeline_uninit_mark: TimelineUninitMark<'t>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_uninit_mark, ctx)
             .await
     }
 
-    async fn branch_timeline_impl(
-        &self,
+    async fn branch_timeline_impl<'t>(
+        &'t self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
+        timeline_uninit_mark: TimelineUninitMark<'t>,
         _ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
@@ -2833,13 +2881,6 @@ impl Tenant {
             info!("branching timeline {dst_id} from timeline {src_id} at last record LSN: {lsn}");
             lsn
         });
-
-        // Create a placeholder for the new branch. This will error
-        // out if the new timeline ID is already in use.
-        let timeline_uninit_mark = {
-            let timelines = self.timelines.lock().unwrap();
-            self.create_timeline_uninit_mark(dst_id, &timelines)?
-        };
 
         // Ensure that `start_lsn` is valid, i.e. the LSN is within the PITR
         // horizon on the source timeline
@@ -2941,25 +2982,29 @@ impl Tenant {
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        self.bootstrap_timeline(timeline_id, pg_version, load_existing_initdb, ctx)
-            .await
+        let uninit_mark = self.create_timeline_uninit_mark(timeline_id).unwrap();
+        self.bootstrap_timeline(
+            timeline_id,
+            pg_version,
+            load_existing_initdb,
+            uninit_mark,
+            ctx,
+        )
+        .await
     }
 
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
     /// The caller is responsible for activating the returned timeline.
-    async fn bootstrap_timeline(
-        &self,
+    async fn bootstrap_timeline<'t>(
+        &'t self,
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
+        timeline_uninit_mark: TimelineUninitMark<'t>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let timeline_uninit_mark = {
-            let timelines = self.timelines.lock().unwrap();
-            self.create_timeline_uninit_mark(timeline_id, &timelines)?
-        };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
 
@@ -3156,11 +3201,11 @@ impl Tenant {
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
     /// `finish_creation` to insert the Timeline into the timelines map and to remove the
     /// uninit mark file.
-    async fn prepare_new_timeline(
-        &self,
+    async fn prepare_new_timeline<'t>(
+        &'t self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        uninit_mark: TimelineUninitMark,
+        uninit_mark: TimelineUninitMark<'t>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
@@ -3233,23 +3278,38 @@ impl Tenant {
     fn create_timeline_uninit_mark(
         &self,
         timeline_id: TimelineId,
-        timelines: &MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
-    ) -> anyhow::Result<TimelineUninitMark> {
+    ) -> Result<TimelineUninitMark, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
-
-        anyhow::ensure!(
-            timelines.get(&timeline_id).is_none(),
-            "Timeline {tenant_shard_id}/{timeline_id} already exists in pageserver's memory"
-        );
-        let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
-        anyhow::ensure!(
-            !timeline_path.exists(),
-            "Timeline {timeline_path} already exists, cannot create its uninit mark file",
-        );
 
         let uninit_mark_path = self
             .conf
             .timeline_uninit_mark_file_path(tenant_shard_id, timeline_id);
+        let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
+
+        let uninit_mark = TimelineUninitMark::new(
+            self,
+            timeline_id,
+            uninit_mark_path.clone(),
+            timeline_path.clone(),
+        )?;
+
+        // At this stage, we have got exclusive access to in-memory state for this timeline ID
+        // for creation.
+        // A timeline directory should never exist on disk already:
+        // - a previous failed creation would have cleaned up after itself
+        // - a pageserver restart would clean up timeline directories that don't have valid remote state
+        //
+        // Therefore it is an unexpected internal error to encounter a timeline directory already existing here,
+        // this error may indicate a bug in cleanup on failed creations.
+        if timeline_path.exists() {
+            return Err(TimelineExclusionError::Other(anyhow::anyhow!(
+                "Timeline directory already exists! This is a bug."
+            )));
+        }
+
+        // Create the on-disk uninit mark _after_ the in-memory acquisition of the tenant ID: guarantees
+        // that during process runtime, colliding creations will be caught in-memory without getting
+        // as far as failing to write a file.
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -3262,8 +3322,6 @@ impl Tenant {
             .with_context(|| {
                 format!("Failed to crate uninit mark for timeline {tenant_shard_id}/{timeline_id}")
             })?;
-
-        let uninit_mark = TimelineUninitMark::new(uninit_mark_path, timeline_path);
 
         Ok(uninit_mark)
     }
@@ -4013,13 +4071,7 @@ mod tests {
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(
-                e.to_string(),
-                format!(
-                    "Timeline {}/{} already exists in pageserver's memory",
-                    tenant.tenant_shard_id, TIMELINE_ID
-                )
-            ),
+            Err(e) => assert_eq!(e.to_string(), "Already exists".to_string()),
         }
 
         Ok(())

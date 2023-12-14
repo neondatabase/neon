@@ -19,14 +19,14 @@ use super::Timeline;
 pub struct UninitializedTimeline<'t> {
     pub(crate) owning_tenant: &'t Tenant,
     timeline_id: TimelineId,
-    raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark)>,
+    raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark<'t>)>,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
         owning_tenant: &'t Tenant,
         timeline_id: TimelineId,
-        raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark)>,
+        raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark<'t>)>,
     ) -> Self {
         Self {
             owning_tenant,
@@ -169,18 +169,55 @@ pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
 ///
 /// XXX: it's important to create it near the timeline dir, not inside it to ensure timeline dir gets removed first.
 #[must_use]
-pub(crate) struct TimelineUninitMark {
+pub(crate) struct TimelineUninitMark<'t> {
+    owning_tenant: &'t Tenant,
+    timeline_id: TimelineId,
     uninit_mark_deleted: bool,
     uninit_mark_path: Utf8PathBuf,
     pub(crate) timeline_path: Utf8PathBuf,
 }
 
-impl TimelineUninitMark {
-    pub(crate) fn new(uninit_mark_path: Utf8PathBuf, timeline_path: Utf8PathBuf) -> Self {
-        Self {
-            uninit_mark_deleted: false,
-            uninit_mark_path,
-            timeline_path,
+/// Errors when acquiring exclusive access to a timeline ID for creation
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum TimelineExclusionError {
+    #[error("Already exists")]
+    AlreadyExists(Arc<Timeline>),
+    #[error("Already creating")]
+    AlreadyCreating,
+
+    // e.g. I/O errors, or some failure deep in postgres initdb
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl<'t> TimelineUninitMark<'t> {
+    pub(crate) fn new(
+        owning_tenant: &'t Tenant,
+        timeline_id: TimelineId,
+        uninit_mark_path: Utf8PathBuf,
+        timeline_path: Utf8PathBuf,
+    ) -> Result<Self, TimelineExclusionError> {
+        // Lock order: this is the only place we take both locks.  During drop() we only
+        // lock creating_timelines
+        let timelines = owning_tenant.timelines.lock().unwrap();
+        let mut creating_timelines: std::sync::MutexGuard<
+            '_,
+            std::collections::HashSet<TimelineId>,
+        > = owning_tenant.timelines_creating.lock().unwrap();
+
+        if let Some(existing) = timelines.get(&timeline_id) {
+            Err(TimelineExclusionError::AlreadyExists(existing.clone()))
+        } else if creating_timelines.contains(&timeline_id) {
+            Err(TimelineExclusionError::AlreadyCreating)
+        } else {
+            creating_timelines.insert(timeline_id);
+            Ok(Self {
+                owning_tenant,
+                timeline_id,
+                uninit_mark_deleted: false,
+                uninit_mark_path,
+                timeline_path,
+            })
         }
     }
 
@@ -207,7 +244,7 @@ impl TimelineUninitMark {
     }
 }
 
-impl Drop for TimelineUninitMark {
+impl<'t> Drop for TimelineUninitMark<'t> {
     fn drop(&mut self) {
         if !self.uninit_mark_deleted {
             if self.timeline_path.exists() {
@@ -226,5 +263,11 @@ impl Drop for TimelineUninitMark {
                 }
             }
         }
+
+        self.owning_tenant
+            .timelines_creating
+            .lock()
+            .unwrap()
+            .remove(&self.timeline_id);
     }
 }
