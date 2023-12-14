@@ -10,11 +10,13 @@ on:
         description: 'Source tag'
         required: true
         type: string
+        default: '7212398291'
       to-tag:
         description: 'Destination tag'
         required: true
         type: string
         default: 'pinned'
+  pull_request:
 
 defaults:
   run:
