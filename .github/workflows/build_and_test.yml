@@ -785,8 +785,8 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-tools-image:
-    runs-on: [ self-hosted, gen3, build-buildtools-image, large ]
-    needs: [ check-permissions, tag ]
+    runs-on: [ self-hosted, gen3, large ]
+    needs: [ check-permissions, build-buildtools-image, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
