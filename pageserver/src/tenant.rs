@@ -1596,6 +1596,8 @@ impl Tenant {
                 // the second creation has different parameters.
                 if existing.get_ancestor_timeline_id() != ancestor_timeline_id
                     || existing.pg_version != pg_version
+                    || (ancestor_start_lsn.is_some()
+                        && ancestor_start_lsn != Some(existing.get_ancestor_lsn()))
                 {
                     return Err(CreateTimelineError::Conflict);
                 }
