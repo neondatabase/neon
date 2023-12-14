@@ -4,14 +4,14 @@ on:
   # uncomment to run on push for debugging your PR
   push:
     branches: [bodobolero/analyze_clickbench_performance]
-  # schedule:
-  # * is a special character in YAML so you have to quote this string
-  #          ┌───────────── minute (0 - 59)
-  #          │ ┌───────────── hour (0 - 23)
-  #          │ │ ┌───────────── day of the month (1 - 31)
-  #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
-  #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-  #- cron:  '0 3 * * *' # run once a day, timezone is utc
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron: "0 3 * * *" # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
@@ -31,6 +31,11 @@ on:
       collect_pg_stat_statements:
         type: boolean
         description: "Collect pg_stat_statements for OLAP queries. If not set, pg_stat_statements will not be collected"
+        required: false
+        default: false
+      run_AWS_RDS_AND_AURORA:
+        type: boolean
+        description: "AWS-RDS and AWS-AURORA normally only run on Saturday. Set this to true to run them on every workflow_dispatch"
         required: false
         default: false
 
@@ -148,7 +153,7 @@ jobs:
       #                   { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
       #     }'
 
-      #     if [ "$(date +%A)" = "Saturday" ]; then
+      #     if [ "$(date +%A)" = "Saturday" || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}]; then
       #       matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
       #                                                { "platform": "rds-aurora",   "db_size": "50gb"}]')
       #     fi
@@ -164,7 +169,7 @@ jobs:
             ]
           }'
 
-          if [ "$(date +%A)" = "Saturday" ]; then
+          if [ "$(date +%A)" = "Saturday" || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}]; then
             matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
                                                      { "platform": "rds-aurora"   }]')
           fi
@@ -183,7 +188,7 @@ jobs:
       #       ]
       #     }'
 
-      #     if [ "$(date +%A)" = "Saturday" ]; then
+      #     iif [ "$(date +%A)" = "Saturday" || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}]; then
       #       matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
       #                                                { "platform": "rds-aurora",   "scale": "10" }]')
       #     fi
