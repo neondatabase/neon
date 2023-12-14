@@ -23,6 +23,16 @@ on:
         type: boolean
         description: "Publish perf report. If not set, the report will be published only for the main branch"
         required: false
+      collect_olap_explain:
+        type: boolean
+        description: "Collect EXPLAIN ANALYZE for OLAP queries. If not set, EXPLAIN ANALYZE will not be collected"
+        required: false
+        default: false
+      collect_pg_stat_statements:
+        type: boolean
+        description: "Collect pg_stat_statements for OLAP queries. If not set, pg_stat_statements will not be collected"
+        required: false
+        default: false
 
 defaults:
   run:
@@ -38,6 +48,8 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
+      TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
+      TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output

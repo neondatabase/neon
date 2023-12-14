@@ -16,11 +16,21 @@ class LabelledQuery:
     label: str
     query: str
 
+# Collect pg_stat_statements after running the tests if TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
+# create extension before all tests in this module if it does not exist and TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
+@pytest.fixture(scope="module")
 @pytest.mark.remote_cluster
-def test_aa_create_extension_pg_stat_statements(remote_compare: RemoteCompare):
-    query =  LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION pg_stat_statements;")
-    run_psql(remote_compare, query, times=1)
-
+def collect_pg_stat_statements(remote_compare: RemoteCompare):
+    if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
+        log.info(f"Creating extension pg_stat_statements")
+        query =  LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION pg_stat_statements;")
+        run_psql_once_without_explain(remote_compare, query)
+        yield
+        query =  LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
+        run_psql_once_without_explain(remote_compare, query)
+    else:
+        # If the environment variable is not set, just yield without collecting pg_stat_statements
+        yield
 
 # A list of queries to run.
 # Please do not alter the label for the query, as it is used to identify it.
@@ -94,7 +104,7 @@ def get_scale() -> List[str]:
     scale = os.getenv("TEST_OLAP_SCALE", "noscale")
     return [scale]
 
-
+# run the query times times plus once with EXPLAIN VERBOSE if TEST_OLAP_COLLECT_EXPLAIN is set to true (default false)
 def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> None:
     # prepare connstr:
     # - cut out password from connstr to pass it via env
@@ -115,11 +125,28 @@ def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> N
         log.info(f"Run {run}/{times}")
         with env.zenbenchmark.record_duration(f"{label}/{run}"):
             env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
-    log.info(f"Explaining query ")
-    run += 1
-    with env.zenbenchmark.record_duration(f"{label}/{run}"):
-        env.pg_bin.run_capture(["psql", connstr, "-c", EXPLAIN_STRING+query], env=environ)
+    if os.getenv('TEST_OLAP_COLLECT_EXPLAIN', 'false').lower() == 'true':
+        log.info(f"Explaining query {label}")
+        run += 1
+        with env.zenbenchmark.record_duration(f"{label}/{run}"):
+            env.pg_bin.run_capture(["psql", connstr, "-c", EXPLAIN_STRING+query], env=environ)
 
+def run_psql_once_without_explain(env: RemoteCompare, labelled_query: LabelledQuery) -> None:
+    # prepare connstr:
+    # - cut out password from connstr to pass it via env
+    # - add options to connstr
+    password = env.pg.default_options.get("password", None)
+    options = f"-cstatement_timeout=0 {env.pg.default_options.get('options', '')}"
+    connstr = env.pg.connstr(password=None, options=options)
+
+    environ: Dict[str, str] = {}
+    if password is not None:
+        environ["PGPASSWORD"] = password
+
+    label, query = labelled_query.label, labelled_query.query
+
+    with env.zenbenchmark.record_duration(f"{label}/{1}"):
+        env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
 
 @pytest.mark.parametrize("scale", get_scale())
 @pytest.mark.parametrize("query", QUERIES)
@@ -168,8 +195,3 @@ def tpch_queuies() -> Tuple[ParameterSet, ...]:
 
 #     run_psql(remote_compare, query, times=1)
 
-
-@pytest.mark.remote_cluster
-def test_zz_collect_pg_stat_statements(remote_compare: RemoteCompare):
-    query =  LabelledQuery("QPG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
-    run_psql(remote_compare, query, times=1)
