@@ -11,7 +11,8 @@ use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter, register_int_counter_vec, Gauge, IntCounter, IntCounterVec, IntGaugeVec,
+    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec, Gauge,
+    IntCounter, IntCounterPairVec, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -89,16 +90,10 @@ pub static BROKER_PULLED_UPDATES: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_broker_pulled_updates_total counter")
 });
-pub static PG_QUERIES_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static PG_QUERIES_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "safekeeper_pg_queries_received_total",
         "Number of queries received through pg protocol",
-        &["query"]
-    )
-    .expect("Failed to register safekeeper_pg_queries_received_total counter")
-});
-pub static PG_QUERIES_FINISHED: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
         "safekeeper_pg_queries_finished_total",
         "Number of queries finished through pg protocol",
         &["query"]

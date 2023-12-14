@@ -2,9 +2,10 @@ use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
@@ -1343,25 +1344,16 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_start_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls started",
-            &["task"],
-        )
-        .unwrap()
-    });
-
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_finish_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
-            &["task"],
-        )
-        .unwrap()
-    });
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_background_loop_semaphore_wait_start_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls started",
+        "pageserver_background_loop_semaphore_wait_finish_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+        &["task"],
+    )
+    .unwrap()
+});
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(

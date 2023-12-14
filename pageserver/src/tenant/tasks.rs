@@ -63,12 +63,10 @@ pub(crate) async fn concurrent_background_tasks_rate_limit(
     _ctx: &RequestContext,
     cancel: &CancellationToken,
 ) -> Result<impl Drop, RateLimitError> {
-    crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT
+    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
         .with_label_values(&[loop_kind.as_static_str()])
-        .inc();
-    scopeguard::defer!(
-        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT.with_label_values(&[loop_kind.as_static_str()]).inc();
-    );
+        .guard();
+
     tokio::select! {
         permit = CONCURRENT_BACKGROUND_TASKS.acquire() => {
             match permit {
