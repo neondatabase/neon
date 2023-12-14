@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
 use metrics::{
-    exponential_buckets, register_counter_pair_vec, register_int_counter_vec, CounterPairVec,
+    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec, IntCounterPairVec,
     IntCounterVec,
 };
 use once_cell::sync::{Lazy, OnceCell};
@@ -47,8 +47,8 @@ const RETRY_WAIT_EXPONENT_BASE: f64 = std::f64::consts::SQRT_2;
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
 
-pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<CounterPairVec> = Lazy::new(|| {
-    register_counter_pair_vec!(
+pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "proxy_opened_db_connections_total",
         "Number of opened connections to a database.",
         "proxy_closed_db_connections_total",
@@ -58,8 +58,8 @@ pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<CounterPairVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<CounterPairVec> = Lazy::new(|| {
-    register_counter_pair_vec!(
+pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "proxy_opened_client_connections_total",
         "Number of opened connections from a client.",
         "proxy_closed_client_connections_total",
@@ -69,8 +69,8 @@ pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<CounterPairVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static NUM_CONNECTION_REQUESTS_GAUGE: Lazy<CounterPairVec> = Lazy::new(|| {
-    register_counter_pair_vec!(
+pub static NUM_CONNECTION_REQUESTS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
         "proxy_accepted_connections_total",
         "Number of client connections accepted.",
         "proxy_closed_connections_total",

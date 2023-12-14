@@ -3,8 +3,11 @@
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
 #![deny(clippy::undocumented_unsafe_blocks)]
+
 use once_cell::sync::Lazy;
-use prometheus::core::{AtomicU64, Collector, GenericGauge, GenericGaugeVec};
+use prometheus::core::{
+    Atomic, AtomicU64, Collector, GenericCounter, GenericCounterVec, GenericGauge, GenericGaugeVec,
+};
 pub use prometheus::opts;
 pub use prometheus::register;
 pub use prometheus::Error;
@@ -133,71 +136,136 @@ fn get_rusage_stats() -> libc::rusage {
     }
 }
 
-/// Create an [`CounterPairVec`] and registers to default registry.
+/// Create an [`IntCounterPairVec`] and registers to default registry.
 #[macro_export(local_inner_macros)]
-macro_rules! register_counter_pair_vec {
+macro_rules! register_int_counter_pair_vec {
     ($NAME1:expr, $HELP1:expr, $NAME2:expr, $HELP2:expr, $LABELS_NAMES:expr $(,)?) => {{
         match (
             $crate::register_int_counter_vec!($NAME1, $HELP1, $LABELS_NAMES),
             $crate::register_int_counter_vec!($NAME2, $HELP2, $LABELS_NAMES),
         ) {
-            (Ok(inc), Ok(dec)) => Ok($crate::CounterPairVec::new(inc, dec)),
+            (Ok(inc), Ok(dec)) => Ok($crate::IntCounterPairVec::new(inc, dec)),
             (Err(e), _) | (_, Err(e)) => Err(e),
         }
     }};
 }
-/// Create an [`CounterPair`] and registers to default registry.
+/// Create an [`IntCounterPair`] and registers to default registry.
 #[macro_export(local_inner_macros)]
-macro_rules! register_counter_pair {
+macro_rules! register_int_counter_pair {
     ($NAME1:expr, $HELP1:expr, $NAME2:expr, $HELP2:expr $(,)?) => {{
         match (
             $crate::register_int_counter!($NAME1, $HELP1),
             $crate::register_int_counter!($NAME2, $HELP2),
         ) {
-            (Ok(inc), Ok(dec)) => Ok($crate::CounterPair::new(inc, dec)),
+            (Ok(inc), Ok(dec)) => Ok($crate::IntCounterPair::new(inc, dec)),
             (Err(e), _) | (_, Err(e)) => Err(e),
         }
     }};
 }
 
-pub struct CounterPairVec {
-    inc: IntCounterVec,
-    dec: IntCounterVec,
+/// A Pair of [`GenericCounterVec`]s. Like an [`GenericGaugeVec`] but will always observe changes
+pub struct GenericCounterPairVec<P: Atomic> {
+    inc: GenericCounterVec<P>,
+    dec: GenericCounterVec<P>,
 }
 
-pub struct CounterPair {
-    inc: IntCounter,
-    dec: IntCounter,
+/// A Pair of [`GenericCounter`]s. Like an [`GenericGauge`] but will always observe changes
+pub struct GenericCounterPair<P: Atomic> {
+    inc: GenericCounter<P>,
+    dec: GenericCounter<P>,
 }
 
-impl CounterPairVec {
-    pub fn new(inc: IntCounterVec, dec: IntCounterVec) -> Self {
+impl<P: Atomic> GenericCounterPairVec<P> {
+    pub fn new(inc: GenericCounterVec<P>, dec: GenericCounterVec<P>) -> Self {
         Self { inc, dec }
     }
 
-    pub fn with_label_values(&self, vals: &[&str]) -> CounterPair {
-        CounterPair {
-            inc: self.inc.with_label_values(vals),
-            dec: self.dec.with_label_values(vals),
-        }
+    /// `get_metric_with_label_values` returns the [`GenericCounterPair<P>`] for the given slice
+    /// of label values (same order as the VariableLabels in Desc). If that combination of
+    /// label values is accessed for the first time, a new [`GenericCounterPair<P>`] is created.
+    ///
+    /// An error is returned if the number of label values is not the same as the
+    /// number of VariableLabels in Desc.
+    pub fn get_metric_with_label_values(&self, vals: &[&str]) -> Result<GenericCounterPair<P>> {
+        Ok(GenericCounterPair {
+            inc: self.inc.get_metric_with_label_values(vals)?,
+            dec: self.dec.get_metric_with_label_values(vals)?,
+        })
+    }
+
+    /// `with_label_values` works as `get_metric_with_label_values`, but panics if an error
+    /// occurs.
+    pub fn with_label_values(&self, vals: &[&str]) -> GenericCounterPair<P> {
+        self.get_metric_with_label_values(vals).unwrap()
     }
 }
 
-impl CounterPair {
-    pub fn new(inc: IntCounter, dec: IntCounter) -> Self {
+impl<P: Atomic> GenericCounterPair<P> {
+    pub fn new(inc: GenericCounter<P>, dec: GenericCounter<P>) -> Self {
         Self { inc, dec }
     }
 
-    pub fn guard(&self) -> CounterPairGuard {
+    /// Increment the gauge by 1, returning a guard that decrements by 1 on drop.
+    pub fn guard(&self) -> GenericCounterPairGuard<P> {
         self.inc.inc();
-        CounterPairGuard(self.dec.clone())
+        GenericCounterPairGuard(self.dec.clone())
+    }
+
+    /// Increment the gauge by n, returning a guard that decrements by n on drop.
+    pub fn guard_by(&self, n: P::T) -> GenericCounterPairGuardBy<P> {
+        self.inc.inc_by(n);
+        GenericCounterPairGuardBy(self.dec.clone(), n)
+    }
+
+    /// Increase the gauge by 1.
+    #[inline]
+    pub fn inc(&self) {
+        self.inc.inc();
+    }
+
+    /// Decrease the gauge by 1.
+    #[inline]
+    pub fn dec(&self) {
+        self.dec.inc();
+    }
+
+    /// Add the given value to the gauge. (The value can be
+    /// negative, resulting in a decrement of the gauge.)
+    #[inline]
+    pub fn inc_by(&self, v: P::T) {
+        self.inc.inc_by(v);
+    }
+
+    /// Subtract the given value from the gauge. (The value can be
+    /// negative, resulting in an increment of the gauge.)
+    #[inline]
+    pub fn dec_by(&self, v: P::T) {
+        self.dec.inc_by(v);
     }
 }
 
-pub struct CounterPairGuard(IntCounter);
+/// Guard returned by [`GenericCounterPair::guard`]
+pub struct GenericCounterPairGuard<P: Atomic>(GenericCounter<P>);
 
-impl Drop for CounterPairGuard {
+impl<P: Atomic> Drop for GenericCounterPairGuard<P> {
     fn drop(&mut self) {
         self.0.inc();
     }
 }
+/// Guard returned by [`GenericCounterPair::guard_by`]
+pub struct GenericCounterPairGuardBy<P: Atomic>(GenericCounter<P>, P::T);
+
+impl<P: Atomic> Drop for GenericCounterPairGuardBy<P> {
+    fn drop(&mut self) {
+        self.0.inc_by(self.1);
+    }
+}
+
+/// A Pair of [`IntCounterVec`]s. Like an [`IntGaugeVec`] but will always observe changes
+pub type IntCounterPairVec = GenericCounterPairVec<AtomicU64>;
+
+/// A Pair of [`IntCounter`]s. Like an [`IntGauge`] but will always observe changes
+pub type IntCounterPair = GenericCounterPair<AtomicU64>;
+
+/// A guard for [`IntCounterPair`] that will decrement the gauge on drop
+pub type IntCounterPairGuard = GenericCounterPairGuard<AtomicU64>;

@@ -7,7 +7,7 @@ use crate::{
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
-use metrics::CounterPairGuard;
+use metrics::IntCounterPairGuard;
 use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
@@ -228,7 +228,7 @@ pub struct PostgresConnection {
     /// Query cancellation token.
     pub cancel_closure: CancelClosure,
 
-    _guage: CounterPairGuard,
+    _guage: IntCounterPairGuard,
 }
 
 impl ConnCfg {

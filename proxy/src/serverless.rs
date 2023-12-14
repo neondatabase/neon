@@ -8,7 +8,7 @@ mod websocket;
 
 use anyhow::bail;
 use hyper::StatusCode;
-use metrics::CounterPairGuard;
+use metrics::IntCounterPairGuard;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
@@ -150,7 +150,7 @@ pub async fn task_main(
 
 struct MetricService<S> {
     inner: S,
-    _gauge: CounterPairGuard,
+    _gauge: IntCounterPairGuard,
 }
 
 impl<S> MetricService<S> {
