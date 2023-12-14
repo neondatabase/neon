@@ -537,6 +537,7 @@ impl Endpoint {
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
             remote_extensions,
+            pgbouncer_settings: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
