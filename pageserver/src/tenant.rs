@@ -2870,9 +2870,9 @@ impl Tenant {
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
-        // First acquire the GC lock so that another task cannot advance the GC
-        // cutoff in 'gc_info', and make 'start_lsn' invalid, while we are
-        // creating the branch.
+        // We will validate our ancestor LSN in this function.  Acquire the GC lock so that
+        // this check cannot race with GC, and the ancestor LSN is guaranteed to remain
+        // valid while we are creating the branch.
         let _gc_cs = self.gc_cs.lock().await;
 
         // If no start LSN is specified, we branch the new timeline from the source timeline's last record LSN
