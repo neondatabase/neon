@@ -307,15 +307,17 @@ def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: N
         log.info(first)
         log.info(second)
 
-        (succeeded, failed) = (first, second) if isinstance(second, Exception) else (second, first)
-        assert isinstance(failed, Exception)
-        assert isinstance(succeeded, Dict)
+        # Both requests may succeed, or one may fail:
+        # - If one request is still creating while the other runs, the other will fail.
+        # - If one request completes and then the other runs, the other will succeed because
+        #   timeline creation is idempotent.
+        success = 0
+        for r in (first, second):
+            if isinstance(r, Dict):
+                assert r["state"] == "Active"
+                success += 1
 
-        # there's multiple valid status codes:
-        # - Timeline x/y already exists
-        # - whatever 409 response says, but that is a subclass of PageserverApiException
-        assert isinstance(failed, PageserverApiException)
-        assert succeeded["state"] == "Active"
+        assert success > 0
     finally:
         # we might still have the failpoint active
         env.pageserver.stop(immediate=True)
