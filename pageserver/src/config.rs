@@ -1152,7 +1152,9 @@ background_task_maximum_delay = '334 s'
                     storage_broker::DEFAULT_KEEPALIVE_INTERVAL
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
-                concurrent_tenant_warmup: ConfigurableSemaphore::default(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
+                ),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
@@ -1219,7 +1221,9 @@ background_task_maximum_delay = '334 s'
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
-                concurrent_tenant_warmup: ConfigurableSemaphore::default(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
+                ),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
