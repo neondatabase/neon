@@ -1,4 +1,4 @@
-use crate::auth;
+use crate::{auth, rate_limiter::RateBucketInfo};
 use anyhow::{bail, ensure, Context, Ok};
 use rustls::{sign, Certificate, PrivateKey};
 use sha2::{Digest, Sha256};
@@ -20,7 +20,7 @@ pub struct ProxyConfig {
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
     pub disable_ip_check_for_http: bool,
-    pub endpoint_rps_limit: u32,
+    pub endpoint_rps_limit: Vec<RateBucketInfo>,
 }
 
 #[derive(Debug)]

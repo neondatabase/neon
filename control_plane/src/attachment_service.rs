@@ -9,7 +9,7 @@ pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
     path: PathBuf,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 const COMMAND: &str = "attachment_service";
@@ -53,7 +53,7 @@ impl AttachmentService {
             env: env.clone(),
             path,
             listen,
-            client: reqwest::blocking::ClientBuilder::new()
+            client: reqwest::ClientBuilder::new()
                 .build()
                 .expect("Failed to construct http client"),
         }
@@ -84,7 +84,7 @@ impl AttachmentService {
     }
 
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
-    pub fn attach_hook(
+    pub async fn attach_hook(
         &self,
         tenant_id: TenantId,
         pageserver_id: NodeId,
@@ -104,16 +104,16 @@ impl AttachmentService {
             node_id: Some(pageserver_id),
         };
 
-        let response = self.client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send().await?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
 
-        let response = response.json::<AttachHookResponse>()?;
+        let response = response.json::<AttachHookResponse>().await?;
         Ok(response.gen)
     }
 
-    pub fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
+    pub async fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
         use hyper::StatusCode;
 
         let url = self
@@ -126,12 +126,12 @@ impl AttachmentService {
 
         let request = InspectRequest { tenant_id };
 
-        let response = self.client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send().await?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
 
-        let response = response.json::<InspectResponse>()?;
+        let response = response.json::<InspectResponse>().await?;
         Ok(response.attachment)
     }
 }

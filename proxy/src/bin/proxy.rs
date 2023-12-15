@@ -7,6 +7,8 @@ use proxy::console;
 use proxy::console::provider::AllowedIpsCache;
 use proxy::console::provider::NodeInfoCache;
 use proxy::http;
+use proxy::rate_limiter::EndpointRateLimiter;
+use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
 use proxy::usage_metrics;
 
@@ -14,6 +16,7 @@ use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
 use std::pin::pin;
+use std::sync::Arc;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -113,8 +116,11 @@ struct ProxyCliArgs {
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     rate_limiter_timeout: tokio::time::Duration,
     /// Endpoint rate limiter max number of requests per second.
-    #[clap(long, default_value_t = 300)]
-    endpoint_rps_limit: u32,
+    ///
+    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Can be given multiple times for different bucket sizes.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    endpoint_rps_limit: Vec<RateBucketInfo>,
     /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
     #[clap(long, default_value_t = 100)]
     initial_limit: usize,
@@ -157,6 +163,8 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
+
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
@@ -164,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
         config,
         proxy_listener,
         cancellation_token.clone(),
+        endpoint_rate_limiter.clone(),
     ));
 
     // TODO: rename the argument to something like serverless.
@@ -177,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
             config,
             serverless_listener,
             cancellation_token.clone(),
+            endpoint_rate_limiter.clone(),
         ));
     }
 
@@ -311,6 +321,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
     };
+
+    let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
+    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
+
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
@@ -320,8 +334,35 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         authentication_config,
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
-        endpoint_rps_limit: args.endpoint_rps_limit,
+        endpoint_rps_limit,
     }));
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+    use proxy::rate_limiter::RateBucketInfo;
+
+    #[test]
+    fn parse_endpoint_rps_limit() {
+        let config = super::ProxyCliArgs::parse_from([
+            "proxy",
+            "--endpoint-rps-limit",
+            "100@1s",
+            "--endpoint-rps-limit",
+            "20@30s",
+        ]);
+
+        assert_eq!(
+            config.endpoint_rps_limit,
+            vec![
+                RateBucketInfo::new(100, Duration::from_secs(1)),
+                RateBucketInfo::new(20, Duration::from_secs(30)),
+            ]
+        );
+    }
 }

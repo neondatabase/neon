@@ -17,7 +17,7 @@ use utils::{
 
 use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -237,6 +237,7 @@ pub struct TenantConfig {
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
+    pub heatmap_period: Option<String>,
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
