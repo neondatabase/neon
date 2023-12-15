@@ -1734,6 +1734,7 @@ impl Timeline {
                 self.current_logical_size.current_size().accuracy(),
                 logical_size::Accuracy::Exact,
             );
+            self.current_logical_size.initialized.add_permits(1);
             return;
         };
 
@@ -1779,6 +1780,11 @@ impl Timeline {
         cancel: CancellationToken,
         background_ctx: RequestContext,
     ) {
+        scopeguard::defer! {
+            // Irrespective of the outcome of this operation, we should unblock anyone waiting for it.
+            self.current_logical_size.initialized.add_permits(1);
+        }
+
         enum BackgroundCalculationError {
             Cancelled,
             Other(anyhow::Error),
@@ -3103,6 +3109,32 @@ impl Timeline {
         timer.stop_and_record();
 
         Ok(image_layers)
+    }
+
+    /// Wait until the background initial logical size calculation is complete, or
+    /// this Timeline is shut down.  Calling this function will cause the initial
+    /// logical size calculation to skip waiting for the background jobs barrier.
+    pub(crate) async fn await_initial_logical_size(self: Arc<Self>) {
+        if let Some(await_bg_cancel) = self
+            .current_logical_size
+            .cancel_wait_for_background_loop_concurrency_limit_semaphore
+            .get()
+        {
+            await_bg_cancel.cancel();
+        } else {
+            // We should not wait if we were not able to explicitly instruct
+            // the logical size cancellation to skip the concurrency limit semaphore.
+            // TODO: this is an unexpected case.  We should restructure so that it
+            // can't happen.
+            tracing::info!(
+                "await_initial_logical_size: can't get semaphore cancel token, skipping"
+            );
+        }
+
+        tokio::select!(
+            _ = self.current_logical_size.initialized.acquire() => {},
+            _ = self.cancel.cancelled() => {}
+        )
     }
 }
 

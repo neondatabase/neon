@@ -28,7 +28,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
-use crate::metrics::TENANT_MANAGER as METRICS;
+use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, TenantConfOpt,
@@ -44,7 +44,6 @@ use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
-use super::timeline::delete::DeleteTimelineFlow;
 use super::TenantSharedResources;
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -429,6 +428,13 @@ pub async fn init_tenant_mgr(
     // Determine which tenants are to be attached
     let tenant_generations =
         init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
+
+    tracing::info!(
+        "Attaching {} tenants at startup, warming up {} at a time",
+        tenant_configs.len(),
+        conf.concurrent_tenant_warmup.initial_permits()
+    );
+    TENANT.startup_scheduled.inc_by(tenant_configs.len() as u64);
 
     // Construct `Tenant` objects and start them running
     for (tenant_shard_id, location_conf) in tenant_configs {
@@ -848,17 +854,6 @@ impl TenantManager {
         }
     }
 
-    pub(crate) async fn delete_timeline(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-        _ctx: &RequestContext,
-    ) -> Result<(), DeleteTimelineError> {
-        let tenant = self.get_attached_tenant_shard(tenant_shard_id, true)?;
-        DeleteTimelineFlow::run(&tenant, timeline_id, false).await?;
-        Ok(())
-    }
-
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(crate) async fn upsert_location(
         &self,
@@ -1221,7 +1216,10 @@ pub(crate) async fn get_active_tenant_with_timeout(
                         // Fast path: we don't need to do any async waiting.
                         return Ok(tenant.clone());
                     }
-                    _ => (WaitFor::Tenant(tenant.clone()), tenant_shard_id),
+                    _ => {
+                        tenant.activate_now();
+                        (WaitFor::Tenant(tenant.clone()), tenant_shard_id)
+                    }
                 }
             }
             Some(TenantSlot::Secondary) => {
@@ -1275,28 +1273,10 @@ pub(crate) async fn get_active_tenant_with_timeout(
     };
 
     tracing::debug!("Waiting for tenant to enter active state...");
-    match timeout_cancellable(
-        deadline.duration_since(Instant::now()),
-        cancel,
-        tenant.wait_to_become_active(),
-    )
-    .await
-    {
-        Ok(Ok(())) => Ok(tenant),
-        Ok(Err(e)) => Err(e),
-        Err(TimeoutCancellableError::Timeout) => {
-            let latest_state = tenant.current_state();
-            if latest_state == TenantState::Active {
-                Ok(tenant)
-            } else {
-                Err(GetActiveTenantError::WaitForActiveTimeout {
-                    latest_state: Some(latest_state),
-                    wait_time: timeout,
-                })
-            }
-        }
-        Err(TimeoutCancellableError::Cancelled) => Err(GetActiveTenantError::Cancelled),
-    }
+    tenant
+        .wait_to_become_active(deadline.duration_since(Instant::now()))
+        .await?;
+    Ok(tenant)
 }
 
 pub(crate) async fn delete_tenant(
