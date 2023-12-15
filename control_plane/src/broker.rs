@@ -19,7 +19,7 @@ pub async fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<(
 
     let args = [format!("--listen-addr={listen_addr}")];
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     background_process::start_process(
         "storage_broker",
         &env.base_data_dir,
@@ -36,7 +36,7 @@ pub async fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<(
                 .get(status_url)
                 .build()
                 .with_context(|| format!("Failed to construct request to broker endpoint {url}"))?;
-            match client.execute(request) {
+            match client.execute(request).await {
                 Ok(resp) => Ok(resp.status().is_success()),
                 Err(_) => Ok(false),
             }

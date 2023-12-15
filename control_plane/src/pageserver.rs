@@ -224,11 +224,7 @@ impl PageServerNode {
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                let st = rt.block_on(self.check_status());
+                let st = self.check_status().await;
                 match st {
                     Ok(()) => Ok(true),
                     Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
