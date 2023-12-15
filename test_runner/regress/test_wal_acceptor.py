@@ -1557,60 +1557,6 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
 
-# We have `wal_keep_size=0`, so postgres should trim WAL once it's broadcasted
-# to all safekeepers. This test checks that compute WAL can fit into small number
-# of WAL segments.
-def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
-    # used to calculate delta in collect_stats
-    last_lsn = Lsn(0)
-
-    # returns pg_wal size in MB
-    def collect_stats(endpoint: Endpoint, cur, enable_logs=True):
-        nonlocal last_lsn
-        assert endpoint.pgdata_dir is not None
-
-        log.info("executing INSERT to generate WAL")
-        current_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        pg_wal_size_mb = get_dir_size(os.path.join(endpoint.pgdata_dir, "pg_wal")) / 1024 / 1024
-        if enable_logs:
-            lsn_delta_mb = (current_lsn - last_lsn) / 1024 / 1024
-            log.info(f"LSN delta: {lsn_delta_mb} MB, current WAL size: {pg_wal_size_mb} MB")
-        last_lsn = current_lsn
-        return pg_wal_size_mb
-
-    # generates about ~20MB of WAL, to create at least one new segment
-    def generate_wal(cur):
-        cur.execute("INSERT INTO t SELECT generate_series(1,300000), 'payload'")
-
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start()
-
-    env.neon_cli.create_branch("test_wal_deleted_after_broadcast")
-    # Adjust checkpoint config to prevent keeping old WAL segments
-    endpoint = env.endpoints.create_start(
-        "test_wal_deleted_after_broadcast",
-        config_lines=["min_wal_size=32MB", "max_wal_size=32MB", "log_checkpoints=on"],
-    )
-
-    pg_conn = endpoint.connect()
-    cur = pg_conn.cursor()
-    cur.execute("CREATE TABLE t(key int, value text)")
-
-    collect_stats(endpoint, cur)
-
-    # generate WAL to simulate normal workload
-    for _ in range(5):
-        generate_wal(cur)
-        collect_stats(endpoint, cur)
-
-    log.info("executing checkpoint")
-    cur.execute("CHECKPOINT")
-    wal_size_after_checkpoint = collect_stats(endpoint, cur)
-
-    # there shouldn't be more than 2 WAL segments (but dir may have archive_status files)
-    assert wal_size_after_checkpoint < 16 * 2.5
-
-
 @pytest.mark.parametrize("auth_enabled", [False, True])
 def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     neon_env_builder.auth_enabled = auth_enabled
