@@ -1734,7 +1734,7 @@ impl Timeline {
                 self.current_logical_size.current_size().accuracy(),
                 logical_size::Accuracy::Exact,
             );
-            self.current_logical_size.initialized.notify_one();
+            self.current_logical_size.initialized.add_permits(1);
             return;
         };
 
@@ -1782,7 +1782,7 @@ impl Timeline {
     ) {
         scopeguard::defer! {
             // Irrespective of the outcome of this operation, we should unblock anyone waiting for it.
-            self.current_logical_size.initialized.notify_one();
+            self.current_logical_size.initialized.add_permits(1);
         }
 
         enum BackgroundCalculationError {
@@ -3124,7 +3124,7 @@ impl Timeline {
         }
 
         tokio::select!(
-            _ = self.current_logical_size.initialized.notified() => {},
+            _ = self.current_logical_size.initialized.acquire() => {},
             _ = self.cancel.cancelled() => {}
         )
     }
