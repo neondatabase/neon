@@ -48,17 +48,17 @@ pub fn stream_tenants<'a>(
 /// Given a TenantShardId, output a stream of the timelines within that tenant, discovered
 /// using ListObjectsv2.  The listing is done before the stream is built, so that this
 /// function can be used to generate concurrency on a stream using buffer_unordered.
-pub async fn stream_tenant_timelines<'a>(
-    s3_client: &'a Client,
-    target: &'a RootTarget,
+pub async fn get_tenant_timelines(
+    s3_client: &Client,
+    target: &RootTarget,
     tenant: TenantShardId,
-) -> anyhow::Result<impl Stream<Item = Result<TenantShardTimelineId, anyhow::Error>> + 'a> {
-    let mut timeline_ids: Vec<Result<TimelineId, anyhow::Error>> = Vec::new();
+) -> Vec<anyhow::Result<TimelineId>> {
+    let mut timeline_ids = Vec::new();
     let mut continuation_token = None;
     let timelines_target = target.timelines_root(&tenant);
 
     loop {
-        tracing::info!("Listing in {}", tenant);
+        tracing::trace!("Listing in {}", tenant);
         let fetch_response =
             list_objects_with_retries(s3_client, &timelines_target, continuation_token.clone())
                 .await;
@@ -95,9 +95,19 @@ pub async fn stream_tenant_timelines<'a>(
         }
     }
 
-    tracing::info!("Yielding for {}", tenant);
+    timeline_ids
+}
+
+pub async fn stream_tenant_timelines<'a>(
+    client: &'a Client,
+    target: &'a RootTarget,
+    tenant: TenantShardId,
+) -> anyhow::Result<impl Stream<Item = Result<TenantShardTimelineId, anyhow::Error>> + 'a> {
+    let timelines = get_tenant_timelines(client, target, tenant).await;
+
+    // FIXME: futures is not yet imported so have to keep doing it like this:
     Ok(stream! {
-        for i in timeline_ids {
+        for i in timelines {
             let id = i?;
             yield Ok(TenantShardTimelineId::new(tenant, id));
         }
