@@ -11,7 +11,7 @@ use camino::Utf8PathBuf;
 
 use crate::{background_process, local_env};
 
-pub fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
+pub async fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
     let broker = &env.broker;
     let listen_addr = &broker.listen_addr;
 
@@ -26,8 +26,8 @@ pub fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
         &env.storage_broker_bin(),
         args,
         [],
-        background_process::InitialPidFile::Create(&storage_broker_pid_file_path(env)),
-        || {
+        background_process::InitialPidFile::Create(storage_broker_pid_file_path(env)),
+        || async {
             let url = broker.client_url();
             let status_url = url.join("status").with_context(|| {
                 format!("Failed to append /status path to broker endpoint {url}")
@@ -42,6 +42,7 @@ pub fn start_broker_process(env: &local_env::LocalEnv) -> anyhow::Result<()> {
             }
         },
     )
+    .await
     .context("Failed to spawn storage_broker subprocess")?;
     Ok(())
 }

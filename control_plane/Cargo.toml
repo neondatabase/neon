@@ -6,9 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 camino.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+futures.workspace = true
 git-version.workspace = true
 nix.workspace = true
 once_cell.workspace = true
@@ -24,6 +26,8 @@ tar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-util.workspace = true
 url.workspace = true
 pageserver = { path = "../pageserver" }
 pageserver_api.workspace = true

@@ -64,7 +64,7 @@ impl AttachmentService {
             .expect("non-Unicode path")
     }
 
-    pub fn start(&self) -> anyhow::Result<Child> {
+    pub async fn start(&self) -> anyhow::Result<Child> {
         let path_str = self.path.to_string_lossy();
 
         background_process::start_process(
@@ -73,10 +73,11 @@ impl AttachmentService {
             &self.env.attachment_service_bin(),
             ["-l", &self.listen, "-p", &path_str],
             [],
-            background_process::InitialPidFile::Create(&self.pid_file()),
+            background_process::InitialPidFile::Create(self.pid_file()),
             // TODO: a real status check
-            || Ok(true),
+            || async move { anyhow::Ok(true) },
         )
+        .await
     }
 
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
