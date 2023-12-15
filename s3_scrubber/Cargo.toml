@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 aws-sdk-s3.workspace = true
+aws-smithy-async.workspace = true
 either.workspace = true
 tokio-rustls.workspace = true
 anyhow.workspace = true
