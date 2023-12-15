@@ -300,7 +300,8 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # load in some data
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
