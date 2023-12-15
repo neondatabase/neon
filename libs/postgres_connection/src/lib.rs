@@ -4,7 +4,6 @@ use anyhow::{bail, Context};
 use itertools::Itertools;
 use std::borrow::Cow;
 use std::fmt;
-use tokio_postgres::tls::NoTlsStream;
 use url::Host;
 
 /// Parses a string of format either `host:port` or `host` into a corresponding pair.
