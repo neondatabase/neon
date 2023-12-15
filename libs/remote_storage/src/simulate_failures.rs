@@ -3,9 +3,9 @@
 //! testing purposes.
 use bytes::Bytes;
 use futures::stream::Stream;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::{collections::hash_map::Entry, time::SystemTime};
 
 use crate::{
     Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
@@ -29,6 +29,7 @@ enum RemoteOp {
     Download(RemotePath),
     Delete(RemotePath),
     DeleteObjects(Vec<RemotePath>),
+    TimeTravelRecover(RemotePath),
 }
 
 impl UnreliableWrapper {
@@ -161,5 +162,14 @@ impl RemoteStorage for UnreliableWrapper {
             ));
         }
         Ok(())
+    }
+
+    async fn time_travel_recover(
+        &self,
+        prefix: &RemotePath,
+        timestamp: SystemTime,
+    ) -> anyhow::Result<()> {
+        self.attempt(RemoteOp::TimeTravelRecover(prefix.clone()))?;
+        self.inner.time_travel_recover(prefix, timestamp).await
     }
 }

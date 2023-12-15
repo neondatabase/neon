@@ -207,6 +207,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+
+    /// Resets the content of everything with the given prefix to the given state
+    async fn time_travel_recover(
+        &self,
+        prefix: &RemotePath,
+        timestamp: SystemTime,
+    ) -> anyhow::Result<()>;
 }
 
 pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
@@ -372,6 +379,19 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.delete_objects(paths).await,
             Self::AzureBlob(s) => s.delete_objects(paths).await,
             Self::Unreliable(s) => s.delete_objects(paths).await,
+        }
+    }
+
+    pub async fn time_travel_recover(
+        &self,
+        prefix: &RemotePath,
+        timestamp: SystemTime,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.time_travel_recover(prefix, timestamp).await,
+            Self::AwsS3(s) => s.time_travel_recover(prefix, timestamp).await,
+            Self::AzureBlob(s) => s.time_travel_recover(prefix, timestamp).await,
+            Self::Unreliable(s) => s.time_travel_recover(prefix, timestamp).await,
         }
     }
 }

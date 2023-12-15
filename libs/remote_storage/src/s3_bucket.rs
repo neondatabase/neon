@@ -9,6 +9,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::SystemTime,
 };
 
 use anyhow::Context as _;
@@ -594,6 +595,10 @@ impl RemoteStorage for S3Bucket {
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         let paths = std::array::from_ref(path);
         self.delete_objects(paths).await
+    }
+
+    async fn time_travel_recover(&self, prefix: &RemotePath, timestamp: SystemTime) -> anyhow::Result<()> {
+        unimplemented!()
     }
 }
 

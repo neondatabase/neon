@@ -6,6 +6,7 @@ use std::env;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
@@ -321,6 +322,15 @@ impl RemoteStorage for AzureBlobStorage {
             self.delete(path).await?;
         }
         Ok(())
+    }
+
+    async fn time_travel_recover(
+        &self,
+        _prefix: &RemotePath,
+        _timestamp: SystemTime,
+    ) -> anyhow::Result<()> {
+        // TODO use Azure point in time recovery feature for this
+        unimplemented!()
     }
 }
 

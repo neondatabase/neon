@@ -4,7 +4,7 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin};
+use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin, time::SystemTime};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -408,6 +408,14 @@ impl RemoteStorage for LocalFs {
             self.delete(path).await?
         }
         Ok(())
+    }
+
+    async fn time_travel_recover(
+        &self,
+        _prefix: &RemotePath,
+        _timestamp: SystemTime,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
     }
 }
 
