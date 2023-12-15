@@ -6,9 +6,9 @@
 //!
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
+
 use std::io;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver::client::mgmt_api;
+use futures::SinkExt;
 use pageserver_api::models::{self, LocationConfig, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use utils::auth::{Claims, Scope};
@@ -148,8 +149,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
-        self.start_node(config_overrides, false)
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
+        self.start_node(config_overrides, false).await
     }
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
@@ -190,53 +191,48 @@ impl PageServerNode {
         Ok(())
     }
 
-    fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
+    async fn start_node(
+        &self,
+        config_overrides: &[&str],
+        update_config: bool,
+    ) -> anyhow::Result<Child> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
-        std::thread::scope(move |s| {
-            s.spawn(move || {
-                let datadir = self.repo_path();
-                print!(
-                    "Starting pageserver node {} at '{}' in {:?}",
-                    self.conf.id,
-                    self.pg_connection_config.raw_address(),
-                    datadir
-                );
-                io::stdout().flush().context("flush stdout")?;
+        let datadir = self.repo_path();
+        print!(
+            "Starting pageserver node {} at '{}' in {:?}",
+            self.conf.id,
+            self.pg_connection_config.raw_address(),
+            datadir
+        );
+        io::stdout().flush().context("flush stdout")?;
 
-                let datadir_path_str = datadir.to_str().with_context(|| {
-                    format!(
-                        "Cannot start pageserver node {} in path that has no string representation: {:?}",
-                        self.conf.id, datadir,
-                    )
-                })?;
-                let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-                if update_config {
-                    args.push(Cow::Borrowed("--update-config"));
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!(
+                "Cannot start pageserver node {} in path that has no string representation: {:?}",
+                self.conf.id, datadir,
+            )
+        })?;
+        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        if update_config {
+            args.push(Cow::Borrowed("--update-config"));
+        }
+        background_process::start_process(
+            "pageserver",
+            &datadir,
+            &self.env.pageserver_bin(),
+            args.iter().map(Cow::as_ref),
+            self.pageserver_env_variables()?,
+            background_process::InitialPidFile::Expect(self.pid_file()),
+            || async {
+                let st = self.check_status().await;
+                match st {
+                    Ok(()) => Ok(true),
+                    Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
+                    Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
                 }
-                background_process::start_process(
-                    "pageserver",
-                    &datadir,
-                    &self.env.pageserver_bin(),
-                    args.iter().map(Cow::as_ref),
-                    self.pageserver_env_variables()?,
-                    background_process::InitialPidFile::Expect(&self.pid_file()),
-                    || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .unwrap();
-                        let st = rt.block_on(self.check_status());
-                        match st {
-                            Ok(()) => Ok(true),
-                            Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
-                            Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
-                        }
-                    },
-                )
-            })
-            .join()
-            .unwrap()
-        })
+            },
+        )
+        .await
     }
 
     fn pageserver_basic_args<'a>(
@@ -282,7 +278,12 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
+    pub async fn page_server_psql_client(
+        &self,
+    ) -> anyhow::Result<(
+        tokio_postgres::Client,
+        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+    )> {
         let mut config = self.pg_connection_config.clone();
         if self.conf.pg_auth_type == AuthType::NeonJWT {
             let token = self
@@ -290,7 +291,7 @@ impl PageServerNode {
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
             config = config.set_password(Some(token));
         }
-        Ok(config.connect_no_tls()?)
+        Ok(config.connect_no_tls().await?)
     }
 
     pub async fn check_status(&self) -> mgmt_api::Result<()> {
@@ -514,7 +515,7 @@ impl PageServerNode {
     /// * `timeline_id` - id to assign to imported timeline
     /// * `base` - (start lsn of basebackup, path to `base.tar` file)
     /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
-    pub fn timeline_import(
+    pub async fn timeline_import(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -522,36 +523,60 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let mut client = self.page_server_psql_client()?;
+        let (client, conn) = self.page_server_psql_client().await?;
+        // The connection object performs the actual communication with the database,
+        // so spawn it off to run on its own.
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        tokio::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
-        let base_tarfile = File::open(base_tarfile_path)?;
-        let mut base_reader = BufReader::new(base_tarfile);
+        let base_tarfile = tokio::fs::File::open(base_tarfile_path).await?;
+        let base_tarfile = tokio_util::io::ReaderStream::new(base_tarfile);
 
         // Init wal reader if necessary
         let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
-            let wal_tarfile = File::open(wal_tarfile_path)?;
-            let wal_reader = BufReader::new(wal_tarfile);
+            let wal_tarfile = tokio::fs::File::open(wal_tarfile_path).await?;
+            let wal_reader = tokio_util::io::ReaderStream::new(wal_tarfile);
             (end_lsn, Some(wal_reader))
         } else {
             (start_lsn, None)
         };
 
-        // Import base
-        let import_cmd = format!(
-            "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
-        );
-        let mut writer = client.copy_in(&import_cmd)?;
-        io::copy(&mut base_reader, &mut writer)?;
-        writer.finish()?;
+        let copy_in = |reader, cmd| {
+            let client = &client;
+            async move {
+                let writer = client.copy_in(&cmd).await?;
+                let writer = std::pin::pin!(writer);
+                let mut writer = writer.sink_map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
+                });
+                let mut reader = std::pin::pin!(reader);
+                writer.send_all(&mut reader).await?;
+                writer.into_inner().finish().await?;
+                anyhow::Ok(())
+            }
+        };
 
+        // Import base
+        copy_in(
+            base_tarfile,
+            format!(
+                "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
+            ),
+        )
+        .await?;
         // Import wal if necessary
-        if let Some(mut wal_reader) = wal_reader {
-            let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
-            let mut writer = client.copy_in(&import_cmd)?;
-            io::copy(&mut wal_reader, &mut writer)?;
-            writer.finish()?;
+        if let Some(wal_reader) = wal_reader {
+            copy_in(
+                wal_reader,
+                format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}"),
+            )
+            .await?;
         }
 
         Ok(())

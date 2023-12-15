@@ -13,7 +13,6 @@ use std::{io, result};
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use postgres_connection::PgConnectionConfig;
-use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::{http::error::HttpErrorBody, id::NodeId};
@@ -34,12 +33,14 @@ pub enum SafekeeperHttpError {
 
 type Result<T> = result::Result<T, SafekeeperHttpError>;
 
+#[async_trait::async_trait]
 pub trait ResponseErrorMessageExt: Sized {
-    fn error_from_body(self) -> Result<Self>;
+    async fn error_from_body(self) -> Result<Self>;
 }
 
-impl ResponseErrorMessageExt for Response {
-    fn error_from_body(self) -> Result<Self> {
+#[async_trait::async_trait]
+impl ResponseErrorMessageExt for reqwest::Response {
+    async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
         if !(status.is_client_error() || status.is_server_error()) {
             return Ok(self);
@@ -48,7 +49,7 @@ impl ResponseErrorMessageExt for Response {
         // reqwest does not export its error construction utility functions, so let's craft the message ourselves
         let url = self.url().to_owned();
         Err(SafekeeperHttpError::Response(
-            match self.json::<HttpErrorBody>() {
+            match self.json::<HttpErrorBody>().await {
                 Ok(err_body) => format!("Error: {}", err_body.msg),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             },
@@ -69,7 +70,7 @@ pub struct SafekeeperNode {
 
     pub pg_connection_config: PgConnectionConfig,
     pub env: LocalEnv,
-    pub http_client: Client,
+    pub http_client: reqwest::Client,
     pub http_base_url: String,
 }
 
@@ -80,7 +81,7 @@ impl SafekeeperNode {
             conf: conf.clone(),
             pg_connection_config: Self::safekeeper_connection_config(conf.pg_port),
             env: env.clone(),
-            http_client: Client::new(),
+            http_client: reqwest::Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
         }
     }
@@ -103,7 +104,7 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<Child> {
+    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<Child> {
         print!(
             "Starting safekeeper at '{}' in '{}'",
             self.pg_connection_config.raw_address(),
@@ -191,13 +192,16 @@ impl SafekeeperNode {
             &self.env.safekeeper_bin(),
             &args,
             [],
-            background_process::InitialPidFile::Expect(&self.pid_file()),
-            || match self.check_status() {
-                Ok(()) => Ok(true),
-                Err(SafekeeperHttpError::Transport(_)) => Ok(false),
-                Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+            background_process::InitialPidFile::Expect(self.pid_file()),
+            || async {
+                match self.check_status().await {
+                    Ok(()) => Ok(true),
+                    Err(SafekeeperHttpError::Transport(_)) => Ok(false),
+                    Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+                }
             },
         )
+        .await
     }
 
     ///
@@ -216,7 +220,7 @@ impl SafekeeperNode {
         )
     }
 
-    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
+    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> reqwest::RequestBuilder {
         // TODO: authentication
         //if self.env.auth_type == AuthType::NeonJWT {
         //    builder = builder.bearer_auth(&self.env.safekeeper_auth_token)
@@ -224,10 +228,12 @@ impl SafekeeperNode {
         self.http_client.request(method, url)
     }
 
-    pub fn check_status(&self) -> Result<()> {
+    pub async fn check_status(&self) -> Result<()> {
         self.http_request(Method::GET, format!("{}/{}", self.http_base_url, "status"))
-            .send()?
-            .error_from_body()?;
+            .send()
+            .await?
+            .error_from_body()
+            .await?;
         Ok(())
     }
 }

@@ -49,7 +49,7 @@ impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
     }
 }
 
-pub struct KeyRange<'a>(&'a std::ops::Range<crate::repository::Key>);
+pub struct KeyRange<'a>(&'a std::ops::Range<crate::key::Key>);
 
 impl<'a> serde::Serialize for KeyRange<'a> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -79,7 +79,7 @@ impl<'a> serde::Deserialize<'a> for Partitioning {
                 #[serde_with::serde_as]
                 #[derive(serde::Deserialize)]
                 #[serde(transparent)]
-                struct Key(#[serde_as(as = "serde_with::DisplayFromStr")] crate::repository::Key);
+                struct Key(#[serde_as(as = "serde_with::DisplayFromStr")] crate::key::Key);
 
                 #[serde_with::serde_as]
                 #[derive(serde::Deserialize)]
@@ -108,5 +108,44 @@ impl<'a> serde::Deserialize<'a> for Partitioning {
             at_lsn: de.at_lsn,
             keys: de.keys.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let reference = r#"
+        {
+            "keys": [
+              [
+                "000000000000000000000000000000000000",
+                "000000000000000000000000000000000001"
+              ],
+              [
+                "000000067F00000001000000000000000000",
+                "000000067F00000001000000000000000002"
+              ],
+              [
+                "030000000000000000000000000000000000",
+                "030000000000000000000000000000000003"
+              ]
+            ],
+            "at_lsn": "0/2240160"
+        }
+        "#;
+
+        let de: Partitioning = serde_json::from_str(reference).unwrap();
+
+        let ser = serde_json::to_string(&de).unwrap();
+
+        let ser_de: serde_json::Value = serde_json::from_str(&ser).unwrap();
+
+        assert_eq!(
+            ser_de,
+            serde_json::from_str::<'_, serde_json::Value>(reference).unwrap()
+        );
     }
 }

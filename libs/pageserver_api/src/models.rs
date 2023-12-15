@@ -1,8 +1,9 @@
+pub mod partitioning;
+
 use std::{
     collections::HashMap,
-    io::Read,
     num::{NonZeroU64, NonZeroUsize},
-    time::SystemTime,
+    time::SystemTime, io::Read,
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -18,7 +19,7 @@ use utils::{
 
 use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut, Buf};
 
 /// The state of a tenant in this pageserver.
 ///

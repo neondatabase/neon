@@ -1,6 +1,5 @@
-use hyper::{header::AUTHORIZATION, http::method::Method};
 use pageserver_api::models::*;
-use reqwest::IntoUrl;
+use reqwest::{IntoUrl, Method};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
@@ -97,9 +96,9 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<crate::http::models::partitioning::Partitioning> {
+    ) -> Result<pageserver_api::models::partitioning::Partitioning> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace?check_serialization_roundtrip=true",
+            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace",
             self.mgmt_api_endpoint
         );
         self.get(&uri)
@@ -121,7 +120,7 @@ impl Client {
     ) -> Result<reqwest::Response> {
         let req = self.client.request(method, uri);
         let req = if let Some(value) = &self.authorization_header {
-            req.header(AUTHORIZATION, value)
+            req.header(reqwest::header::AUTHORIZATION, value)
         } else {
             req
         };

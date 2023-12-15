@@ -15,7 +15,6 @@ byteorder.workspace = true
 utils.workspace = true
 postgres_ffi.workspace = true
 enum-map.workspace = true
-rand.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 hex.workspace = true
@@ -25,3 +24,4 @@ workspace_hack.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true
+rand.workspace = true
