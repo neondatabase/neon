@@ -49,77 +49,75 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bench:
-    env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "300"
-      TEST_PG_BENCH_SCALES_MATRIX: "10,100"
-      TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
-      TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
-      TEST_OUTPUT: /tmp/test_output
-      BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: "neon-staging"
+  # bench:
+  #   env:
+  #     TEST_PG_BENCH_DURATIONS_MATRIX: "300"
+  #     TEST_PG_BENCH_SCALES_MATRIX: "10,100"
+  #     POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+  #     DEFAULT_PG_VERSION: 14
+  #     TEST_OUTPUT: /tmp/test_output
+  #     BUILD_TYPE: remote
+  #     SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
+  #     PLATFORM: "neon-staging"
 
-    runs-on: [self-hosted, us-east-2, x64]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
+  #   runs-on: [self-hosted, us-east-2, x64]
+  #   container:
+  #     image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+  #     options: --init
 
-    steps:
-      - uses: actions/checkout@v3
+  #   steps:
+  #     - uses: actions/checkout@v3
 
-      - name: Download Neon artifact
-        uses: ./.github/actions/download
-        with:
-          name: neon-${{ runner.os }}-release-artifact
-          path: /tmp/neon/
-          prefix: latest
+  #     - name: Download Neon artifact
+  #       uses: ./.github/actions/download
+  #       with:
+  #         name: neon-${{ runner.os }}-release-artifact
+  #         path: /tmp/neon/
+  #         prefix: latest
 
-      - name: Create Neon Project
-        id: create-neon-project
-        uses: ./.github/actions/neon-project-create
-        with:
-          region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
-          postgres_version: ${{ env.DEFAULT_PG_VERSION }}
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+  #     - name: Create Neon Project
+  #       id: create-neon-project
+  #       uses: ./.github/actions/neon-project-create
+  #       with:
+  #         region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+  #         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+  #         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
-      - name: Run benchmark
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ env.BUILD_TYPE }}
-          test_selection: performance
-          run_in_parallel: false
-          save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-          # Set --sparse-ordering option of pytest-order plugin
-          # to ensure tests are running in order of appears in the file.
-          # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
-          extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
-        env:
-          BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+  #     - name: Run benchmark
+  #       uses: ./.github/actions/run-python-test-set
+  #       with:
+  #         build_type: ${{ env.BUILD_TYPE }}
+  #         test_selection: performance
+  #         run_in_parallel: false
+  #         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+  #         # Set --sparse-ordering option of pytest-order plugin
+  #         # to ensure tests are running in order of appears in the file.
+  #         # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
+  #         extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
+  #       env:
+  #         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+  #         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+  #         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
-      - name: Delete Neon Project
-        if: ${{ always() }}
-        uses: ./.github/actions/neon-project-delete
-        with:
-          project_id: ${{ steps.create-neon-project.outputs.project_id }}
-          api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+  #     - name: Delete Neon Project
+  #       if: ${{ always() }}
+  #       uses: ./.github/actions/neon-project-delete
+  #       with:
+  #         project_id: ${{ steps.create-neon-project.outputs.project_id }}
+  #         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
-      - name: Create Allure report
-        if: ${{ !cancelled() }}
-        uses: ./.github/actions/allure-report-generate
+  #     - name: Create Allure report
+  #       if: ${{ !cancelled() }}
+  #       uses: ./.github/actions/allure-report-generate
 
-      # - name: Post to a Slack channel
-      #   if: ${{ github.event.schedule && failure() }}
-      #   uses: slackapi/slack-github-action@v1
-      #   with:
-      #     channel-id: "C033QLM5P7D" # dev-staging-stream
-      #     slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-      #   env:
-      #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+  # - name: Post to a Slack channel
+  #   if: ${{ github.event.schedule && failure() }}
+  #   uses: slackapi/slack-github-action@v1
+  #   with:
+  #     channel-id: "C033QLM5P7D" # dev-staging-stream
+  #     slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+  #   env:
+  #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   generate-matrices:
     # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
@@ -354,6 +352,8 @@ jobs:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
+      TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
+      TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
@@ -412,10 +412,12 @@ jobs:
           test_selection: performance/test_perf_olap.py
           run_in_parallel: false
           save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-          extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
+          extra_params: -m remote_cluster --timeout 21600 -k test_clickbench_debug
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
+          TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
           TEST_OLAP_SCALE: 10
 
