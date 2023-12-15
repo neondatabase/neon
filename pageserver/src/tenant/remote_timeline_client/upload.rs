@@ -5,7 +5,7 @@ use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
 use std::io::{ErrorKind, SeekFrom};
-use tokio::fs::io::AsyncSeekExt;
+use tokio::io::AsyncSeekExt;
 use tokio::fs::{self, File};
 
 use super::Generation;
