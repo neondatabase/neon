@@ -54,7 +54,7 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
 
     env.pageserver.allowed_errors.extend(
         [
-            # This fixture detaches the tenant, and tests using git will tend to re-attach it
+            # This fixture detaches the tenant, and tests using it will tend to re-attach it
             # shortly after. There may be un-processed deletion_queue validations from the
             # initial attachment
             ".*Dropped remote consistent LSN updates.*",
