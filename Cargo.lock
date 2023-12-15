@@ -4354,6 +4354,7 @@ dependencies = [
  "clap",
  "crc32c",
  "either",
+ "futures",
  "futures-util",
  "hex",
  "histogram",
