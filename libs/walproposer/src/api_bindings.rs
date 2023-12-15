@@ -1,3 +1,6 @@
+//! A C-Rust shim: defines implementation of C walproposer API, assuming wp
+//! callback_data stores Box to some Rust implementation.
+
 #![allow(dead_code)]
 
 use std::ffi::CStr;

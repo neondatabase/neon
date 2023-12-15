@@ -4292,6 +4292,7 @@ dependencies = [
  "histogram",
  "itertools",
  "pageserver",
+ "pageserver_api",
  "rand 0.8.5",
  "remote_storage",
  "reqwest",
