@@ -3048,7 +3048,9 @@ impl Tenant {
                     3,
                     u32::MAX,
                     "persist_initdb_tar_zst",
-                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("initdb upload cancelled")),
+                    backoff::Cancel::new(self.cancel.clone(), || {
+                        anyhow::anyhow!("initdb upload cancelled")
+                    }),
                 )
                 .await?;
 
