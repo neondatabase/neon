@@ -684,14 +684,34 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_is_loading")
 });
 
-/// How long did tenants take to go from construction to active state?
-pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+/// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
+/// like how long it took to load.
+pub(crate) struct TenantMetrics {
+    /// How long did tenants take to go from construction to active state?
+    pub(crate) activation: Histogram,
+    pub(crate) preload: Histogram,
+    pub(crate) attach: Histogram,
+}
+
+pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| TenantMetrics {
+    activation: register_histogram!(
         "pageserver_tenant_activation_seconds",
         "Time taken by tenants to activate, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
-    .expect("Failed to register pageserver_tenant_activation_seconds metric")
+    .expect("Failed to register metric"),
+    preload: register_histogram!(
+        "pageserver_tenant_preload_seconds",
+        "Time taken by tenants to load remote metadata on startup/attach, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    attach: register_histogram!(
+        "pageserver_tenant_attach_seconds",
+        "Time taken by tenants to intialize, after remote metadata is already loaded",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
