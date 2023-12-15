@@ -102,7 +102,7 @@ jobs:
             echo "docker_file_changed=true" >> $GITHUB_OUTPUT
           fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-buildtools-image:
     needs: [ check-permissions , check-if-build-tools-dockerfile-changed, tag]
