@@ -188,6 +188,8 @@ impl<R: Rng, S: BuildHasher + Clone> EndpointRateLimiter<R, S> {
             self.map.len()
         );
         let n = self.map.shards().len();
+        // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
+        // (impossible, infact, unless we have 2048 threads)
         let shard = self.rand.lock().unwrap().gen_range(0..n);
         self.map.shards()[shard].write().clear();
     }
@@ -691,6 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limits_gc() {
+        // fixed seeded random/hasher to ensure that the test is not flaky
         let rand = rand::rngs::StdRng::from_seed([1; 32]);
         let hasher = BuildHasherDefault::<FxHasher>::default();
 

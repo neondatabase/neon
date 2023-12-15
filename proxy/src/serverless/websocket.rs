@@ -169,7 +169,7 @@ mod tests {
     use super::WebSocketRw;
 
     #[tokio::test]
-    async fn websockets() {
+    async fn websocket_stream_wrapper_happy_path() {
         let (stream1, stream2) = duplex(1024);
 
         let mut js = JoinSet::new();
