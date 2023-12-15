@@ -2,37 +2,10 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::ops::{AddAssign, Range};
+use std::ops::AddAssign;
 use std::time::Duration;
 
 pub use pageserver_api::key::{Key, KEY_SIZE};
-
-pub fn key_range_size(key_range: &Range<Key>) -> u32 {
-    let start = key_range.start;
-    let end = key_range.end;
-
-    if end.field1 != start.field1
-        || end.field2 != start.field2
-        || end.field3 != start.field3
-        || end.field4 != start.field4
-    {
-        return u32::MAX;
-    }
-
-    let start = (start.field5 as u64) << 32 | start.field6 as u64;
-    let end = (end.field5 as u64) << 32 | end.field6 as u64;
-
-    let diff = end - start;
-    if diff > u32::MAX as u64 {
-        u32::MAX
-    } else {
-        diff as u32
-    }
-}
-
-pub fn singleton_range(key: Key) -> Range<Key> {
-    key..key.next()
-}
 
 /// A 'value' stored for a one Key.
 #[derive(Debug, Clone, Serialize, Deserialize)]

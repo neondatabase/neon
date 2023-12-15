@@ -1498,8 +1498,8 @@ async fn timeline_collect_keyspace(
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
-        let res = crate::http::models::partitioning::Partitioning { keys, at_lsn };
-      
+        let res = pageserver_api::models::partitioning::Partitioning { keys, at_lsn };
+
         json_response(StatusCode::OK, res)
     }
     .instrument(info_span!("timeline_collect_keyspace", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))

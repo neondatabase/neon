@@ -49,7 +49,7 @@ impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
     }
 }
 
-pub struct KeyRange<'a>(&'a std::ops::Range<crate::repository::Key>);
+pub struct KeyRange<'a>(&'a std::ops::Range<crate::key::Key>);
 
 impl<'a> serde::Serialize for KeyRange<'a> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -79,7 +79,7 @@ impl<'a> serde::Deserialize<'a> for Partitioning {
                 #[serde_with::serde_as]
                 #[derive(serde::Deserialize)]
                 #[serde(transparent)]
-                struct Key(#[serde_as(as = "serde_with::DisplayFromStr")] crate::repository::Key);
+                struct Key(#[serde_as(as = "serde_with::DisplayFromStr")] crate::key::Key);
 
                 #[serde_with::serde_as]
                 #[derive(serde::Deserialize)]
