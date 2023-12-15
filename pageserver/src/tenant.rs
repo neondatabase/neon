@@ -668,7 +668,6 @@ impl Tenant {
                     OnDemand,
                     // During normal operations after startup, we are attaching a tenant.
                     Normal,
-
                 }
 
                 // Before doing any I/O, wait for either or:
