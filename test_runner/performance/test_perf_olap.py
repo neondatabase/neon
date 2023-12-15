@@ -25,7 +25,7 @@ def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
     if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
         log.info(f"Creating extension pg_stat_statements")
         query =  LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION pg_stat_statements;")
-        run_psql_once_without_explain(remote_compare_module, query)
+        run_psql_once_without_explain(remote_compare, query)
         log.info(f"Reset pg_stat_statements")
         query =  LabelledQuery("Q_RESET", r"SELECT pg_stat_statements_reset();")
     else:
@@ -201,6 +201,6 @@ def test_clickbench_collect_pg_stat_statements(remote_compare: RemoteCompare):
     if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
         log.info(f"Collecting pg_stat_statements")
         query =  LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
-        run_psql_once_without_explain(remote_compare_module, query)
+        run_psql_once_without_explain(remote_compare, query)
     else:
         log.info(f"Skipping - Collecting pg_stat_statements")
