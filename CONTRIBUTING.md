@@ -74,7 +74,7 @@ For details see [`approved-for-ci-run.yml`](.github/workflows/approved-for-ci-ru
 ## How do I add the "pinned" tag to an buildtools image?
 We use the `pinned` tag for `Dockerfile.buildtools` build images in our CI/CD setup, currently adding the `pinned` tag is a manual operation.
 
-You can call it from GitHub UI: https://github.com/neondatabase/neon/actions/workflows/update_build-tools-image.yml,
+You can call it from GitHub UI: https://github.com/neondatabase/neon/actions/workflows/update_build_tools_image.yml,
 or using GitHub CLI:
 
 ```bash
