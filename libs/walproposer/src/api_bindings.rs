@@ -326,14 +326,6 @@ extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, commit_lsn: XLog
     }
 }
 
-extern "C" fn confirm_wal_streamed(wp: *mut WalProposer, lsn: XLogRecPtr) {
-    unsafe {
-        let callback_data = (*(*wp).config).callback_data;
-        let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).confirm_wal_streamed(&mut (*wp), lsn)
-    }
-}
-
 extern "C" fn log_internal(
     wp: *mut WalProposer,
     level: ::std::os::raw::c_int,
@@ -419,7 +411,6 @@ pub(crate) fn create_api() -> walproposer_api {
         get_redo_start_lsn: Some(get_redo_start_lsn),
         finish_sync_safekeepers: Some(finish_sync_safekeepers),
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
-        confirm_wal_streamed: Some(confirm_wal_streamed),
         log_internal: Some(log_internal),
     }
 }

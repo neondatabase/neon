@@ -1812,7 +1812,7 @@ walprop_pg_finish_sync_safekeepers(WalProposer *wp, XLogRecPtr lsn)
 }
 
 /*
- * Get PageserverFeedback fields from the most advanced safekeeper
+ * Choose most advanced PageserverFeedback and set it to *rf.
  */
 static void
 GetLatestNeonFeedback(PageserverFeedback *rf, WalProposer *wp)
@@ -1842,8 +1842,6 @@ GetLatestNeonFeedback(PageserverFeedback *rf, WalProposer *wp)
 		 LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
 		 LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
 		 rf->replytime);
-
-	replication_feedback_set(rf);
 }
 
 /*
@@ -1883,61 +1881,67 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 		hs->catalog_xmin = InvalidFullTransactionId;
 }
 
+/*
+ * Based on commitLsn and safekeeper responses including pageserver feedback,
+ * 1) Propagate cluster size received from ps to ensure the limit.
+ * 2) Propagate pageserver LSN positions to ensure backpressure limits.
+ * 3) Advance walproposer slot to commitLsn (releasing WAL & waking up waiters).
+ * 4) Propagate hot standby feedback.
+ *
+ * None of that is functional in sync-safekeepers.
+ */
 static void
 walprop_pg_process_safekeeper_feedback(WalProposer *wp, XLogRecPtr commitLsn)
 {
 	HotStandbyFeedback hsFeedback;
-	XLogRecPtr	diskConsistentLsn;
+	XLogRecPtr	oldDiskConsistentLsn;
 
-	diskConsistentLsn = quorumFeedback.rf.disk_consistent_lsn;
+	if (wp->config->syncSafekeepers)
+		return;
 
-	if (!wp->config->syncSafekeepers)
+	oldDiskConsistentLsn = quorumFeedback.rf.disk_consistent_lsn;
+
+	/* Get PageserverFeedback fields from the most advanced safekeeper */
+	GetLatestNeonFeedback(&quorumFeedback.rf, wp);
+	replication_feedback_set(&quorumFeedback.rf);
+	SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
+
+	if (commitLsn > quorumFeedback.flushLsn || oldDiskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
 	{
-		/* Get PageserverFeedback fields from the most advanced safekeeper */
-		GetLatestNeonFeedback(&quorumFeedback.rf, wp);
-		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
-	}
-
-	if (commitLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
-	{
-
 		if (commitLsn > quorumFeedback.flushLsn)
 			quorumFeedback.flushLsn = commitLsn;
 
-		/* advance the replication slot */
-		if (!wp->config->syncSafekeepers)
-			ProcessStandbyReply(
-			/* write_lsn -  This is what durably stored in WAL service. */
-								quorumFeedback.flushLsn,
-			/* flush_lsn - This is what durably stored in WAL service. */
-								quorumFeedback.flushLsn,
+		/*
+		 * Advance the replication slot to commitLsn. WAL before it is
+		 * hardened and will be fetched from one of safekeepers by
+		 * neon_walreader if needed.
+		 *
+		 * Also wakes up syncrep waiters.
+		 */
+		ProcessStandbyReply(
+		/* write_lsn -  This is what durably stored in WAL service. */
+							quorumFeedback.flushLsn,
+		/* flush_lsn - This is what durably stored in WAL service. */
+							quorumFeedback.flushLsn,
 
-			/*
-			 * apply_lsn - This is what processed and durably saved at*
-			 * pageserver.
-			 */
-								quorumFeedback.rf.disk_consistent_lsn,
-								walprop_pg_get_current_timestamp(wp), false);
+		/*
+		 * apply_lsn - This is what processed and durably saved at*
+		 * pageserver.
+		 */
+							quorumFeedback.rf.disk_consistent_lsn,
+							walprop_pg_get_current_timestamp(wp), false);
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback, wp);
 	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &quorumFeedback.hs, sizeof hsFeedback) != 0)
 	{
 		quorumFeedback.hs = hsFeedback;
-		if (!wp->config->syncSafekeepers)
-			ProcessStandbyHSFeedback(hsFeedback.ts,
-									 XidFromFullTransactionId(hsFeedback.xmin),
-									 EpochFromFullTransactionId(hsFeedback.xmin),
-									 XidFromFullTransactionId(hsFeedback.catalog_xmin),
-									 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
+		ProcessStandbyHSFeedback(hsFeedback.ts,
+								 XidFromFullTransactionId(hsFeedback.xmin),
+								 EpochFromFullTransactionId(hsFeedback.xmin),
+								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
+								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
 	}
-}
-
-static void
-walprop_pg_confirm_wal_streamed(WalProposer *wp, XLogRecPtr lsn)
-{
-	if (MyReplicationSlot)
-		PhysicalConfirmReceivedLocation(lsn);
 }
 
 static XLogRecPtr
@@ -2040,6 +2044,5 @@ static const walproposer_api walprop_pg = {
 	.get_redo_start_lsn = walprop_pg_get_redo_start_lsn,
 	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
-	.confirm_wal_streamed = walprop_pg_confirm_wal_streamed,
 	.log_internal = walprop_pg_log_internal,
 };

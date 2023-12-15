@@ -1643,35 +1643,26 @@ static void
 HandleSafekeeperResponse(WalProposer *wp)
 {
 	XLogRecPtr	minQuorumLsn;
-	XLogRecPtr	minFlushLsn;
+	XLogRecPtr	candidateTruncateLsn;
 
 	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
 	wp->api.process_safekeeper_feedback(wp, minQuorumLsn);
 
 	/*
-	 * Try to advance truncateLsn to minFlushLsn, which is the last record
-	 * flushed to all safekeepers. We must always start streaming from the
-	 * beginning of the record, which simplifies decoding on the far end.
+	 * Try to advance truncateLsn -- the last record flushed to all
+	 * safekeepers.
 	 *
-	 * Advanced truncateLsn should be not further than nearest commitLsn. This
-	 * prevents surprising violation of truncateLsn <= commitLsn invariant
-	 * which might occur because 1) truncateLsn can be advanced immediately
-	 * once chunk is broadcast to all safekeepers, and commitLsn generally
-	 * can't be advanced based on feedback from safekeeper who is still in the
-	 * previous epoch (similar to 'leader can't commit entries from previous
-	 * term' in Raft); 2) chunks we read from WAL and send are plain sheets of
-	 * bytes, but safekeepers ack only on record boundaries.
+	 * Advanced truncateLsn should be not higher than commitLsn. This prevents
+	 * surprising violation of truncateLsn <= commitLsn invariant which might
+	 * occur because commitLsn generally can't be advanced based on feedback
+	 * from safekeeper who is still in the previous epoch (similar to 'leader
+	 * can't commit entries from previous term' in Raft); 2)
 	 */
-	minFlushLsn = CalculateMinFlushLsn(wp);
-	if (minFlushLsn > wp->truncateLsn)
+	candidateTruncateLsn = CalculateMinFlushLsn(wp);
+	candidateTruncateLsn = Min(candidateTruncateLsn, minQuorumLsn);
+	if (candidateTruncateLsn > wp->truncateLsn)
 	{
-		wp->truncateLsn = minFlushLsn;
-
-		/*
-		 * Advance the replication slot to free up old WAL files. Note that
-		 * slot doesn't exist if we are in syncSafekeepers mode.
-		 */
-		wp->api.confirm_wal_streamed(wp, wp->truncateLsn);
+		wp->truncateLsn = candidateTruncateLsn;
 	}
 
 	/*
