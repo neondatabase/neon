@@ -1734,6 +1734,7 @@ impl Timeline {
                 self.current_logical_size.current_size().accuracy(),
                 logical_size::Accuracy::Exact,
             );
+            self.current_logical_size.initialized.notify_one();
             return;
         };
 
@@ -1779,6 +1780,11 @@ impl Timeline {
         cancel: CancellationToken,
         background_ctx: RequestContext,
     ) {
+        scopeguard::defer! {
+            // Irrespective of the outcome of this operation, we should unblock anyone waiting for it.
+            self.current_logical_size.initialized.notify_one();
+        }
+
         enum BackgroundCalculationError {
             Cancelled,
             Other(anyhow::Error),
@@ -1903,7 +1909,6 @@ impl Timeline {
             .set((calculated_size, metrics_guard.calculation_result_saved()))
             .ok()
             .expect("only this task sets it");
-        self.current_logical_size.initialized.notify_one();
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
