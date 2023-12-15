@@ -133,11 +133,25 @@ pageserver_connect(int elevel)
 	const char *values[3];
 	int			n;
 
+	static TimestampTz last_connect_time = 0;
+	TimestampTz now;
+
 	Assert(!connected);
 
 	if (CheckConnstringUpdated())
 	{
 		ReloadConnstring();
+	}
+
+	now = GetCurrentTimestamp();
+	if ((now - last_connect_time) < RECONNECT_INTERVAL_USEC)
+	{
+		pg_usleep(RECONNECT_INTERVAL_USEC);
+		last_connect_time = GetCurrentTimestamp();
+	}
+	else
+	{
+		last_connect_time = now;
 	}
 
 	/*
@@ -333,7 +347,6 @@ pageserver_send(NeonRequest *request)
 		{
 			HandleMainLoopInterrupts();
 			n_reconnect_attempts += 1;
-			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
 		n_reconnect_attempts = 0;
 	}
