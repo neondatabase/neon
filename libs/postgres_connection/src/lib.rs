@@ -4,6 +4,7 @@ use anyhow::{bail, Context};
 use itertools::Itertools;
 use std::borrow::Cow;
 use std::fmt;
+use tokio_postgres::tls::NoTlsStream;
 use url::Host;
 
 /// Parses a string of format either `host:port` or `host` into a corresponding pair.
@@ -163,8 +164,18 @@ impl PgConnectionConfig {
     }
 
     /// Connect using postgres protocol with TLS disabled.
-    pub fn connect_no_tls(&self) -> Result<postgres::Client, postgres::Error> {
-        postgres::Config::from(self.to_tokio_postgres_config()).connect(postgres::NoTls)
+    pub async fn connect_no_tls(
+        &self,
+    ) -> Result<
+        (
+            tokio_postgres::Client,
+            tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+        ),
+        postgres::Error,
+    > {
+        self.to_tokio_postgres_config()
+            .connect(postgres::NoTls)
+            .await
     }
 }
 

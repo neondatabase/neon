@@ -560,7 +560,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
 
             let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
-            pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)?;
+            pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version).await?;
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
             println!("Creating endpoint for imported timeline ...");

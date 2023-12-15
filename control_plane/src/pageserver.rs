@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
+use futures::{SinkExt, StreamExt};
 use pageserver::client::mgmt_api;
 use pageserver_api::models::{self, LocationConfig, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
@@ -282,7 +283,12 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
+    pub async fn page_server_psql_client(
+        &self,
+    ) -> anyhow::Result<(
+        tokio_postgres::Client,
+        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+    )> {
         let mut config = self.pg_connection_config.clone();
         if self.conf.pg_auth_type == AuthType::NeonJWT {
             let token = self
@@ -290,7 +296,7 @@ impl PageServerNode {
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
             config = config.set_password(Some(token));
         }
-        Ok(config.connect_no_tls()?)
+        Ok(config.connect_no_tls().await?)
     }
 
     pub async fn check_status(&self) -> mgmt_api::Result<()> {
@@ -514,7 +520,7 @@ impl PageServerNode {
     /// * `timeline_id` - id to assign to imported timeline
     /// * `base` - (start lsn of basebackup, path to `base.tar` file)
     /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
-    pub fn timeline_import(
+    pub async fn timeline_import(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -522,17 +528,25 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let mut client = self.page_server_psql_client()?;
+        let (client, conn) = self.page_server_psql_client().await?;
+        // The connection object performs the actual communication with the database,
+        // so spawn it off to run on its own.
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        tokio::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
-        let base_tarfile = File::open(base_tarfile_path)?;
-        let mut base_reader = BufReader::new(base_tarfile);
+        let base_tarfile = tokio::fs::File::open(base_tarfile_path).await?;
+        let mut base_tarfile = tokio_util::io::ReaderStream::new(base_tarfile);
 
         // Init wal reader if necessary
         let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
-            let wal_tarfile = File::open(wal_tarfile_path)?;
-            let wal_reader = BufReader::new(wal_tarfile);
+            let wal_tarfile = tokio::fs::File::open(wal_tarfile_path).await?;
+            let wal_reader = tokio_util::io::ReaderStream::new(wal_tarfile);
             (end_lsn, Some(wal_reader))
         } else {
             (start_lsn, None)
@@ -542,16 +556,25 @@ impl PageServerNode {
         let import_cmd = format!(
             "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
         );
-        let mut writer = client.copy_in(&import_cmd)?;
-        io::copy(&mut base_reader, &mut writer)?;
-        writer.finish()?;
+        let writer = client.copy_in(&import_cmd).await?;
+        let mut writer = std::pin::pin!(writer);
+        let mut writer =
+            writer.sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")));
+        let mut base_tarfile = std::pin::pin!(base_tarfile);
+        writer.send_all(&mut base_tarfile).await?;
+        writer.into_inner().finish().await?;
 
         // Import wal if necessary
         if let Some(mut wal_reader) = wal_reader {
             let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
-            let mut writer = client.copy_in(&import_cmd)?;
-            io::copy(&mut wal_reader, &mut writer)?;
-            writer.finish()?;
+
+            let writer = client.copy_in(&import_cmd).await?;
+            let mut writer = std::pin::pin!(writer);
+            let mut writer = writer
+                .sink_map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")));
+            let mut wal_reader = std::pin::pin!(wal_reader);
+            writer.send_all(&mut wal_reader).await?;
+            writer.into_inner().finish().await?;
         }
 
         Ok(())
