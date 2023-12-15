@@ -868,11 +868,13 @@ impl LayerInner {
                             1.5,
                             60.0,
                         );
+
                         let backoff = std::time::Duration::from_secs_f64(backoff);
 
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {},
                             _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
+                            _ = timeline.cancel.cancelled() => {},
                         };
 
                         Err(e)
