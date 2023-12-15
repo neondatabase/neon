@@ -83,6 +83,12 @@ impl std::fmt::Display for RemotePath {
     }
 }
 
+impl From<RemotePath> for String {
+    fn from(val: RemotePath) -> Self {
+        val.0.into()
+    }
+}
+
 impl RemotePath {
     pub fn new(relative_path: &Utf8Path) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -104,7 +110,7 @@ impl RemotePath {
         self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Utf8Path) -> Self {
+    pub fn join<P: AsRef<Utf8Path>>(&self, segment: P) -> Self {
         Self(self.0.join(segment))
     }
 

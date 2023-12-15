@@ -367,6 +367,8 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -516,6 +518,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        remote_path: Option<String>,
     },
     Image {
         layer_file_name: String,
@@ -524,6 +528,8 @@ pub enum HistoricLayerInfo {
         lsn_start: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        remote_path: Option<String>,
     },
 }
 
@@ -876,6 +882,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
+            generation: None,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -896,6 +903,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
+            generation: None,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
