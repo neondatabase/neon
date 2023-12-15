@@ -15,7 +15,6 @@ on:
         required: true
         type: string
         default: 'pinned'
-  pull_request:
 
 defaults:
   run:
