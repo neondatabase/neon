@@ -51,7 +51,7 @@ use crate::tenant::storage_layer::{
     LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
     ValueReconstructState,
 };
-use crate::tenant::tasks::{BackgroundLoopKind, RateLimitError};
+use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -715,19 +715,27 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        let _g = self.compaction_lock.lock().await;
+        // most likely the cancellation token is from background task, but in tests it could be the
+        // request task as well.
+
+        let prepare = async move {
+            let guard = self.compaction_lock.lock().await;
+
+            let permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
+                BackgroundLoopKind::Compaction,
+                ctx,
+            )
+            .await;
+
+            (guard, permit)
+        };
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
-        let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
-            BackgroundLoopKind::Compaction,
-            ctx,
-            cancel,
-        )
-        .await
-        {
-            Ok(permit) => permit,
-            Err(RateLimitError::Cancelled) => return Ok(()),
+        let (_guard, _permit) = tokio::select! {
+            tuple = prepare => { tuple },
+            _ = self.cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Ok(()),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1782,22 +1790,22 @@ impl Timeline {
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
                 let cancel = task_mgr::shutdown_token();
-                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit(
+                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
-                    &cancel,
                 );
 
                 use crate::metrics::initial_logical_size::StartCircumstances;
                 let (_maybe_permit, circumstances) = tokio::select! {
-                    res = wait_for_permit => {
-                        match res {
-                            Ok(permit) => (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit),
-                            Err(RateLimitError::Cancelled) => {
-                                return Err(BackgroundCalculationError::Cancelled);
-                            }
-                        }
+                    permit = wait_for_permit => {
+                        (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
+                    _ = self_ref.cancel.cancelled() => {
+                        return Err(BackgroundCalculationError::Cancelled);
+                    }
+                    _ = cancel.cancelled() => {
+                        return Err(BackgroundCalculationError::Cancelled);
+                    },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
                         // => break out of the rate limit
@@ -3852,7 +3860,14 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
-        let _g = self.gc_lock.lock().await;
+        // this is most likely the background tasks, but it might be the spawned task from
+        // immediate_gc
+        let cancel = crate::task_mgr::shutdown_token();
+        let _g = tokio::select! {
+            guard = self.gc_lock.lock() => guard,
+            _ = self.cancel.cancelled() => return Ok(GcResult::default()),
+            _ = cancel.cancelled() => return Ok(GcResult::default()),
+        };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
