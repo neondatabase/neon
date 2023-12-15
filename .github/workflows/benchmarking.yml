@@ -151,7 +151,7 @@ jobs:
       #                   { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
       #     }'
 
-      #     if [ "$(date +%A)" = "Saturday" || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}]; then
+      #     if [ "$(date +%A)" = "Saturday" ] || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}; then
       #       matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
       #                                                { "platform": "rds-aurora",   "db_size": "50gb"}]')
       #     fi
@@ -167,7 +167,7 @@ jobs:
             ]
           }'
 
-          if [ "$(date +%A)" = "Saturday" || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}]; then
+          if [ "$(date +%A)" = "Saturday" ] || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}; then
             matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
                                                      { "platform": "rds-aurora"   }]')
           fi
@@ -186,7 +186,7 @@ jobs:
       #       ]
       #     }'
 
-      #     iif [ "$(date +%A)" = "Saturday" || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}]; then
+      #    if [ "$(date +%A)" = "Saturday" ] || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}; then
       #       matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
       #                                                { "platform": "rds-aurora",   "scale": "10" }]')
       #     fi
