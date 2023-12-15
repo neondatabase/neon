@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
-use tracing::{error, info, warn};
+
 use utils::generation::Generation;
 
 use crate::cloud_admin_api::BranchData;
@@ -47,12 +47,13 @@ pub(crate) fn branch_cleanup_and_check_errors(
 ) -> TimelineAnalysis {
     let mut result = TimelineAnalysis::new();
 
-    info!("Checking timeline {id}");
+    tracing::trace!("Checking timeline {id}");
 
     if let Some(s3_active_branch) = s3_active_branch {
-        info!(
+        tracing::trace!(
             "Checking console status for timeline for branch {:?}/{:?}",
-            s3_active_branch.project_id, s3_active_branch.id
+            s3_active_branch.project_id,
+            s3_active_branch.id
         );
         match console_branch {
             Some(_) => {result.errors.push(format!("Timeline has deleted branch data in the console (id = {:?}, project_id = {:?}), recheck whether it got removed during the check",
@@ -101,7 +102,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
 
                     if index_part.layer_metadata.is_empty() {
                         // not an error, can happen for branches with zero writes, but notice that
-                        info!("index_part.json has no layers");
+                        tracing::trace!("index_part.json has no layers");
                     }
 
                     for (layer, metadata) in index_part.layer_metadata {
@@ -185,17 +186,17 @@ pub(crate) fn branch_cleanup_and_check_errors(
     }
 
     if result.errors.is_empty() {
-        info!("No check errors found");
+        tracing::trace!("No check errors found");
     } else {
-        warn!("Timeline metadata errors: {0:?}", result.errors);
+        tracing::info!("Timeline metadata errors: {:?}", result.errors);
     }
 
     if !result.warnings.is_empty() {
-        warn!("Timeline metadata warnings: {0:?}", result.warnings);
+        tracing::info!("Timeline metadata warnings: {:?}", result.warnings);
     }
 
     if !result.garbage_keys.is_empty() {
-        error!(
+        tracing::info!(
             "The following keys should be removed from S3: {0:?}",
             result.garbage_keys
         )
@@ -260,20 +261,20 @@ pub(crate) async fn list_timeline_blobs(
         let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
         match blob_name {
             Some(name) if name.starts_with("index_part.json") => {
-                tracing::info!("Index key {key}");
+                tracing::trace!("Index key {key}");
                 index_parts.push(obj)
             }
             Some("initdb.tar.zst") => {
-                tracing::info!("initdb archive {key}");
+                tracing::trace!("initdb archive {key}");
                 initdb_archive = true;
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {
-                    tracing::info!("Parsed layer key: {} {:?}", new_layer, gen);
+                    tracing::trace!("Parsed layer key: {} {:?}", new_layer, gen);
                     s3_layers.insert((new_layer, gen));
                 }
                 Err(e) => {
-                    tracing::info!("Error parsing key {maybe_layer_name}");
+                    tracing::trace!("Error parsing key {maybe_layer_name}");
                     errors.push(
                         format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
                     );
@@ -281,7 +282,7 @@ pub(crate) async fn list_timeline_blobs(
                 }
             },
             None => {
-                tracing::info!("Peculiar key {}", key);
+                tracing::trace!("Peculiar key {}", key);
                 errors.push(format!("S3 list response got an object with odd key {key}"));
                 keys_to_remove.push(key.to_string());
             }
@@ -289,7 +290,7 @@ pub(crate) async fn list_timeline_blobs(
     }
 
     if index_parts.is_empty() && s3_layers.is_empty() && initdb_archive {
-        tracing::info!(
+        tracing::trace!(
             "Timeline is empty apart from initdb archive: expected post-deletion state."
         );
         return Ok(S3TimelineBlobData {

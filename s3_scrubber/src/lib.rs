@@ -340,7 +340,7 @@ async fn list_objects_with_retries(
         {
             Ok(response) => return Ok(response),
             Err(e) => {
-                error!("list_objects_v2 query failed: {e}");
+                error!("list_objects_v2 query failed: {e:?}");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -378,7 +378,7 @@ async fn download_object_with_retries(
             .await
         {
             Ok(bytes_read) => {
-                tracing::info!("Downloaded {bytes_read} bytes for object object with key {key}");
+                tracing::trace!("Downloaded {bytes_read} bytes for object object with key {key}");
                 return Ok(body_buf);
             }
             Err(e) => {
