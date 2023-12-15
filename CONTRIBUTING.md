@@ -80,7 +80,7 @@ or using GitHub CLI:
 ```bash
 gh workflow -R neondatabase/neon run update_build_tools_image.yml \
             -f from-tag=6254913013 \
-            -f to-tag=mynewtag \
+            -f to-tag=pinned \
 
 # Default `-f to-tag` is `pinned`, so the parameter can be omitted.
 ```
