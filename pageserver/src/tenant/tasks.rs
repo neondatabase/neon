@@ -54,6 +54,7 @@ impl BackgroundLoopKind {
     }
 }
 
+/// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
