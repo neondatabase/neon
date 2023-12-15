@@ -1034,12 +1034,25 @@ nm_pack_request(NeonRequest *msg)
 				break;
 			}
 
+		case T_NeonGetSlruSegmentRequest:
+			{
+				NeonGetSlruSegmentRequest *msg_req = (NeonGetSlruSegmentRequest *) msg;
+
+				pq_sendbyte(&s, msg_req->req.latest);
+				pq_sendint64(&s, msg_req->req.lsn);
+				pq_sendbyte(&s, msg_req->kind);
+				pq_sendint32(&s, msg_req->segno);
+
+				break;
+			}
+
 			/* pagestore -> pagestore_client. We never need to create these. */
 		case T_NeonExistsResponse:
 		case T_NeonNblocksResponse:
 		case T_NeonGetPageResponse:
 		case T_NeonErrorResponse:
 		case T_NeonDbSizeResponse:
+		case T_NeonGetSlruSegmentResponse:
 		default:
 			neon_log(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
@@ -1126,6 +1139,20 @@ nm_unpack_response(StringInfo s)
 				break;
 			}
 
+		case T_NeonGetSlruSegmentResponse:
+		    {
+				NeonGetSlruSegmentResponse *msg_resp;
+				int n_blocks = pq_getmsgint(s, 4);
+				msg_resp = palloc(sizeof(NeonGetSlruSegmentResponse));
+				msg_resp->tag = tag;
+				msg_resp->n_blocks = n_blocks;
+				memcpy(msg_resp->data, pq_getmsgbytes(s, n_blocks * BLCKSZ), n_blocks * BLCKSZ);
+				pq_getmsgend(s);
+
+				resp = (NeonResponse *) msg_resp;
+				break;
+			}
+
 			/*
 			 * pagestore_client -> pagestore
 			 *
@@ -1135,6 +1162,7 @@ nm_unpack_response(StringInfo s)
 		case T_NeonNblocksRequest:
 		case T_NeonGetPageRequest:
 		case T_NeonDbSizeRequest:
+		case T_NeonGetSlruSegmentRequest:
 		default:
 			neon_log(ERROR, "unexpected neon message tag 0x%02x", tag);
 			break;
@@ -1204,7 +1232,18 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoChar(&s, '}');
 				break;
 			}
+		case T_NeonGetSlruSegmentRequest:
+			{
+				NeonGetSlruSegmentRequest *msg_req = (NeonGetSlruSegmentRequest *) msg;
 
+				appendStringInfoString(&s, "{\"type\": \"NeonGetSlruSegmentRequest\"");
+				appendStringInfo(&s, ", \"kind\": %u", msg_req->kind);
+				appendStringInfo(&s, ", \"segno\": %u", msg_req->segno);
+				appendStringInfo(&s, ", \"lsn\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->req.lsn));
+				appendStringInfo(&s, ", \"latest\": %d", msg_req->req.latest);
+				appendStringInfoChar(&s, '}');
+				break;
+			}
 			/* pagestore -> pagestore_client */
 		case T_NeonExistsResponse:
 			{
@@ -1256,6 +1295,17 @@ nm_to_string(NeonMessage *msg)
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeResponse\"");
 				appendStringInfo(&s, ", \"db_size\": %ld}",
 								 msg_resp->db_size);
+				appendStringInfoChar(&s, '}');
+
+				break;
+			}
+		case T_NeonGetSlruSegmentResponse:
+			{
+				NeonGetSlruSegmentResponse *msg_resp = (NeonGetSlruSegmentResponse *) msg;
+
+				appendStringInfoString(&s, "{\"type\": \"NeonGetSlruSegmentResponse\"");
+				appendStringInfo(&s, ", \"n_blocks\": %u}",
+								 msg_resp->n_blocks);
 				appendStringInfoChar(&s, '}');
 
 				break;
@@ -2727,6 +2777,61 @@ neon_end_unlogged_build(SMgrRelation reln)
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
 
+static int
+neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer)
+{
+	XLogRecPtr request_lsn;
+	/* TODO: any better alternative than flush LSN? Actually we to request SLRU at basebackup creation time... */
+#if PG_VERSION_NUM >= 150000
+	request_lsn = GetFlushRecPtr(NULL);
+#else
+	request_lsn = GetFlushRecPtr();
+#endif
+	NeonResponse *resp;
+	shardno_t shard_no = 0; /* SLRU are at the zero shard */
+	NeonGetSlruSegmentRequest request = {
+		.req.tag = T_NeonGetSlruSegmentRequest,
+		.req.latest = false,
+		.req.lsn = request_lsn,
+
+		.kind = kind,
+		.segno = segno
+	};
+	int n_blocks;
+
+	do
+	{
+		while (!page_server->send(shard_no, &request.req) || !page_server->flush(shard_no));
+		consume_prefetch_responses();
+		resp = page_server->receive(shard_no);
+	} while (resp == NULL);
+
+	switch (resp->tag)
+	{
+		case T_NeonGetSlruSegmentResponse:
+			n_blocks = ((NeonGetSlruSegmentResponse *) resp)->n_blocks;
+			memcpy(buffer, ((NeonGetSlruSegmentResponse *) resp)->data, n_blocks*BLCKSZ);
+			break;
+
+		case T_NeonErrorResponse:
+			ereport(ERROR,
+					(errcode(ERRCODE_IO_ERROR),
+					 errmsg(NEON_TAG "could not read SLRU %d segment %d at lsn %X/%08X",
+							kind,
+							segno,
+							(uint32) (request_lsn >> 32), (uint32) request_lsn),
+					 errdetail("page server returned error: %s",
+							   ((NeonErrorResponse *) resp)->message)));
+			break;
+
+		default:
+			neon_log(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+	}
+	pfree(resp);
+
+	return n_blocks;
+}
+
 static void
 AtEOXact_neon(XactEvent event, void *arg)
 {
@@ -2785,6 +2890,8 @@ static const struct f_smgr neon_smgr =
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
 	.smgr_end_unlogged_build = neon_end_unlogged_build,
+
+	.smgr_read_slru_segment = neon_read_slru_segment,
 };
 
 const f_smgr *

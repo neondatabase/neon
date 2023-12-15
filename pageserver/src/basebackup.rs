@@ -139,6 +139,8 @@ where
     async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
 
+        let on_demand_slru_download = true; // TODO: should it be feature flag, config parameter or whatever else ?
+
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
             let header = new_tar_header_dir(dir)?;
@@ -165,19 +167,20 @@ where
                     .context("could not add config file to basebackup tarball")?;
             }
         }
-
-        // Gather non-relational files from object storage pages.
-        for kind in [
-            SlruKind::Clog,
-            SlruKind::MultiXactOffsets,
-            SlruKind::MultiXactMembers,
-        ] {
-            for segno in self
-                .timeline
-                .list_slru_segments(kind, self.lsn, self.ctx)
-                .await?
-            {
-                self.add_slru_segment(kind, segno).await?;
+        if !on_demand_slru_download {
+            // Gather non-relational files from object storage pages.
+            for kind in [
+                SlruKind::Clog,
+                SlruKind::MultiXactOffsets,
+                SlruKind::MultiXactMembers,
+            ] {
+                for segno in self
+                    .timeline
+                    .list_slru_segments(kind, self.lsn, self.ctx)
+                    .await?
+                {
+                    self.add_slru_segment(kind, segno).await?;
+                }
             }
         }
 

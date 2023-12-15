@@ -12,7 +12,7 @@ use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use pageserver_api::key::is_rel_block_key;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -312,6 +312,25 @@ impl Timeline {
             }
             Err(e) => Err(PageReconstructError::from(e)),
         }
+    }
+
+    /// Get the whole SLRU segment
+    pub async fn get_slru_segment(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        let n_blocks = self.get_slru_segment_size(kind, segno, lsn, ctx).await?;
+        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for blkno in 0..n_blocks {
+            let block = self
+                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
+                .await?;
+            segment.extend_from_slice(&block[..BLCKSZ as usize]);
+        }
+        Ok(segment.freeze())
     }
 
     /// Look up given SLRU page version.
