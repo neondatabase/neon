@@ -2,11 +2,13 @@
 
 mod mitm;
 
+use super::connect_compute::ConnectMechanism;
+use super::retry::ShouldRetry;
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
-use crate::proxy::retry::NUM_RETRIES_CONNECT;
+use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -424,7 +426,7 @@ impl ConnectMechanism for TestConnectMechanism {
     async fn connect_once(
         &self,
         _node_info: &console::CachedNodeInfo,
-        _timeout: time::Duration,
+        _timeout: std::time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
