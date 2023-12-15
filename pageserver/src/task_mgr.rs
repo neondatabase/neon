@@ -564,9 +564,9 @@ pub fn shutdown_token() -> CancellationToken {
     let res = SHUTDOWN_TOKEN.try_with(|t| t.clone());
 
     if cfg!(test) {
+        // in tests this method is called from non-taskmgr spawned tasks, and that is all ok.
         res.unwrap_or_default()
     } else {
-        // tests need to call the same paths which need to use get the shutdown token
         res.expect("shutdown_token() called in an unexpected task or thread")
     }
 }
