@@ -44,15 +44,15 @@ const NOTICE_AFTER_RETRIES: u64 = 50;
 
 /// Argument to `start_process`, to indicate whether it should create pidfile or if the process creates
 /// it itself.
-pub enum InitialPidFile<'t> {
+pub enum InitialPidFile {
     /// Create a pidfile, to allow future CLI invocations to manipulate the process.
-    Create(&'t Utf8Path),
+    Create(Utf8PathBuf),
     /// The process will create the pidfile itself, need to wait for that event.
-    Expect(&'t Utf8Path),
+    Expect(Utf8PathBuf),
 }
 
 /// Start a background child process using the parameters given.
-pub fn start_process<F, AI, A, EI>(
+pub async fn start_process<F, Fut, AI, A, EI>(
     process_name: &str,
     datadir: &Path,
     command: &Path,
@@ -62,7 +62,8 @@ pub fn start_process<F, AI, A, EI>(
     process_status_check: F,
 ) -> anyhow::Result<Child>
 where
-    F: Fn() -> anyhow::Result<bool>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
     AI: IntoIterator<Item = A>,
     A: AsRef<OsStr>,
     // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
@@ -89,7 +90,7 @@ where
     let filled_cmd = fill_remote_storage_secrets_vars(fill_rust_env_vars(background_command));
     filled_cmd.envs(envs);
 
-    let pid_file_to_check = match initial_pid_file {
+    let pid_file_to_check = match &initial_pid_file {
         InitialPidFile::Create(path) => {
             pre_exec_create_pidfile(filled_cmd, path);
             path
@@ -107,7 +108,7 @@ where
     );
 
     for retries in 0..RETRIES {
-        match process_started(pid, Some(pid_file_to_check), &process_status_check) {
+        match process_started(pid, &pid_file_to_check, &process_status_check).await {
             Ok(true) => {
                 println!("\n{process_name} started, pid: {pid}");
                 return Ok(spawned_process);
@@ -316,22 +317,20 @@ where
     cmd
 }
 
-fn process_started<F>(
+async fn process_started<F, Fut>(
     pid: Pid,
-    pid_file_to_check: Option<&Utf8Path>,
+    pid_file_to_check: &Utf8Path,
     status_check: &F,
 ) -> anyhow::Result<bool>
 where
-    F: Fn() -> anyhow::Result<bool>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
 {
-    match status_check() {
-        Ok(true) => match pid_file_to_check {
-            Some(pid_file_path) => match pid_file::read(pid_file_path)? {
-                PidFileRead::NotExist => Ok(false),
-                PidFileRead::LockedByOtherProcess(pid_in_file) => Ok(pid_in_file == pid),
-                PidFileRead::NotHeldByAnyProcess(_) => Ok(false),
-            },
-            None => Ok(true),
+    match status_check().await {
+        Ok(true) => match pid_file::read(pid_file_to_check)? {
+            PidFileRead::NotExist => Ok(false),
+            PidFileRead::LockedByOtherProcess(pid_in_file) => Ok(pid_in_file == pid),
+            PidFileRead::NotHeldByAnyProcess(_) => Ok(false),
         },
         Ok(false) => Ok(false),
         Err(e) => anyhow::bail!("process failed to start: {e}"),

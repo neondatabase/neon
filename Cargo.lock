@@ -1245,6 +1245,7 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "camino",
  "clap",
  "comfy-table",

@@ -149,8 +149,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
-        self.start_node(config_overrides, false)
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
+        self.start_node(config_overrides, false).await
     }
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
@@ -191,53 +191,52 @@ impl PageServerNode {
         Ok(())
     }
 
-    fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
+    async fn start_node(
+        &self,
+        config_overrides: &[&str],
+        update_config: bool,
+    ) -> anyhow::Result<Child> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
-        std::thread::scope(move |s| {
-            s.spawn(move || {
-                let datadir = self.repo_path();
-                print!(
-                    "Starting pageserver node {} at '{}' in {:?}",
-                    self.conf.id,
-                    self.pg_connection_config.raw_address(),
-                    datadir
-                );
-                io::stdout().flush().context("flush stdout")?;
+        let datadir = self.repo_path();
+        print!(
+            "Starting pageserver node {} at '{}' in {:?}",
+            self.conf.id,
+            self.pg_connection_config.raw_address(),
+            datadir
+        );
+        io::stdout().flush().context("flush stdout")?;
 
-                let datadir_path_str = datadir.to_str().with_context(|| {
-                    format!(
-                        "Cannot start pageserver node {} in path that has no string representation: {:?}",
-                        self.conf.id, datadir,
-                    )
-                })?;
-                let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
-                if update_config {
-                    args.push(Cow::Borrowed("--update-config"));
+        let datadir_path_str = datadir.to_str().with_context(|| {
+            format!(
+                "Cannot start pageserver node {} in path that has no string representation: {:?}",
+                self.conf.id, datadir,
+            )
+        })?;
+        let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
+        if update_config {
+            args.push(Cow::Borrowed("--update-config"));
+        }
+        background_process::start_process(
+            "pageserver",
+            &datadir,
+            &self.env.pageserver_bin(),
+            args.iter().map(Cow::as_ref),
+            self.pageserver_env_variables()?,
+            background_process::InitialPidFile::Expect(self.pid_file()),
+            || async {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let st = rt.block_on(self.check_status());
+                match st {
+                    Ok(()) => Ok(true),
+                    Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
+                    Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
                 }
-                background_process::start_process(
-                    "pageserver",
-                    &datadir,
-                    &self.env.pageserver_bin(),
-                    args.iter().map(Cow::as_ref),
-                    self.pageserver_env_variables()?,
-                    background_process::InitialPidFile::Expect(&self.pid_file()),
-                    || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .unwrap();
-                        let st = rt.block_on(self.check_status());
-                        match st {
-                            Ok(()) => Ok(true),
-                            Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
-                            Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
-                        }
-                    },
-                )
-            })
-            .join()
-            .unwrap()
-        })
+            },
+        )
+        .await
     }
 
     fn pageserver_basic_args<'a>(

@@ -128,11 +128,11 @@ fn main() -> Result<()> {
         let subcommand_result = match sub_name {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
-            "start" => handle_start_all(sub_args, &env),
+            "start" => rt.block_on(handle_start_all(sub_args, &env)),
             "stop" => handle_stop_all(sub_args, &env),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
-            "attachment_service" => handle_attachment_service(sub_args, &env),
-            "safekeeper" => handle_safekeeper(sub_args, &env),
+            "attachment_service" => rt.block_on(handle_attachment_service(sub_args, &env)),
+            "safekeeper" => rt.block_on(handle_safekeeper(sub_args, &env)),
             "endpoint" => rt.block_on(handle_endpoint(sub_args, &env)),
             "mappings" => handle_mappings(sub_args, &mut env),
             "pg" => bail!("'pg' subcommand has been renamed to 'endpoint'"),
@@ -560,7 +560,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
 
             let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
-            pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version).await?;
+            pageserver
+                .timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)
+                .await?;
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
             println!("Creating endpoint for imported timeline ...");
@@ -904,6 +906,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
         Some(("start", subcommand_args)) => {
             if let Err(e) = get_pageserver(env, subcommand_args)?
                 .start(&pageserver_config_overrides(subcommand_args))
+                .await
             {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
@@ -930,7 +933,10 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+            if let Err(e) = pageserver
+                .start(&pageserver_config_overrides(subcommand_args))
+                .await
+            {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -944,7 +950,10 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+            if let Err(e) = pageserver
+                .start(&pageserver_config_overrides(subcommand_args))
+                .await
+            {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -966,11 +975,14 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-fn handle_attachment_service(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_attachment_service(
+    sub_match: &ArgMatches,
+    env: &local_env::LocalEnv,
+) -> Result<()> {
     let svc = AttachmentService::from_env(env);
     match sub_match.subcommand() {
         Some(("start", _start_match)) => {
-            if let Err(e) = svc.start() {
+            if let Err(e) = svc.start().await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
@@ -1011,7 +1023,7 @@ fn safekeeper_extra_opts(init_match: &ArgMatches) -> Vec<String> {
         .collect()
 }
 
-fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let (sub_name, sub_args) = match sub_match.subcommand() {
         Some(safekeeper_command_data) => safekeeper_command_data,
         None => bail!("no safekeeper subcommand provided"),
@@ -1029,7 +1041,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         "start" => {
             let extra_opts = safekeeper_extra_opts(sub_args);
 
-            if let Err(e) = safekeeper.start(extra_opts) {
+            if let Err(e) = safekeeper.start(extra_opts).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1055,7 +1067,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
 
             let extra_opts = safekeeper_extra_opts(sub_args);
-            if let Err(e) = safekeeper.start(extra_opts) {
+            if let Err(e) = safekeeper.start(extra_opts).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1068,15 +1080,15 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
-fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
-    broker::start_broker_process(env)?;
+    broker::start_broker_process(env).await?;
 
     // Only start the attachment service if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let attachment_service = AttachmentService::from_env(env);
-        if let Err(e) = attachment_service.start() {
+        if let Err(e) = attachment_service.start().await {
             eprintln!("attachment_service start failed: {:#}", e);
             try_stop_all(env, true);
             exit(1);
@@ -1085,7 +1097,10 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver.start(&pageserver_config_overrides(sub_match)) {
+        if let Err(e) = pageserver
+            .start(&pageserver_config_overrides(sub_match))
+            .await
+        {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true);
             exit(1);
@@ -1094,7 +1109,7 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start(vec![]) {
+        if let Err(e) = safekeeper.start(vec![]).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false);
             exit(1);
