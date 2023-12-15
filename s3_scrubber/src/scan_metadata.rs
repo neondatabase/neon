@@ -108,7 +108,7 @@ impl MetadataSummary {
             total_size += meta.file_size;
             self.layer_size_bytes.sample(meta.file_size)?;
         }
-        self.timeline_size_bytes.sample(total_size)?;
+        self.timeline_size_bytes.sample(total_size / 1024)?;
 
         Ok(())
     }
@@ -161,7 +161,7 @@ With errors: {1}
 With warnings: {2}
 With garbage: {3}
 Index versions: {version_summary}
-Timeline size bytes: {4}
+Timeline size KiB: {4}
 Layer size bytes: {5}
 Timeline layer count: {6}
 ",
