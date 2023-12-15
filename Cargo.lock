@@ -3167,7 +3167,6 @@ dependencies = [
  "enum-map",
  "hex",
  "postgres_ffi",
- "rand 0.8.5",
  "serde",
  "serde_json",
  "serde_with",
