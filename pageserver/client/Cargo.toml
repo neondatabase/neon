@@ -11,3 +11,4 @@ async-trait.workspace = true
 reqwest.workspace = true
 utils.workspace = true
 serde.workspace = true
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
