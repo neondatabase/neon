@@ -464,7 +464,7 @@ impl Endpoint {
         }
     }
 
-    pub fn start(
+    pub async fn start(
         &self,
         auth_token: &Option<String>,
         safekeepers: Vec<NodeId>,
@@ -587,7 +587,7 @@ impl Endpoint {
         const MAX_ATTEMPTS: u32 = 10 * 30; // Wait up to 30 s
         loop {
             attempt += 1;
-            match self.get_status() {
+            match self.get_status().await {
                 Ok(state) => {
                     match state.status {
                         ComputeStatus::Init => {
@@ -629,8 +629,8 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub fn get_status(&self) -> Result<ComputeState> {
-        let client = reqwest::blocking::Client::new();
+    pub async fn get_status(&self) -> Result<ComputeState> {
+        let client = reqwest::Client::new();
 
         let response = client
             .request(
@@ -641,16 +641,17 @@ impl Endpoint {
                     self.http_address.port()
                 ),
             )
-            .send()?;
+            .send()
+            .await?;
 
         // Interpret the response
         let status = response.status();
         if !(status.is_client_error() || status.is_server_error()) {
-            Ok(response.json()?)
+            Ok(response.json().await?)
         } else {
             // reqwest does not export its error construction utility functions, so let's craft the message ourselves
             let url = response.url().to_owned();
-            let msg = match response.text() {
+            let msg = match response.text().await {
                 Ok(err_body) => format!("Error: {}", err_body),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };
@@ -658,7 +659,7 @@ impl Endpoint {
         }
     }
 
-    pub fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
+    pub async fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
         let mut spec: ComputeSpec = {
             let spec_path = self.endpoint_path().join("spec.json");
             let file = std::fs::File::open(spec_path)?;
@@ -687,7 +688,7 @@ impl Endpoint {
             spec.pageserver_connstring = Some(format!("postgresql://no_user@{host}:{port}"));
         }
 
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::Client::new();
         let response = client
             .post(format!(
                 "http://{}:{}/configure",
@@ -698,14 +699,15 @@ impl Endpoint {
                 "{{\"spec\":{}}}",
                 serde_json::to_string_pretty(&spec)?
             ))
-            .send()?;
+            .send()
+            .await?;
 
         let status = response.status();
         if !(status.is_client_error() || status.is_server_error()) {
             Ok(())
         } else {
             let url = response.url().to_owned();
-            let msg = match response.text() {
+            let msg = match response.text().await {
                 Ok(err_body) => format!("Error: {}", err_body),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };

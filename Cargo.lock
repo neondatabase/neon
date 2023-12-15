@@ -1245,16 +1245,19 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "camino",
  "clap",
  "comfy-table",
  "compute_api",
+ "futures",
  "git-version",
  "hex",
  "hyper",
  "nix 0.26.2",
  "once_cell",
  "pageserver_api",
+ "pageserver_client",
  "postgres",
  "postgres_backend",
  "postgres_connection",
@@ -1268,6 +1271,8 @@ dependencies = [
  "tar",
  "thiserror",
  "tokio",
+ "tokio-postgres",
+ "tokio-util",
  "toml",
  "tracing",
  "url",
@@ -3167,6 +3172,19 @@ dependencies = [
  "serde_with",
  "strum",
  "strum_macros",
+ "thiserror",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
+name = "pageserver_client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pageserver_api",
+ "reqwest",
+ "serde",
  "thiserror",
  "utils",
  "workspace_hack",
