@@ -32,7 +32,6 @@ pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> Clien
 
 pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
-        .http2_prior_knowledge()
         .connection_verbose(true)
         .timeout(default_timout)
         .build()
