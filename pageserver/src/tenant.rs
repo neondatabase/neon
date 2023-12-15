@@ -61,7 +61,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::TENANT_ACTIVATION;
+use crate::metrics::TENANT;
 use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
@@ -228,7 +228,7 @@ pub struct Tenant {
 
     /// The value creation timestamp, used to measure activation delay, see:
     /// <https://github.com/neondatabase/neon/issues/4025>
-    loading_started_at: Instant,
+    constructed_at: Instant,
 
     state: watch::Sender<TenantState>,
 
@@ -705,6 +705,7 @@ impl Tenant {
                     AttachType::Normal
                 };
 
+                let preload_timer = TENANT.preload.start_timer();
                 let preload = match mode {
                     SpawnMode::Create => {None},
                     SpawnMode::Normal => {
@@ -727,6 +728,7 @@ impl Tenant {
                         }
                     }
                 };
+                preload_timer.observe_duration();
 
                 // Remote preload is complete.
                 drop(remote_load_completion);
@@ -778,6 +780,7 @@ impl Tenant {
                     }
                 }
 
+                let attach_timer = TENANT.attach.start_timer();
                 match tenant_clone.attach(preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
@@ -787,6 +790,7 @@ impl Tenant {
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
+                attach_timer.observe_duration();
 
                 // If we are doing an opportunistic warmup attachment at startup, initialize
                 // logical size at the same time.  This is better than starting a bunch of idle tenants
@@ -1944,7 +1948,7 @@ impl Tenant {
                 );
                 *current_state = TenantState::Active;
 
-                let elapsed = self.loading_started_at.elapsed();
+                let elapsed = self.constructed_at.elapsed();
                 let total_timelines = timelines_accessor.len();
 
                 // log a lot of stuff, because some tenants sometimes suffer from user-visible
@@ -1959,7 +1963,7 @@ impl Tenant {
                     "activation attempt finished"
                 );
 
-                TENANT_ACTIVATION.observe(elapsed.as_secs_f64());
+                TENANT.activation.observe(elapsed.as_secs_f64());
             });
         }
     }
@@ -2567,7 +2571,7 @@ impl Tenant {
             conf,
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
-            loading_started_at: Instant::now(),
+            constructed_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
