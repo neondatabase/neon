@@ -89,7 +89,7 @@ impl Client {
             args.push(format!("{lsn}"));
         }
         if *gzip {
-            args.push(format!("--gzip"))
+            args.push("--gzip".to_string())
         }
         Ok(self.client.copy_out(&args.join(" ")).await?)
     }
