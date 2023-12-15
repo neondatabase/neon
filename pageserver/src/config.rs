@@ -41,6 +41,8 @@ use crate::{
     TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
+use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
+
 pub mod defaults {
     use crate::tenant::config::defaults::*;
     use const_format::formatcp;
@@ -60,6 +62,8 @@ pub mod defaults {
     pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
 
     pub const DEFAULT_LOG_FORMAT: &str = "plain";
+
+    pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
 
     pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
@@ -94,6 +98,7 @@ pub mod defaults {
 #log_format = '{DEFAULT_LOG_FORMAT}'
 
 #concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
+#concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
@@ -179,6 +184,11 @@ pub struct PageServerConf {
     pub broker_keepalive_interval: Duration,
 
     pub log_format: LogFormat,
+
+    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup,
+    /// does not limit tenants loaded in response to client I/O.  A lower value implicitly deprioritizes
+    /// loading such tenants, vs. other work in the system.
+    pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
@@ -283,6 +293,7 @@ struct PageServerConfigBuilder {
 
     log_format: BuilderValue<LogFormat>,
 
+    concurrent_tenant_warmup: BuilderValue<NonZeroUsize>,
     concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
@@ -340,6 +351,8 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
+            concurrent_tenant_warmup: Set(NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
+                .expect("Invalid default constant")),
             concurrent_tenant_size_logical_size_queries: Set(
                 ConfigurableSemaphore::DEFAULT_INITIAL,
             ),
@@ -453,6 +466,10 @@ impl PageServerConfigBuilder {
         self.log_format = BuilderValue::Set(log_format)
     }
 
+    pub fn concurrent_tenant_warmup(&mut self, u: NonZeroUsize) {
+        self.concurrent_tenant_warmup = BuilderValue::Set(u);
+    }
+
     pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: NonZeroUsize) {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
@@ -518,6 +535,9 @@ impl PageServerConfigBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
+        let concurrent_tenant_warmup = self
+            .concurrent_tenant_warmup
+            .ok_or(anyhow!("missing concurrent_tenant_warmup"))?;
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
             .ok_or(anyhow!(
@@ -570,6 +590,7 @@ impl PageServerConfigBuilder {
                 .broker_keepalive_interval
                 .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
                 concurrent_tenant_size_logical_size_queries,
             ),
@@ -807,6 +828,11 @@ impl PageServerConf {
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
+                "concurrent_tenant_warmup" => builder.concurrent_tenant_warmup({
+                    let input = parse_toml_string(key, item)?;
+                    let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
+                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
+                }),
                 "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
                     let input = parse_toml_string(key, item)?;
                     let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
@@ -904,6 +930,10 @@ impl PageServerConf {
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
+                    .expect("Invalid default constant"),
+            ),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
             ),
@@ -1122,6 +1152,7 @@ background_task_maximum_delay = '334 s'
                     storage_broker::DEFAULT_KEEPALIVE_INTERVAL
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::default(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
@@ -1188,6 +1219,7 @@ background_task_maximum_delay = '334 s'
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
+                concurrent_tenant_warmup: ConfigurableSemaphore::default(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),

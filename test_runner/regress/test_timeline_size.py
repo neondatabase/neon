@@ -745,6 +745,10 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     to limit concurrent tenant warm-up.
     """
 
+    # We will run with the limit set to 1, so that once we have one tenant stuck
+    # in a pausable failpoint, the rest are prevented from proceeding through warmup.
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 

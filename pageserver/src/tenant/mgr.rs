@@ -430,9 +430,9 @@ pub async fn init_tenant_mgr(
         init_load_generations(conf, &tenant_configs, &resources, &cancel).await?;
 
     tracing::info!(
-        "Attaching {} tenants at startup, {} at a time",
+        "Attaching {} tenants at startup, warming up {} at a time",
         tenant_configs.len(),
-        init_order.warmup_limit.available_permits()
+        conf.concurrent_tenant_warmup.initial_permits()
     );
 
     // Construct `Tenant` objects and start them running

@@ -669,13 +669,16 @@ impl Tenant {
                 // Before doing any I/O, wait for either or:
                 // - A client to attempt to access to this tenant (on-demand loading)
                 // - A permit to become available in the warmup semaphore (background warmup)
-                let attach_type = if let Some(init_order) = &init_order {
+                //
+                // Some-ness of init_order is how we know if we're attaching during startup or later
+                // in process lifetime.
+                let attach_type = if let Some(_init_order) = &init_order {
                     tokio::select!(
                         _ = tenant_clone.activate_now.notified() => {
                             tracing::info!("Activating tenant (on-demand)");
                             AttachType::OnDemand
                         },
-                        permit_result = init_order.warmup_limit.acquire() => {
+                        permit_result = conf.concurrent_tenant_warmup.inner().acquire() => {
                             match permit_result {
                                 Ok(p) => {
                                     tracing::info!("Activating tenant (warmup)");
