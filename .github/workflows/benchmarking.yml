@@ -412,7 +412,7 @@ jobs:
           test_selection: performance/test_perf_olap.py
           run_in_parallel: false
           save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-          extra_params: -m remote_cluster --timeout 21600 -k test_clickbench_debug
+          extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"

@@ -17,18 +17,18 @@ class LabelledQuery:
     query: str
 
 # just print out the env variables of interest
-@pytest.mark.remote_cluster
-def test_clickbench_debug():
-    log.info(f"TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: {os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'hugo')}") 
-    log.info(f"TEST_OLAP_COLLECT_EXPLAIN: {os.getenv('TEST_OLAP_COLLECT_EXPLAIN', 'hugo')}") 
-    if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
-        log.info(f"TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true")
-    else:
-        log.info(f"TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to false")
-    if os.getenv('TEST_OLAP_COLLECT_EXPLAIN', 'false').lower() == 'true':
-        log.info(f"TEST_OLAP_COLLECT_EXPLAIN is set to true")
-    else:
-        log.info(f"TEST_OLAP_COLLECT_EXPLAIN is set to false")
+# @pytest.mark.remote_cluster
+# def test_clickbench_debug():
+#     log.info(f"TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: {os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'hugo')}") 
+#     log.info(f"TEST_OLAP_COLLECT_EXPLAIN: {os.getenv('TEST_OLAP_COLLECT_EXPLAIN', 'hugo')}") 
+#     if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
+#         log.info(f"TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true")
+#     else:
+#         log.info(f"TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to false")
+#     if os.getenv('TEST_OLAP_COLLECT_EXPLAIN', 'false').lower() == 'true':
+#         log.info(f"TEST_OLAP_COLLECT_EXPLAIN is set to true")
+#     else:
+#         log.info(f"TEST_OLAP_COLLECT_EXPLAIN is set to false")
 
 # create extension pg_stat_statements before all tests in this module if it does not exist 
 # and TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
@@ -142,7 +142,7 @@ def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> N
     if os.getenv('TEST_OLAP_COLLECT_EXPLAIN', 'false').lower() == 'true':
         log.info(f"Explaining query {label}")
         run += 1
-        with env.zenbenchmark.record_duration(f"{label}/{run}"):
+        with env.zenbenchmark.record_duration(f"{label}/EXPLAIN"):
             env.pg_bin.run_capture(["psql", connstr, "-c", EXPLAIN_STRING+query], env=environ)
 
 def run_psql_once_without_explain(env: RemoteCompare, labelled_query: LabelledQuery) -> None:
@@ -173,7 +173,7 @@ def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare, scale: 
     The DB prepared manually in advance
     """
 
-#    run_psql(remote_compare, query, times=3)
+    run_psql(remote_compare, query, times=3)
 
 
 def tpch_queuies() -> Tuple[ParameterSet, ...]:
