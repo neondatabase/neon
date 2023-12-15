@@ -833,7 +833,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 } else {
                     None
                 };
-            endpoint.reconfigure(pageserver_id)?;
+            endpoint.reconfigure(pageserver_id).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
