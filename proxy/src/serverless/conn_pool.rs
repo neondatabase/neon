@@ -24,9 +24,8 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    proxy::{
-        connect_compute::ConnectMechanism, neon_options, LatencyTimer, NUM_DB_CONNECTIONS_GAUGE,
-    },
+    metrics::{LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    proxy::{connect_compute::ConnectMechanism, neon_options},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};

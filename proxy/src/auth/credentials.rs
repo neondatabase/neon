@@ -1,9 +1,8 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param,
-    error::UserFacingError,
-    proxy::{neon_options_str, NUM_CONNECTION_ACCEPTED_BY_SNI},
+    auth::password_hack::parse_endpoint_param, error::UserFacingError,
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::neon_options_str,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;

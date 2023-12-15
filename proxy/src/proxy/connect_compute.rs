@@ -2,11 +2,8 @@ use crate::{
     auth,
     compute::{self, PostgresConnection},
     console::{self, errors::WakeComputeError, Api},
-    proxy::{
-        bool_to_str,
-        retry::{retry_after, ShouldRetry},
-        NUM_WAKEUP_FAILURES,
-    },
+    metrics::{bool_to_str, LatencyTimer, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
+    proxy::retry::{retry_after, ShouldRetry},
 };
 use async_trait::async_trait;
 use hyper::StatusCode;
@@ -14,8 +11,6 @@ use pq_proto::StartupMessageParams;
 use std::ops::ControlFlow;
 use tokio::time;
 use tracing::{error, info, warn};
-
-use super::{LatencyTimer, NUM_CONNECTION_FAILURES};
 
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 
