@@ -31,6 +31,7 @@ reqwest = { workspace = true, default-features = false, features = ["rustls-tls"
 aws-config = { workspace = true, default-features = false, features = ["rustls", "sso"] }
 
 pageserver = { path = "../pageserver" }
+pageserver_api = { path = "../libs/pageserver_api" }
 remote_storage = { path = "../libs/remote_storage" }
 
 tracing.workspace = true
