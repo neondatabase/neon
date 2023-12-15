@@ -677,7 +677,7 @@ impl Tenant {
                 //
                 // Some-ness of init_order is how we know if we're attaching during startup or later
                 // in process lifetime.
-                let attach_type = if let Some(_init_order) = &init_order {
+                let attach_type = if init_order.is_some() {
                     tokio::select!(
                         _ = tenant_clone.activate_now_sem.acquire() => {
                             tracing::info!("Activating tenant (on-demand)");
@@ -702,7 +702,7 @@ impl Tenant {
                             // This is safe, but should be pretty rare: it is interesting if a tenant
                             // stayed in Activating for such a long time that shutdown found it in
                             // that state.
-                            tracing::info!("Tenant shut down before activation");
+                            tracing::info!(state=%tenant_clone.current_state(), "Tenant shut down before activation");
                             return Ok(());
                         },
                     )
@@ -789,13 +789,14 @@ impl Tenant {
                 match tenant_clone.attach(preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
+                        attach_timer.observe_duration();
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
+                        attach_timer.observe_duration();
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
-                attach_timer.observe_duration();
 
                 // If we are doing an opportunistic warmup attachment at startup, initialize
                 // logical size at the same time.  This is better than starting a bunch of idle tenants
