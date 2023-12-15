@@ -1489,9 +1489,6 @@ async fn timeline_collect_keyspace(
 
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
 
-    let check_serialization_roundtrip: bool =
-        parse_query_param(&request, "check_serialization_roundtrip")?.unwrap_or(false);
-
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(tenant_shard_id, timeline_id).await?;
@@ -1502,18 +1499,7 @@ async fn timeline_collect_keyspace(
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
         let res = crate::http::models::partitioning::Partitioning { keys, at_lsn };
-        if check_serialization_roundtrip {
-            (|| {
-                let ser = serde_json::ser::to_vec(&res).context("serialize")?;
-                let de: crate::http::models::partitioning::Partitioning =
-                    serde_json::from_slice(&ser).context("deserialize")?;
-                anyhow::ensure!(de == res, "not equal");
-                info!("passed serialization rountrip check");
-                Ok(())
-            })()
-            .context("serialization rountrip")
-            .map_err(ApiError::InternalServerError)?;
-        }
+      
         json_response(StatusCode::OK, res)
     }
     .instrument(info_span!("timeline_collect_keyspace", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))

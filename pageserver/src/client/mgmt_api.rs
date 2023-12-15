@@ -99,7 +99,7 @@ impl Client {
         timeline_id: TimelineId,
     ) -> Result<crate::http::models::partitioning::Partitioning> {
         let uri = format!(
-            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace?check_serialization_roundtrip=true",
+            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/keyspace",
             self.mgmt_api_endpoint
         );
         self.get(&uri)
