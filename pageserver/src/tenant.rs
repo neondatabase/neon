@@ -3059,6 +3059,7 @@ impl Tenant {
                     storage,
                     &self.tenant_shard_id,
                     &existing_initdb_timeline_id,
+                    &self.cancel,
                 )
                 .await
                 .context("download initdb tar")?;
@@ -3099,6 +3100,7 @@ impl Tenant {
                             &timeline_id,
                             pgdata_zstd.try_clone().await?,
                             tar_zst_size,
+                            &self.cancel,
                         )
                         .await
                     },
@@ -3106,9 +3108,7 @@ impl Tenant {
                     3,
                     u32::MAX,
                     "persist_initdb_tar_zst",
-                    backoff::Cancel::new(self.cancel.clone(), || {
-                        anyhow::anyhow!("initdb upload cancelled")
-                    }),
+                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
                 )
                 .await?;
 

@@ -196,10 +196,12 @@ pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
+use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use std::ops::DerefMut;
@@ -316,6 +318,47 @@ pub struct RemoteTimelineClient {
     storage_impl: GenericRemoteStorage,
 
     deletion_queue_client: DeletionQueueClient,
+
+    cancel: CancellationToken,
+}
+
+/// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
+/// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to anyhow.
+///
+/// This is a convenience for the various upload functions.  In future
+/// the anyhow::Error result should be replaced with a more structured type that
+/// enables callers to avoid handling shutdown as an error.
+async fn upload_cancellable<F>(cancel: &CancellationToken, future: F) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    match timeout_cancellable(UPLOAD_TIMEOUT, cancel, future).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(TimeoutCancellableError::Timeout) => Err(anyhow::anyhow!("Timeout")),
+        Err(TimeoutCancellableError::Cancelled) => Err(anyhow::anyhow!("Shutting down")),
+    }
+}
+/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to DownloaDError.
+async fn download_cancellable<F, R>(
+    cancel: &CancellationToken,
+    future: F,
+) -> Result<R, DownloadError>
+where
+    F: std::future::Future<Output = Result<R, DownloadError>>,
+{
+    match timeout_cancellable(DOWNLOAD_TIMEOUT, cancel, future).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(e),
+        Err(TimeoutCancellableError::Timeout) => {
+            Err(DownloadError::Other(anyhow::anyhow!("Timed out")))
+        }
+        Err(TimeoutCancellableError::Cancelled) => Err(DownloadError::Cancelled),
+    }
 }
 
 impl RemoteTimelineClient {
@@ -351,6 +394,7 @@ impl RemoteTimelineClient {
                 &tenant_shard_id,
                 &timeline_id,
             )),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -501,6 +545,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(
@@ -517,6 +562,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                cancel,
             )
             .measure_remote_op(
                 self.tenant_shard_id.tenant_id,
@@ -971,6 +1017,7 @@ impl RemoteTimelineClient {
                     &self.timeline_id,
                     self.generation,
                     &index_part_with_deleted_at,
+                    &self.cancel,
                 )
             },
             |_e| false,
@@ -980,8 +1027,7 @@ impl RemoteTimelineClient {
             // when executed as part of tenant deletion this happens in the background
             2,
             "persist_index_part_with_deleted_flag",
-            // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
         )
         .await?;
 
@@ -1281,6 +1327,7 @@ impl RemoteTimelineClient {
                         path,
                         layer_metadata,
                         self.generation,
+                        &self.cancel,
                     )
                     .measure_remote_op(
                         self.tenant_shard_id.tenant_id,
@@ -1307,6 +1354,7 @@ impl RemoteTimelineClient {
                         &self.timeline_id,
                         self.generation,
                         index_part,
+                        &self.cancel,
                     )
                     .measure_remote_op(
                         self.tenant_shard_id.tenant_id,
@@ -1828,6 +1876,7 @@ mod tests {
                     &self.harness.tenant_shard_id,
                     &TIMELINE_ID,
                 )),
+                cancel: CancellationToken::new(),
             })
         }
 

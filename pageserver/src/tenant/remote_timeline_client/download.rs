@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 use std::future::Future;
-use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -14,13 +13,17 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use utils::timeout::timeout_cancellable;
 use utils::{backoff, crashsafe};
 
 use crate::config::PageServerConf;
-use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
+use crate::tenant::remote_timeline_client::{
+    download_cancellable, remote_layer_path, remote_timelines_path, DOWNLOAD_TIMEOUT,
+};
 use crate::tenant::storage_layer::LayerFileName;
 use crate::tenant::timeline::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::Generation;
+use crate::virtual_file::on_fatal_io_error;
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode};
 use utils::crashsafe::path_with_suffix_extension;
@@ -31,8 +34,6 @@ use super::{
     parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
     FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
-
-static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -46,6 +47,7 @@ pub async fn download_layer_file<'a>(
     timeline_id: TimelineId,
     layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
+    cancel: &CancellationToken,
 ) -> Result<u64, DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -73,14 +75,18 @@ pub async fn download_layer_file<'a>(
     // If pageserver crashes the temp file will be deleted on startup and re-downloaded.
     let temp_file_path = path_with_suffix_extension(&local_path, TEMP_DOWNLOAD_EXTENSION);
 
+    let cancel_inner = cancel.clone();
     let (mut destination_file, bytes_amount) = download_retry(
         || async {
             let destination_file = tokio::fs::File::create(&temp_file_path)
                 .await
                 .with_context(|| format!("create a destination file for layer '{temp_file_path}'"))
                 .map_err(DownloadError::Other)?;
-            let download = storage
-                .download(&remote_path)
+
+            // Cancellation safety: it is safe to cancel this future, because it isn't writing to a local
+            // file: the write to local file doesn't start until after the request header is returned
+            // and we start draining the body stream below
+            let download = download_cancellable(&cancel_inner, storage.download(&remote_path))
                 .await
                 .with_context(|| {
                     format!(
@@ -94,12 +100,33 @@ pub async fn download_layer_file<'a>(
 
             let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
 
-            let bytes_amount = tokio::time::timeout(
-                MAX_DOWNLOAD_DURATION,
+            // Cancellation safety: it is safe to cancel this future because it is writing into a temporary file,
+            // and we will unlink the temporary file if there is an error.  This unlink is important because we
+            // are in a retry loop, and we wouldn't want to leave behind a rogue write I/O to a file that
+            // we will imminiently try and write to again.
+            let bytes_amount: u64 = match timeout_cancellable(
+                DOWNLOAD_TIMEOUT,
+                &cancel_inner,
                 tokio::io::copy_buf(&mut reader, &mut destination_file),
             )
             .await
-            .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
+            .with_context(|| {
+                format!(
+                    "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
+                )
+            })
+            .map_err(DownloadError::Other)?
+            {
+                Ok(b) => Ok(b),
+                Err(e) => {
+                    // Remove incomplete files: on restart Timeline would do this anyway, but we must
+                    // do it here for the retry case.
+                    if let Err(e) = tokio::fs::remove_file(&temp_file_path).await {
+                        on_fatal_io_error(&e, &format!("Removing temporary file {temp_file_path}"));
+                    }
+                    Err(e)
+                }
+            }
             .with_context(|| {
                 format!(
                     "download layer at remote path '{remote_path:?}' into file {temp_file_path:?}"
@@ -112,6 +139,7 @@ pub async fn download_layer_file<'a>(
             Ok((destination_file, bytes_amount))
         },
         &format!("download {remote_path:?}"),
+        cancel,
     )
     .await?;
 
@@ -188,8 +216,14 @@ pub async fn list_remote_timelines(
         anyhow::bail!("storage-sync-list-remote-timelines");
     });
 
+    let cancel_inner = cancel.clone();
     let listing = download_retry_forever(
-        || storage.list(Some(&remote_path), ListingMode::WithDelimiter),
+        || {
+            download_cancellable(
+                &cancel_inner,
+                storage.list(Some(&remote_path), ListingMode::WithDelimiter),
+            )
+        },
         &format!("list timelines for {tenant_shard_id}"),
         cancel,
     )
@@ -230,9 +264,13 @@ async fn do_download_index_part(
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
+    let cancel_inner = cancel.clone();
     let index_part_bytes = download_retry_forever(
         || async {
-            let index_part_download = storage.download(&remote_path).await?;
+            // Cancellation: if is safe to cancel this future because we're just downloading into
+            // a memory buffer, not touching local disk.
+            let index_part_download =
+                download_cancellable(&cancel_inner, storage.download(&remote_path)).await?;
 
             let mut index_part_bytes = Vec::new();
             let mut stream = std::pin::pin!(index_part_download.download_stream);
@@ -347,10 +385,7 @@ pub(super) async fn download_index_part(
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "listing index_part files",
-        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-        backoff::Cancel::new(CancellationToken::new(), || -> anyhow::Error {
-            unreachable!()
-        }),
+        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
     )
     .await
     .map_err(DownloadError::Other)?;
@@ -389,6 +424,7 @@ pub(crate) async fn download_initdb_tar_zst(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
+    cancel: &CancellationToken,
 ) -> Result<(Utf8PathBuf, File), DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -406,6 +442,8 @@ pub(crate) async fn download_initdb_tar_zst(
         "{INITDB_PATH}.download-{timeline_id}.{TEMP_FILE_SUFFIX}"
     ));
 
+    let cancel_inner = cancel.clone();
+
     let file = download_retry(
         || async {
             let file = OpenOptions::new()
@@ -418,10 +456,14 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download = storage.download(&remote_path).await?;
+            let download =
+                download_cancellable(&cancel_inner, storage.download(&remote_path)).await?;
             let mut download = tokio_util::io::StreamReader::new(download.download_stream);
             let mut writer = tokio::io::BufWriter::with_capacity(8 * 1024, file);
 
+            // TODO: this consumption of the response body should be subject to timeout + cancellation, but
+            // not without thinking carefully about how to recover safely from cancelling a write to
+            // local storage (e.g. by writing into a temp file as we do in download_layer)
             tokio::io::copy_buf(&mut download, &mut writer)
                 .await
                 .with_context(|| format!("download initdb.tar.zst at {remote_path:?}"))
@@ -437,6 +479,7 @@ pub(crate) async fn download_initdb_tar_zst(
             Ok(file)
         },
         &format!("download {remote_path}"),
+        cancel,
     )
     .await
     .map_err(|e| {
@@ -460,7 +503,11 @@ pub(crate) async fn download_initdb_tar_zst(
 /// with backoff.
 ///
 /// (See similar logic for uploads in `perform_upload_task`)
-async fn download_retry<T, O, F>(op: O, description: &str) -> Result<T, DownloadError>
+async fn download_retry<T, O, F>(
+    op: O,
+    description: &str,
+    cancel: &CancellationToken,
+) -> Result<T, DownloadError>
 where
     O: FnMut() -> F,
     F: Future<Output = Result<T, DownloadError>>,
@@ -471,10 +518,7 @@ where
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
-        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-        backoff::Cancel::new(CancellationToken::new(), || -> DownloadError {
-            unreachable!()
-        }),
+        backoff::Cancel::new(cancel.clone(), || DownloadError::Cancelled),
     )
     .await
 }

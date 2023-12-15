@@ -2,8 +2,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+#[derive(thiserror::Error, Debug)]
 pub enum TimeoutCancellableError {
+    #[error("Timed out")]
     Timeout,
+    #[error("Cancelled")]
     Cancelled,
 }
 
