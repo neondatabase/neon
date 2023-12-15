@@ -2945,7 +2945,7 @@ class Safekeeper:
         tli_dir = self.timeline_dir(tenant_id, timeline_id)
         segments = []
         for _, _, filenames in os.walk(tli_dir):
-            segments.extend([f for f in filenames if f != "safekeeper.control"])
+            segments.extend([f for f in filenames if not f.startswith("safekeeper.control")])
         segments.sort()
         return segments
 
