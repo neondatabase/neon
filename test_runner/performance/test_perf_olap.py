@@ -20,17 +20,17 @@ class LabelledQuery:
 # create extension before all tests in this module if it does not exist and TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
 @pytest.fixture(scope="module", autouse=True)
 @pytest.mark.remote_cluster
-def collect_pg_stat_statements(remote_compare: RemoteCompare):
+def collect_pg_stat_statements(remote_compare_module: RemoteCompare):
     if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
         log.info(f"Creating extension pg_stat_statements")
         query =  LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION pg_stat_statements;")
-        run_psql_once_without_explain(remote_compare, query)
+        run_psql_once_without_explain(remote_compare_module, query)
         log.info(f"Reset pg_stat_statements")
         query =  LabelledQuery("Q_RESET", r"SELECT pg_stat_statements_reset();")
         yield
         log.info(f"Collecting pg_stat_statements")
         query =  LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
-        run_psql_once_without_explain(remote_compare, query)
+        run_psql_once_without_explain(remote_compare_module, query)
     else:
         log.info(f"Skipping - Creating extension pg_stat_statements")
         # If the environment variable is not set, just yield without collecting pg_stat_statements

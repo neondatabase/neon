@@ -293,6 +293,10 @@ def vanilla_compare(zenbenchmark: NeonBenchmarker, vanilla_pg: VanillaPostgres) 
 def remote_compare(zenbenchmark: NeonBenchmarker, remote_pg: RemotePostgres) -> RemoteCompare:
     return RemoteCompare(zenbenchmark, remote_pg)
 
+@pytest.fixture(scope="module")
+def remote_compare_module(zenbenchmark: NeonBenchmarker, remote_pg: RemotePostgres) -> RemoteCompare:
+    return RemoteCompare(zenbenchmark, remote_pg)
+
 
 @pytest.fixture(params=["vanilla_compare", "neon_compare"], ids=["vanilla", "neon"])
 def neon_with_baseline(request: FixtureRequest) -> PgCompare:
