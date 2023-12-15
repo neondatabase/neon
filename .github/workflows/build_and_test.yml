@@ -63,14 +63,12 @@ jobs:
           echo run:$GITHUB_RUN_ID
           echo ref:$GITHUB_REF_NAME
           echo rev:$(git rev-list --count HEAD)
-          echo "image_tag=pinned" >> $GITHUB_OUTPUT
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             echo "tag=$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             echo "tag=release-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
             echo "tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
           fi
         shell: bash
@@ -115,6 +113,7 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
+    if: ${{ always() }}
     needs: [ check-permissions, build-buildtools-image , tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -148,6 +147,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
+    if: ${{ always() }}
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
@@ -215,6 +215,7 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
+    if: ${{ always() }}
     needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
@@ -448,7 +449,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
+    if: ${{ always() }}
+    needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
@@ -487,7 +489,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    needs: [ check-permissions, build-neon, build-buildtools-image, tag]
+    needs: [ check-permissions, build-neon, tag]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
@@ -519,7 +521,7 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-buildtools-image , tag]
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, tag]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
@@ -566,8 +568,7 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, build-buildtools-image, tag ]
-
+    needs: [ check-permissions, regress-tests, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
@@ -734,6 +735,7 @@ jobs:
             }"
 
   neon-image:
+    if: ${{ always() }}
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -783,6 +785,7 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-tools-image:
+    if: ${{ always() }}
     runs-on: [ self-hosted, gen3, large ]
     needs: [ check-permissions, build-buildtools-image, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -830,6 +833,7 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-node-image:
+    if: ${{ always() }}
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
