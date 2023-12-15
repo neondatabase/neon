@@ -11,7 +11,7 @@ use tracing::{debug, info, info_span, Instrument};
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
-use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::metrics::{TrafficMetrics, PG_QUERIES_GAUGE};
 use crate::safekeeper::Term;
 use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
@@ -210,10 +210,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         let cmd = parse_cmd(query_string)?;
         let cmd_str = cmd_to_string(&cmd);
 
-        PG_QUERIES_RECEIVED.with_label_values(&[cmd_str]).inc();
-        scopeguard::defer! {
-            PG_QUERIES_FINISHED.with_label_values(&[cmd_str]).inc();
-        }
+        let _guard = PG_QUERIES_GAUGE.with_label_values(&[cmd_str]).guard();
 
         info!("got query {:?}", query_string);
 

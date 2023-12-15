@@ -16,6 +16,7 @@ from fixtures.log_helper import log
 from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
+TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
 
 
 @enum.unique
@@ -131,6 +132,13 @@ class LocalFsStorage:
 
     def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
         with self.index_path(tenant_id, timeline_id).open("r") as f:
+            return json.load(f)
+
+    def heatmap_path(self, tenant_id: TenantId) -> Path:
+        return self.tenant_path(tenant_id) / TENANT_HEATMAP_FILE_NAME
+
+    def heatmap_content(self, tenant_id):
+        with self.heatmap_path(tenant_id).open("r") as f:
             return json.load(f)
 
     def to_toml_inline_table(self) -> str:

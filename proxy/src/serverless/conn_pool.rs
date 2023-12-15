@@ -24,10 +24,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    proxy::{
-        neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
-        NUM_DB_CONNECTIONS_OPENED_COUNTER,
-    },
+    proxy::{neon_options, LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -477,6 +474,11 @@ async fn connect_to_compute_once(
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
+
+    let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
+        .with_label_values(&["http"])
+        .guard();
+
     tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
 
     let (tx, mut rx) = tokio::sync::watch::channel(session);
@@ -492,10 +494,7 @@ async fn connect_to_compute_once(
 
     tokio::spawn(
         async move {
-            NUM_DB_CONNECTIONS_OPENED_COUNTER.with_label_values(&["http"]).inc();
-            scopeguard::defer! {
-                NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
-            }
+            let _conn_gauge = conn_gauge;
             poll_fn(move |cx| {
                 if matches!(rx.has_changed(), Ok(true)) {
                     session = *rx.borrow_and_update();

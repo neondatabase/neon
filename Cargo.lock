@@ -3104,6 +3104,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "itertools",
+ "md5",
  "metrics",
  "nix 0.26.2",
  "num-traits",

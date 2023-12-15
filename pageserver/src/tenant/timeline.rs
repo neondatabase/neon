@@ -29,7 +29,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{id::TenantTimelineId, sync::gate::Gate};
+use utils::sync::gate::Gate;
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
@@ -98,8 +98,9 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
 use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -377,9 +378,6 @@ pub enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
-    /// The operation would require downloading a layer that is missing locally.
-    NeedsDownload(TenantTimelineId, LayerFileName),
-
     /// The operation was cancelled
     Cancelled,
 
@@ -408,14 +406,6 @@ impl std::fmt::Debug for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
-                write!(
-                    f,
-                    "layer {}/{} needs download",
-                    tenant_timeline_id,
-                    layer_file_name.file_name()
-                )
-            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::AncestorStopping(timeline_id) => {
                 write!(f, "ancestor timeline {timeline_id} is being stopped")
@@ -429,14 +419,6 @@ impl std::fmt::Display for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
-                write!(
-                    f,
-                    "layer {}/{} needs download",
-                    tenant_timeline_id,
-                    layer_file_name.file_name()
-                )
-            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::AncestorStopping(timeline_id) => {
                 write!(f, "ancestor timeline {timeline_id} is being stopped")
@@ -462,6 +444,12 @@ pub enum GetLogicalSizePriority {
 #[derive(enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
+}
+
+impl std::fmt::Debug for Timeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Timeline<{}>", self.timeline_id)
+    }
 }
 
 /// Public interface functions
@@ -1118,8 +1106,9 @@ impl Timeline {
         Ok(Some(true))
     }
 
-    /// Like [`evict_layer_batch`](Self::evict_layer_batch), but for just one layer.
-    /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
+    /// Evict just one layer.
+    ///
+    /// Returns `Ok(None)` in the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let _gate = self
             .gate
@@ -1130,108 +1119,16 @@ impl Timeline {
             return Ok(None);
         };
 
-        let Some(local_layer) = local_layer.keep_resident().await? else {
-            return Ok(Some(false));
-        };
-
-        let local_layer: Layer = local_layer.into();
-
-        let remote_client = self
+        let rtc = self
             .remote_client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
 
-        let results = self
-            .evict_layer_batch(remote_client, &[local_layer])
-            .await?;
-        assert_eq!(results.len(), 1);
-        let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
-        match result {
-            None => anyhow::bail!("task_mgr shutdown requested"),
-            Some(Ok(())) => Ok(Some(true)),
-            Some(Err(e)) => Err(anyhow::Error::new(e)),
+        match local_layer.evict_and_wait(rtc).await {
+            Ok(()) => Ok(Some(true)),
+            Err(EvictionError::NotFound) => Ok(Some(false)),
+            Err(EvictionError::Downloaded) => Ok(Some(false)),
         }
-    }
-
-    /// Evict a batch of layers.
-    pub(crate) async fn evict_layers(
-        &self,
-        layers_to_evict: &[Layer],
-    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        let _gate = self
-            .gate
-            .enter()
-            .map_err(|_| anyhow::anyhow!("Shutting down"))?;
-
-        let remote_client = self
-            .remote_client
-            .as_ref()
-            .context("timeline must have RemoteTimelineClient")?;
-
-        self.evict_layer_batch(remote_client, layers_to_evict).await
-    }
-
-    /// Evict multiple layers at once, continuing through errors.
-    ///
-    /// The `remote_client` should be this timeline's `self.remote_client`.
-    /// We make the caller provide it so that they are responsible for handling the case
-    /// where someone wants to evict the layer but no remote storage is configured.
-    ///
-    /// Returns either `Err()` or `Ok(results)` where `results.len() == layers_to_evict.len()`.
-    /// If `Err()` is returned, no eviction was attempted.
-    /// Each position of `Ok(results)` corresponds to the layer in `layers_to_evict`.
-    /// Meaning of each `result[i]`:
-    /// - `Some(Err(...))` if layer replacement failed for some reason
-    ///    - replacement failed for an expectable reason (e.g., layer removed by GC before we grabbed all locks)
-    /// - `Some(Ok(()))` if everything went well.
-    /// - `None` if no eviction attempt was made for the layer because `cancel.is_cancelled() == true`.
-    async fn evict_layer_batch(
-        &self,
-        remote_client: &Arc<RemoteTimelineClient>,
-        layers_to_evict: &[Layer],
-    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        {
-            // to avoid racing with detach and delete_timeline
-            let state = self.current_state();
-            anyhow::ensure!(
-                state == TimelineState::Active,
-                "timeline is not active but {state:?}"
-            );
-        }
-
-        let mut results = Vec::with_capacity(layers_to_evict.len());
-        for _ in 0..layers_to_evict.len() {
-            results.push(None);
-        }
-
-        let mut js = tokio::task::JoinSet::new();
-
-        for (i, l) in layers_to_evict.iter().enumerate() {
-            js.spawn({
-                let l = l.to_owned();
-                let remote_client = remote_client.clone();
-                async move { (i, l.evict_and_wait(&remote_client).await) }
-            });
-        }
-
-        let join = async {
-            while let Some(next) = js.join_next().await {
-                match next {
-                    Ok((i, res)) => results[i] = Some(res),
-                    Err(je) if je.is_cancelled() => unreachable!("not used"),
-                    Err(je) if je.is_panic() => { /* already logged */ }
-                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
-                }
-            }
-        };
-
-        tokio::select! {
-            _ = self.cancel.cancelled() => {},
-            _ = join => {}
-        }
-
-        assert_eq!(results.len(), layers_to_evict.len());
-        Ok(results)
     }
 }
 
@@ -2164,6 +2061,55 @@ impl Timeline {
         }
 
         None
+    }
+
+    /// The timeline heatmap is a hint to secondary locations from the primary location,
+    /// indicating which layers are currently on-disk on the primary.
+    ///
+    /// None is returned if the Timeline is in a state where uploading a heatmap
+    /// doesn't make sense, such as shutting down or initializing.  The caller
+    /// should treat this as a cue to simply skip doing any heatmap uploading
+    /// for this timeline.
+    pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
+        let eviction_info = self.get_local_layers_for_disk_usage_eviction().await;
+
+        let remote_client = match &self.remote_client {
+            Some(c) => c,
+            None => return None,
+        };
+
+        let layer_file_names = eviction_info
+            .resident_layers
+            .iter()
+            .map(|l| l.layer.layer_desc().filename())
+            .collect::<Vec<_>>();
+
+        let decorated = match remote_client.get_layers_metadata(layer_file_names) {
+            Ok(d) => d,
+            Err(_) => {
+                // Getting metadata only fails on Timeline in bad state.
+                return None;
+            }
+        };
+
+        let heatmap_layers = std::iter::zip(
+            eviction_info.resident_layers.into_iter(),
+            decorated.into_iter(),
+        )
+        .filter_map(|(layer, remote_info)| {
+            remote_info.map(|remote_info| {
+                HeatMapLayer::new(
+                    layer.layer.layer_desc().filename(),
+                    IndexLayerMetadata::from(remote_info),
+                    layer.last_activity_ts,
+                )
+            })
+        });
+
+        Some(HeatMapTimeline::new(
+            self.timeline_id,
+            heatmap_layers.collect(),
+        ))
     }
 }
 
@@ -4605,7 +4551,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rc = timeline
+        let rtc = timeline
             .remote_client
             .clone()
             .expect("just configured this");
@@ -4618,16 +4564,12 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let batch = [layer];
-
-        let first = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
-        let second = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
+        let first = async { layer.evict_and_wait(&rtc).await };
+        let second = async { layer.evict_and_wait(&rtc).await };
 
         let (first, second) = tokio::join!(first, second);
 
-        let (first, second) = (only_one(first), only_one(second));
-
-        let res = batch[0].keep_resident().await;
+        let res = layer.keep_resident().await;
         assert!(matches!(res, Ok(None)), "{res:?}");
 
         match (first, second) {
@@ -4646,14 +4588,6 @@ mod tests {
         use crate::context::*;
         use crate::task_mgr::*;
         RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
-    }
-
-    fn only_one<T>(mut input: Vec<Option<T>>) -> T {
-        assert_eq!(1, input.len());
-        input
-            .pop()
-            .expect("length just checked")
-            .expect("no cancellation")
     }
 
     async fn find_some_layer(timeline: &Timeline) -> Layer {

@@ -992,8 +992,8 @@ paths:
           type: string
     post:
       description: |
-        Create a timeline. Returns new timeline id on success.\
-        If no new timeline id is specified in parameters, it would be generated. It's an error to recreate the same timeline.
+        Create a timeline. Returns new timeline id on success.
+        Recreating the same timeline will succeed if the parameters match the existing timeline.
         If no pg_version is specified, assume DEFAULT_PG_VERSION hardcoded in the pageserver.
       requestBody:
         content:
@@ -1405,6 +1405,8 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
+        heatmap_period:
+          type: integer
     TenantConfigResponse:
       type: object
       properties:

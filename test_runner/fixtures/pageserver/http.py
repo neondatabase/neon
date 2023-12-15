@@ -322,6 +322,10 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return TenantConfig.from_json(res.json())
 
+    def tenant_heatmap_upload(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/heatmap_upload")
+        self.verbose_error(res)
+
     def set_tenant_config(self, tenant_id: TenantId, config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
         res = self.put(

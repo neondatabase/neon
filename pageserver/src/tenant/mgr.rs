@@ -807,6 +807,12 @@ pub(crate) async fn set_new_tenant_config(
 }
 
 impl TenantManager {
+    /// Convenience function so that anyone with a TenantManager can get at the global configuration, without
+    /// having to pass it around everywhere as a separate object.
+    pub(crate) fn get_conf(&self) -> &'static PageServerConf {
+        self.conf
+    }
+
     /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or is not fitting to the query.
     /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
     pub(crate) fn get_attached_tenant_shard(
@@ -1086,6 +1092,20 @@ impl TenantManager {
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
         Ok(())
+    }
+
+    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<Tenant>> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => map
+                .values()
+                .filter_map(|slot| {
+                    slot.get_attached()
+                        .and_then(|t| if t.is_active() { Some(t.clone()) } else { None })
+                })
+                .collect(),
+        }
     }
 }
 
