@@ -8,12 +8,13 @@ mod websocket;
 
 use anyhow::bail;
 use hyper::StatusCode;
+use metrics::IntCounterPairGuard;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
-use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
+use crate::proxy::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
@@ -38,13 +39,13 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(config.endpoint_rps_limit));
 
     // shutdown the connection pool
     tokio::spawn({
@@ -149,22 +150,17 @@ pub async fn task_main(
 
 struct MetricService<S> {
     inner: S,
+    _gauge: IntCounterPairGuard,
 }
 
 impl<S> MetricService<S> {
     fn new(inner: S) -> MetricService<S> {
-        NUM_CLIENT_CONNECTION_OPENED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
-        MetricService { inner }
-    }
-}
-
-impl<S> Drop for MetricService<S> {
-    fn drop(&mut self) {
-        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
+        MetricService {
+            inner,
+            _gauge: NUM_CLIENT_CONNECTION_GAUGE
+                .with_label_values(&["http"])
+                .guard(),
+        }
     }
 }
 
@@ -248,7 +244,7 @@ async fn request_handler(
             .header("Access-Control-Allow-Origin", "*")
             .header(
                 "Access-Control-Allow-Headers",
-                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In",
+                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In, Neon-Batch-Read-Only, Neon-Batch-Isolation-Level",
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code

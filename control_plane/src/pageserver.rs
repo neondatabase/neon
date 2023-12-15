@@ -368,6 +368,7 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
+            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
         };
 
         let request = models::TenantCreateRequest {
@@ -452,6 +453,7 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'gc_feedback' as bool")?,
+                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
             }
         };
 

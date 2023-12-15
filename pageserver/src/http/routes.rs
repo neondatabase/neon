@@ -42,6 +42,7 @@ use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
@@ -75,9 +76,11 @@ pub struct State {
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
+    secondary_controller: SecondaryController,
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
@@ -86,6 +89,7 @@ impl State {
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
+        secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
@@ -100,6 +104,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
+            secondary_controller,
         })
     }
 
@@ -136,11 +141,6 @@ impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
             PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
-            PageReconstructError::NeedsDownload(_, _) => {
-                // This shouldn't happen, because we use a RequestContext that requests to
-                // download any missing layer files on-demand.
-                ApiError::InternalServerError(anyhow::anyhow!("need to download remote layer file"))
-            }
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
@@ -453,7 +453,7 @@ async fn timeline_create_handler(
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
-            Err(tenant::CreateTimelineError::AlreadyExists) => {
+            Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
                 json_response(StatusCode::CONFLICT, ())
             }
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
@@ -1593,7 +1593,7 @@ async fn always_panic_handler(
 
 async fn disk_usage_eviction_run(
     mut r: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
 
@@ -1630,48 +1630,41 @@ async fn disk_usage_eviction_run(
         freed_bytes: 0,
     };
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
     let state = get_state(&r);
 
-    if state.remote_storage.as_ref().is_none() {
+    let Some(storage) = state.remote_storage.as_ref() else {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
         )));
-    }
+    };
 
     let state = state.disk_usage_eviction_state.clone();
 
-    let cancel = CancellationToken::new();
-    let child_cancel = cancel.clone();
-    let _g = cancel.drop_guard();
+    let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
+        &state, storage, usage, &cancel,
+    )
+    .await;
 
-    crate::task_mgr::spawn(
-        crate::task_mgr::BACKGROUND_RUNTIME.handle(),
-        TaskKind::DiskUsageEviction,
-        None,
-        None,
-        "ondemand disk usage eviction",
-        false,
-        async move {
-            let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-                &state,
-                usage,
-                &child_cancel,
-            )
-            .await;
+    info!(?res, "disk_usage_eviction_task_iteration_impl finished");
 
-            info!(?res, "disk_usage_eviction_task_iteration_impl finished");
+    let res = res.map_err(ApiError::InternalServerError)?;
 
-            let _ = tx.send(res);
-            Ok(())
-        }
-        .in_current_span(),
-    );
+    json_response(StatusCode::OK, res)
+}
 
-    let response = rx.await.unwrap().map_err(ApiError::InternalServerError)?;
+async fn secondary_upload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    state
+        .secondary_controller
+        .upload_tenant(tenant_shard_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
-    json_response(StatusCode::OK, response)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1933,6 +1926,9 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
         )
+        .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
+            api_handler(r, secondary_upload_handler)
+        })
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
         })
