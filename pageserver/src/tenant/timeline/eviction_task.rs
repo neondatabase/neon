@@ -30,7 +30,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        tasks::{BackgroundLoopKind, RateLimitError},
+        tasks::BackgroundLoopKind,
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -158,15 +158,15 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(
+        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
-            cancel,
-        )
-        .await
-        {
-            Ok(permit) => permit,
-            Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
+        );
+
+        let _permit = tokio::select! {
+            permit = acquire_permit => permit,
+            _ = cancel.cancelled() => return ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
         // If we evict layers but keep cached values derived from those layers, then

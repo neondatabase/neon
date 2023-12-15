@@ -33,39 +33,6 @@ impl Aimd {
             min_utilisation_threshold: config.aimd_min_utilisation_threshold,
         }
     }
-
-    pub fn decrease_factor(self, factor: f32) -> Self {
-        assert!((0.5..1.0).contains(&factor));
-        Self {
-            decrease_factor: factor,
-            ..self
-        }
-    }
-
-    pub fn increase_by(self, increase: usize) -> Self {
-        assert!(increase > 0);
-        Self {
-            increase_by: increase,
-            ..self
-        }
-    }
-
-    pub fn with_max_limit(self, max: usize) -> Self {
-        assert!(max > 0);
-        Self {
-            max_limit: max,
-            ..self
-        }
-    }
-
-    /// A threshold below which the limit won't be increased. 0.5 = 50%.
-    pub fn with_min_utilisation_threshold(self, min_util: f32) -> Self {
-        assert!(min_util > 0. && min_util < 1.);
-        Self {
-            min_utilisation_threshold: min_util,
-            ..self
-        }
-    }
 }
 
 #[async_trait]
