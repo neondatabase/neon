@@ -6,6 +6,7 @@ use super::*;
 use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
+use crate::proxy::retry::NUM_RETRIES_CONNECT;
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
