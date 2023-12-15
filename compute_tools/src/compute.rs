@@ -700,13 +700,14 @@ impl ComputeNode {
         // In this case we need to connect with old `zenith_admin` name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
-        let mut client = match Client::connect(self.connstr.as_str(), NoTls) {
+        let connstr = self.connstr.clone();
+        let mut client = match Client::connect(connstr.as_str(), NoTls) {
             Err(e) => {
                 info!(
                     "cannot connect to postgres: {}, retrying with `zenith_admin` username",
                     e
                 );
-                let mut zenith_admin_connstr = self.connstr.clone();
+                let mut zenith_admin_connstr = connstr.clone();
 
                 zenith_admin_connstr
                     .set_username("zenith_admin")
@@ -719,8 +720,8 @@ impl ComputeNode {
                 client.simple_query("GRANT zenith_admin TO cloud_admin")?;
                 drop(client);
 
-                // reconnect with connsting with expected name
-                Client::connect(self.connstr.as_str(), NoTls)?
+                // reconnect with connstring with expected name
+                Client::connect(connstr.as_str(), NoTls)?
             }
             Ok(client) => client,
         };
@@ -734,16 +735,23 @@ impl ComputeNode {
         cleanup_instance(&mut client)?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
-        handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(spec, &mut client, self.connstr.as_str())?;
+        handle_role_deletions(spec, connstr.as_str(), &mut client)?;
+        handle_grants(spec, &mut client, connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
         handle_extension_neon(&mut client)?;
-        handle_migrations(&mut client)?;
         create_availability_check_data(&mut client)?;
 
         // 'Close' connection
         drop(client);
 
+        /*
+        thread::spawn(
+            move ||
+            {
+                let mut client = Client::connect(connstr.as_str(), NoTls)?;
+                handle_migrations(&mut client)
+            });
+         */
         Ok(())
     }
 
