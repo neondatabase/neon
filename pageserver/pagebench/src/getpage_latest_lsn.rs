@@ -1,39 +1,43 @@
 use anyhow::Context;
-use pageserver_client::page_service::BasebackupRequest;
+use futures::future::join_all;
+use pageserver::pgdatadir_mapping::key_to_rel_block;
+use pageserver::repository;
+use pageserver_api::key::is_rel_block_key;
+use pageserver_api::shard::TenantShardId;
+use pageserver_client::page_service::RelTagBlockNo;
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 use utils::id::TenantShardId;
 use utils::logging;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::num::NonZeroUsize;
-use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::util::tenant_timeline_id::TenantTimelineId;
 
-/// basebackup@LatestLSN
+/// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
-    #[clap(long, default_value = "localhost:64000")]
-    page_service_host_port: String,
-    #[clap(long)]
-    pageserver_jwt: Option<String>,
+    #[clap(long, default_value = "postgres://postgres@localhost:64000")]
+    page_service_connstring: String,
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
-    #[clap(long, default_value = "1.0")]
-    gzip_probability: f64,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
+    #[clap(long)]
+    per_target_rate_limit: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -168,9 +172,18 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
     rt.block_on(main_task).unwrap()
 }
 
-struct Target {
+#[derive(Clone)]
+struct KeyRange {
     timeline: TenantTimelineId,
-    lsn_range: Option<Range<Lsn>>,
+    timeline_lsn: Lsn,
+    start: i128,
+    end: i128,
+}
+
+impl KeyRange {
+    fn len(&self) -> i128 {
+        self.end - self.start
+    }
 }
 
 async fn main_impl(
@@ -181,7 +194,7 @@ async fn main_impl(
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
-        args.pageserver_jwt.as_deref(),
+        None, // TODO: support jwt in args
     ));
 
     // discover targets
@@ -223,23 +236,44 @@ async fn main_impl(
     let mut js = JoinSet::new();
     for timeline in &timelines {
         js.spawn({
+            let mgmt_api_client = Arc::clone(&mgmt_api_client);
             let timeline = *timeline;
-            let info = mgmt_api_client
-                .timeline_info(timeline.tenant_shard_id, timeline.timeline_id)
-                .await
-                .unwrap();
             async move {
-                anyhow::Ok(Target {
-                    timeline,
-                    // TODO: lsn_range != latest LSN
-                    lsn_range: Some(info.last_record_lsn..(info.last_record_lsn + 1)),
-                })
+                let partitioning = mgmt_api_client
+                    .keyspace(timeline.tenant_shard_id, timeline.timeline_id)
+                    .await?;
+                let lsn = partitioning.at_lsn;
+
+                let ranges = partitioning
+                    .keys
+                    .ranges
+                    .iter()
+                    .filter_map(|r| {
+                        let start = r.start;
+                        let end = r.end;
+                        // filter out non-relblock keys
+                        match (is_rel_block_key(&start), is_rel_block_key(&end)) {
+                            (true, true) => Some(KeyRange {
+                                timeline,
+                                timeline_lsn: lsn,
+                                start: start.to_i128(),
+                                end: end.to_i128(),
+                            }),
+                            (true, false) | (false, true) => {
+                                unimplemented!("split up range")
+                            }
+                            (false, false) => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                anyhow::Ok(ranges)
             }
         });
     }
-    let mut all_targets: Vec<Target> = Vec::new();
+    let mut all_ranges: Vec<KeyRange> = Vec::new();
     while let Some(res) = js.join_next().await {
-        all_targets.push(res.unwrap().unwrap());
+        all_ranges.extend(res.unwrap().unwrap());
     }
 
     let live_stats = Arc::new(LiveStats::default());
@@ -274,7 +308,7 @@ async fn main_impl(
     let mut work_senders = HashMap::new();
     let mut tasks = Vec::new();
     for tl in &timelines {
-        let (sender, receiver) = tokio::sync::mpsc::channel(1); // TODO: not sure what the implications of this are
+        let (sender, receiver) = tokio::sync::mpsc::channel(10); // TODO: not sure what the implications of this are
         work_senders.insert(tl, sender);
         tasks.push(tokio::spawn(client(
             args,
@@ -286,25 +320,79 @@ async fn main_impl(
         )));
     }
 
-    let work_sender = async move {
-        start_work_barrier.wait().await;
-        loop {
-            let (timeline, work) = {
-                let mut rng = rand::thread_rng();
-                let target = all_targets.choose(&mut rng).unwrap();
-                let lsn = target.lsn_range.clone().map(|r| rng.gen_range(r));
-                (
-                    target.timeline,
-                    Work {
-                        lsn,
-                        gzip: rng.gen_bool(args.gzip_probability),
-                    },
+    let work_sender: Pin<Box<dyn Send + Future<Output = ()>>> = match args.per_target_rate_limit {
+        None => Box::pin(async move {
+            let weights = rand::distributions::weighted::WeightedIndex::new(
+                all_ranges.iter().map(|v| v.len()),
+            )
+            .unwrap();
+
+            start_work_barrier.wait().await;
+
+            loop {
+                let (range, key) = {
+                    let mut rng = rand::thread_rng();
+                    let r = &all_ranges[weights.sample(&mut rng)];
+                    let key: i128 = rng.gen_range(r.start..r.end);
+                    let key = repository::Key::from_i128(key);
+                    let (rel_tag, block_no) =
+                        key_to_rel_block(key).expect("we filter non-rel-block keys out above");
+                    (r, RelTagBlockNo { rel_tag, block_no })
+                };
+                let sender = work_senders.get(&range.timeline).unwrap();
+                // TODO: what if this blocks?
+                sender.send((key, range.timeline_lsn)).await.ok().unwrap();
+            }
+        }),
+        Some(rps_limit) => Box::pin(async move {
+            let period = Duration::from_secs_f64(1.0 / (rps_limit as f64));
+
+            let make_timeline_task: &dyn Fn(
+                TenantTimelineId,
+            )
+                -> Pin<Box<dyn Send + Future<Output = ()>>> = &|timeline| {
+                let sender = work_senders.get(&timeline).unwrap();
+                let ranges: Vec<KeyRange> = all_ranges
+                    .iter()
+                    .filter(|r| r.timeline == timeline)
+                    .cloned()
+                    .collect();
+                let weights = rand::distributions::weighted::WeightedIndex::new(
+                    ranges.iter().map(|v| v.len()),
                 )
+                .unwrap();
+
+                Box::pin(async move {
+                    let mut ticker = tokio::time::interval(period);
+                    ticker.set_missed_tick_behavior(
+                        /* TODO review this choice */
+                        tokio::time::MissedTickBehavior::Burst,
+                    );
+                    loop {
+                        ticker.tick().await;
+                        let (range, key) = {
+                            let mut rng = rand::thread_rng();
+                            let r = &ranges[weights.sample(&mut rng)];
+                            let key: i128 = rng.gen_range(r.start..r.end);
+                            let key = repository::Key::from_i128(key);
+                            let (rel_tag, block_no) = key_to_rel_block(key)
+                                .expect("we filter non-rel-block keys out above");
+                            (r, RelTagBlockNo { rel_tag, block_no })
+                        };
+                        sender.send((key, range.timeline_lsn)).await.ok().unwrap();
+                    }
+                })
             };
-            let sender = work_senders.get(&timeline).unwrap();
-            // TODO: what if this blocks?
-            sender.send(work).await.ok().unwrap();
-        }
+
+            let tasks: Vec<_> = work_senders
+                .keys()
+                .map(|tl| make_timeline_task(**tl))
+                .collect();
+
+            start_work_barrier.wait().await;
+
+            join_all(tasks).await;
+        }),
     };
 
     if let Some(runtime) = args.runtime {
@@ -340,58 +428,32 @@ async fn main_impl(
     anyhow::Ok(())
 }
 
-#[derive(Copy, Clone)]
-struct Work {
-    lsn: Option<Lsn>,
-    gzip: bool,
-}
-
 #[instrument(skip_all)]
 async fn client(
     args: &'static Args,
     timeline: TenantTimelineId,
     start_work_barrier: Arc<Barrier>,
-    mut work: tokio::sync::mpsc::Receiver<Work>,
+    mut work: tokio::sync::mpsc::Receiver<(RelTagBlockNo, Lsn)>,
     all_work_done_barrier: Arc<Barrier>,
     live_stats: Arc<LiveStats>,
 ) {
     start_work_barrier.wait().await;
 
-    let client =
-        pageserver_client::page_service::Client::new(crate::util::connstring::connstring(
-            &args.page_service_host_port,
-            args.pageserver_jwt.as_deref(),
-        ))
+    let client = pageserver_client::page_service::Client::new(args.page_service_connstring.clone())
+        .await
+        .unwrap();
+    let mut client = client
+        .pagestream(timeline.tenant_shard_id, timeline.timeline_id)
         .await
         .unwrap();
 
-    while let Some(Work { lsn, gzip }) = work.recv().await {
+    while let Some((key, lsn)) = work.recv().await {
         let start = Instant::now();
-        let copy_out_stream = client
-            .basebackup(&BasebackupRequest {
-                tenant_id: timeline.tenant_shard_id,
-                timeline_id: timeline.timeline_id,
-                lsn,
-                gzip,
-            })
+        client
+            .getpage(key, lsn)
             .await
-            .with_context(|| format!("start basebackup for {timeline}"))
+            .with_context(|| format!("getpage for {timeline}"))
             .unwrap();
-
-        use futures::StreamExt;
-        let size = Arc::new(AtomicUsize::new(0));
-        copy_out_stream
-            .for_each({
-                |r| {
-                    let size = Arc::clone(&size);
-                    async move {
-                        let size = Arc::clone(&size);
-                        size.fetch_add(r.unwrap().len(), Ordering::Relaxed);
-                    }
-                }
-            })
-            .await;
-        debug!("basebackup size is {} bytes", size.load(Ordering::Relaxed));
         let elapsed = start.elapsed();
         live_stats.inc();
         STATS.with(|stats| {

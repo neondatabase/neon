@@ -3081,6 +3081,8 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "pageserver",
+ "pageserver_api",
+ "pageserver_client",
  "rand 0.8.5",
  "serde",
  "serde_json",
