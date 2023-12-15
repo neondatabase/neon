@@ -84,10 +84,10 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     }
 
                     if &index_part.get_version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
-                        result.warnings.push(format!(
-                            "index_part.json version is not latest: {}",
-                            index_part.get_version()
-                        ))
+                        // result.warnings.push(format!(
+                        //     "index_part.json version is not latest: {}",
+                        //     index_part.get_version()
+                        // ))
                     }
 
                     if index_part.metadata.disk_consistent_lsn()
