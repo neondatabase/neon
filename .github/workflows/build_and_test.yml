@@ -113,7 +113,7 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
-    if: ${{ always() }}
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image , tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -147,7 +147,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    if: ${{ always() }}
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
@@ -219,7 +219,7 @@ jobs:
     needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{  needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -735,7 +735,7 @@ jobs:
             }"
 
   neon-image:
-    if: ${{ always() }}
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -785,7 +785,7 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-tools-image:
-    if: ${{ always() }}
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     runs-on: [ self-hosted, gen3, large ]
     needs: [ check-permissions, build-buildtools-image, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -833,7 +833,7 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-node-image:
-    if: ${{ always() }}
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
