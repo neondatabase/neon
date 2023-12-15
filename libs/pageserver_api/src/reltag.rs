@@ -125,7 +125,7 @@ impl RelTag {
     strum_macros::EnumIter,
 )]
 pub enum SlruKind {
-    Clog,
+    Clog = 0,
     MultiXactMembers,
     MultiXactOffsets,
 }

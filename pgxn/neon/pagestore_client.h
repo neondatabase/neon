@@ -15,6 +15,7 @@
 
 #include "neon_pgversioncompat.h"
 
+#include "access/slru.h"
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
 #include "lib/stringinfo.h"
@@ -34,6 +35,7 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonGetSlruSegmentRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -41,6 +43,7 @@ typedef enum
 	T_NeonGetPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
+	T_NeonGetSlruSegmentResponse,
 } NeonMessageTag;
 
 /* base struct for c-style inheritance */
@@ -101,6 +104,13 @@ typedef struct
 	BlockNumber blkno;
 } NeonGetPageRequest;
 
+typedef struct
+{
+	NeonRequest req;
+	SlruKind kind;
+	int      segno;
+} NeonGetSlruSegmentRequest;
+
 /* supertype of all the Neon*Response structs below */
 typedef struct
 {
@@ -139,6 +149,14 @@ typedef struct
 	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
 												 * message */
 } NeonErrorResponse;
+
+typedef struct
+{
+	NeonMessageTag tag;
+	int         n_blocks;
+	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
+} NeonGetSlruSegmentResponse;
+
 
 extern StringInfoData nm_pack_request(NeonRequest *msg);
 extern NeonResponse *nm_unpack_response(StringInfo s);

@@ -8,6 +8,7 @@ use std::{
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
+use postgres_ffi::BLCKSZ;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use strum_macros;
@@ -633,6 +634,7 @@ pub enum PagestreamFeMessage {
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
+    GetSlruSegment(PagestreamGetSlruSegmentRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -643,6 +645,7 @@ pub enum PagestreamBeMessage {
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+    GetSlruSegment(PagestreamGetSlruSegmentResponse),
 }
 
 // Keep in sync with `pagestore_client.h`
@@ -697,6 +700,14 @@ pub struct PagestreamDbSizeRequest {
     pub dbnode: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PagestreamGetSlruSegmentRequest {
+    pub latest: bool,
+    pub lsn: Lsn,
+    pub kind: u8,
+    pub segno: u32,
+}
+
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
     pub exists: bool,
@@ -710,6 +721,11 @@ pub struct PagestreamNblocksResponse {
 #[derive(Debug)]
 pub struct PagestreamGetPageResponse {
     pub page: Bytes,
+}
+
+#[derive(Debug)]
+pub struct PagestreamGetSlruSegmentResponse {
+    pub segment: Bytes,
 }
 
 #[derive(Debug)]
@@ -775,6 +791,14 @@ impl PagestreamFeMessage {
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.dbnode);
             }
+
+            Self::GetSlruSegment(req) => {
+                bytes.put_u8(4);
+                bytes.put_u8(u8::from(req.latest));
+                bytes.put_u64(req.lsn.0);
+                bytes.put_u8(req.kind);
+                bytes.put_u32(req.segno);
+            }
         }
 
         bytes.into()
@@ -825,6 +849,14 @@ impl PagestreamFeMessage {
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 dbnode: body.read_u32::<BigEndian>()?,
             })),
+            4 => Ok(PagestreamFeMessage::GetSlruSegment(
+                PagestreamGetSlruSegmentRequest {
+                    latest: body.read_u8()? != 0,
+                    lsn: Lsn::from(body.read_u64::<BigEndian>()?),
+                    kind: body.read_u8()?,
+                    segno: body.read_u32::<BigEndian>()?,
+                },
+            )),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
@@ -859,6 +891,12 @@ impl PagestreamBeMessage {
             Self::DbSize(resp) => {
                 bytes.put_u8(Tag::DbSize as u8);
                 bytes.put_i64(resp.db_size);
+            }
+
+            Self::GetSlruSegment(resp) => {
+                bytes.put_u8(105); /* tag from pagestore_client.h */
+                bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
+                bytes.put(&resp.segment[..]);
             }
         }
 
