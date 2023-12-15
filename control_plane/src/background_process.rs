@@ -108,7 +108,7 @@ where
     );
 
     for retries in 0..RETRIES {
-        match process_started(pid, &pid_file_to_check, &process_status_check).await {
+        match process_started(pid, pid_file_to_check, &process_status_check).await {
             Ok(true) => {
                 println!("\n{process_name} started, pid: {pid}");
                 return Ok(spawned_process);
