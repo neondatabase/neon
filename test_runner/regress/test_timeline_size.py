@@ -732,3 +732,118 @@ def wait_for_timeline_size_init(
     raise Exception(
         f"timed out while waiting for current_logical_size of a timeline to reach its non-incremental value, details: {timeline_details}"
     )
+
+
+def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
+    """
+    Tenants warmuping up opportunistically will wait for one another's logical size calculations to complete
+    before proceeding.  However, they skip this if a client is actively trying to access them.
+
+    This test is not purely about logical sizes, but logical size calculation is the phase that we
+    use as a proxy for "warming up" in this test: it happens within the semaphore guard used
+    to limit concurrent tenant warm-up.
+    """
+
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # Create some tenants
+    n_tenants = 10
+    tenant_ids = {env.initial_tenant}
+    for _i in range(0, n_tenants - 1):
+        tenant_id = TenantId.generate()
+        env.pageserver.tenant_create(tenant_id)
+
+        # Empty tenants are not subject to waiting for logical size calculations, because
+        # those hapen on timeline level
+        branch_name = f"{tenant_id}-main"
+        timeline_id = TimelineId.generate()
+        env.neon_cli.create_timeline(
+            new_branch_name=branch_name, tenant_id=tenant_id, timeline_id=timeline_id
+        )
+
+        tenant_ids.add(tenant_id)
+
+    # Restart pageserver with logical size calculations paused
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
+    )
+
+    def get_tenant_states():
+        states = {}
+        for tenant_id in tenant_ids:
+            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
+            states[tenant_id] = tenant["state"]["slug"]
+        log.info(f"Tenant states: {states}")
+        return states
+
+    def at_least_one_active():
+        assert "Active" in set(get_tenant_states().values())
+
+    # One tenant should activate, then get stuck in their logical size calculation
+    wait_until(10, 1, at_least_one_active)
+
+    # Wait some walltime to gain confidence that other tenants really are stuck and not proceeding to activate
+    time.sleep(5)
+
+    # We should see one tenant win the activation race, and enter logical size calculation.  The rest
+    # will stay in Attaching state, waiting for the "warmup_limit" semaphore
+    expect_activated = 1
+    states = get_tenant_states()
+    assert len([s for s in states.values() if s == "Active"]) == expect_activated
+    assert len([s for s in states.values() if s == "Attaching"]) == n_tenants - expect_activated
+
+    # If a client accesses one of the blocked tenants, it should skip waiting for warmup and
+    # go active as fast as it can.
+    stuck_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+
+    endpoint = env.endpoints.create_start(
+        branch_name=f"{stuck_tenant_id}-main", tenant_id=stuck_tenant_id
+    )
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10) g",
+        ]
+    )
+    endpoint.stop()
+
+    # That one that we successfully accessed is now Active
+    expect_activated += 1
+    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+
+    # The ones we didn't touch are still in Attaching
+    assert (
+        len([s for s in get_tenant_states().values() if s == "Attaching"])
+        == n_tenants - expect_activated
+    )
+
+    # Timeline creation operations also wake up Attaching tenants
+    stuck_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+    pageserver_http.timeline_create(env.pg_version, stuck_tenant_id, TimelineId.generate())
+    expect_activated += 1
+    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        len([s for s in get_tenant_states().values() if s == "Attaching"])
+        == n_tenants - expect_activated
+    )
+
+    # When we unblock logical size calculation, all tenants should proceed to active state via
+    # the warmup route.
+    pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
+
+    def all_active():
+        assert all(s == "Active" for s in get_tenant_states().values())
+
+    wait_until(10, 1, all_active)
+
+    # Final control check: restarting with no failpoints at all results in all tenants coming active
+    # without being prompted by client I/O
+    env.pageserver.stop()
+    env.pageserver.start()
+    wait_until(10, 1, all_active)
