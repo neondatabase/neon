@@ -24,6 +24,7 @@ extern void NeonWALReaderFree(NeonWALReader *state);
 extern NeonWALReadResult NeonWALRead(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size count, TimeLineID tli);
 extern pgsocket NeonWALReaderSocket(NeonWALReader *state);
 extern uint32 NeonWALReaderEvents(NeonWALReader *state);
+extern bool NeonWALReaderIsRemConnEstablished(NeonWALReader *state);
 extern char *NeonWALReaderErrMsg(NeonWALReader *state);
 
 #endif							/* __NEON_WALREADER_H__ */

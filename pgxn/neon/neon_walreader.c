@@ -557,6 +557,17 @@ NeonWALReaderSocket(NeonWALReader *state)
 }
 
 /*
+ * Whether remote connection is established. Once this is done, until successful
+ * local read or error socket is stable and user can update socket events
+ * instead of readding it each time.
+ */
+bool
+NeonWALReaderIsRemConnEstablished(NeonWALReader *state)
+{
+	return state->rem_state == RS_ESTABLISHED;
+}
+
+/*
  * Returns events user should wait on connection socket or 0 if remote
  * connection is not active.
  */

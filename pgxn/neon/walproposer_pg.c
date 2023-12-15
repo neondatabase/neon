@@ -1541,6 +1541,7 @@ walprop_pg_free_event_set(WalProposer *wp)
 	{
 		wp->safekeeper[i].eventPos = -1;
 		wp->safekeeper[i].nwrEventPos = -1;
+		wp->safekeeper[i].nwrConnEstablished = false;
 	}
 }
 
@@ -1561,6 +1562,7 @@ walprop_pg_init_event_set(WalProposer *wp)
 	{
 		wp->safekeeper[i].eventPos = -1;
 		wp->safekeeper[i].nwrEventPos = -1;
+		wp->safekeeper[i].nwrConnEstablished = false;
 	}
 }
 
@@ -1578,6 +1580,7 @@ add_nwr_event_set(Safekeeper *sk, uint32 events)
 {
 	Assert(sk->nwrEventPos == -1);
 	sk->nwrEventPos = AddWaitEventToSet(waitEvents, events, NeonWALReaderSocket(sk->xlogreader), NULL, sk);
+	sk->nwrConnEstablished = NeonWALReaderIsRemConnEstablished(sk->xlogreader);
 	elog(DEBUG5, "sk %s:%s: added nwr socket events %d", sk->host, sk->port, events);
 }
 
@@ -1619,14 +1622,19 @@ walprop_pg_active_state_update_event_set(Safekeeper *sk)
 	if (sk->active_state == SS_ACTIVE_READ_WAL)
 	{
 		/*
-		 * TODO: instead of reattaching socket (and thus recreating WES) each
-		 * time we should keep it if possible, i.e. if connection is already
-		 * established. Note that single neon_walreader object can switch
-		 * between local and remote reads multiple times during its lifetime,
-		 * so careful bookkeeping is needed here.
+		 * If conn is established and socket is thus stable, update the event
+		 * directly; otherwise re-add it.
 		 */
-		rm_safekeeper_event_set(sk, false);
-		add_nwr_event_set(sk, nwr_events);
+		if (sk->nwrConnEstablished)
+		{
+			Assert(sk->nwrEventPos != -1);
+			update_nwr_event_set(sk, nwr_events);
+		}
+		else
+		{
+			rm_safekeeper_event_set(sk, false);
+			add_nwr_event_set(sk, nwr_events);
+		}
 	}
 	else
 	{
@@ -1701,14 +1709,6 @@ rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk)
 	{
 		Safekeeper *sk = &wp->safekeeper[i];
 
-		if (sk == to_remove)
-		{
-			if (is_sk)
-				sk->eventPos = -1;
-			else
-				sk->nwrEventPos = -1;
-		}
-
 		/*
 		 * If this safekeeper isn't offline, add events for it, except for the
 		 * event requested to remove.
@@ -1725,7 +1725,7 @@ rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk)
 				/* will set sk->eventPos */
 				wp->api.add_safekeeper_event_set(sk, sk_events);
 			}
-			else if ((sk != to_remove || is_sk) && nwr_events)
+			if ((sk != to_remove || is_sk) && nwr_events)
 			{
 				add_nwr_event_set(sk, nwr_events);
 			}

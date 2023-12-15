@@ -377,9 +377,19 @@ typedef struct Safekeeper
 	int			eventPos;
 
 	/*
-	 * Neon WAL reader position in wait event set, or -1 if no socket.
+	 * Neon WAL reader position in wait event set, or -1 if no socket. Note
+	 * that event must be removed not only on error/failure, but also on
+	 * successful *local* read, as next read might again be remote, but with
+	 * different socket.
 	 */
 	int			nwrEventPos;
+
+	/*
+	 * Per libpq docs, during connection establishment socket might change,
+	 * remember here if it is stable to avoid readding to the event set if
+	 * possible. Must be reset whenever nwr event is deleted.
+	 */
+	bool		nwrConnEstablished;
 #endif
 
 
