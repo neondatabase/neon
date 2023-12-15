@@ -281,7 +281,7 @@ pub struct Tenant {
     /// If the tenant is in Activating state, notify this to encourage it
     /// to proceed to Active as soon as possible, rather than waiting for lazy
     /// background warmup.
-    pub(crate) activate_now: tokio::sync::Notify,
+    pub(crate) activate_now_sem: tokio::sync::Semaphore,
 
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 
@@ -679,7 +679,7 @@ impl Tenant {
                 // in process lifetime.
                 let attach_type = if let Some(_init_order) = &init_order {
                     tokio::select!(
-                        _ = tenant_clone.activate_now.notified() => {
+                        _ = tenant_clone.activate_now_sem.acquire() => {
                             tracing::info!("Activating tenant (on-demand)");
                             AttachType::OnDemand
                         },
@@ -2223,17 +2223,23 @@ impl Tenant {
         self.state.subscribe()
     }
 
+    /// The activate_now semaphore is initialized with zero units.  As soon as
+    /// we add a unit, waiters will be able to acquire a unit and proceed.
+    pub(crate) fn activate_now(&self) {
+        self.activate_now_sem.add_permits(1);
+    }
+
     pub(crate) async fn wait_to_become_active(
         &self,
         timeout: Duration,
     ) -> Result<(), GetActiveTenantError> {
-        self.activate_now.notify_one();
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
+                    self.activate_now();
                     match timeout_cancellable(timeout, &self.cancel, receiver.changed()).await {
                         Ok(r) => {
                             r.map_err(
@@ -2588,7 +2594,7 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
-            activate_now: tokio::sync::Notify::new(),
+            activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),

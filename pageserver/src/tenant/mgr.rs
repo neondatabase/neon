@@ -1217,7 +1217,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
                         return Ok(tenant.clone());
                     }
                     _ => {
-                        tenant.activate_now.notify_one();
+                        tenant.activate_now();
                         (WaitFor::Tenant(tenant.clone()), tenant_shard_id)
                     }
                 }
