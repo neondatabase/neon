@@ -757,10 +757,9 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
         # Empty tenants are not subject to waiting for logical size calculations, because
         # those hapen on timeline level
-        branch_name = f"{tenant_id}-main"
         timeline_id = TimelineId.generate()
         env.neon_cli.create_timeline(
-            new_branch_name=branch_name, tenant_id=tenant_id, timeline_id=timeline_id
+            new_branch_name="main", tenant_id=tenant_id, timeline_id=timeline_id
         )
 
         tenant_ids.add(tenant_id)
@@ -801,9 +800,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
     )[0][0]
 
-    endpoint = env.endpoints.create_start(
-        branch_name=f"{stuck_tenant_id}-main", tenant_id=stuck_tenant_id
-    )
+    endpoint = env.endpoints.create_start(branch_name="main", tenant_id=stuck_tenant_id)
     endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (x INTEGER)",
