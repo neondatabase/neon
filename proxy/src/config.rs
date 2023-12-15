@@ -33,6 +33,8 @@ pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
     pub common_names: Option<HashSet<String>>,
     pub cert_resolver: Arc<CertResolver>,
+    pub handshake_timeout: Duration,
+    pub max_handshaking: usize,
 }
 
 pub struct HttpConfig {
@@ -98,6 +100,8 @@ pub fn configure_tls(
         config,
         common_names: Some(common_names),
         cert_resolver,
+        handshake_timeout: tls_listener::DEFAULT_HANDSHAKE_TIMEOUT,
+        max_handshaking: tls_listener::DEFAULT_MAX_HANDSHAKES,
     })
 }
 

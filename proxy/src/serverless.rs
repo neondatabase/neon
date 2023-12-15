@@ -29,7 +29,6 @@ use hyper::{
 use std::net::IpAddr;
 use std::task::Poll;
 use std::{future::ready, sync::Arc};
-use tls_listener::TlsListener;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -59,14 +58,15 @@ pub async fn task_main(
         }
     });
 
-    let tls_config = config.tls_config.as_ref().map(|cfg| cfg.to_server_config());
-    let tls_acceptor: tokio_rustls::TlsAcceptor = match tls_config {
-        Some(config) => config.into(),
+    // let tls_config = config.tls_config.as_ref().map(|cfg| cfg.to_server_config());
+    let tls_config = match config.tls_config.as_ref() {
+        Some(config) => config,
         None => {
             warn!("TLS config is missing, WebSocket Secure server will not be started");
             return Ok(());
         }
     };
+    let tls_acceptor: tokio_rustls::TlsAcceptor = tls_config.to_server_config().into();
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);
@@ -77,14 +77,17 @@ pub async fn task_main(
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
-        if let Err(err) = conn {
-            error!("failed to accept TLS connection for websockets: {err:?}");
-            ready(false)
-        } else {
-            ready(true)
-        }
-    });
+    let tls_listener = tls_listener::builder(tls_acceptor)
+        .handshake_timeout(tls_config.handshake_timeout)
+        .listen(addr_incoming)
+        .filter(|conn| {
+            if let Err(err) = conn {
+                error!("failed to accept TLS connection for websockets: {err:?}");
+                ready(false)
+            } else {
+                ready(true)
+            }
+        });
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {

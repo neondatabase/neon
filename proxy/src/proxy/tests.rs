@@ -85,6 +85,8 @@ fn generate_tls_config<'a>(
             config,
             common_names,
             cert_resolver: Arc::new(cert_resolver),
+            handshake_timeout: tls_listener::DEFAULT_HANDSHAKE_TIMEOUT,
+            max_handshaking: tls_listener::DEFAULT_MAX_HANDSHAKES,
         }
     };
 

@@ -28,7 +28,7 @@ use prometheus::{
     IntGaugeVec,
 };
 use regex::Regex;
-use std::{error::Error, io, net::IpAddr, ops::ControlFlow, sync::Arc, time::Instant};
+use std::{error::Error, io, net::IpAddr, ops::ControlFlow, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     time,
@@ -154,7 +154,7 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
 
 pub struct LatencyTimer {
     // time since the stopwatch was started
-    start: Option<Instant>,
+    start: Option<time::Instant>,
     // accumulated time on the stopwatch
     accumulated: std::time::Duration,
     // label data
@@ -171,7 +171,7 @@ pub struct LatencyTimerPause<'a> {
 impl LatencyTimer {
     pub fn new(protocol: &'static str) -> Self {
         Self {
-            start: Some(Instant::now()),
+            start: Some(time::Instant::now()),
             accumulated: std::time::Duration::ZERO,
             protocol,
             cache_miss: false,
@@ -205,7 +205,7 @@ impl LatencyTimer {
 impl Drop for LatencyTimerPause<'_> {
     fn drop(&mut self) {
         // start the stopwatch again
-        self.timer.start = Some(Instant::now());
+        self.timer.start = Some(time::Instant::now());
     }
 }
 
@@ -467,9 +467,14 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
 
+    let handshake_timeout = tls
+        .map(|tls| tls.handshake_timeout)
+        .unwrap_or(tls_listener::DEFAULT_HANDSHAKE_TIMEOUT);
+    let deadline = time::Instant::now() + handshake_timeout;
+
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
-        let msg = stream.read_startup_packet().await?;
+        let msg = tokio::time::timeout_at(deadline, stream.read_startup_packet()).await??;
         info!("received {msg:?}");
 
         use FeStartupPacket::*;
@@ -495,7 +500,9 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         if !read_buf.is_empty() {
                             bail!("data is sent before server replied with EncryptionResponse");
                         }
-                        let tls_stream = raw.upgrade(tls.to_server_config()).await?;
+                        let tls_stream =
+                            tokio::time::timeout_at(deadline, raw.upgrade(tls.to_server_config()))
+                                .await??;
 
                         let (_, tls_server_end_point) = tls
                             .cert_resolver
