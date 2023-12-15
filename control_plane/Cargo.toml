@@ -29,8 +29,8 @@ tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 url.workspace = true
-pageserver = { path = "../pageserver" }
 pageserver_api.workspace = true
+pageserver_client.workspace = true
 postgres_backend.workspace = true
 safekeeper_api.workspace = true
 postgres_connection.workspace = true

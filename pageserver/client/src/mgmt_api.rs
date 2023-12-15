@@ -1,6 +1,5 @@
-use hyper::{header::AUTHORIZATION, http::method::Method};
 use pageserver_api::models::*;
-use reqwest::IntoUrl;
+use reqwest::{IntoUrl, Method};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
@@ -105,7 +104,7 @@ impl Client {
     ) -> Result<reqwest::Response> {
         let req = self.client.request(method, uri);
         let req = if let Some(value) = &self.authorization_header {
-            req.header(AUTHORIZATION, value)
+            req.header(reqwest::header::AUTHORIZATION, value)
         } else {
             req
         };
