@@ -3126,7 +3126,7 @@ impl Timeline {
             // the logical size cancellation to skip the concurrency limit semaphore.
             // TODO: this is an unexpected case.  We should restructure so that it
             // can't happen.
-            tracing::warn!(
+            tracing::info!(
                 "await_initial_logical_size: can't get semaphore cancel token, skipping"
             );
         }
