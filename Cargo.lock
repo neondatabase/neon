@@ -3188,6 +3188,7 @@ dependencies = [
  "serde",
  "thiserror",
  "utils",
+ "workspace_hack",
 ]
 
 [[package]]
