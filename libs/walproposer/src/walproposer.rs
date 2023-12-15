@@ -142,10 +142,6 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn confirm_wal_streamed(&self, _wp: &mut WalProposer, _lsn: u64) {
-        todo!()
-    }
-
     fn log_internal(&self, _wp: &mut WalProposer, _level: Level, _msg: &str) {
         todo!()
     }

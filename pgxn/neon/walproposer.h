@@ -558,12 +558,6 @@ typedef struct walproposer_api
 	void		(*process_safekeeper_feedback) (WalProposer *wp, XLogRecPtr commitLsn);
 
 	/*
-	 * Called on peer_horizon_lsn updates. Used to advance replication slot
-	 * and to free up disk space by deleting unnecessary WAL.
-	 */
-	void		(*confirm_wal_streamed) (WalProposer *wp, XLogRecPtr lsn);
-
-	/*
 	 * Write a log message to the internal log processor. This is used only
 	 * when walproposer is compiled as a library. Otherwise, all logging is
 	 * handled by elog().
