@@ -28,7 +28,7 @@ use crate::control_plane_client::{
     ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
-use crate::metrics::TENANT_MANAGER as METRICS;
+use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, TenantConfOpt,
@@ -434,6 +434,7 @@ pub async fn init_tenant_mgr(
         tenant_configs.len(),
         conf.concurrent_tenant_warmup.initial_permits()
     );
+    TENANT.startup_scheduled.inc_by(tenant_configs.len() as u64);
 
     // Construct `Tenant` objects and start them running
     for (tenant_shard_id, location_conf) in tenant_configs {

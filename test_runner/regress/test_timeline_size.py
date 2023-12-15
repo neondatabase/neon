@@ -798,6 +798,15 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     assert len([s for s in states.values() if s == "Active"]) == expect_activated
     assert len([s for s in states.values() if s == "Attaching"]) == n_tenants - expect_activated
 
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
+    )
+
+    # This is zero, and subsequent checks are expect_activated - 1, because this counter does not
+    # count how may tenants are Active, it counts how many have finished warmup.  The first tenant
+    # that reached Active is still stuck in its local size calculation, and has therefore not finished warmup.
+    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == 0
+
     # If a client accesses one of the blocked tenants, it should skip waiting for warmup and
     # go active as fast as it can.
     stuck_tenant_id = list(
@@ -816,6 +825,10 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     # That one that we successfully accessed is now Active
     expect_activated += 1
     assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
+        == expect_activated - 1
+    )
 
     # The ones we didn't touch are still in Attaching
     assert (
@@ -835,6 +848,11 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         == n_tenants - expect_activated
     )
 
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
+        == expect_activated - 1
+    )
+
     # When we unblock logical size calculation, all tenants should proceed to active state via
     # the warmup route.
     pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
@@ -849,3 +867,8 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
     wait_until(10, 1, all_active)
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
+    )
+    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == n_tenants
