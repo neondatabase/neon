@@ -78,10 +78,13 @@ jobs:
 
       - name: Get buildtools tag
         run: |
-          echo "image_tag=pinned" >> $GITHUB_OUTPUT
-          if [[ "$GITHUB_REF_NAME" != "main" && "$GITHUB_REF_NAME" != "release" ]]; then
-            echo "image_tag=$GITHUB_RUN_ID" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            IMAGE_TAG=$GITHUB_RUN_ID
+          else
+            IMAGE_TAG=pinned
           fi
+          
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
         shell: bash
         id: buildtools-tag
 
