@@ -33,8 +33,8 @@ use aws_sdk_s3::{
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
 
-use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use aws_smithy_types::{body::SdkBody, DateTime};
 use bytes::Bytes;
 use futures::stream::Stream;
 use hyper::Body;
@@ -270,6 +270,65 @@ impl S3Bucket {
                 ))
             }
         }
+    }
+
+    async fn delete_oids(
+        &self,
+        kind: RequestKind,
+        delete_objects: &[ObjectIdentifier],
+    ) -> anyhow::Result<()> {
+        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
+            let started_at = start_measuring_requests(kind);
+
+            let resp = self
+                .client
+                .delete_objects()
+                .bucket(self.bucket_name.clone())
+                .delete(
+                    Delete::builder()
+                        .set_objects(Some(chunk.to_vec()))
+                        .build()?,
+                )
+                .send()
+                .await;
+
+            let started_at = ScopeGuard::into_inner(started_at);
+            metrics::BUCKET_METRICS
+                .req_seconds
+                .observe_elapsed(kind, &resp, started_at);
+
+            match resp {
+                Ok(resp) => {
+                    metrics::BUCKET_METRICS
+                        .deleted_objects_total
+                        .inc_by(chunk.len() as u64);
+                    if let Some(errors) = resp.errors {
+                        // Log a bounded number of the errors within the response:
+                        // these requests can carry 1000 keys so logging each one
+                        // would be too verbose, especially as errors may lead us
+                        // to retry repeatedly.
+                        const LOG_UP_TO_N_ERRORS: usize = 10;
+                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                            tracing::warn!(
+                                "DeleteObjects key {} failed: {}: {}",
+                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                            );
+                        }
+
+                        return Err(anyhow::format_err!(
+                            "Failed to delete {} objects",
+                            errors.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -538,58 +597,7 @@ impl RemoteStorage for S3Bucket {
             delete_objects.push(obj_id);
         }
 
-        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
-            let started_at = start_measuring_requests(kind);
-
-            let resp = self
-                .client
-                .delete_objects()
-                .bucket(self.bucket_name.clone())
-                .delete(
-                    Delete::builder()
-                        .set_objects(Some(chunk.to_vec()))
-                        .build()?,
-                )
-                .send()
-                .await;
-
-            let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &resp, started_at);
-
-            match resp {
-                Ok(resp) => {
-                    metrics::BUCKET_METRICS
-                        .deleted_objects_total
-                        .inc_by(chunk.len() as u64);
-                    if let Some(errors) = resp.errors {
-                        // Log a bounded number of the errors within the response:
-                        // these requests can carry 1000 keys so logging each one
-                        // would be too verbose, especially as errors may lead us
-                        // to retry repeatedly.
-                        const LOG_UP_TO_N_ERRORS: usize = 10;
-                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
-                            tracing::warn!(
-                                "DeleteObjects key {} failed: {}: {}",
-                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
-                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
-                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
-                            );
-                        }
-
-                        return Err(anyhow::format_err!(
-                            "Failed to delete {} objects",
-                            errors.len()
-                        ));
-                    }
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
-            }
-        }
-        Ok(())
+        self.delete_oids(kind, &delete_objects).await
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
@@ -597,8 +605,54 @@ impl RemoteStorage for S3Bucket {
         self.delete_objects(paths).await
     }
 
-    async fn time_travel_recover(&self, prefix: &RemotePath, timestamp: SystemTime) -> anyhow::Result<()> {
-        unimplemented!()
+    async fn time_travel_recover(
+        &self,
+        prefix: &RemotePath,
+        timestamp: SystemTime,
+    ) -> anyhow::Result<()> {
+        let kind = RequestKind::TimeTravel;
+        let _guard = self.permit(kind).await;
+
+        let timestamp = DateTime::from(timestamp);
+
+        let list = self
+            .client
+            .list_object_versions()
+            .bucket(self.bucket_name.clone())
+            .prefix(self.relative_path_to_s3_object(prefix))
+            .send()
+            .await?;
+
+        let mut oids = Vec::with_capacity(list.versions().len());
+
+        for version in list.versions() {
+            let Some(last_modified) = version.last_modified else {
+                tracing::info!(
+                    "ignoring key {:?} version {:?} for S3 time travel recovery: no last_modified",
+                    version.key,
+                    version.version_id
+                );
+                continue;
+            };
+            if last_modified >= timestamp {
+                continue;
+            }
+            let (Some(version_id), Some(key)) = (&version.version_id, &version.key) else {
+                tracing::warn!(
+                    "ListObjects for prefix {prefix} did not yield key or version_id: {version:?}"
+                );
+                continue;
+            };
+
+            oids.push(
+                ObjectIdentifier::builder()
+                    .set_key(Some(key.to_owned()))
+                    .set_version_id(Some(version_id.to_owned()))
+                    .build()?,
+            );
+        }
+
+        self.delete_oids(kind, &oids).await
     }
 }
 

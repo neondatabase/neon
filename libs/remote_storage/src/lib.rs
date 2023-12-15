@@ -680,6 +680,7 @@ impl ConcurrencyLimiter {
             RequestKind::Put => &self.write,
             RequestKind::List => &self.read,
             RequestKind::Delete => &self.write,
+            RequestKind::TimeTravel => &self.write,
         }
     }
 

@@ -11,6 +11,7 @@ pub(crate) enum RequestKind {
     Put = 1,
     Delete = 2,
     List = 3,
+    TimeTravel = 4,
 }
 
 use RequestKind::*;
@@ -22,6 +23,7 @@ impl RequestKind {
             Put => "put_object",
             Delete => "delete_object",
             List => "list_objects",
+            TimeTravel => "time_travel_recover",
         }
     }
     const fn as_index(&self) -> usize {
