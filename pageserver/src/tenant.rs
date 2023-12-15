@@ -629,6 +629,11 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                scopeguard::defer! {
+                    tracing::info!("Increment complete count");
+                    TENANT.startup_complete.inc();
+                }
+
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
                 let make_broken =
                     |t: &Tenant, err: anyhow::Error| {
