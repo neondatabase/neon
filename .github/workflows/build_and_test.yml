@@ -215,7 +215,7 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    if: ${{ always() }}
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
