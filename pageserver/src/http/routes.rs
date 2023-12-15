@@ -720,7 +720,17 @@ async fn timeline_delete_handler(
 
     let tenant = state
         .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id, false)?;
+        .get_attached_tenant_shard(tenant_shard_id, false)
+        .map_err(|e| {
+            match e {
+                // GetTenantError has a built-in conversion to ApiError, but in this context we don't
+                // want to treat missing tenants as 404, to avoid ambiguity with successful deletions.
+                GetTenantError::NotFound(_) => ApiError::PreconditionFailed(
+                    "Requested tenant is missing".to_string().into_boxed_str(),
+                ),
+                e => e.into(),
+            }
+        })?;
     tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
     tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
