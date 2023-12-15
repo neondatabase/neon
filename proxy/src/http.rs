@@ -4,14 +4,12 @@
 
 pub mod health_server;
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use futures::FutureExt;
 pub use reqwest::{Request, Response, StatusCode};
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::Instant;
-use tracing::trace;
 
 use crate::{proxy::CONSOLE_REQUEST_LATENCY, rate_limiter, url::ApiUrl};
 use reqwest_middleware::RequestBuilder;
@@ -21,7 +19,7 @@ use reqwest_middleware::RequestBuilder;
 /// We deliberately don't want to replace this with a public static.
 pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
-        .dns_resolver(Arc::new(GaiResolver::default()))
+        .http2_prior_knowledge()
         .connection_verbose(true)
         .build()
         .expect("Failed to create http client");
@@ -34,7 +32,7 @@ pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> Clien
 
 pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
-        .dns_resolver(Arc::new(GaiResolver::default()))
+        .http2_prior_knowledge()
         .connection_verbose(true)
         .timeout(default_timout)
         .build()
@@ -97,37 +95,6 @@ impl Endpoint {
             .with_label_values(&[&path])
             .observe(start.elapsed().as_secs_f64());
         res
-    }
-}
-
-/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
-use hyper::{
-    client::connect::dns::{GaiResolver as HyperGaiResolver, Name},
-    service::Service,
-};
-use reqwest::dns::{Addrs, Resolve, Resolving};
-#[derive(Debug)]
-pub struct GaiResolver(HyperGaiResolver);
-
-impl Default for GaiResolver {
-    fn default() -> Self {
-        Self(HyperGaiResolver::new())
-    }
-}
-
-impl Resolve for GaiResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let this = &mut self.0.clone();
-        let start = Instant::now();
-        Box::pin(
-            Service::<Name>::call(this, name.clone()).map(move |result| {
-                let resolve_duration = start.elapsed();
-                trace!(duration = ?resolve_duration, addr = %name, "resolve host complete");
-                result
-                    .map(|addrs| -> Addrs { Box::new(addrs) })
-                    .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })
-            }),
-        )
     }
 }
 
