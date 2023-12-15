@@ -3121,6 +3121,14 @@ impl Timeline {
             .get()
         {
             await_bg_cancel.cancel();
+        } else {
+            // We should not wait if we were not able to explicitly instruct
+            // the logical size cancellation to skip the concurrency limit semaphore.
+            // TODO: this is an unexpected case.  We should restructure so that it
+            // can't happen.
+            tracing::warn!(
+                "await_initial_logical_size: can't get semaphore cancel token, skipping"
+            );
         }
 
         tokio::select!(
