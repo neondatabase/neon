@@ -78,7 +78,7 @@ You can call it from GitHub UI: https://github.com/neondatabase/neon/actions/wor
 or using GitHub CLI:
 
 ```bash
-gh workflow -R neondatabase/neon run update_build-tools-image.yml \
+gh workflow -R neondatabase/neon run update_build_tools_image.yml \
             -f from-tag=6254913013 \
             -f to-tag=mynewtag \
 
