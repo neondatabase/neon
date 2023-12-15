@@ -52,7 +52,16 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
         TenantId(t["id"]) for t in ps_http.tenant_list()
     ], "tenant should not be attached after negative test"
 
-    env.pageserver.allowed_errors.append(".*Error processing HTTP request: Bad request")
+    env.pageserver.allowed_errors.extend(
+        [
+            # This fixture detaches the tenant, and tests using it will tend to re-attach it
+            # shortly after. There may be un-processed deletion_queue validations from the
+            # initial attachment
+            ".*Dropped remote consistent LSN updates.*",
+            # This fixture is for tests that will intentionally generate 400 responses
+            ".*Error processing HTTP request: Bad request",
+        ]
+    )
 
     def log_contains_bad_request():
         env.pageserver.log_contains(".*Error processing HTTP request: Bad request")
@@ -163,6 +172,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
+        "heatmap_period": "10m",
         "image_creation_threshold": 7,
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",

@@ -163,7 +163,7 @@ pub(super) async fn handle_walreceiver_connection(
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnectionPoller,
-        Some(timeline.tenant_shard_id.tenant_id),
+        Some(timeline.tenant_shard_id),
         Some(timeline.timeline_id),
         "walreceiver connection",
         false,

@@ -7,13 +7,12 @@ use utils::generation::Generation;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
-use crate::{download_object_with_retries, RootTarget};
+use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::{pin_mut, StreamExt};
 use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::IndexPart;
 use remote_storage::RemotePath;
-use utils::id::TenantTimelineId;
 
 pub(crate) struct TimelineAnalysis {
     /// Anomalies detected
@@ -39,8 +38,8 @@ impl TimelineAnalysis {
     }
 }
 
-pub(crate) async fn branch_cleanup_and_check_errors(
-    id: &TenantTimelineId,
+pub(crate) fn branch_cleanup_and_check_errors(
+    id: &TenantShardTimelineId,
     s3_root: &RootTarget,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
@@ -142,7 +141,9 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         .collect();
 
                     if !orphan_layers.is_empty() {
-                        result.errors.push(format!(
+                        // An orphan layer is not an error: it's arguably not even a warning, but it is helpful to report
+                        // these as a hint that there is something worth cleaning up here.
+                        result.warnings.push(format!(
                             "index_part.json does not contain layers from S3: {:?}",
                             orphan_layers
                                 .iter()
@@ -170,6 +171,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         ));
                     }
                 }
+                BlobDataParseResult::Relic => {}
                 BlobDataParseResult::Incorrect(parse_errors) => result.errors.extend(
                     parse_errors
                         .into_iter()
@@ -215,6 +217,8 @@ pub(crate) enum BlobDataParseResult {
         index_part_generation: Generation,
         s3_layers: HashSet<(LayerFileName, Generation)>,
     },
+    /// The remains of a deleted Timeline (i.e. an initdb archive only)
+    Relic,
     Incorrect(Vec<String>),
 }
 
@@ -233,7 +237,7 @@ fn parse_layer_object_name(name: &str) -> Result<(LayerFileName, Generation), St
 
 pub(crate) async fn list_timeline_blobs(
     s3_client: &Client,
-    id: TenantTimelineId,
+    id: TenantShardTimelineId,
     s3_root: &RootTarget,
 ) -> anyhow::Result<S3TimelineBlobData> {
     let mut s3_layers = HashSet::new();
@@ -245,6 +249,7 @@ pub(crate) async fn list_timeline_blobs(
     timeline_dir_target.delimiter = String::new();
 
     let mut index_parts: Vec<ObjectIdentifier> = Vec::new();
+    let mut initdb_archive: bool = false;
 
     let stream = stream_listing(s3_client, &timeline_dir_target);
     pin_mut!(stream);
@@ -257,6 +262,10 @@ pub(crate) async fn list_timeline_blobs(
             Some(name) if name.starts_with("index_part.json") => {
                 tracing::info!("Index key {key}");
                 index_parts.push(obj)
+            }
+            Some("initdb.tar.zst") => {
+                tracing::info!("initdb archive {key}");
+                initdb_archive = true;
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {
@@ -277,6 +286,16 @@ pub(crate) async fn list_timeline_blobs(
                 keys_to_remove.push(key.to_string());
             }
         }
+    }
+
+    if index_parts.is_empty() && s3_layers.is_empty() && initdb_archive {
+        tracing::info!(
+            "Timeline is empty apart from initdb archive: expected post-deletion state."
+        );
+        return Ok(S3TimelineBlobData {
+            blob_data: BlobDataParseResult::Relic,
+            keys_to_remove: Vec::new(),
+        });
     }
 
     // Choose the index_part with the highest generation

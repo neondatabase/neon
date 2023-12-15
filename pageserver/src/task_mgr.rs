@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
+use pageserver_api::shard::TenantShardId;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio::task_local;
@@ -51,7 +52,7 @@ use tracing::{debug, error, info, warn};
 
 use once_cell::sync::Lazy;
 
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 
 use crate::shutdown_pageserver;
 
@@ -257,6 +258,9 @@ pub enum TaskKind {
     /// See [`crate::disk_usage_eviction_task`].
     DiskUsageEviction,
 
+    /// See [`crate::tenant::secondary`].
+    SecondaryUploads,
+
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 
@@ -317,7 +321,7 @@ struct PageServerTask {
 
     /// Tasks may optionally be launched for a particular tenant/timeline, enabling
     /// later cancelling tasks for that tenant/timeline in [`shutdown_tasks`]
-    tenant_id: Option<TenantId>,
+    tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
 
     mutable: Mutex<MutableTaskState>,
@@ -329,7 +333,7 @@ struct PageServerTask {
 pub fn spawn<F>(
     runtime: &tokio::runtime::Handle,
     kind: TaskKind,
-    tenant_id: Option<TenantId>,
+    tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     name: &str,
     shutdown_process_on_error: bool,
@@ -345,7 +349,7 @@ where
         kind,
         name: name.to_string(),
         cancel: cancel.clone(),
-        tenant_id,
+        tenant_shard_id,
         timeline_id,
         mutable: Mutex::new(MutableTaskState { join_handle: None }),
     });
@@ -424,28 +428,28 @@ async fn task_finish(
             Ok(Err(err)) => {
                 if shutdown_process_on_error {
                     error!(
-                        "Shutting down: task '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
-                        task_name, task.tenant_id, task.timeline_id, err
+                        "Shutting down: task '{}' tenant_shard_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                        task_name, task.tenant_shard_id, task.timeline_id, err
                     );
                     shutdown_process = true;
                 } else {
                     error!(
-                        "Task '{}' tenant_id: {:?}, timeline_id: {:?} exited with error: {:?}",
-                        task_name, task.tenant_id, task.timeline_id, err
+                        "Task '{}' tenant_shard_id: {:?}, timeline_id: {:?} exited with error: {:?}",
+                        task_name, task.tenant_shard_id, task.timeline_id, err
                     );
                 }
             }
             Err(err) => {
                 if shutdown_process_on_error {
                     error!(
-                        "Shutting down: task '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
-                        task_name, task.tenant_id, task.timeline_id, err
+                        "Shutting down: task '{}' tenant_shard_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                        task_name, task.tenant_shard_id, task.timeline_id, err
                     );
                     shutdown_process = true;
                 } else {
                     error!(
-                        "Task '{}' tenant_id: {:?}, timeline_id: {:?} panicked: {:?}",
-                        task_name, task.tenant_id, task.timeline_id, err
+                        "Task '{}' tenant_shard_id: {:?}, timeline_id: {:?} panicked: {:?}",
+                        task_name, task.tenant_shard_id, task.timeline_id, err
                     );
                 }
             }
@@ -467,11 +471,11 @@ async fn task_finish(
 ///
 /// Or to shut down all tasks for given timeline:
 ///
-///   shutdown_tasks(None, Some(tenant_id), Some(timeline_id))
+///   shutdown_tasks(None, Some(tenant_shard_id), Some(timeline_id))
 ///
 pub async fn shutdown_tasks(
     kind: Option<TaskKind>,
-    tenant_id: Option<TenantId>,
+    tenant_shard_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
 ) {
     let mut victim_tasks = Vec::new();
@@ -480,35 +484,35 @@ pub async fn shutdown_tasks(
         let tasks = TASKS.lock().unwrap();
         for task in tasks.values() {
             if (kind.is_none() || Some(task.kind) == kind)
-                && (tenant_id.is_none() || task.tenant_id == tenant_id)
+                && (tenant_shard_id.is_none() || task.tenant_shard_id == tenant_shard_id)
                 && (timeline_id.is_none() || task.timeline_id == timeline_id)
             {
                 task.cancel.cancel();
                 victim_tasks.push((
                     Arc::clone(task),
                     task.kind,
-                    task.tenant_id,
+                    task.tenant_shard_id,
                     task.timeline_id,
                 ));
             }
         }
     }
 
-    let log_all = kind.is_none() && tenant_id.is_none() && timeline_id.is_none();
+    let log_all = kind.is_none() && tenant_shard_id.is_none() && timeline_id.is_none();
 
-    for (task, task_kind, tenant_id, timeline_id) in victim_tasks {
+    for (task, task_kind, tenant_shard_id, timeline_id) in victim_tasks {
         let join_handle = {
             let mut task_mut = task.mutable.lock().unwrap();
             task_mut.join_handle.take()
         };
         if let Some(mut join_handle) = join_handle {
             if log_all {
-                if tenant_id.is_none() {
+                if tenant_shard_id.is_none() {
                     // there are quite few of these
                     info!(name = task.name, kind = ?task_kind, "stopping global task");
                 } else {
                     // warn to catch these in tests; there shouldn't be any
-                    warn!(name = task.name, tenant_id = ?tenant_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
+                    warn!(name = task.name, tenant_shard_id = ?tenant_shard_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
                 }
             }
             if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
@@ -517,12 +521,13 @@ pub async fn shutdown_tasks(
             {
                 // allow some time to elapse before logging to cut down the number of log
                 // lines.
-                info!("waiting for {} to shut down", task.name);
+                info!("waiting for task {} to shut down", task.name);
                 // we never handled this return value, but:
                 // - we don't deschedule which would lead to is_cancelled
                 // - panics are already logged (is_panicked)
                 // - task errors are already logged in the wrapper
                 let _ = join_handle.await;
+                info!("task {} completed", task.name);
             }
         } else {
             // Possibly one of:
@@ -556,9 +561,14 @@ pub async fn shutdown_watcher() {
 /// cancelled. It can however be moved to other tasks, such as `tokio::task::spawn_blocking` or
 /// `tokio::task::JoinSet::spawn`.
 pub fn shutdown_token() -> CancellationToken {
-    SHUTDOWN_TOKEN
-        .try_with(|t| t.clone())
-        .expect("shutdown_token() called in an unexpected task or thread")
+    let res = SHUTDOWN_TOKEN.try_with(|t| t.clone());
+
+    if cfg!(test) {
+        // in tests this method is called from non-taskmgr spawned tasks, and that is all ok.
+        res.unwrap_or_default()
+    } else {
+        res.expect("shutdown_token() called in an unexpected task or thread")
+    }
 }
 
 /// Has the current task been requested to shut down?

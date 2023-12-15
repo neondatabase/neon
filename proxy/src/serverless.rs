@@ -8,12 +8,14 @@ mod websocket;
 
 use anyhow::bail;
 use hyper::StatusCode;
+use metrics::IntCounterPairGuard;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
-use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
+use crate::proxy::NUM_CLIENT_CONNECTION_GAUGE;
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
@@ -37,6 +39,7 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -91,6 +94,7 @@ pub async fn task_main(
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
             let ws_connections = ws_connections.clone();
+            let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
             async move {
                 let peer_addr = match client_addr {
@@ -103,6 +107,7 @@ pub async fn task_main(
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
                         let ws_connections = ws_connections.clone();
+                        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
                         async move {
                             let cancel_map = Arc::new(CancelMap::default());
@@ -117,6 +122,7 @@ pub async fn task_main(
                                 session_id,
                                 sni_name,
                                 peer_addr.ip(),
+                                endpoint_rate_limiter,
                             )
                             .instrument(info_span!(
                                 "serverless",
@@ -144,22 +150,17 @@ pub async fn task_main(
 
 struct MetricService<S> {
     inner: S,
+    _gauge: IntCounterPairGuard,
 }
 
 impl<S> MetricService<S> {
     fn new(inner: S) -> MetricService<S> {
-        NUM_CLIENT_CONNECTION_OPENED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
-        MetricService { inner }
-    }
-}
-
-impl<S> Drop for MetricService<S> {
-    fn drop(&mut self) {
-        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
+        MetricService {
+            inner,
+            _gauge: NUM_CLIENT_CONNECTION_GAUGE
+                .with_label_values(&["http"])
+                .guard(),
+        }
     }
 }
 
@@ -190,6 +191,7 @@ async fn request_handler(
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
     peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()
@@ -214,6 +216,7 @@ async fn request_handler(
                     session_id,
                     host,
                     peer_addr,
+                    endpoint_rate_limiter,
                 )
                 .await
                 {
@@ -241,7 +244,7 @@ async fn request_handler(
             .header("Access-Control-Allow-Origin", "*")
             .header(
                 "Access-Control-Allow-Headers",
-                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In",
+                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In, Neon-Batch-Read-Only, Neon-Batch-Isolation-Level",
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code

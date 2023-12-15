@@ -98,33 +98,6 @@ pub(crate) enum TenantsMap {
     ShuttingDown(BTreeMap<TenantShardId, TenantSlot>),
 }
 
-/// Helper for mapping shard-unaware functions to a sharding-aware map
-/// TODO(sharding): all users of this must be made shard-aware.
-fn exactly_one_or_none<'a>(
-    map: &'a BTreeMap<TenantShardId, TenantSlot>,
-    tenant_id: &TenantId,
-) -> Option<(&'a TenantShardId, &'a TenantSlot)> {
-    let mut slots = map.range(TenantShardId::tenant_range(*tenant_id));
-
-    // Retrieve the first two slots in the range: if both are populated, we must panic because the caller
-    // needs a shard-naive view of the world in which only one slot can exist for a TenantId at a time.
-    let slot_a = slots.next();
-    let slot_b = slots.next();
-    match (slot_a, slot_b) {
-        (None, None) => None,
-        (Some(slot), None) => {
-            // Exactly one matching slot
-            Some(slot)
-        }
-        (Some(_slot_a), Some(_slot_b)) => {
-            // Multiple shards for this tenant: cannot handle this yet.
-            // TODO(sharding): callers of get() should be shard-aware.
-            todo!("Attaching multiple shards in teh same tenant to the same pageserver")
-        }
-        (None, Some(_)) => unreachable!(),
-    }
-}
-
 pub(crate) enum TenantsMapRemoveResult {
     Occupied(TenantSlot),
     Vacant,
@@ -147,12 +120,11 @@ impl TenantsMap {
     /// Convenience function for typical usage, where we want to get a `Tenant` object, for
     /// working with attached tenants.  If the TenantId is in the map but in Secondary state,
     /// None is returned.
-    pub(crate) fn get(&self, tenant_id: &TenantId) -> Option<&Arc<Tenant>> {
+    pub(crate) fn get(&self, tenant_shard_id: &TenantShardId) -> Option<&Arc<Tenant>> {
         match self {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                // TODO(sharding): callers of get() should be shard-aware.
-                exactly_one_or_none(m, tenant_id).and_then(|(_, slot)| slot.get_attached())
+                m.get(tenant_shard_id).and_then(|slot| slot.get_attached())
             }
         }
     }
@@ -204,25 +176,19 @@ impl TenantsMap {
     ///
     /// The normal way to remove a tenant is using a SlotGuard, which will gracefully remove the guarded
     /// slot if the enclosed tenant is shutdown.
-    pub(crate) fn remove(&mut self, tenant_id: &TenantId) -> TenantsMapRemoveResult {
+    pub(crate) fn remove(&mut self, tenant_shard_id: TenantShardId) -> TenantsMapRemoveResult {
         use std::collections::btree_map::Entry;
         match self {
             TenantsMap::Initializing => TenantsMapRemoveResult::Vacant,
-            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
-                let key = exactly_one_or_none(m, tenant_id).map(|(k, _)| *k);
-                match key {
-                    Some(key) => match m.entry(key) {
-                        Entry::Occupied(entry) => match entry.get() {
-                            TenantSlot::InProgress(barrier) => {
-                                TenantsMapRemoveResult::InProgress(barrier.clone())
-                            }
-                            _ => TenantsMapRemoveResult::Occupied(entry.remove()),
-                        },
-                        Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
-                    },
-                    None => TenantsMapRemoveResult::Vacant,
-                }
-            }
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => match m.entry(tenant_shard_id) {
+                Entry::Occupied(entry) => match entry.get() {
+                    TenantSlot::InProgress(barrier) => {
+                        TenantsMapRemoveResult::InProgress(barrier.clone())
+                    }
+                    _ => TenantsMapRemoveResult::Occupied(entry.remove()),
+                },
+                Entry::Vacant(_entry) => TenantsMapRemoveResult::Vacant,
+            },
         }
     }
 
@@ -822,14 +788,16 @@ pub(crate) async fn set_new_tenant_config(
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
 ) -> Result<(), SetNewTenantConfigError> {
+    // Legacy API: does not support sharding
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+
     info!("configuring tenant {tenant_id}");
-    let tenant = get_tenant(tenant_id, true)?;
+    let tenant = get_tenant(tenant_shard_id, true)?;
 
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
     let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
         .await
@@ -839,6 +807,12 @@ pub(crate) async fn set_new_tenant_config(
 }
 
 impl TenantManager {
+    /// Convenience function so that anyone with a TenantManager can get at the global configuration, without
+    /// having to pass it around everywhere as a separate object.
+    pub(crate) fn get_conf(&self) -> &'static PageServerConf {
+        self.conf
+    }
+
     /// Gets the attached tenant from the in-memory data, erroring if it's absent, in secondary mode, or is not fitting to the query.
     /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
     pub(crate) fn get_attached_tenant_shard(
@@ -1119,6 +1093,20 @@ impl TenantManager {
 
         Ok(())
     }
+
+    pub(crate) fn get_attached_active_tenant_shards(&self) -> Vec<Arc<Tenant>> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => map
+                .values()
+                .filter_map(|slot| {
+                    slot.get_attached()
+                        .and_then(|t| if t.is_active() { Some(t.clone()) } else { None })
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1143,13 +1131,10 @@ pub(crate) enum GetTenantError {
 ///
 /// This method is cancel-safe.
 pub(crate) fn get_tenant(
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     active_only: bool,
 ) -> Result<Arc<Tenant>, GetTenantError> {
     let locked = TENANTS.read().unwrap();
-
-    // TODO(sharding): make all callers of get_tenant shard-aware
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
 
     let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)?;
 
@@ -1162,14 +1147,18 @@ pub(crate) fn get_tenant(
             TenantState::Active => Ok(Arc::clone(tenant)),
             _ => {
                 if active_only {
-                    Err(GetTenantError::NotActive(tenant_id))
+                    Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
                 } else {
                     Ok(Arc::clone(tenant))
                 }
             }
         },
-        Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_id)),
-        None | Some(TenantSlot::Secondary) => Err(GetTenantError::NotFound(tenant_id)),
+        Some(TenantSlot::InProgress(_)) => {
+            Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+        }
+        None | Some(TenantSlot::Secondary) => {
+            Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
+        }
     }
 }
 
@@ -1542,7 +1531,8 @@ pub(crate) enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
+pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, TenantMapListError>
+{
     let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1550,12 +1540,10 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, Tenan
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((id, tenant.current_state())),
+            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
             TenantSlot::Secondary => None,
             TenantSlot::InProgress(_) => None,
         })
-        // TODO(sharding): make callers of this function shard-aware
-        .map(|(k, v)| (k.tenant_id, v))
         .collect())
 }
 
@@ -2089,21 +2077,19 @@ use {
 };
 
 pub(crate) async fn immediate_gc(
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     gc_req: TimelineGcRequest,
     cancel: CancellationToken,
     ctx: &RequestContext,
 ) -> Result<tokio::sync::oneshot::Receiver<Result<GcResult, anyhow::Error>>, ApiError> {
     let guard = TENANTS.read().unwrap();
-    let tenant = guard
-        .get(&tenant_id)
-        .map(Arc::clone)
-        .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(|e| ApiError::NotFound(e.into()))?;
 
-    // TODO(sharding): make callers of this function shard-aware
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    let tenant = guard
+        .get(&tenant_shard_id)
+        .map(Arc::clone)
+        .with_context(|| format!("tenant {tenant_shard_id}"))
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
     // Use tenant's pitr setting
@@ -2116,9 +2102,9 @@ pub(crate) async fn immediate_gc(
     task_mgr::spawn(
         &tokio::runtime::Handle::current(),
         TaskKind::GarbageCollector,
-        Some(tenant_id),
+        Some(tenant_shard_id),
         Some(timeline_id),
-        &format!("timeline_gc_handler garbage collection run for tenant {tenant_id} timeline {timeline_id}"),
+        &format!("timeline_gc_handler garbage collection run for tenant {tenant_shard_id} timeline {timeline_id}"),
         false,
         async move {
             fail::fail_point!("immediate_gc_task_pre");

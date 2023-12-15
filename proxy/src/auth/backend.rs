@@ -166,7 +166,7 @@ impl TryFrom<ClientCredentials> for ComputeUserInfo {
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
     api: &impl console::Api,
-    extra: &ConsoleReqExtra<'_>,
+    extra: &ConsoleReqExtra,
     creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -235,7 +235,7 @@ async fn auth_quirks(
 /// only if authentication was successfuly.
 async fn auth_and_wake_compute(
     api: &impl console::Api,
-    extra: &ConsoleReqExtra<'_>,
+    extra: &ConsoleReqExtra,
     creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -314,7 +314,7 @@ impl<'a> BackendType<'a, ClientCredentials> {
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
         self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
@@ -387,7 +387,7 @@ impl<'a> BackendType<'a, ClientCredentials> {
 impl BackendType<'_, ComputeUserInfo> {
     pub async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         use BackendType::*;
         match self {
@@ -404,7 +404,7 @@ impl BackendType<'_, ComputeUserInfo> {
     /// The link auth flow doesn't support this, so we return [`None`] in that case.
     pub async fn wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        extra: &ConsoleReqExtra,
     ) -> Result<Option<CachedNodeInfo>, console::errors::WakeComputeError> {
         use BackendType::*;
 

@@ -236,3 +236,30 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     assert vanilla_pg.safe_psql(
         "select sum(somedata) from replication_example"
     ) == endpoint.safe_psql("select sum(somedata) from replication_example")
+
+
+#
+# Check that slots are not inherited in brnach
+#
+def test_slots_and_branching(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    tenant, timeline = env.neon_cli.create_tenant()
+    env.pageserver.http_client()
+
+    main_branch = env.endpoints.create_start("main", tenant_id=tenant)
+    main_cur = main_branch.connect().cursor()
+
+    # Create table and insert some data
+    main_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")
+
+    wait_for_last_flush_lsn(env, main_branch, tenant, timeline)
+
+    # Create branch ws.
+    env.neon_cli.create_branch("ws", "main", tenant_id=tenant)
+    ws_branch = env.endpoints.create_start("ws", tenant_id=tenant)
+    log.info("postgres is running on 'ws' branch")
+
+    # Check that we can create slot with the same name
+    ws_cur = ws_branch.connect().cursor()
+    ws_cur.execute("select pg_create_logical_replication_slot('my_slot', 'pgoutput')")

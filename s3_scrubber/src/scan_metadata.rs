@@ -5,20 +5,19 @@ use crate::checks::{
     TimelineAnalysis,
 };
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget};
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use aws_sdk_s3::Client;
 use futures_util::{pin_mut, StreamExt, TryStreamExt};
 use histogram::Histogram;
 use pageserver::tenant::IndexPart;
 use serde::Serialize;
-use utils::id::TenantTimelineId;
 
 #[derive(Serialize)]
 pub struct MetadataSummary {
     count: usize,
-    with_errors: HashSet<TenantTimelineId>,
-    with_warnings: HashSet<TenantTimelineId>,
-    with_garbage: HashSet<TenantTimelineId>,
+    with_errors: HashSet<TenantShardTimelineId>,
+    with_warnings: HashSet<TenantShardTimelineId>,
+    with_garbage: HashSet<TenantShardTimelineId>,
     indices_by_version: HashMap<usize, usize>,
 
     layer_count: MinMaxHisto,
@@ -132,7 +131,7 @@ impl MetadataSummary {
         }
     }
 
-    fn update_analysis(&mut self, id: &TenantTimelineId, analysis: &TimelineAnalysis) {
+    fn update_analysis(&mut self, id: &TenantShardTimelineId, analysis: &TimelineAnalysis) {
         if !analysis.errors.is_empty() {
             self.with_errors.insert(*id);
         }
@@ -174,6 +173,10 @@ Timeline layer count: {6}
     pub fn is_fatal(&self) -> bool {
         !self.with_errors.is_empty()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 /// Scan the pageserver metadata in an S3 bucket, reporting errors and statistics.
@@ -195,8 +198,8 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
     async fn report_on_timeline(
         s3_client: &Client,
         target: &RootTarget,
-        ttid: TenantTimelineId,
-    ) -> anyhow::Result<(TenantTimelineId, S3TimelineBlobData)> {
+        ttid: TenantShardTimelineId,
+    ) -> anyhow::Result<(TenantShardTimelineId, S3TimelineBlobData)> {
         let data = list_timeline_blobs(s3_client, ttid, target).await?;
         Ok((ttid, data))
     }
@@ -209,8 +212,7 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
         let (ttid, data) = i?;
         summary.update_data(&data);
 
-        let analysis =
-            branch_cleanup_and_check_errors(&ttid, &target, None, None, Some(data)).await;
+        let analysis = branch_cleanup_and_check_errors(&ttid, &target, None, None, Some(data));
 
         summary.update_analysis(&ttid, &analysis);
     }

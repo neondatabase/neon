@@ -4,8 +4,9 @@ use anyhow::{bail, Context};
 use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, SeekFrom};
 use tokio::fs::{self, File};
+use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 
 use super::Generation;
@@ -124,11 +125,14 @@ pub(crate) async fn upload_initdb_dir(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-    initdb_tar_zst: File,
+    mut initdb_tar_zst: File,
     size: u64,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading initdb dir");
+
+    // We might have read somewhat into the file already in the prior retry attempt
+    initdb_tar_zst.seek(SeekFrom::Start(0)).await?;
 
     let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 

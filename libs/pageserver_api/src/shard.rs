@@ -76,6 +76,11 @@ impl TenantShardId {
     pub fn shard_slug(&self) -> impl std::fmt::Display + '_ {
         ShardSlug(self)
     }
+
+    /// Convenience for code that has special behavior on the 0th shard.
+    pub fn is_zero(&self) -> bool {
+        self.shard_number == ShardNumber(0)
+    }
 }
 
 /// Formatting helper

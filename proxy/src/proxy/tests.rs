@@ -484,13 +484,13 @@ fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> (
     CachedNodeInfo,
-    console::ConsoleReqExtra<'static>,
+    console::ConsoleReqExtra,
     auth::BackendType<'_, ComputeUserInfo>,
 ) {
     let cache = helper_create_cached_node_info();
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
-        application_name: Some("TEST"),
+        application_name: "TEST".into(),
         options: vec![],
     };
     let creds = auth::BackendType::Test(mechanism);

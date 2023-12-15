@@ -180,7 +180,7 @@
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
 //! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
 
-mod download;
+pub(crate) mod download;
 pub mod index;
 mod upload;
 
@@ -1269,7 +1269,7 @@ impl RemoteTimelineClient {
             task_mgr::spawn(
                 &self.runtime,
                 TaskKind::RemoteUploadTask,
-                Some(self.tenant_shard_id.tenant_id),
+                Some(self.tenant_shard_id),
                 Some(self.timeline_id),
                 "remote upload",
                 false,
@@ -1652,6 +1652,23 @@ impl RemoteTimelineClient {
             }
         }
     }
+
+    pub(crate) fn get_layers_metadata(
+        &self,
+        layers: Vec<LayerFileName>,
+    ) -> anyhow::Result<Vec<Option<LayerFileMetadata>>> {
+        let q = self.upload_queue.lock().unwrap();
+        let q = match &*q {
+            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
+                anyhow::bail!("queue is in state {}", q.as_str())
+            }
+            UploadQueue::Initialized(inner) => inner,
+        };
+
+        let decorated = layers.into_iter().map(|l| q.latest_files.get(&l).cloned());
+
+        Ok(decorated.collect())
+    }
 }
 
 pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
@@ -1705,6 +1722,13 @@ pub fn remote_index_path(
         generation.get_suffix()
     ))
     .expect("Failed to construct path")
+}
+
+pub const HEATMAP_BASENAME: &str = "heatmap-v1.json";
+
+pub(crate) fn remote_heatmap_path(tenant_shard_id: &TenantShardId) -> RemotePath {
+    RemotePath::from_string(&format!("tenants/{tenant_shard_id}/{HEATMAP_BASENAME}"))
+        .expect("Failed to construct path")
 }
 
 /// Given the key of an index, parse out the generation part of the name

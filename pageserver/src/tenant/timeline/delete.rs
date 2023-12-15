@@ -43,7 +43,7 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
     // Shut down the layer flush task before the remote client, as one depends on the other
     task_mgr::shutdown_tasks(
         Some(TaskKind::LayerFlushTask),
-        Some(timeline.tenant_shard_id.tenant_id),
+        Some(timeline.tenant_shard_id),
         Some(timeline.timeline_id),
     )
     .await;
@@ -71,7 +71,7 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
     info!("waiting for timeline tasks to shutdown");
     task_mgr::shutdown_tasks(
         None,
-        Some(timeline.tenant_shard_id.tenant_id),
+        Some(timeline.tenant_shard_id),
         Some(timeline.timeline_id),
     )
     .await;
@@ -528,7 +528,7 @@ impl DeleteTimelineFlow {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
-            Some(tenant_shard_id.tenant_id),
+            Some(tenant_shard_id),
             Some(timeline_id),
             "timeline_delete",
             false,
