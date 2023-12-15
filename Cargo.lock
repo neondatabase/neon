@@ -4281,6 +4281,7 @@ dependencies = [
  "async-stream",
  "aws-config",
  "aws-sdk-s3",
+ "aws-smithy-async",
  "bincode",
  "bytes",
  "chrono",
