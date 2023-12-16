@@ -1,3 +1,5 @@
+pub mod partitioning;
+
 use std::{
     collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},

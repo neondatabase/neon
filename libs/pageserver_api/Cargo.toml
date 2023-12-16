@@ -24,3 +24,4 @@ workspace_hack.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true
+rand.workspace = true
