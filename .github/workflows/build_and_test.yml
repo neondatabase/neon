@@ -455,7 +455,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, tag ]
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
+    needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
@@ -494,13 +495,15 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    needs: [ check-permissions, build-neon, tag]
+    needs: [ check-permissions, build-neon, build-buildtools-image, tag]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
+    if: |
+      always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result) &&
+      (github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks'))
     strategy:
       fail-fast: false
       matrix:
@@ -573,7 +576,8 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, tag ]
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
+    needs: [ check-permissions, regress-tests, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
