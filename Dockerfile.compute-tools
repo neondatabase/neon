@@ -1,7 +1,7 @@
 # First transient image to build compute_tools binaries
 # NB: keep in sync with rust image version in .github/workflows/build_and_test.yml
 ARG REPOSITORY=neondatabase
-ARG IMAGE=build-tools
+ARG IMAGE=rust
 ARG TAG=pinned
 ARG BUILD_TAG
 

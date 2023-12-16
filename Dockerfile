@@ -3,7 +3,7 @@
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
 ARG REPOSITORY=neondatabase
-ARG IMAGE=build-tools
+ARG IMAGE=rust
 ARG TAG=pinned
 
 # Build Postgres
