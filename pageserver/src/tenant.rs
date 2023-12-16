@@ -629,8 +629,12 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                // Is this tenant being spawned as part of process startup?
+                let starting_up = init_order.is_some();
                 scopeguard::defer! {
-                    TENANT.startup_complete.inc();
+                    if starting_up {
+                        TENANT.startup_complete.inc();
+                    }
                 }
 
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
