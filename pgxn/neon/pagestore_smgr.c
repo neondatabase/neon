@@ -2799,6 +2799,8 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 #else
 	request_lsn = GetFlushRecPtr();
 #endif
+	request_lsn = nm_adjust_lsn(request_lsn);
+
 	NeonResponse *resp;
 	NeonGetSlruSegmentRequest request = {
 		.req.tag = T_NeonGetSlruSegmentRequest,
@@ -2809,7 +2811,6 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 		.segno = segno
 	};
 	int n_blocks;
-
 	do
 	{
 		while (!page_server->send(&request.req) || !page_server->flush());
