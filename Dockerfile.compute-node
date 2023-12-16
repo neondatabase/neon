@@ -1,6 +1,6 @@
 ARG PG_VERSION
 ARG REPOSITORY=neondatabase
-ARG IMAGE=rust
+ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
 
