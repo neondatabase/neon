@@ -6,7 +6,6 @@ __pycache__/
 test_output/
 .vscode
 .idea
-neon.iml
 /.neon
 /integration_tests/.neon
 
