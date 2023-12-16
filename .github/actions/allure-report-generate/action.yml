@@ -186,6 +186,10 @@ runs:
         COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         REPORT_JSON_URL: ${{ steps.generate-report.outputs.report-json-url }}
       run: |
+        if [ ! -f "${WORKDIR}/report/data/suites.json" ]; then
+          exit 0
+        fi
+
         export DATABASE_URL=${REGRESS_TEST_RESULT_CONNSTR}
 
         ./scripts/pysync
