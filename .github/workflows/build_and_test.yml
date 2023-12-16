@@ -81,12 +81,13 @@ jobs:
           else
             IMAGE_TAG=pinned
           fi
-          
+
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
         shell: bash
         id: buildtools-tag
 
   check-if-build-tools-dockerfile-changed:
+    if: github.event_name == 'pull_request'
     needs: [ check-permissions ]
     runs-on: ubuntu-latest
     outputs:
@@ -97,8 +98,12 @@ jobs:
         run: |
           updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
           if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            echo "docker_file_changed=true" >> $GITHUB_OUTPUT
+            DOCKER_FILE_CHANGED=true
+          else
+            DOCKER_FILE_CHANGED=false
           fi
+
+          echo "docker_file_changed=${DOCKER_FILE_CHANGED}" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
