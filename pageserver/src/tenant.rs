@@ -630,7 +630,6 @@ impl Tenant {
             false,
             async move {
                 scopeguard::defer! {
-                    tracing::info!("Increment complete count");
                     TENANT.startup_complete.inc();
                 }
 
