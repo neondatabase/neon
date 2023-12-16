@@ -44,8 +44,30 @@ jobs:
 
         exit 1
 
-  tag:
+  check-if-build-tools-dockerfile-changed:
+    if: github.event_name == 'pull_request'
     needs: [ check-permissions ]
+    runs-on: ubuntu-latest
+    outputs:
+      docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
+    steps:
+      - name: Check if Dockerfile.buildtools has changed
+        id: dockerfile
+        run: |
+          updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
+          if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
+            DOCKER_FILE_CHANGED=true
+          else
+            DOCKER_FILE_CHANGED=false
+          fi
+
+          echo "docker_file_changed=${DOCKER_FILE_CHANGED}" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  tag:
+    if: always() && contains(fromJSON('["success", "skipped"]'), needs.check-if-build-tools-dockerfile-changed.result)
+    needs: [ check-permissions, check-if-build-tools-dockerfile-changed ]
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
@@ -76,7 +98,7 @@ jobs:
 
       - name: Get buildtools tag
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] && [[ "${{ needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed }}" == "true" ]]; then
             IMAGE_TAG=$GITHUB_RUN_ID
           else
             IMAGE_TAG=pinned
@@ -85,27 +107,6 @@ jobs:
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
         shell: bash
         id: buildtools-tag
-
-  check-if-build-tools-dockerfile-changed:
-    if: github.event_name == 'pull_request'
-    needs: [ check-permissions ]
-    runs-on: ubuntu-latest
-    outputs:
-      docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
-    steps:
-      - name: Check if Dockerfile.buildtools has changed
-        id: dockerfile
-        run: |
-          updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
-          if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            DOCKER_FILE_CHANGED=true
-          else
-            DOCKER_FILE_CHANGED=false
-          fi
-
-          echo "docker_file_changed=${DOCKER_FILE_CHANGED}" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-buildtools-image:
     needs: [ check-permissions, check-if-build-tools-dockerfile-changed, tag]
