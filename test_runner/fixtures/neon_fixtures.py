@@ -60,7 +60,7 @@ from fixtures.remote_storage import (
     default_remote_storage,
     remote_storage_to_toml_inline_table,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,
@@ -1690,8 +1690,18 @@ class NeonAttachmentService:
         response = requests.get(f"{self.env.control_plane_api}/tenant/{tenant_id}/locate")
         response.raise_for_status()
         body = response.json()
-        log.info(f"tenant_locate success: {body}")
         shards: list[dict[str, Any]] = body["shards"]
+        return shards
+
+    def tenant_shard_split(self, tenant_id: TenantId, shard_count: int) -> list[TenantShardId]:
+        response = requests.put(
+            f"{self.env.control_plane_api}/tenant/{tenant_id}/shard_split",
+            json={"new_shard_count": shard_count},
+        )
+        response.raise_for_status()
+        body = response.json()
+        log.info(f"tenant_shard_split success: {body}")
+        shards: list[TenantShardId] = body["new_shards"]
         return shards
 
     def __enter__(self) -> "NeonAttachmentService":
@@ -3405,6 +3415,27 @@ def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -
         time.sleep(0.5)
 
 
+def tenant_get_shards(
+    env: NeonEnv, tenant_id: TenantId, pageserver_id: Optional[int] = None
+) -> list[tuple[TenantShardId, NeonPageserver]]:
+    """
+    Helper for when you want to talk to one or more pageservers, and the
+    caller _might_ have specified a pageserver, or they might leave it to
+    us to figure out the shards for a tenant.
+
+    Caller should over the response to apply their per-pageserver action to
+    each shard
+    """
+    if len(env.pageservers) > 1:
+        return [
+            (TenantShardId.parse(s["shard_id"]), env.get_pageserver(s["node_id"]))
+            for s in env.attachment_service.locate(tenant_id)
+        ]
+    else:
+        # Assume an unsharded tenant
+        return [(TenantShardId(tenant_id, 0, 0), env.pageserver)]
+
+
 def wait_for_last_flush_lsn(
     env: NeonEnv,
     endpoint: Endpoint,
@@ -3414,19 +3445,13 @@ def wait_for_last_flush_lsn(
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
 
-    if len(env.pageservers) > 1:
-        shards = [
-            (s["shard_id"], env.get_pageserver(s["node_id"]))
-            for s in env.attachment_service.locate(tenant)
-        ]
-    else:
-        # Assume an unsharded tenant
-        shards = [(str(tenant), env.pageserver)]
+    shards = tenant_get_shards(env, tenant, pageserver_id)
 
     last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     results = []
     for tenant_shard_id, pageserver in shards:
+        log.info(f"wait_for_last_flush_lsn: shard {tenant_shard_id}")
         waited = wait_for_last_record_lsn(
             pageserver.http_client(), tenant_shard_id, timeline, last_flush_lsn
         )
@@ -3447,9 +3472,16 @@ def wait_for_wal_insert_lsn(
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
-    return wait_for_last_record_lsn(
-        env.get_pageserver(pageserver_id).http_client(), tenant, timeline, last_flush_lsn
-    )
+    result = None
+    for tenant_shard_id, pageserver in tenant_get_shards(env, tenant, pageserver_id):
+        shard_r = wait_for_last_record_lsn(
+            pageserver.http_client(), tenant_shard_id, timeline, last_flush_lsn
+        )
+        if result is None:
+            result = shard_r
+
+    assert result is not None
+    return result
 
 
 def fork_at_current_lsn(
@@ -3483,11 +3515,13 @@ def last_flush_lsn_upload(
     last_flush_lsn = wait_for_last_flush_lsn(
         env, endpoint, tenant_id, timeline_id, pageserver_id=pageserver_id
     )
-    ps_http = env.get_pageserver(pageserver_id).http_client()
-    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, last_flush_lsn)
-    # force a checkpoint to trigger upload
-    ps_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
+    shards = tenant_get_shards(env, tenant_id, pageserver_id)
+    for tenant_shard_id, pageserver in shards:
+        ps_http = pageserver.http_client()
+        wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
+        # force a checkpoint to trigger upload
+        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id)
+        wait_for_upload(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
     return last_flush_lsn
 
 

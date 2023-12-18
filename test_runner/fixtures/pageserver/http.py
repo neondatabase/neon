@@ -13,7 +13,7 @@ from urllib3.util.retry import Retry
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
 
 
@@ -433,7 +433,7 @@ class PageserverHttpClient(requests.Session):
 
     def timeline_detail(
         self,
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
@@ -455,7 +455,7 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
+    def timeline_delete(self, tenant_id: TenantShardId, timeline_id: TimelineId, **kwargs):
         """
         Note that deletion is not instant, it is scheduled and performed mostly in the background.
         So if you need to wait for it to complete use `timeline_delete_wait_completed`.
@@ -540,7 +540,7 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_checkpoint(
-        self, tenant_id: TenantId, timeline_id: TimelineId, force_repartition=False
+        self, tenant_id: TenantShardId, timeline_id: TimelineId, force_repartition=False
     ):
         self.is_testing_enabled_or_skip()
         query = {}
