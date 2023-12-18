@@ -87,6 +87,7 @@ jobs:
         id: buildtools-tag
 
   check-if-build-tools-dockerfile-changed:
+    if: github.ref_name != 'main'
     needs: [ check-permissions ]
     runs-on: ubuntu-latest
     outputs:
