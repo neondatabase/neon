@@ -1697,9 +1697,9 @@ walprop_pg_after_election(WalProposer *wp)
 	f = fopen("restart.lsn", "rb");
 	if (f != NULL && !wp->config->syncSafekeepers)
 	{
-		fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
+		size_t rc = fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
 		fclose(f);
-		if (lrRestartLsn != InvalidXLogRecPtr)
+		if (rc == 1 && lrRestartLsn != InvalidXLogRecPtr)
 		{
 			elog(LOG, "Logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
 
