@@ -1,5 +1,6 @@
 use clap::Parser;
 
+pub(crate) mod cli;
 pub(crate) mod util;
 
 mod basebackup;

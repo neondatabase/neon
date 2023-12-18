@@ -1,6 +1,6 @@
 use anyhow::Context;
 use pageserver_client::page_service::BasebackupRequest;
-use utils::id::TenantId;
+
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::cli;
 use crate::util::tenant_timeline_id::TenantTimelineId;
 
 /// basebackup@LatestLSN
@@ -34,6 +35,8 @@ pub(crate) struct Args {
     gzip_probability: f64,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
+    #[clap(long)]
+    limit_to_first_n_targets: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -185,44 +188,14 @@ async fn main_impl(
     ));
 
     // discover targets
-    let mut timelines: Vec<TenantTimelineId> = Vec::new();
-    if args.targets.is_some() {
-        timelines = args.targets.clone().unwrap();
-    } else {
-        let mut tenants: Vec<TenantId> = Vec::new();
-        for ti in mgmt_api_client.list_tenants().await? {
-            if !ti.id.is_unsharded() {
-                anyhow::bail!(
-                    "only unsharded tenants are supported at this time: {}",
-                    ti.id
-                );
-            }
-            tenants.push(ti.id.tenant_id)
-        }
-        let mut js = JoinSet::new();
-        for tenant_id in tenants {
-            js.spawn({
-                let mgmt_api_client = Arc::clone(&mgmt_api_client);
-                async move {
-                    (
-                        tenant_id,
-                        mgmt_api_client.list_timelines(tenant_id).await.unwrap(),
-                    )
-                }
-            });
-        }
-        while let Some(res) = js.join_next().await {
-            let (tenant_id, tl_infos) = res.unwrap();
-            for tl in tl_infos {
-                timelines.push(TenantTimelineId {
-                    tenant_id,
-                    timeline_id: tl.timeline_id,
-                });
-            }
-        }
-    }
-
-    info!("timelines:\n{:?}", timelines);
+    let timelines: Vec<TenantTimelineId> = cli::targets::discover(
+        &mgmt_api_client,
+        cli::targets::Spec {
+            limit_to_first_n_targets: args.limit_to_first_n_targets,
+            targets: args.targets.clone(),
+        },
+    )
+    .await?;
 
     let mut js = JoinSet::new();
     for timeline in &timelines {
