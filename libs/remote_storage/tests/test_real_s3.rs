@@ -16,7 +16,8 @@ use tracing::{debug, info};
 mod common;
 
 use common::{
-    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, upload_stream, wrap_stream, download_to_vec,
+    cleanup, download_to_vec, ensure_logging_ready, upload_remote_data, upload_simple_remote_data,
+    upload_stream, wrap_stream,
 };
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
