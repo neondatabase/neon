@@ -2794,11 +2794,7 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 {
 	XLogRecPtr request_lsn;
 	/* TODO: any better alternative than flush LSN? Actually we to request SLRU at basebackup creation time... */
-#if PG_VERSION_NUM >= 150000
-	request_lsn = GetFlushRecPtr(NULL);
-#else
-	request_lsn = GetFlushRecPtr();
-#endif
+	request_lsn = GetRedoStartLsn();
 	request_lsn = nm_adjust_lsn(request_lsn);
 
 	NeonResponse *resp;
