@@ -6,6 +6,7 @@ use proxy::config::HttpConfig;
 use proxy::console;
 use proxy::console::provider::AllowedIpsCache;
 use proxy::console::provider::NodeInfoCache;
+use proxy::console::provider::RoleSecretCache;
 use proxy::http;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
@@ -86,7 +87,7 @@ struct ProxyCliArgs {
     #[clap(long)]
     metric_collection_interval: Option<String>,
     /// cache for `wake_compute` api method (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
+    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
     /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
     #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
@@ -127,8 +128,11 @@ struct ProxyCliArgs {
     #[clap(flatten)]
     aimd_config: proxy::rate_limiter::AimdConfig,
     /// cache for `allowed_ips` (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
+    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     allowed_ips_cache: String,
+    /// cache for `role_secret` (use `size=0` to disable)
+    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
+    role_secret_cache: String,
     /// disable ip check for http requests. If it is too time consuming, it could be turned off.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_ip_check_for_http: bool,
@@ -266,9 +270,11 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         AuthBackend::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let allowed_ips_cache_config: CacheOptions = args.allowed_ips_cache.parse()?;
+            let role_secret_cache_config: CacheOptions = args.role_secret_cache.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
             info!("Using AllowedIpsCache (wake_compute) with options={allowed_ips_cache_config:?}");
+            info!("Using RoleSecretCache (wake_compute) with options={role_secret_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches {
                 node_info: NodeInfoCache::new(
                     "node_info_cache",
@@ -280,6 +286,12 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                     "allowed_ips_cache",
                     allowed_ips_cache_config.size,
                     allowed_ips_cache_config.ttl,
+                    false,
+                ),
+                role_secret: RoleSecretCache::new(
+                    "role_secret_cache",
+                    role_secret_cache_config.size,
+                    role_secret_cache_config.ttl,
                     false,
                 ),
             }));
