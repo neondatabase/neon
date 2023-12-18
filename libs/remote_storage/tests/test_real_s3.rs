@@ -1,9 +1,9 @@
-use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
+use std::{collections::HashSet, time::SystemTime};
 
 use anyhow::Context;
 use camino::Utf8Path;
@@ -140,6 +140,99 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         nested_remote_files, trim_remote_blobs,
         "remote storage list_files on subdirrectory mismatches with the uploads."
     );
+    Ok(())
+}
+
+#[test_context(MaybeEnabledS3)]
+#[tokio::test]
+async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledS3::Enabled(ctx) => ctx,
+        MaybeEnabledS3::Disabled => return Ok(()),
+    };
+    // This depends on discrepancies in the clock between S3 and the environment the tests
+    // run in. Therefore, wait a little bit before and after. The alternative would be
+    // to take the time from S3 headers.
+    async fn time_point() -> SystemTime {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ret = SystemTime::now();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        ret
+    }
+    async fn list_files(client: &Arc<GenericRemoteStorage>) -> anyhow::Result<HashSet<RemotePath>> {
+        Ok(client
+            .list_files(None)
+            .await
+            .context("list root files failure")?
+            .into_iter()
+            .collect::<HashSet<_>>())
+    }
+    async fn download_to_buf(dl: remote_storage::Download) -> anyhow::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        tokio::io::copy_buf(
+            &mut tokio_util::io::StreamReader::new(dl.download_stream),
+            &mut buf,
+        )
+        .await?;
+        Ok(buf)
+    }
+
+    let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let path2 = RemotePath::new(Utf8Path::new(format!("{}/path2", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let (data, len) = upload_stream("remote blob data1".as_bytes().into());
+    ctx.client.upload(data, len, &path1, None).await?;
+
+    let t0_files = list_files(&ctx.client).await?;
+    let t0 = time_point().await;
+
+    let old_data = "remote blob data2";
+    let (data, len) = upload_stream(old_data.as_bytes().into());
+    ctx.client.upload(data, len, &path2, None).await?;
+
+    let t1_files = list_files(&ctx.client).await?;
+    let t1 = time_point().await;
+
+    let (data, len) = upload_stream("remote blob data3".as_bytes().into());
+    ctx.client.upload(data, len, &path3, None).await?;
+
+    let new_data = "new remote blob data2";
+    let (data, len) = upload_stream(new_data.as_bytes().into());
+    ctx.client.upload(data, len, &path2, None).await?;
+
+    ctx.client.delete(&path1).await?;
+
+    let t2_files = list_files(&ctx.client).await?;
+    let t2 = time_point().await;
+
+    // No changes after recovery to t2 (no-op)
+    ctx.client.time_travel_recover(None, t2).await?;
+    let t2_files_recovered = list_files(&ctx.client).await?;
+    assert_eq!(t2_files, t2_files_recovered);
+    let path2_recovered_t2 = download_to_buf(ctx.client.download(&path2).await?).await?;
+    assert_eq!(path2_recovered_t2, new_data.as_bytes());
+
+    // after recovery to t1: path1 is back, path2 has the old content
+    ctx.client.time_travel_recover(None, t1).await?;
+    let t1_files_recovered = list_files(&ctx.client).await?;
+    assert_eq!(t1_files, t1_files_recovered);
+    let path2_recovered_t1 = download_to_buf(ctx.client.download(&path2).await?).await?;
+    assert_eq!(path2_recovered_t1, old_data.as_bytes());
+
+    // after recovery to t0: everything is gone except for path1
+    ctx.client.time_travel_recover(None, t0).await?;
+    let t0_files_recovered = list_files(&ctx.client).await?;
+    assert_eq!(t0_files, t0_files_recovered);
+
+    // cleanup
+    ctx.client.delete_objects(&[path1, path2, path3]).await?;
+
     Ok(())
 }
 

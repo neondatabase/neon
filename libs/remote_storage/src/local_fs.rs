@@ -412,7 +412,7 @@ impl RemoteStorage for LocalFs {
 
     async fn time_travel_recover(
         &self,
-        _prefix: &RemotePath,
+        _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
     ) -> anyhow::Result<()> {
         unimplemented!()

@@ -607,7 +607,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn time_travel_recover(
         &self,
-        prefix: &RemotePath,
+        prefix: Option<&RemotePath>,
         timestamp: SystemTime,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::TimeTravel;
@@ -615,11 +615,16 @@ impl RemoteStorage for S3Bucket {
 
         let timestamp = DateTime::from(timestamp);
 
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let prefix = prefix
+            .map(|p| self.relative_path_to_s3_object(p))
+            .or_else(|| self.prefix_in_bucket.clone());
+
         let list = self
             .client
             .list_object_versions()
             .bucket(self.bucket_name.clone())
-            .prefix(self.relative_path_to_s3_object(prefix))
+            .set_prefix(prefix.clone())
             .send()
             .await?;
 
@@ -639,7 +644,7 @@ impl RemoteStorage for S3Bucket {
             }
             let (Some(version_id), Some(key)) = (&version.version_id, &version.key) else {
                 tracing::warn!(
-                    "ListObjects for prefix {prefix} did not yield key or version_id: {version:?}"
+                    "ListObjects for prefix {prefix:?} did not yield key or version_id: {version:?}"
                 );
                 continue;
             };

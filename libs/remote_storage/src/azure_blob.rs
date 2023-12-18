@@ -326,7 +326,7 @@ impl RemoteStorage for AzureBlobStorage {
 
     async fn time_travel_recover(
         &self,
-        _prefix: &RemotePath,
+        _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
     ) -> anyhow::Result<()> {
         // TODO use Azure point in time recovery feature for this

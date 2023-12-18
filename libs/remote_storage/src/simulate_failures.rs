@@ -29,7 +29,7 @@ enum RemoteOp {
     Download(RemotePath),
     Delete(RemotePath),
     DeleteObjects(Vec<RemotePath>),
-    TimeTravelRecover(RemotePath),
+    TimeTravelRecover(Option<RemotePath>),
 }
 
 impl UnreliableWrapper {
@@ -166,10 +166,10 @@ impl RemoteStorage for UnreliableWrapper {
 
     async fn time_travel_recover(
         &self,
-        prefix: &RemotePath,
+        prefix: Option<&RemotePath>,
         timestamp: SystemTime,
     ) -> anyhow::Result<()> {
-        self.attempt(RemoteOp::TimeTravelRecover(prefix.clone()))?;
+        self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))?;
         self.inner.time_travel_recover(prefix, timestamp).await
     }
 }

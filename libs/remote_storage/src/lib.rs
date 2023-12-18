@@ -211,7 +211,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Resets the content of everything with the given prefix to the given state
     async fn time_travel_recover(
         &self,
-        prefix: &RemotePath,
+        prefix: Option<&RemotePath>,
         timestamp: SystemTime,
     ) -> anyhow::Result<()>;
 }
@@ -384,7 +384,7 @@ impl GenericRemoteStorage {
 
     pub async fn time_travel_recover(
         &self,
-        prefix: &RemotePath,
+        prefix: Option<&RemotePath>,
         timestamp: SystemTime,
     ) -> anyhow::Result<()> {
         match self {
