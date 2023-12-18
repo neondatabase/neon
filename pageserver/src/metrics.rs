@@ -2,9 +2,10 @@ use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
@@ -683,14 +684,54 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_is_loading")
 });
 
-/// How long did tenants take to go from construction to active state?
-pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+/// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
+/// like how long it took to load.
+///
+/// Note that these are process-global metrics, _not_ per-tenant metrics.  Per-tenant
+/// metrics are rather expensive, and usually fine grained stuff makes more sense
+/// at a timeline level than tenant level.
+pub(crate) struct TenantMetrics {
+    /// How long did tenants take to go from construction to active state?
+    pub(crate) activation: Histogram,
+    pub(crate) preload: Histogram,
+    pub(crate) attach: Histogram,
+
+    /// How many tenants are included in the initial startup of the pagesrever?
+    pub(crate) startup_scheduled: IntCounter,
+    pub(crate) startup_complete: IntCounter,
+}
+
+pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| {
+    TenantMetrics {
+    activation: register_histogram!(
         "pageserver_tenant_activation_seconds",
         "Time taken by tenants to activate, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
-    .expect("Failed to register pageserver_tenant_activation_seconds metric")
+    .expect("Failed to register metric"),
+    preload: register_histogram!(
+        "pageserver_tenant_preload_seconds",
+        "Time taken by tenants to load remote metadata on startup/attach, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    attach: register_histogram!(
+        "pageserver_tenant_attach_seconds",
+        "Time taken by tenants to intialize, after remote metadata is already loaded",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    startup_scheduled: register_int_counter!(
+        "pageserver_tenant_startup_scheduled",
+        "Number of tenants included in pageserver startup (doesn't count tenants attached later)"
+    ).expect("Failed to register metric"),
+    startup_complete: register_int_counter!(
+        "pageserver_tenant_startup_complete",
+        "Number of tenants that have completed warm-up, or activated on-demand during initial startup: \
+         should eventually reach `pageserver_tenant_startup_scheduled_total`.  Does not include broken \
+         tenants: such cases will lead to this metric never reaching the scheduled count."
+    ).expect("Failed to register metric"),
+}
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
@@ -1270,6 +1311,28 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     )
     .expect("failed to define a metric"),
 });
+pub(crate) struct SecondaryModeMetrics {
+    pub(crate) upload_heatmap: IntCounter,
+    pub(crate) upload_heatmap_errors: IntCounter,
+    pub(crate) upload_heatmap_duration: Histogram,
+}
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+    upload_heatmap: register_int_counter!(
+        "pageserver_secondary_upload_heatmap",
+        "Number of heatmaps written to remote storage by attached tenants"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_errors: register_int_counter!(
+        "pageserver_secondary_upload_heatmap_errors",
+        "Failures writing heatmap to remote storage"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_duration: register_histogram!(
+        "pageserver_secondary_upload_heatmap_duration",
+        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+    )
+    .expect("failed to define a metric"),
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
@@ -1321,25 +1384,16 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_start_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls started",
-            &["task"],
-        )
-        .unwrap()
-    });
-
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_finish_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
-            &["task"],
-        )
-        .unwrap()
-    });
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_background_loop_semaphore_wait_start_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls started",
+        "pageserver_background_loop_semaphore_wait_finish_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+        &["task"],
+    )
+    .unwrap()
+});
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -2198,6 +2252,9 @@ pub fn preinitialize_metrics() {
 
     // Deletion queue stats
     Lazy::force(&DELETION_QUEUE);
+
+    // Tenant stats
+    Lazy::force(&TENANT);
 
     // Tenant manager stats
     Lazy::force(&TENANT_MANAGER);

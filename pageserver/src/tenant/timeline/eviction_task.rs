@@ -30,7 +30,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        tasks::{BackgroundLoopKind, RateLimitError},
+        tasks::BackgroundLoopKind,
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -158,15 +158,15 @@ impl Timeline {
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
-        let _permit = match crate::tenant::tasks::concurrent_background_tasks_rate_limit(
+        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
             BackgroundLoopKind::Eviction,
             ctx,
-            cancel,
-        )
-        .await
-        {
-            Ok(permit) => permit,
-            Err(RateLimitError::Cancelled) => return ControlFlow::Break(()),
+        );
+
+        let _permit = tokio::select! {
+            permit = acquire_permit => permit,
+            _ = cancel.cancelled() => return ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
         };
 
         // If we evict layers but keep cached values derived from those layers, then
@@ -212,11 +212,21 @@ impl Timeline {
         // Gather layers for eviction.
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
         // We don't want to hold the layer map lock during eviction.
+
         // So, we just need to deal with this.
-        let candidates: Vec<_> = {
+
+        let remote_client = match self.remote_client.as_ref() {
+            Some(c) => c,
+            None => {
+                error!("no remote storage configured, cannot evict layers");
+                return ControlFlow::Continue(());
+            }
+        };
+
+        let mut js = tokio::task::JoinSet::new();
+        {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
-            let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
 
@@ -262,54 +272,49 @@ impl Timeline {
                         continue;
                     }
                 };
+                let layer = guard.drop_eviction_guard();
                 if no_activity_for > p.threshold {
-                    candidates.push(guard.drop_eviction_guard())
+                    let remote_client = remote_client.clone();
+                    // this could cause a lot of allocations in some cases
+                    js.spawn(async move { layer.evict_and_wait(&remote_client).await });
+                    stats.candidates += 1;
                 }
             }
-            candidates
-        };
-        stats.candidates = candidates.len();
-
-        let remote_client = match self.remote_client.as_ref() {
-            None => {
-                error!(
-                    num_candidates = candidates.len(),
-                    "no remote storage configured, cannot evict layers"
-                );
-                return ControlFlow::Continue(());
-            }
-            Some(c) => c,
         };
 
-        let results = match self.evict_layer_batch(remote_client, &candidates).await {
-            Err(pre_err) => {
-                stats.errors += candidates.len();
-                error!("could not do any evictions: {pre_err:#}");
-                return ControlFlow::Continue(());
+        let join_all = async move {
+            while let Some(next) = js.join_next().await {
+                match next {
+                    Ok(Ok(())) => stats.evicted += 1,
+                    Ok(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
+                        stats.not_evictable += 1;
+                    }
+                    Err(je) if je.is_cancelled() => unreachable!("not used"),
+                    Err(je) if je.is_panic() => {
+                        /* already logged */
+                        stats.errors += 1;
+                    }
+                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
+                }
             }
-            Ok(results) => results,
+            stats
         };
-        assert_eq!(results.len(), candidates.len());
-        for result in results {
-            match result {
-                None => {
-                    stats.skipped_for_shutdown += 1;
-                }
-                Some(Ok(())) => {
-                    stats.evicted += 1;
-                }
-                Some(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
-                    stats.not_evictable += 1;
+
+        tokio::select! {
+            stats = join_all => {
+                if stats.candidates == stats.not_evictable {
+                    debug!(stats=?stats, "eviction iteration complete");
+                } else if stats.errors > 0 || stats.not_evictable > 0 {
+                    warn!(stats=?stats, "eviction iteration complete");
+                } else {
+                    info!(stats=?stats, "eviction iteration complete");
                 }
             }
+            _ = cancel.cancelled() => {
+                // just drop the joinset to "abort"
+            }
         }
-        if stats.candidates == stats.not_evictable {
-            debug!(stats=?stats, "eviction iteration complete");
-        } else if stats.errors > 0 || stats.not_evictable > 0 {
-            warn!(stats=?stats, "eviction iteration complete");
-        } else {
-            info!(stats=?stats, "eviction iteration complete");
-        }
+
         ControlFlow::Continue(())
     }
 

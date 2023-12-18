@@ -1,11 +1,12 @@
-use crate::repository::{key_range_size, singleton_range, Key};
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
+
+use crate::key::Key;
 
 ///
 /// Represents a set of Keys, in a compact form.
 ///
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeySpace {
     /// Contiguous ranges of keys that belong to the key space. In key order,
     /// and with no overlap.
@@ -184,6 +185,33 @@ impl KeySpaceRandomAccum {
         }
         KeySpace { ranges }
     }
+}
+
+pub fn key_range_size(key_range: &Range<Key>) -> u32 {
+    let start = key_range.start;
+    let end = key_range.end;
+
+    if end.field1 != start.field1
+        || end.field2 != start.field2
+        || end.field3 != start.field3
+        || end.field4 != start.field4
+    {
+        return u32::MAX;
+    }
+
+    let start = (start.field5 as u64) << 32 | start.field6 as u64;
+    let end = (end.field5 as u64) << 32 | end.field6 as u64;
+
+    let diff = end - start;
+    if diff > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        diff as u32
+    }
+}
+
+pub fn singleton_range(key: Key) -> Range<Key> {
+    key..key.next()
 }
 
 #[cfg(test)]

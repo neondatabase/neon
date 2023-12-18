@@ -457,6 +457,8 @@ struct LayerInner {
     /// For loaded layers, this may be some other value if the tenant has undergone
     /// a shard split since the layer was originally written.
     shard: ShardIndex,
+
+    last_evicted_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -587,6 +589,7 @@ impl LayerInner {
             consecutive_failures: AtomicUsize::new(0),
             generation,
             shard,
+            last_evicted_at: std::sync::Mutex::default(),
         }
     }
 
@@ -722,6 +725,14 @@ impl LayerInner {
                     permit
                 };
 
+                let since_last_eviction =
+                    self.last_evicted_at.lock().unwrap().map(|ts| ts.elapsed());
+                if let Some(since_last_eviction) = since_last_eviction {
+                    // FIXME: this will not always be recorded correctly until #6028 (the no
+                    // download needed branch above)
+                    LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
+                }
+
                 let res = Arc::new(DownloadedLayer {
                     owner: Arc::downgrade(self),
                     kind: tokio::sync::OnceCell::default(),
@@ -851,6 +862,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
+                    &crate::task_mgr::shutdown_token()
                 )
                 .await;
 
@@ -1116,6 +1128,8 @@ impl LayerInner {
 
         // we are still holding the permit, so no new spawn_download_and_wait can happen
         drop(self.status.send(Status::Evicted));
+
+        *self.last_evicted_at.lock().unwrap() = Some(std::time::Instant::now());
 
         res
     }
@@ -1421,6 +1435,7 @@ pub(crate) struct LayerImplMetrics {
 
     rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
     inits_cancelled: metrics::core::GenericCounter<metrics::core::AtomicU64>,
+    redownload_after: metrics::Histogram,
 }
 
 impl Default for LayerImplMetrics {
@@ -1496,6 +1511,26 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
+        let redownload_after = {
+            let minute = 60.0;
+            let hour = 60.0 * minute;
+            metrics::register_histogram!(
+                "pageserver_layer_redownloaded_after",
+                "Time between evicting and re-downloading.",
+                vec![
+                    10.0,
+                    30.0,
+                    minute,
+                    5.0 * minute,
+                    15.0 * minute,
+                    30.0 * minute,
+                    hour,
+                    12.0 * hour,
+                ]
+            )
+            .unwrap()
+        };
+
         Self {
             started_evictions,
             completed_evictions,
@@ -1507,6 +1542,7 @@ impl Default for LayerImplMetrics {
 
             rare_counters,
             inits_cancelled,
+            redownload_after,
         }
     }
 }
@@ -1573,6 +1609,10 @@ impl LayerImplMetrics {
 
     fn inc_init_cancelled(&self) {
         self.inits_cancelled.inc()
+    }
+
+    fn record_redownloaded_after(&self, duration: std::time::Duration) {
+        self.redownload_after.observe(duration.as_secs_f64())
     }
 }
 

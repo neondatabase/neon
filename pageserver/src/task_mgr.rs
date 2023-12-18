@@ -258,6 +258,9 @@ pub enum TaskKind {
     /// See [`crate::disk_usage_eviction_task`].
     DiskUsageEviction,
 
+    /// See [`crate::tenant::secondary`].
+    SecondaryUploads,
+
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 
@@ -558,9 +561,14 @@ pub async fn shutdown_watcher() {
 /// cancelled. It can however be moved to other tasks, such as `tokio::task::spawn_blocking` or
 /// `tokio::task::JoinSet::spawn`.
 pub fn shutdown_token() -> CancellationToken {
-    SHUTDOWN_TOKEN
-        .try_with(|t| t.clone())
-        .expect("shutdown_token() called in an unexpected task or thread")
+    let res = SHUTDOWN_TOKEN.try_with(|t| t.clone());
+
+    if cfg!(test) {
+        // in tests this method is called from non-taskmgr spawned tasks, and that is all ok.
+        res.unwrap_or_default()
+    } else {
+        res.expect("shutdown_token() called in an unexpected task or thread")
+    }
 }
 
 /// Has the current task been requested to shut down?

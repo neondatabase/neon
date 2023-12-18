@@ -29,7 +29,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{id::TenantTimelineId, sync::gate::Gate};
+use utils::sync::gate::Gate;
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
@@ -51,7 +51,7 @@ use crate::tenant::storage_layer::{
     LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
     ValueReconstructState,
 };
-use crate::tenant::tasks::{BackgroundLoopKind, RateLimitError};
+use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -98,8 +98,9 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::remote_timeline_client::index::IndexPart;
+use super::remote_timeline_client::index::{IndexLayerMetadata, IndexPart};
 use super::remote_timeline_client::RemoteTimelineClient;
+use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -377,9 +378,6 @@ pub enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
-    /// The operation would require downloading a layer that is missing locally.
-    NeedsDownload(TenantTimelineId, LayerFileName),
-
     /// The operation was cancelled
     Cancelled,
 
@@ -408,14 +406,6 @@ impl std::fmt::Debug for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
-                write!(
-                    f,
-                    "layer {}/{} needs download",
-                    tenant_timeline_id,
-                    layer_file_name.file_name()
-                )
-            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::AncestorStopping(timeline_id) => {
                 write!(f, "ancestor timeline {timeline_id} is being stopped")
@@ -429,14 +419,6 @@ impl std::fmt::Display for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
-                write!(
-                    f,
-                    "layer {}/{} needs download",
-                    tenant_timeline_id,
-                    layer_file_name.file_name()
-                )
-            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::AncestorStopping(timeline_id) => {
                 write!(f, "ancestor timeline {timeline_id} is being stopped")
@@ -462,6 +444,12 @@ pub enum GetLogicalSizePriority {
 #[derive(enumset::EnumSetType)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
+}
+
+impl std::fmt::Debug for Timeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Timeline<{}>", self.timeline_id)
+    }
 }
 
 /// Public interface functions
@@ -727,19 +715,27 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        let _g = self.compaction_lock.lock().await;
+        // most likely the cancellation token is from background task, but in tests it could be the
+        // request task as well.
+
+        let prepare = async move {
+            let guard = self.compaction_lock.lock().await;
+
+            let permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
+                BackgroundLoopKind::Compaction,
+                ctx,
+            )
+            .await;
+
+            (guard, permit)
+        };
 
         // this wait probably never needs any "long time spent" logging, because we already nag if
         // compaction task goes over it's period (20s) which is quite often in production.
-        let _permit = match super::tasks::concurrent_background_tasks_rate_limit(
-            BackgroundLoopKind::Compaction,
-            ctx,
-            cancel,
-        )
-        .await
-        {
-            Ok(permit) => permit,
-            Err(RateLimitError::Cancelled) => return Ok(()),
+        let (_guard, _permit) = tokio::select! {
+            tuple = prepare => { tuple },
+            _ = self.cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Ok(()),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1118,8 +1114,9 @@ impl Timeline {
         Ok(Some(true))
     }
 
-    /// Like [`evict_layer_batch`](Self::evict_layer_batch), but for just one layer.
-    /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
+    /// Evict just one layer.
+    ///
+    /// Returns `Ok(None)` in the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let _gate = self
             .gate
@@ -1130,108 +1127,16 @@ impl Timeline {
             return Ok(None);
         };
 
-        let Some(local_layer) = local_layer.keep_resident().await? else {
-            return Ok(Some(false));
-        };
-
-        let local_layer: Layer = local_layer.into();
-
-        let remote_client = self
+        let rtc = self
             .remote_client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
 
-        let results = self
-            .evict_layer_batch(remote_client, &[local_layer])
-            .await?;
-        assert_eq!(results.len(), 1);
-        let result: Option<Result<(), EvictionError>> = results.into_iter().next().unwrap();
-        match result {
-            None => anyhow::bail!("task_mgr shutdown requested"),
-            Some(Ok(())) => Ok(Some(true)),
-            Some(Err(e)) => Err(anyhow::Error::new(e)),
+        match local_layer.evict_and_wait(rtc).await {
+            Ok(()) => Ok(Some(true)),
+            Err(EvictionError::NotFound) => Ok(Some(false)),
+            Err(EvictionError::Downloaded) => Ok(Some(false)),
         }
-    }
-
-    /// Evict a batch of layers.
-    pub(crate) async fn evict_layers(
-        &self,
-        layers_to_evict: &[Layer],
-    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        let _gate = self
-            .gate
-            .enter()
-            .map_err(|_| anyhow::anyhow!("Shutting down"))?;
-
-        let remote_client = self
-            .remote_client
-            .as_ref()
-            .context("timeline must have RemoteTimelineClient")?;
-
-        self.evict_layer_batch(remote_client, layers_to_evict).await
-    }
-
-    /// Evict multiple layers at once, continuing through errors.
-    ///
-    /// The `remote_client` should be this timeline's `self.remote_client`.
-    /// We make the caller provide it so that they are responsible for handling the case
-    /// where someone wants to evict the layer but no remote storage is configured.
-    ///
-    /// Returns either `Err()` or `Ok(results)` where `results.len() == layers_to_evict.len()`.
-    /// If `Err()` is returned, no eviction was attempted.
-    /// Each position of `Ok(results)` corresponds to the layer in `layers_to_evict`.
-    /// Meaning of each `result[i]`:
-    /// - `Some(Err(...))` if layer replacement failed for some reason
-    ///    - replacement failed for an expectable reason (e.g., layer removed by GC before we grabbed all locks)
-    /// - `Some(Ok(()))` if everything went well.
-    /// - `None` if no eviction attempt was made for the layer because `cancel.is_cancelled() == true`.
-    async fn evict_layer_batch(
-        &self,
-        remote_client: &Arc<RemoteTimelineClient>,
-        layers_to_evict: &[Layer],
-    ) -> anyhow::Result<Vec<Option<Result<(), EvictionError>>>> {
-        {
-            // to avoid racing with detach and delete_timeline
-            let state = self.current_state();
-            anyhow::ensure!(
-                state == TimelineState::Active,
-                "timeline is not active but {state:?}"
-            );
-        }
-
-        let mut results = Vec::with_capacity(layers_to_evict.len());
-        for _ in 0..layers_to_evict.len() {
-            results.push(None);
-        }
-
-        let mut js = tokio::task::JoinSet::new();
-
-        for (i, l) in layers_to_evict.iter().enumerate() {
-            js.spawn({
-                let l = l.to_owned();
-                let remote_client = remote_client.clone();
-                async move { (i, l.evict_and_wait(&remote_client).await) }
-            });
-        }
-
-        let join = async {
-            while let Some(next) = js.join_next().await {
-                match next {
-                    Ok((i, res)) => results[i] = Some(res),
-                    Err(je) if je.is_cancelled() => unreachable!("not used"),
-                    Err(je) if je.is_panic() => { /* already logged */ }
-                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
-                }
-            }
-        };
-
-        tokio::select! {
-            _ = self.cancel.cancelled() => {},
-            _ = join => {}
-        }
-
-        assert_eq!(results.len(), layers_to_evict.len());
-        Ok(results)
     }
 }
 
@@ -1829,6 +1734,7 @@ impl Timeline {
                 self.current_logical_size.current_size().accuracy(),
                 logical_size::Accuracy::Exact,
             );
+            self.current_logical_size.initialized.add_permits(1);
             return;
         };
 
@@ -1874,6 +1780,11 @@ impl Timeline {
         cancel: CancellationToken,
         background_ctx: RequestContext,
     ) {
+        scopeguard::defer! {
+            // Irrespective of the outcome of this operation, we should unblock anyone waiting for it.
+            self.current_logical_size.initialized.add_permits(1);
+        }
+
         enum BackgroundCalculationError {
             Cancelled,
             Other(anyhow::Error),
@@ -1885,22 +1796,22 @@ impl Timeline {
             let skip_concurrency_limiter = &skip_concurrency_limiter;
             async move {
                 let cancel = task_mgr::shutdown_token();
-                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit(
+                let wait_for_permit = super::tasks::concurrent_background_tasks_rate_limit_permit(
                     BackgroundLoopKind::InitialLogicalSizeCalculation,
                     background_ctx,
-                    &cancel,
                 );
 
                 use crate::metrics::initial_logical_size::StartCircumstances;
                 let (_maybe_permit, circumstances) = tokio::select! {
-                    res = wait_for_permit => {
-                        match res {
-                            Ok(permit) => (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit),
-                            Err(RateLimitError::Cancelled) => {
-                                return Err(BackgroundCalculationError::Cancelled);
-                            }
-                        }
+                    permit = wait_for_permit => {
+                        (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
+                    _ = self_ref.cancel.cancelled() => {
+                        return Err(BackgroundCalculationError::Cancelled);
+                    }
+                    _ = cancel.cancelled() => {
+                        return Err(BackgroundCalculationError::Cancelled);
+                    },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
                         // => break out of the rate limit
@@ -2164,6 +2075,55 @@ impl Timeline {
         }
 
         None
+    }
+
+    /// The timeline heatmap is a hint to secondary locations from the primary location,
+    /// indicating which layers are currently on-disk on the primary.
+    ///
+    /// None is returned if the Timeline is in a state where uploading a heatmap
+    /// doesn't make sense, such as shutting down or initializing.  The caller
+    /// should treat this as a cue to simply skip doing any heatmap uploading
+    /// for this timeline.
+    pub(crate) async fn generate_heatmap(&self) -> Option<HeatMapTimeline> {
+        let eviction_info = self.get_local_layers_for_disk_usage_eviction().await;
+
+        let remote_client = match &self.remote_client {
+            Some(c) => c,
+            None => return None,
+        };
+
+        let layer_file_names = eviction_info
+            .resident_layers
+            .iter()
+            .map(|l| l.layer.layer_desc().filename())
+            .collect::<Vec<_>>();
+
+        let decorated = match remote_client.get_layers_metadata(layer_file_names) {
+            Ok(d) => d,
+            Err(_) => {
+                // Getting metadata only fails on Timeline in bad state.
+                return None;
+            }
+        };
+
+        let heatmap_layers = std::iter::zip(
+            eviction_info.resident_layers.into_iter(),
+            decorated.into_iter(),
+        )
+        .filter_map(|(layer, remote_info)| {
+            remote_info.map(|remote_info| {
+                HeatMapLayer::new(
+                    layer.layer.layer_desc().filename(),
+                    IndexLayerMetadata::from(remote_info),
+                    layer.last_activity_ts,
+                )
+            })
+        });
+
+        Some(HeatMapTimeline::new(
+            self.timeline_id,
+            heatmap_layers.collect(),
+        ))
     }
 }
 
@@ -3150,6 +3110,32 @@ impl Timeline {
 
         Ok(image_layers)
     }
+
+    /// Wait until the background initial logical size calculation is complete, or
+    /// this Timeline is shut down.  Calling this function will cause the initial
+    /// logical size calculation to skip waiting for the background jobs barrier.
+    pub(crate) async fn await_initial_logical_size(self: Arc<Self>) {
+        if let Some(await_bg_cancel) = self
+            .current_logical_size
+            .cancel_wait_for_background_loop_concurrency_limit_semaphore
+            .get()
+        {
+            await_bg_cancel.cancel();
+        } else {
+            // We should not wait if we were not able to explicitly instruct
+            // the logical size cancellation to skip the concurrency limit semaphore.
+            // TODO: this is an unexpected case.  We should restructure so that it
+            // can't happen.
+            tracing::info!(
+                "await_initial_logical_size: can't get semaphore cancel token, skipping"
+            );
+        }
+
+        tokio::select!(
+            _ = self.current_logical_size.initialized.acquire() => {},
+            _ = self.cancel.cancelled() => {}
+        )
+    }
 }
 
 #[derive(Default)]
@@ -3906,7 +3892,14 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
-        let _g = self.gc_lock.lock().await;
+        // this is most likely the background tasks, but it might be the spawned task from
+        // immediate_gc
+        let cancel = crate::task_mgr::shutdown_token();
+        let _g = tokio::select! {
+            guard = self.gc_lock.lock() => guard,
+            _ = self.cancel.cancelled() => return Ok(GcResult::default()),
+            _ = cancel.cancelled() => return Ok(GcResult::default()),
+        };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
@@ -4605,7 +4598,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rc = timeline
+        let rtc = timeline
             .remote_client
             .clone()
             .expect("just configured this");
@@ -4618,16 +4611,12 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let batch = [layer];
-
-        let first = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
-        let second = async { timeline.evict_layer_batch(&rc, &batch).await.unwrap() };
+        let first = async { layer.evict_and_wait(&rtc).await };
+        let second = async { layer.evict_and_wait(&rtc).await };
 
         let (first, second) = tokio::join!(first, second);
 
-        let (first, second) = (only_one(first), only_one(second));
-
-        let res = batch[0].keep_resident().await;
+        let res = layer.keep_resident().await;
         assert!(matches!(res, Ok(None)), "{res:?}");
 
         match (first, second) {
@@ -4646,14 +4635,6 @@ mod tests {
         use crate::context::*;
         use crate::task_mgr::*;
         RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error)
-    }
-
-    fn only_one<T>(mut input: Vec<Option<T>>) -> T {
-        assert_eq!(1, input.len());
-        input
-            .pop()
-            .expect("length just checked")
-            .expect("no cancellation")
     }
 
     async fn find_some_layer(timeline: &Timeline) -> Layer {

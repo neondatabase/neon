@@ -120,15 +120,20 @@ fn main() -> Result<()> {
         let mut env = LocalEnv::load_config().context("Error loading config")?;
         let original_env = env.clone();
 
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
         let subcommand_result = match sub_name {
-            "tenant" => handle_tenant(sub_args, &mut env),
-            "timeline" => handle_timeline(sub_args, &mut env),
-            "start" => handle_start_all(sub_args, &env),
+            "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
+            "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
+            "start" => rt.block_on(handle_start_all(sub_args, &env)),
             "stop" => handle_stop_all(sub_args, &env),
-            "pageserver" => handle_pageserver(sub_args, &env),
-            "attachment_service" => handle_attachment_service(sub_args, &env),
-            "safekeeper" => handle_safekeeper(sub_args, &env),
-            "endpoint" => handle_endpoint(sub_args, &env),
+            "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
+            "attachment_service" => rt.block_on(handle_attachment_service(sub_args, &env)),
+            "safekeeper" => rt.block_on(handle_safekeeper(sub_args, &env)),
+            "endpoint" => rt.block_on(handle_endpoint(sub_args, &env)),
             "mappings" => handle_mappings(sub_args, &mut env),
             "pg" => bail!("'pg' subcommand has been renamed to 'endpoint'"),
             _ => bail!("unexpected subcommand {sub_name}"),
@@ -269,12 +274,13 @@ fn print_timeline(
 
 /// Returns a map of timeline IDs to timeline_id@lsn strings.
 /// Connects to the pageserver to query this information.
-fn get_timeline_infos(
+async fn get_timeline_infos(
     env: &local_env::LocalEnv,
     tenant_id: &TenantId,
 ) -> Result<HashMap<TimelineId, TimelineInfo>> {
     Ok(get_default_pageserver(env)
-        .timeline_list(tenant_id)?
+        .timeline_list(tenant_id)
+        .await?
         .into_iter()
         .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
         .collect())
@@ -373,11 +379,14 @@ fn pageserver_config_overrides(init_match: &ArgMatches) -> Vec<&str> {
         .collect()
 }
 
-fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_tenant(
+    tenant_match: &ArgMatches,
+    env: &mut local_env::LocalEnv,
+) -> anyhow::Result<()> {
     let pageserver = get_default_pageserver(env);
     match tenant_match.subcommand() {
         Some(("list", _)) => {
-            for t in pageserver.tenant_list()? {
+            for t in pageserver.tenant_list().await? {
                 println!("{} {:?}", t.id, t.state);
             }
         }
@@ -394,12 +403,16 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 // We must register the tenant with the attachment service, so
                 // that when the pageserver restarts, it will be re-attached.
                 let attachment_service = AttachmentService::from_env(env);
-                attachment_service.attach_hook(tenant_id, pageserver.conf.id)?
+                attachment_service
+                    .attach_hook(tenant_id, pageserver.conf.id)
+                    .await?
             } else {
                 None
             };
 
-            pageserver.tenant_create(tenant_id, generation, tenant_conf)?;
+            pageserver
+                .tenant_create(tenant_id, generation, tenant_conf)
+                .await?;
             println!("tenant {tenant_id} successfully created on the pageserver");
 
             // Create an initial timeline for the new tenant
@@ -409,14 +422,16 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let timeline_info = pageserver.timeline_create(
-                tenant_id,
-                new_timeline_id,
-                None,
-                None,
-                Some(pg_version),
-                None,
-            )?;
+            let timeline_info = pageserver
+                .timeline_create(
+                    tenant_id,
+                    new_timeline_id,
+                    None,
+                    None,
+                    Some(pg_version),
+                    None,
+                )
+                .await?;
             let new_timeline_id = timeline_info.timeline_id;
             let last_record_lsn = timeline_info.last_record_lsn;
 
@@ -450,6 +465,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
 
             pageserver
                 .tenant_config(tenant_id, tenant_conf)
+                .await
                 .with_context(|| format!("Tenant config failed for tenant with id {tenant_id}"))?;
             println!("tenant {tenant_id} successfully configured on the pageserver");
         }
@@ -458,7 +474,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             let new_pageserver = get_pageserver(env, matches)?;
             let new_pageserver_id = new_pageserver.conf.id;
 
-            migrate_tenant(env, tenant_id, new_pageserver)?;
+            migrate_tenant(env, tenant_id, new_pageserver).await?;
             println!("tenant {tenant_id} migrated to {}", new_pageserver_id);
         }
 
@@ -468,13 +484,13 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
     Ok(())
 }
 
-fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
+async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
     let pageserver = get_default_pageserver(env);
 
     match timeline_match.subcommand() {
         Some(("list", list_match)) => {
             let tenant_id = get_tenant_id(list_match, env)?;
-            let timelines = pageserver.timeline_list(&tenant_id)?;
+            let timelines = pageserver.timeline_list(&tenant_id).await?;
             print_timelines_tree(timelines, env.timeline_name_mappings())?;
         }
         Some(("create", create_match)) => {
@@ -490,14 +506,16 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
 
             let new_timeline_id_opt = parse_timeline_id(create_match)?;
 
-            let timeline_info = pageserver.timeline_create(
-                tenant_id,
-                new_timeline_id_opt,
-                None,
-                None,
-                Some(pg_version),
-                None,
-            )?;
+            let timeline_info = pageserver
+                .timeline_create(
+                    tenant_id,
+                    new_timeline_id_opt,
+                    None,
+                    None,
+                    Some(pg_version),
+                    None,
+                )
+                .await?;
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -542,7 +560,9 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
 
             let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
-            pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)?;
+            pageserver
+                .timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)
+                .await?;
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
             println!("Creating endpoint for imported timeline ...");
@@ -578,14 +598,16 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
-            let timeline_info = pageserver.timeline_create(
-                tenant_id,
-                None,
-                start_lsn,
-                Some(ancestor_timeline_id),
-                None,
-                None,
-            )?;
+            let timeline_info = pageserver
+                .timeline_create(
+                    tenant_id,
+                    None,
+                    start_lsn,
+                    Some(ancestor_timeline_id),
+                    None,
+                    None,
+                )
+                .await?;
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
@@ -604,7 +626,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
     Ok(())
 }
 
-fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let (sub_name, sub_args) = match ep_match.subcommand() {
         Some(ep_subcommand_data) => ep_subcommand_data,
         None => bail!("no endpoint subcommand provided"),
@@ -614,10 +636,12 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
     match sub_name {
         "list" => {
             let tenant_id = get_tenant_id(sub_args, env)?;
-            let timeline_infos = get_timeline_infos(env, &tenant_id).unwrap_or_else(|e| {
-                eprintln!("Failed to load timeline info: {}", e);
-                HashMap::new()
-            });
+            let timeline_infos = get_timeline_infos(env, &tenant_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to load timeline info: {}", e);
+                    HashMap::new()
+                });
 
             let timeline_name_mappings = env.timeline_name_mappings();
 
@@ -791,7 +815,9 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
             };
 
             println!("Starting existing endpoint {endpoint_id}...");
-            endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
+            endpoint
+                .start(&auth_token, safekeepers, remote_ext_config)
+                .await?;
         }
         "reconfigure" => {
             let endpoint_id = sub_args
@@ -809,7 +835,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 } else {
                     None
                 };
-            endpoint.reconfigure(pageserver_id)?;
+            endpoint.reconfigure(pageserver_id).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -875,11 +901,12 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
     ))
 }
 
-fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
             if let Err(e) = get_pageserver(env, subcommand_args)?
                 .start(&pageserver_config_overrides(subcommand_args))
+                .await
             {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
@@ -906,7 +933,10 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+            if let Err(e) = pageserver
+                .start(&pageserver_config_overrides(subcommand_args))
+                .await
+            {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -920,14 +950,17 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start(&pageserver_config_overrides(subcommand_args)) {
+            if let Err(e) = pageserver
+                .start(&pageserver_config_overrides(subcommand_args))
+                .await
+            {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
         }
 
         Some(("status", subcommand_args)) => {
-            match get_pageserver(env, subcommand_args)?.check_status() {
+            match get_pageserver(env, subcommand_args)?.check_status().await {
                 Ok(_) => println!("Page server is up and running"),
                 Err(err) => {
                     eprintln!("Page server is not available: {}", err);
@@ -942,11 +975,14 @@ fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
-fn handle_attachment_service(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_attachment_service(
+    sub_match: &ArgMatches,
+    env: &local_env::LocalEnv,
+) -> Result<()> {
     let svc = AttachmentService::from_env(env);
     match sub_match.subcommand() {
         Some(("start", _start_match)) => {
-            if let Err(e) = svc.start() {
+            if let Err(e) = svc.start().await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
@@ -987,7 +1023,7 @@ fn safekeeper_extra_opts(init_match: &ArgMatches) -> Vec<String> {
         .collect()
 }
 
-fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let (sub_name, sub_args) = match sub_match.subcommand() {
         Some(safekeeper_command_data) => safekeeper_command_data,
         None => bail!("no safekeeper subcommand provided"),
@@ -1005,7 +1041,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
         "start" => {
             let extra_opts = safekeeper_extra_opts(sub_args);
 
-            if let Err(e) = safekeeper.start(extra_opts) {
+            if let Err(e) = safekeeper.start(extra_opts).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1031,7 +1067,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
             }
 
             let extra_opts = safekeeper_extra_opts(sub_args);
-            if let Err(e) = safekeeper.start(extra_opts) {
+            if let Err(e) = safekeeper.start(extra_opts).await {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1044,15 +1080,15 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
     Ok(())
 }
 
-fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
-    broker::start_broker_process(env)?;
+    broker::start_broker_process(env).await?;
 
     // Only start the attachment service if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let attachment_service = AttachmentService::from_env(env);
-        if let Err(e) = attachment_service.start() {
+        if let Err(e) = attachment_service.start().await {
             eprintln!("attachment_service start failed: {:#}", e);
             try_stop_all(env, true);
             exit(1);
@@ -1061,7 +1097,10 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver.start(&pageserver_config_overrides(sub_match)) {
+        if let Err(e) = pageserver
+            .start(&pageserver_config_overrides(sub_match))
+            .await
+        {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true);
             exit(1);
@@ -1070,7 +1109,7 @@ fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start(vec![]) {
+        if let Err(e) = safekeeper.start(vec![]).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false);
             exit(1);

@@ -28,20 +28,18 @@ use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
-use super::models::{
-    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
-    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
-};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
+use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
@@ -49,6 +47,10 @@ use crate::tenant::timeline::Timeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
+use pageserver_api::models::{
+    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
+    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
+};
 use utils::{
     auth::SwappableJwtAuth,
     generation::Generation,
@@ -64,7 +66,12 @@ use utils::{
 };
 
 // Imports only used for testing APIs
-use super::models::ConfigureFailpointsRequest;
+use pageserver_api::models::ConfigureFailpointsRequest;
+
+// For APIs that require an Active tenant, how long should we block waiting for that state?
+// This is not functionally necessary (clients will retry), but avoids generating a lot of
+// failed API calls while tenants are activating.
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 pub struct State {
     conf: &'static PageServerConf,
@@ -75,9 +82,11 @@ pub struct State {
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
+    secondary_controller: SecondaryController,
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
@@ -86,6 +95,7 @@ impl State {
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
+        secondary_controller: SecondaryController,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml", "/metrics"]
             .iter()
@@ -100,6 +110,7 @@ impl State {
             broker_client,
             disk_usage_eviction_state,
             deletion_queue_client,
+            secondary_controller,
         })
     }
 
@@ -136,11 +147,6 @@ impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
             PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
-            PageReconstructError::NeedsDownload(_, _) => {
-                // This shouldn't happen, because we use a RequestContext that requests to
-                // download any missing layer files on-demand.
-                ApiError::InternalServerError(anyhow::anyhow!("need to download remote layer file"))
-            }
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
@@ -229,6 +235,19 @@ impl From<GetTenantError> for ApiError {
                 ApiError::ResourceUnavailable("Tenant not yet active".into())
             }
             GetTenantError::MapState(e) => ApiError::ResourceUnavailable(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<GetActiveTenantError> for ApiError {
+    fn from(e: GetActiveTenantError) -> ApiError {
+        match e {
+            GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
+            GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
+            GetActiveTenantError::NotFound(gte) => gte.into(),
+            GetActiveTenantError::WaitForActiveTimeout { .. } => {
+                ApiError::ResourceUnavailable(format!("{}", e).into())
+            }
         }
     }
 }
@@ -435,7 +454,10 @@ async fn timeline_create_handler(
     let state = get_state(&request);
 
     async {
-        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, true)?;
+        let tenant = state.tenant_manager.get_attached_tenant_shard(tenant_shard_id, false)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         match tenant.create_timeline(
             new_timeline_id,
             request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -453,7 +475,7 @@ async fn timeline_create_handler(
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
-            Err(tenant::CreateTimelineError::AlreadyExists) => {
+            Err(tenant::CreateTimelineError::Conflict | tenant::CreateTimelineError::AlreadyCreating) => {
                 json_response(StatusCode::CONFLICT, ())
             }
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
@@ -694,11 +716,23 @@ async fn timeline_delete_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
     let state = get_state(&request);
 
-    state.tenant_manager.delete_timeline(tenant_shard_id, timeline_id, &ctx)
-        .instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id, false)
+        .map_err(|e| {
+            match e {
+                // GetTenantError has a built-in conversion to ApiError, but in this context we don't
+                // want to treat missing tenants as 404, to avoid ambiguity with successful deletions.
+                GetTenantError::NotFound(_) => ApiError::PreconditionFailed(
+                    "Requested tenant is missing".to_string().into_boxed_str(),
+                ),
+                e => e.into(),
+            }
+        })?;
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+    tenant.delete_timeline(timeline_id).instrument(info_span!("timeline_delete", tenant_id=%tenant_shard_id.tenant_id, shard=%tenant_shard_id.shard_slug(), %timeline_id))
         .await?;
 
     json_response(StatusCode::ACCEPTED, ())
@@ -1136,7 +1170,10 @@ async fn tenant_create_handler(
 
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
-    if let res @ Err(_) = new_tenant.wait_to_become_active().await {
+    if let res @ Err(_) = new_tenant
+        .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
+        .await
+    {
         // This shouldn't happen because we just created the tenant directory
         // in tenant::mgr::create_tenant, and there aren't any remote timelines
         // to load, so, nothing can really fail during load.
@@ -1487,69 +1524,6 @@ async fn timeline_collect_keyspace(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    struct Partitioning {
-        keys: crate::keyspace::KeySpace,
-
-        at_lsn: Lsn,
-    }
-
-    impl serde::Serialize for Partitioning {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeMap;
-            let mut map = serializer.serialize_map(Some(2))?;
-            map.serialize_key("keys")?;
-            map.serialize_value(&KeySpace(&self.keys))?;
-            map.serialize_key("at_lsn")?;
-            map.serialize_value(&WithDisplay(&self.at_lsn))?;
-            map.end()
-        }
-    }
-
-    struct WithDisplay<'a, T>(&'a T);
-
-    impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            serializer.collect_str(&self.0)
-        }
-    }
-
-    struct KeySpace<'a>(&'a crate::keyspace::KeySpace);
-
-    impl<'a> serde::Serialize for KeySpace<'a> {
-        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeSeq;
-            let mut seq = serializer.serialize_seq(Some(self.0.ranges.len()))?;
-            for kr in &self.0.ranges {
-                seq.serialize_element(&KeyRange(kr))?;
-            }
-            seq.end()
-        }
-    }
-
-    struct KeyRange<'a>(&'a std::ops::Range<crate::repository::Key>);
-
-    impl<'a> serde::Serialize for KeyRange<'a> {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            use serde::ser::SerializeTuple;
-            let mut t = serializer.serialize_tuple(2)?;
-            t.serialize_element(&WithDisplay(&self.0.start))?;
-            t.serialize_element(&WithDisplay(&self.0.end))?;
-            t.end()
-        }
-    }
-
     let at_lsn: Option<Lsn> = parse_query_param(&request, "at_lsn")?;
 
     async {
@@ -1561,7 +1535,9 @@ async fn timeline_collect_keyspace(
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
-        json_response(StatusCode::OK, Partitioning { keys, at_lsn })
+        let res = pageserver_api::models::partitioning::Partitioning { keys, at_lsn };
+
+        json_response(StatusCode::OK, res)
     }
     .instrument(info_span!("timeline_collect_keyspace", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
@@ -1593,7 +1569,7 @@ async fn always_panic_handler(
 
 async fn disk_usage_eviction_run(
     mut r: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
 
@@ -1621,57 +1597,48 @@ async fn disk_usage_eviction_run(
         }
     }
 
-    let config = json_request::<Config>(&mut r)
-        .await
-        .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
+    let config = json_request::<Config>(&mut r).await?;
 
     let usage = Usage {
         config,
         freed_bytes: 0,
     };
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
     let state = get_state(&r);
 
-    if state.remote_storage.as_ref().is_none() {
+    let Some(storage) = state.remote_storage.as_ref() else {
         return Err(ApiError::InternalServerError(anyhow::anyhow!(
             "remote storage not configured, cannot run eviction iteration"
         )));
-    }
+    };
 
     let state = state.disk_usage_eviction_state.clone();
 
-    let cancel = CancellationToken::new();
-    let child_cancel = cancel.clone();
-    let _g = cancel.drop_guard();
+    let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
+        &state, storage, usage, &cancel,
+    )
+    .await;
 
-    crate::task_mgr::spawn(
-        crate::task_mgr::BACKGROUND_RUNTIME.handle(),
-        TaskKind::DiskUsageEviction,
-        None,
-        None,
-        "ondemand disk usage eviction",
-        false,
-        async move {
-            let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-                &state,
-                usage,
-                &child_cancel,
-            )
-            .await;
+    info!(?res, "disk_usage_eviction_task_iteration_impl finished");
 
-            info!(?res, "disk_usage_eviction_task_iteration_impl finished");
+    let res = res.map_err(ApiError::InternalServerError)?;
 
-            let _ = tx.send(res);
-            Ok(())
-        }
-        .in_current_span(),
-    );
+    json_response(StatusCode::OK, res)
+}
 
-    let response = rx.await.unwrap().map_err(ApiError::InternalServerError)?;
+async fn secondary_upload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    state
+        .secondary_controller
+        .upload_tenant(tenant_shard_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
-    json_response(StatusCode::OK, response)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1933,6 +1900,9 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
         )
+        .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
+            api_handler(r, secondary_upload_handler)
+        })
         .put("/v1/disk_usage_eviction/run", |r| {
             api_handler(r, disk_usage_eviction_run)
         })

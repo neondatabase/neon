@@ -41,6 +41,8 @@ use crate::{
     TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
+use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
+
 pub mod defaults {
     use crate::tenant::config::defaults::*;
     use const_format::formatcp;
@@ -61,6 +63,8 @@ pub mod defaults {
 
     pub const DEFAULT_LOG_FORMAT: &str = "plain";
 
+    pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
+
     pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
@@ -69,6 +73,8 @@ pub mod defaults {
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
+
+    pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
 
     ///
     /// Default built-in configuration file.
@@ -92,6 +98,7 @@ pub mod defaults {
 #log_format = '{DEFAULT_LOG_FORMAT}'
 
 #concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
+#concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
@@ -116,6 +123,8 @@ pub mod defaults {
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 #gc_feedback = false
+
+#heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
 
 [remote_storage]
 
@@ -176,6 +185,11 @@ pub struct PageServerConf {
 
     pub log_format: LogFormat,
 
+    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup,
+    /// does not limit tenants loaded in response to client I/O.  A lower value implicitly deprioritizes
+    /// loading such tenants, vs. other work in the system.
+    pub concurrent_tenant_warmup: ConfigurableSemaphore,
+
     /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
     /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
@@ -215,6 +229,10 @@ pub struct PageServerConf {
     /// If true, pageserver will make best-effort to operate without a control plane: only
     /// for use in major incidents.
     pub control_plane_emergency_mode: bool,
+
+    /// How many heatmap uploads may be done concurrency: lower values implicitly deprioritize
+    /// heatmap uploads vs. other remote storage operations.
+    pub heatmap_upload_concurrency: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -275,6 +293,7 @@ struct PageServerConfigBuilder {
 
     log_format: BuilderValue<LogFormat>,
 
+    concurrent_tenant_warmup: BuilderValue<NonZeroUsize>,
     concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
@@ -293,6 +312,8 @@ struct PageServerConfigBuilder {
     control_plane_api: BuilderValue<Option<Url>>,
     control_plane_api_token: BuilderValue<Option<SecretString>>,
     control_plane_emergency_mode: BuilderValue<bool>,
+
+    heatmap_upload_concurrency: BuilderValue<usize>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -330,6 +351,8 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
+            concurrent_tenant_warmup: Set(NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
+                .expect("Invalid default constant")),
             concurrent_tenant_size_logical_size_queries: Set(
                 ConfigurableSemaphore::DEFAULT_INITIAL,
             ),
@@ -361,6 +384,8 @@ impl Default for PageServerConfigBuilder {
             control_plane_api: Set(None),
             control_plane_api_token: Set(None),
             control_plane_emergency_mode: Set(false),
+
+            heatmap_upload_concurrency: Set(DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
         }
     }
 }
@@ -441,6 +466,10 @@ impl PageServerConfigBuilder {
         self.log_format = BuilderValue::Set(log_format)
     }
 
+    pub fn concurrent_tenant_warmup(&mut self, u: NonZeroUsize) {
+        self.concurrent_tenant_warmup = BuilderValue::Set(u);
+    }
+
     pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: NonZeroUsize) {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
@@ -501,7 +530,14 @@ impl PageServerConfigBuilder {
         self.control_plane_emergency_mode = BuilderValue::Set(enabled)
     }
 
+    pub fn heatmap_upload_concurrency(&mut self, value: usize) {
+        self.heatmap_upload_concurrency = BuilderValue::Set(value)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
+        let concurrent_tenant_warmup = self
+            .concurrent_tenant_warmup
+            .ok_or(anyhow!("missing concurrent_tenant_warmup"))?;
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
             .ok_or(anyhow!(
@@ -554,6 +590,7 @@ impl PageServerConfigBuilder {
                 .broker_keepalive_interval
                 .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
                 concurrent_tenant_size_logical_size_queries,
             ),
@@ -595,6 +632,10 @@ impl PageServerConfigBuilder {
             control_plane_emergency_mode: self
                 .control_plane_emergency_mode
                 .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
+
+            heatmap_upload_concurrency: self
+                .heatmap_upload_concurrency
+                .ok_or(anyhow!("missing heatmap_upload_concurrency"))?,
         })
     }
 }
@@ -787,6 +828,11 @@ impl PageServerConf {
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
+                "concurrent_tenant_warmup" => builder.concurrent_tenant_warmup({
+                    let input = parse_toml_string(key, item)?;
+                    let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
+                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
+                }),
                 "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
                     let input = parse_toml_string(key, item)?;
                     let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
@@ -828,7 +874,9 @@ impl PageServerConf {
                 },
                 "control_plane_emergency_mode" => {
                     builder.control_plane_emergency_mode(parse_toml_bool(key, item)?)
-
+                },
+                "heatmap_upload_concurrency" => {
+                    builder.heatmap_upload_concurrency(parse_toml_u64(key, item)? as usize)
                 },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -882,6 +930,10 @@ impl PageServerConf {
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
+                    .expect("Invalid default constant"),
+            ),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
             ),
@@ -896,6 +948,7 @@ impl PageServerConf {
             control_plane_api: None,
             control_plane_api_token: None,
             control_plane_emergency_mode: false,
+            heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
         }
     }
 }
@@ -1099,6 +1152,9 @@ background_task_maximum_delay = '334 s'
                     storage_broker::DEFAULT_KEEPALIVE_INTERVAL
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
+                ),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
@@ -1120,7 +1176,8 @@ background_task_maximum_delay = '334 s'
                 )?,
                 control_plane_api: None,
                 control_plane_api_token: None,
-                control_plane_emergency_mode: false
+                control_plane_emergency_mode: false,
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1164,6 +1221,9 @@ background_task_maximum_delay = '334 s'
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
+                concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
+                ),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
@@ -1177,7 +1237,8 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: Duration::from_secs(334),
                 control_plane_api: None,
                 control_plane_api_token: None,
-                control_plane_emergency_mode: false
+                control_plane_emergency_mode: false,
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
             },
             "Should be able to parse all basic config values correctly"
         );
