@@ -35,7 +35,8 @@ libcurl4-openssl-dev openssl python-poetry lsof libicu-dev
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
-  protobuf-devel libcurl-devel openssl poetry lsof libicu-devel
+  protobuf-devel libcurl-devel openssl poetry lsof libicu-devel libpq-devel python3-devel \
+  libffi-devel
 ```
 * On Arch based systems, these packages are needed:
 ```bash
