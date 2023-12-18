@@ -146,8 +146,10 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Option<AuthSecret>, GetAuthInfoError> {
-        Ok(self.do_get_auth_info(creds).await?.secret)
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        Ok(CachedRoleSecret::new_uncached(
+            self.do_get_auth_info(creds).await?.secret,
+        ))
     }
 
     async fn get_allowed_ips(
