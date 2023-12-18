@@ -186,7 +186,6 @@ async fn auth_quirks(
     };
 
     info!("fetching user's authentication info");
-    // TODO(anna): this will slow down both "hacks" below; we probably need a cache.
     let allowed_ips = api.get_allowed_ips(extra, &info).await?;
 
     // check allowed list
