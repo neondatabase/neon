@@ -10,6 +10,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
+use smol_str::SmolStr;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -21,7 +22,7 @@ pub mod errors {
     use crate::{
         error::{io_error, UserFacingError},
         http,
-        proxy::ShouldRetry,
+        proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
 
@@ -216,6 +217,7 @@ impl ConsoleReqExtra {
 }
 
 /// Auth secret which is managed by the cloud.
+#[derive(Clone)]
 pub enum AuthSecret {
     #[cfg(feature = "testing")]
     /// Md5 hash of user's password.
@@ -250,18 +252,19 @@ pub struct NodeInfo {
 
 pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
 pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
-pub type AllowedIpsCache = TimedLru<Arc<str>, Arc<Vec<String>>>;
+pub type AllowedIpsCache = TimedLru<SmolStr, Arc<Vec<String>>>;
+pub type RoleSecretCache = TimedLru<(SmolStr, SmolStr), Option<AuthSecret>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
 #[async_trait]
 pub trait Api {
     /// Get the client's auth secret for authentication.
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<AuthInfo, errors::GetAuthInfoError>;
+    ) -> Result<Option<AuthSecret>, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
@@ -282,7 +285,9 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
     /// Cache for the `get_allowed_ips`. TODO(anna): use notifications listener instead.
-    pub allowed_ips: TimedLru<Arc<str>, Arc<Vec<String>>>,
+    pub allowed_ips: AllowedIpsCache,
+    /// Cache for the `get_role_secret`. TODO(anna): use notifications listener instead.
+    pub role_secret: RoleSecretCache,
 }
 
 /// Various caches for [`console`](super).

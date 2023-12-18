@@ -163,8 +163,18 @@ impl PgConnectionConfig {
     }
 
     /// Connect using postgres protocol with TLS disabled.
-    pub fn connect_no_tls(&self) -> Result<postgres::Client, postgres::Error> {
-        postgres::Config::from(self.to_tokio_postgres_config()).connect(postgres::NoTls)
+    pub async fn connect_no_tls(
+        &self,
+    ) -> Result<
+        (
+            tokio_postgres::Client,
+            tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+        ),
+        postgres::Error,
+    > {
+        self.to_tokio_postgres_config()
+            .connect(postgres::NoTls)
+            .await
     }
 }
 

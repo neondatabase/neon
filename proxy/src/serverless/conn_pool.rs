@@ -24,12 +24,11 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    proxy::{neon_options, LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    metrics::{LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    proxy::{connect_compute::ConnectMechanism, neon_options},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
-
-use crate::proxy::ConnectMechanism;
 
 use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
@@ -432,7 +431,6 @@ async fn connect_to_compute(
         application_name: APP_NAME.to_string(),
         options: console_options,
     };
-    // TODO(anna): this is a bit hacky way, consider using console notification listener.
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(&extra).await?;
         if !check_peer_addr_is_in_list(&peer_addr, &allowed_ips) {
@@ -444,7 +442,7 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
-    crate::proxy::connect_to_compute(
+    crate::proxy::connect_compute::connect_to_compute(
         &TokioMechanism {
             conn_id,
             conn_info,

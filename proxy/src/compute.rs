@@ -1,9 +1,6 @@
 use crate::{
-    auth::parse_endpoint_param,
-    cancellation::CancelClosure,
-    console::errors::WakeComputeError,
-    error::UserFacingError,
-    proxy::{neon_option, NUM_DB_CONNECTIONS_GAUGE},
+    auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
+    error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE, proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;

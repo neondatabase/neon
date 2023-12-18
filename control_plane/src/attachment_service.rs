@@ -9,7 +9,7 @@ pub struct AttachmentService {
     env: LocalEnv,
     listen: String,
     path: PathBuf,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 const COMMAND: &str = "attachment_service";
@@ -53,7 +53,7 @@ impl AttachmentService {
             env: env.clone(),
             path,
             listen,
-            client: reqwest::blocking::ClientBuilder::new()
+            client: reqwest::ClientBuilder::new()
                 .build()
                 .expect("Failed to construct http client"),
         }
@@ -64,7 +64,7 @@ impl AttachmentService {
             .expect("non-Unicode path")
     }
 
-    pub fn start(&self) -> anyhow::Result<Child> {
+    pub async fn start(&self) -> anyhow::Result<Child> {
         let path_str = self.path.to_string_lossy();
 
         background_process::start_process(
@@ -73,10 +73,11 @@ impl AttachmentService {
             &self.env.attachment_service_bin(),
             ["-l", &self.listen, "-p", &path_str],
             [],
-            background_process::InitialPidFile::Create(&self.pid_file()),
+            background_process::InitialPidFile::Create(self.pid_file()),
             // TODO: a real status check
-            || Ok(true),
+            || async move { anyhow::Ok(true) },
         )
+        .await
     }
 
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
@@ -84,7 +85,7 @@ impl AttachmentService {
     }
 
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
-    pub fn attach_hook(
+    pub async fn attach_hook(
         &self,
         tenant_id: TenantId,
         pageserver_id: NodeId,
@@ -104,16 +105,16 @@ impl AttachmentService {
             node_id: Some(pageserver_id),
         };
 
-        let response = self.client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send().await?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
 
-        let response = response.json::<AttachHookResponse>()?;
+        let response = response.json::<AttachHookResponse>().await?;
         Ok(response.gen)
     }
 
-    pub fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
+    pub async fn inspect(&self, tenant_id: TenantId) -> anyhow::Result<Option<(u32, NodeId)>> {
         use hyper::StatusCode;
 
         let url = self
@@ -126,12 +127,12 @@ impl AttachmentService {
 
         let request = InspectRequest { tenant_id };
 
-        let response = self.client.post(url).json(&request).send()?;
+        let response = self.client.post(url).json(&request).send().await?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!("Unexpected status {}", response.status()));
         }
 
-        let response = response.json::<InspectResponse>()?;
+        let response = response.json::<InspectResponse>().await?;
         Ok(response.attachment)
     }
 }

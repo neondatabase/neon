@@ -1,5 +1,8 @@
+pub mod partitioning;
+
 use std::{
     collections::HashMap,
+    io::Read,
     num::{NonZeroU64, NonZeroUsize},
     time::SystemTime,
 };
@@ -17,7 +20,7 @@ use utils::{
 
 use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -574,12 +577,36 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
+#[derive(strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+}
+
+// Keep in sync with `pagestore_client.h`
+#[repr(u8)]
+enum PagestreamBeMessageTag {
+    Exists = 100,
+    Nblocks = 101,
+    GetPage = 102,
+    Error = 103,
+    DbSize = 104,
+}
+impl TryFrom<u8> for PagestreamBeMessageTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, u8> {
+        match value {
+            100 => Ok(PagestreamBeMessageTag::Exists),
+            101 => Ok(PagestreamBeMessageTag::Nblocks),
+            102 => Ok(PagestreamBeMessageTag::GetPage),
+            103 => Ok(PagestreamBeMessageTag::Error),
+            104 => Ok(PagestreamBeMessageTag::DbSize),
+            _ => Err(value),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -737,34 +764,90 @@ impl PagestreamBeMessage {
     pub fn serialize(&self) -> Bytes {
         let mut bytes = BytesMut::new();
 
+        use PagestreamBeMessageTag as Tag;
         match self {
             Self::Exists(resp) => {
-                bytes.put_u8(100); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Exists as u8);
                 bytes.put_u8(resp.exists as u8);
             }
 
             Self::Nblocks(resp) => {
-                bytes.put_u8(101); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Nblocks as u8);
                 bytes.put_u32(resp.n_blocks);
             }
 
             Self::GetPage(resp) => {
-                bytes.put_u8(102); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::GetPage as u8);
                 bytes.put(&resp.page[..]);
             }
 
             Self::Error(resp) => {
-                bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Error as u8);
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
             }
             Self::DbSize(resp) => {
-                bytes.put_u8(104); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::DbSize as u8);
                 bytes.put_i64(resp.db_size);
             }
         }
 
         bytes.into()
+    }
+
+    pub fn deserialize(buf: Bytes) -> anyhow::Result<Self> {
+        let mut buf = buf.reader();
+        let msg_tag = buf.read_u8()?;
+
+        use PagestreamBeMessageTag as Tag;
+        let ok =
+            match Tag::try_from(msg_tag).map_err(|tag: u8| anyhow::anyhow!("invalid tag {tag}"))? {
+                Tag::Exists => {
+                    let exists = buf.read_u8()?;
+                    Self::Exists(PagestreamExistsResponse {
+                        exists: exists != 0,
+                    })
+                }
+                Tag::Nblocks => {
+                    let n_blocks = buf.read_u32::<BigEndian>()?;
+                    Self::Nblocks(PagestreamNblocksResponse { n_blocks })
+                }
+                Tag::GetPage => {
+                    let mut page = vec![0; 8192]; // TODO: use MaybeUninit
+                    buf.read_exact(&mut page)?;
+                    PagestreamBeMessage::GetPage(PagestreamGetPageResponse { page: page.into() })
+                }
+                Tag::Error => {
+                    let buf = buf.get_ref();
+                    let cstr = std::ffi::CStr::from_bytes_until_nul(buf)?;
+                    let rust_str = cstr.to_str()?;
+                    PagestreamBeMessage::Error(PagestreamErrorResponse {
+                        message: rust_str.to_owned(),
+                    })
+                }
+                Tag::DbSize => {
+                    let db_size = buf.read_i64::<BigEndian>()?;
+                    Self::DbSize(PagestreamDbSizeResponse { db_size })
+                }
+            };
+        let remaining = buf.into_inner();
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "remaining bytes in msg with tag={msg_tag}: {}",
+                remaining.len()
+            );
+        }
+        Ok(ok)
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Exists(_) => "Exists",
+            Self::Nblocks(_) => "Nblocks",
+            Self::GetPage(_) => "GetPage",
+            Self::Error(_) => "Error",
+            Self::DbSize(_) => "DbSize",
+        }
     }
 }
 

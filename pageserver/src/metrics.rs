@@ -684,14 +684,54 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_is_loading")
 });
 
-/// How long did tenants take to go from construction to active state?
-pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+/// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
+/// like how long it took to load.
+///
+/// Note that these are process-global metrics, _not_ per-tenant metrics.  Per-tenant
+/// metrics are rather expensive, and usually fine grained stuff makes more sense
+/// at a timeline level than tenant level.
+pub(crate) struct TenantMetrics {
+    /// How long did tenants take to go from construction to active state?
+    pub(crate) activation: Histogram,
+    pub(crate) preload: Histogram,
+    pub(crate) attach: Histogram,
+
+    /// How many tenants are included in the initial startup of the pagesrever?
+    pub(crate) startup_scheduled: IntCounter,
+    pub(crate) startup_complete: IntCounter,
+}
+
+pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| {
+    TenantMetrics {
+    activation: register_histogram!(
         "pageserver_tenant_activation_seconds",
         "Time taken by tenants to activate, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
-    .expect("Failed to register pageserver_tenant_activation_seconds metric")
+    .expect("Failed to register metric"),
+    preload: register_histogram!(
+        "pageserver_tenant_preload_seconds",
+        "Time taken by tenants to load remote metadata on startup/attach, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    attach: register_histogram!(
+        "pageserver_tenant_attach_seconds",
+        "Time taken by tenants to intialize, after remote metadata is already loaded",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    startup_scheduled: register_int_counter!(
+        "pageserver_tenant_startup_scheduled",
+        "Number of tenants included in pageserver startup (doesn't count tenants attached later)"
+    ).expect("Failed to register metric"),
+    startup_complete: register_int_counter!(
+        "pageserver_tenant_startup_complete",
+        "Number of tenants that have completed warm-up, or activated on-demand during initial startup: \
+         should eventually reach `pageserver_tenant_startup_scheduled_total`.  Does not include broken \
+         tenants: such cases will lead to this metric never reaching the scheduled count."
+    ).expect("Failed to register metric"),
+}
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
@@ -2212,6 +2252,9 @@ pub fn preinitialize_metrics() {
 
     // Deletion queue stats
     Lazy::force(&DELETION_QUEUE);
+
+    // Tenant stats
+    Lazy::force(&TENANT);
 
     // Tenant manager stats
     Lazy::force(&TENANT_MANAGER);
