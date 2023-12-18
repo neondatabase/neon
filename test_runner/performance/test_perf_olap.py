@@ -195,6 +195,44 @@ def test_tpch(query: LabelledQuery, remote_compare: RemoteCompare, scale: str):
 
     run_psql(remote_compare, query, times=1)
 
+@pytest.mark.remote_cluster
+def test_user_examples(remote_compare: RemoteCompare):
+    query = LabelledQuery(
+        "Q1",
+        r"""
+        SELECT
+            v20.c2263 AS v1,
+            v19.c2484 AS v2,
+            DATE_TRUNC('month', v18.c37)::DATE AS v3,
+            (ARRAY_AGG(c1840 order by v18.c37))[1] AS v4,
+            (ARRAY_AGG(c1841 order by v18.c37 DESC))[1] AS v5,
+            SUM(v17.c1843) AS v6,
+            SUM(v17.c1844) AS v7,
+            SUM(v17.c1848) AS v8,
+            SUM(v17.c1845) AS v9,
+            SUM(v17.c1846) AS v10,
+            SUM(v17.c1861) AS v11,
+            SUM(v17.c1860) AS v12,
+            SUM(v17.c1869) AS v13,
+            SUM(v17.c1856) AS v14,
+            SUM(v17.c1855) AS v15,
+            SUM(v17.c1854) AS v16
+        FROM
+            s3.t266 v17
+            INNER JOIN s1.t41 v18 ON v18.c34 = v17.c1836
+            INNER JOIN s3.t571 v19 ON v19.c2482 = v17.c1834
+            INNER JOIN s3.t331 v20 ON v20.c2261 = v17.c1835
+        WHERE
+            (v17.c1835 = 4) AND
+            (v18.c37 >= '2019-03-01') AND
+            (v17.c1833 = 2)
+        GROUP BY v1, v2, v3
+        ORDER BY v1, v2, v3
+        LIMIT 199;
+        """,
+    )
+    run_psql(remote_compare, query, times=3)
+
 # Collect pg_stat_statements after running the tests if TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
 @pytest.mark.remote_cluster
 def test_clickbench_collect_pg_stat_statements(remote_compare: RemoteCompare):
