@@ -21,7 +21,7 @@ pub mod errors {
     use crate::{
         error::{io_error, UserFacingError},
         http,
-        proxy::ShouldRetry,
+        proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
 

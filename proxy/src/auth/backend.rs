@@ -11,7 +11,8 @@ use crate::auth::validate_password_and_exchange;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::AuthInfo;
 use crate::console::AuthSecret;
-use crate::proxy::{handle_try_wake, retry_after, LatencyTimer};
+use crate::proxy::connect_compute::handle_try_wake;
+use crate::proxy::retry::retry_after;
 use crate::scram;
 use crate::stream::Stream;
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
         provider::{CachedNodeInfo, ConsoleReqExtra},
         Api,
     },
+    metrics::LatencyTimer,
     stream, url,
 };
 use futures::TryFutureExt;
