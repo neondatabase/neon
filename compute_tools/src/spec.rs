@@ -298,7 +298,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
                 // from neon_superuser.
                 let mut query: String = format!(
-                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);
