@@ -629,9 +629,12 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                // Is this tenant being spawned as part of process startup?
+                let starting_up = init_order.is_some();
                 scopeguard::defer! {
-                    tracing::info!("Increment complete count");
-                    TENANT.startup_complete.inc();
+                    if starting_up {
+                        TENANT.startup_complete.inc();
+                    }
                 }
 
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
@@ -711,7 +714,11 @@ impl Tenant {
 
                 let preload_timer = TENANT.preload.start_timer();
                 let preload = match mode {
-                    SpawnMode::Create => {None},
+                    SpawnMode::Create => {
+                        // Don't count the skipped preload into the histogram of preload durations
+                        preload_timer.stop_and_discard();
+                        None
+                    },
                     SpawnMode::Normal => {
                         match &remote_storage {
                             Some(remote_storage) => Some(
@@ -721,7 +728,11 @@ impl Tenant {
                                         tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()),
                                     )
                                     .await {
-                                        Ok(p) => p,
+                                        Ok(p) => {
+                                            preload_timer.observe_duration();
+                                            p
+                                        }
+                                            ,
                                         Err(e) => {
                                             make_broken(&tenant_clone, anyhow::anyhow!(e));
                                                 return Ok(());
@@ -732,7 +743,6 @@ impl Tenant {
                         }
                     }
                 };
-                preload_timer.observe_duration();
 
                 // Remote preload is complete.
                 drop(remote_load_completion);
@@ -784,15 +794,19 @@ impl Tenant {
                     }
                 }
 
-                let attach_timer = TENANT.attach.start_timer();
+                // We will time the duration of the attach phase unless this is a creation (attach will do no work)
+                let attach_timer = match mode {
+                    SpawnMode::Create => None,
+                    SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                };
                 match tenant_clone.attach(preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
-                        attach_timer.observe_duration();
+                        if let Some(t)=  attach_timer {t.observe_duration();}
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
-                        attach_timer.observe_duration();
+                        if let Some(t)=  attach_timer {t.observe_duration();}
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
