@@ -3145,6 +3145,7 @@ dependencies = [
  "tokio",
  "tokio-io-timeout",
  "tokio-postgres",
+ "tokio-stream",
  "tokio-tar",
  "tokio-util",
  "toml_edit",
@@ -3182,11 +3183,19 @@ dependencies = [
 name = "pageserver_client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "bytes",
+ "futures",
  "pageserver_api",
+ "postgres",
  "reqwest",
  "serde",
  "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tokio-stream",
+ "tokio-util",
  "utils",
  "workspace_hack",
 ]
