@@ -514,10 +514,7 @@ pub async fn init_tenant_mgr(
             &ctx,
         ) {
             Ok(tenant) => {
-                tenants.insert(
-                    TenantShardId::unsharded(tenant.tenant_id()),
-                    TenantSlot::Attached(tenant),
-                );
+                tenants.insert(tenant_shard_id, TenantSlot::Attached(tenant));
             }
             Err(e) => {
                 error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to start tenant: {e:#}");
