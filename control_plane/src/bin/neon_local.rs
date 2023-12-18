@@ -440,18 +440,20 @@ async fn handle_tenant(
             // We must register the tenant with the attachment service, so
             // that when the pageserver restarts, it will be re-attached.
             let attachment_service = AttachmentService::from_env(env);
-            attachment_service.tenant_create(TenantCreateRequest {
-                // Note that ::unsharded here isn't actually because the tenant is unsharded, its because the
-                // attachment service expecfs a shard-naive tenant_id in this attribute, and the TenantCreateRequest
-                // type is used both in attachment service (for creating tenants) and in pageserver (for creating shards)
-                new_tenant_id: TenantShardId::unsharded(tenant_id),
-                generation: None,
-                shard_parameters: ShardParameters {
-                    count: ShardCount(shard_count),
-                    stripe_size: shard_stripe_size.map(ShardStripeSize),
-                },
-                config: tenant_conf,
-            })?;
+            attachment_service
+                .tenant_create(TenantCreateRequest {
+                    // Note that ::unsharded here isn't actually because the tenant is unsharded, its because the
+                    // attachment service expecfs a shard-naive tenant_id in this attribute, and the TenantCreateRequest
+                    // type is used both in attachment service (for creating tenants) and in pageserver (for creating shards)
+                    new_tenant_id: TenantShardId::unsharded(tenant_id),
+                    generation: None,
+                    shard_parameters: ShardParameters {
+                        count: ShardCount(shard_count),
+                        stripe_size: shard_stripe_size.map(ShardStripeSize),
+                    },
+                    config: tenant_conf,
+                })
+                .await?;
             println!("tenant {tenant_id} successfully created on the pageserver");
 
             // Create an initial timeline for the new tenant
@@ -465,16 +467,18 @@ async fn handle_tenant(
             // FIXME: passing None for ancestor_start_lsn is not kosher in a sharded world: we can't have
             // different shards picking different start lsns.  Maybe we have to teach attachment service
             // to let shard 0 branch first and then propagate the chosen LSN to other shards.
-            attachment_service.tenant_timeline_create(
-                tenant_id,
-                TimelineCreateRequest {
-                    new_timeline_id,
-                    ancestor_timeline_id: None,
-                    ancestor_start_lsn: None,
-                    existing_initdb_timeline_id: None,
-                    pg_version: Some(pg_version),
-                },
-            )?;
+            attachment_service
+                .tenant_timeline_create(
+                    tenant_id,
+                    TimelineCreateRequest {
+                        new_timeline_id,
+                        ancestor_timeline_id: None,
+                        ancestor_start_lsn: None,
+                        existing_initdb_timeline_id: None,
+                        pg_version: Some(pg_version),
+                    },
+                )
+                .await?;
 
             env.register_branch_mapping(
                 DEFAULT_BRANCH_NAME.to_string(),
@@ -519,13 +523,15 @@ async fn handle_tenant(
         Some(("split", matches)) => {
             let tenant_id = get_tenant_id(matches, env)?;
             let attachment_service = AttachmentService::from_env(env);
-            let old_shards = attachment_service.tenant_locate(tenant_id)?.shards;
+            let old_shards = attachment_service.tenant_locate(tenant_id).await?.shards;
             let new_shard_count = old_shards.len() * 2;
             if old_shards.len() > 127 {
                 bail!("Cannot split further");
             }
 
-            attachment_service.tenant_split(tenant_id, new_shard_count as u8)?;
+            attachment_service
+                .tenant_split(tenant_id, new_shard_count as u8)
+                .await?;
             println!("Split {}->{}", old_shards.len(), new_shard_count);
         }
         Some(("status", matches)) => {
@@ -537,7 +543,7 @@ async fn handle_tenant(
             let mut tenant_synthetic_size = None;
 
             let attachment_service = AttachmentService::from_env(env);
-            for shard in attachment_service.tenant_locate(tenant_id)?.shards {
+            for shard in attachment_service.tenant_locate(tenant_id).await?.shards {
                 let pageserver =
                     PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
 
@@ -555,7 +561,8 @@ async fn handle_tenant(
                 ]);
 
                 if shard.shard_id.is_zero() {
-                    tenant_synthetic_size = Some(pageserver.tenant_synthetic_size(shard.shard_id)?);
+                    tenant_synthetic_size =
+                        Some(pageserver.tenant_synthetic_size(shard.shard_id).await?);
                 }
             }
 
@@ -903,7 +910,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let attachment_service = AttachmentService::from_env(env);
             let pageservers = attachment_service
-                .tenant_locate(endpoint.tenant_id)?
+                .tenant_locate(endpoint.tenant_id)
+                .await?
                 .shards
                 .into_iter()
                 .map(|shard| {
@@ -948,7 +956,8 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 } else {
                     let attachment_service = AttachmentService::from_env(env);
                     attachment_service
-                        .tenant_locate(endpoint.tenant_id)?
+                        .tenant_locate(endpoint.tenant_id)
+                        .await?
                         .shards
                         .into_iter()
                         .map(|shard| {

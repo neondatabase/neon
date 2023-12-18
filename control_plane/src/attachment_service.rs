@@ -119,10 +119,12 @@ impl AttachmentService {
             &self.env.attachment_service_bin(),
             ["-l", &self.listen, "-p", &path_str],
             [],
-            background_process::InitialPidFile::Create(&self.pid_file()),
-            || match self.status() {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
+            background_process::InitialPidFile::Create(self.pid_file()),
+            || async {
+                match self.status().await {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false),
+                }
             },
         )
         .await;
@@ -138,7 +140,8 @@ impl AttachmentService {
                 listen_pg_port: pg_port.unwrap_or(5432),
                 listen_http_addr: http_host.to_string(),
                 listen_http_port: http_port.unwrap_or(80),
-            })?;
+            })
+            .await?;
         }
 
         result
@@ -149,7 +152,7 @@ impl AttachmentService {
     }
 
     /// Simple HTTP request wrapper for calling into attachment service
-    fn dispatch<RQ, RS>(
+    async fn dispatch<RQ, RS>(
         &self,
         method: hyper::Method,
         path: String,
@@ -172,7 +175,7 @@ impl AttachmentService {
             builder = builder.json(&body)
         }
 
-        let response = builder.send()?;
+        let response = builder.send().await?;
         if response.status() != StatusCode::OK {
             return Err(anyhow!(
                 "Unexpected status {} on {}",
@@ -181,7 +184,7 @@ impl AttachmentService {
             ));
         }
 
-        Ok(response.json()?)
+        Ok(response.json().await?)
     }
 
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
@@ -238,36 +241,48 @@ impl AttachmentService {
     }
 
     #[instrument(skip(self))]
-    pub fn tenant_create(&self, req: TenantCreateRequest) -> anyhow::Result<TenantCreateResponse> {
+    pub async fn tenant_create(
+        &self,
+        req: TenantCreateRequest,
+    ) -> anyhow::Result<TenantCreateResponse> {
         self.dispatch(Method::POST, "tenant".to_string(), Some(req))
+            .await
     }
 
     #[instrument(skip(self))]
-    pub fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
+    pub async fn tenant_locate(&self, tenant_id: TenantId) -> anyhow::Result<TenantLocateResponse> {
         self.dispatch::<(), _>(Method::GET, format!("tenant/{tenant_id}/locate"), None)
+            .await
     }
 
     #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
-    pub fn tenant_split(&self, tenant_id: TenantId, new_shard_count: u8) -> anyhow::Result<()> {
+    pub async fn tenant_split(
+        &self,
+        tenant_id: TenantId,
+        new_shard_count: u8,
+    ) -> anyhow::Result<()> {
         self.dispatch::<_, ()>(
             Method::POST,
             format!("tenant/{tenant_id}/shard_split"),
             Some(TenantShardSplitRequest { new_shard_count }),
         )
+        .await
     }
 
     #[instrument(skip_all, fields(node_id=%req.node_id))]
-    pub fn node_register(&self, req: NodeRegisterRequest) -> anyhow::Result<()> {
+    pub async fn node_register(&self, req: NodeRegisterRequest) -> anyhow::Result<()> {
         self.dispatch::<_, ()>(Method::POST, "node".to_string(), Some(req))
+            .await
     }
 
     #[instrument(skip(self))]
-    pub fn status(&self) -> anyhow::Result<()> {
+    pub async fn status(&self) -> anyhow::Result<()> {
         self.dispatch::<(), ()>(Method::GET, "status".to_string(), None)
+            .await
     }
 
     #[instrument(skip_all, fields(%tenant_id, timeline_id=%req.new_timeline_id))]
-    pub fn tenant_timeline_create(
+    pub async fn tenant_timeline_create(
         &self,
         tenant_id: TenantId,
         req: TimelineCreateRequest,
@@ -277,5 +292,6 @@ impl AttachmentService {
             format!("tenant/{tenant_id}/timeline"),
             Some(req),
         )
+        .await
     }
 }

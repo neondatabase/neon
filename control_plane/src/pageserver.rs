@@ -491,8 +491,11 @@ impl PageServerNode {
             .await?)
     }
 
-    pub async fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
-        Ok(self.http_client.list_timelines(*tenant_id).await?)
+    pub async fn timeline_list(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> anyhow::Result<Vec<TimelineInfo>> {
+        Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
     }
 
     pub async fn timeline_create(
@@ -588,5 +591,15 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+
+    pub async fn tenant_synthetic_size(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> anyhow::Result<TenantHistorySize> {
+        Ok(self
+            .http_client
+            .tenant_synthetic_size(tenant_shard_id)
+            .await?)
     }
 }
