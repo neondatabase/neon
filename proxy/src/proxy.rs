@@ -10,6 +10,7 @@ use crate::{
     compute,
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
+    context::RequestContext,
     metrics::{
         LatencyTimer, NUM_BYTES_PROXIED_COUNTER, NUM_BYTES_PROXIED_PER_CLIENT_COUNTER,
         NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE,
@@ -25,7 +26,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
-use std::{net::IpAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, Instrument};
@@ -82,13 +83,29 @@ pub async fn task_main(
                 info!("accepted postgres client connection");
 
                 let mut socket = WithClientIp::new(socket);
-                let mut peer_addr = peer_addr;
-                if let Some(ip) = socket.wait_for_addr().await? {
-                    peer_addr = ip;
-                    tracing::Span::current().record("peer_addr", &tracing::field::display(ip));
+                let mut peer_addr = peer_addr.ip();
+                if let Some(addr) = socket.wait_for_addr().await? {
+                    peer_addr = addr.ip();
+                    tracing::Span::current().record("peer_addr", &tracing::field::display(addr));
                 } else if config.require_client_ip {
                     bail!("missing required client IP");
                 }
+
+                let mut ctx = RequestContext {
+                    peer_addr,
+                    session_id,
+                    first_packet: tokio::time::Instant::now(),
+                    protocol: "tcp",
+                    project: None,
+                    branch: None,
+                    endpoint_id: None,
+                    user: None,
+                    application: None,
+                    cluster: &config.cluster,
+                    error_kind: None,
+                    latency_timer: LatencyTimer::new("tcp"),
+                };
+                // ctx.latency_timer.
 
                 socket
                     .inner
@@ -97,11 +114,10 @@ pub async fn task_main(
 
                 handle_client(
                     config,
+                    &mut ctx,
                     &cancel_map,
-                    session_id,
                     socket,
                     ClientMode::Tcp,
-                    peer_addr.ip(),
                     endpoint_rate_limiter,
                 )
                 .await
@@ -173,11 +189,10 @@ impl ClientMode {
 
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
+    ctx: &mut RequestContext,
     cancel_map: &CancelMap,
-    session_id: uuid::Uuid,
     stream: S,
     mode: ClientMode,
-    peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     info!(
@@ -208,7 +223,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names, peer_addr))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names, ctx.peer_addr))
             .transpose();
 
         match result {
@@ -221,7 +236,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         stream,
         creds,
         &params,
-        session_id,
+        ctx.session_id,
         mode.allow_self_signed_compute(config),
         endpoint_rate_limiter,
     );

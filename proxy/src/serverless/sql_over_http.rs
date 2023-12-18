@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -29,6 +28,7 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::config::HttpConfig;
+use crate::context::RequestContext;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 
 use super::conn_pool::ConnInfo;
@@ -198,23 +198,15 @@ fn get_conn_info(
 
 // TODO: return different http error codes
 pub async fn handle(
+    config: &'static HttpConfig,
+    ctx: &mut RequestContext,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
-    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.request_timeout,
-        handle_inner(
-            config,
-            request,
-            sni_hostname,
-            conn_pool,
-            session_id,
-            peer_addr,
-        ),
+        handle_inner(config, ctx, request, sni_hostname, conn_pool),
     )
     .await;
     let mut response = match result {
@@ -297,11 +289,10 @@ pub async fn handle(
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
     config: &'static HttpConfig,
+    ctx: &mut RequestContext,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
@@ -360,7 +351,7 @@ async fn handle_inner(
     let payload: Payload = serde_json::from_slice(&body)?;
 
     let mut client = conn_pool
-        .get(conn_info, !allow_pool, session_id, peer_addr)
+        .get(conn_info, !allow_pool, ctx.session_id, ctx.peer_addr)
         .await?;
 
     let mut response = Response::builder()

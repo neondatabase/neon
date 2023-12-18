@@ -1,6 +1,7 @@
 use crate::{
     cancellation::CancelMap,
     config::ProxyConfig,
+    context::RequestContext,
     error::io_error,
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
@@ -12,7 +13,6 @@ use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
 
 use std::{
-    net::IpAddr,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -130,22 +130,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 }
 
 pub async fn serve_websocket(
-    websocket: HyperWebsocket,
     config: &'static ProxyConfig,
+    ctx: &mut RequestContext,
+    websocket: HyperWebsocket,
     cancel_map: &CancelMap,
-    session_id: uuid::Uuid,
     hostname: Option<String>,
-    peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     handle_client(
         config,
+        ctx,
         cancel_map,
-        session_id,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
-        peer_addr,
         endpoint_rate_limiter,
     )
     .await?;

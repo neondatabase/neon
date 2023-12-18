@@ -17,7 +17,8 @@ pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
-use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
+use crate::context::RequestContext;
+use crate::metrics::{LatencyTimer, NUM_CLIENT_CONNECTION_GAUGE};
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
@@ -218,13 +219,27 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                if let Err(e) = websocket::serve_websocket(
-                    websocket,
-                    config,
-                    &cancel_map,
-                    session_id,
-                    host,
+                let mut ctx = RequestContext {
                     peer_addr,
+                    session_id,
+                    first_packet: tokio::time::Instant::now(),
+                    protocol: "ws",
+                    project: None,
+                    branch: None,
+                    endpoint_id: None,
+                    user: None,
+                    application: None,
+                    cluster: &config.cluster,
+                    error_kind: None,
+                    latency_timer: LatencyTimer::new("ws"),
+                };
+
+                if let Err(e) = websocket::serve_websocket(
+                    config,
+                    &mut ctx,
+                    websocket,
+                    &cancel_map,
+                    host,
                     endpoint_rate_limiter,
                 )
                 .await
@@ -238,13 +253,27 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
+        let mut ctx = RequestContext {
+            peer_addr,
+            session_id,
+            first_packet: tokio::time::Instant::now(),
+            protocol: "http",
+            project: None,
+            branch: None,
+            endpoint_id: None,
+            user: None,
+            application: None,
+            cluster: &config.cluster,
+            error_kind: None,
+            latency_timer: LatencyTimer::new("http"),
+        };
+
         sql_over_http::handle(
+            &config.http_config,
+            &mut ctx,
             request,
             sni_hostname,
             conn_pool,
-            session_id,
-            peer_addr,
-            &config.http_config,
         )
         .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {

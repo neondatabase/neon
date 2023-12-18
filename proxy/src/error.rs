@@ -28,3 +28,17 @@ pub trait UserFacingError: fmt::Display {
         self.to_string()
     }
 }
+
+pub enum ErrorKind {
+    /// Wrong password, unknown endpoint, protocol violation, etc...
+    User,
+
+    /// Rate limits, internal errors
+    Service,
+
+    /// Error communicating with control plane
+    ControlPlane,
+
+    /// Error communicating with compute
+    Compute,
+}

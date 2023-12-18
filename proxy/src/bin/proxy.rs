@@ -380,6 +380,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        // TODO: add this argument
+        cluster: String::new(),
     }));
 
     Ok(config)
