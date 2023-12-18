@@ -16,21 +16,21 @@ class LabelledQuery:
     label: str
     query: str
 
-# create extension pg_stat_statements before all tests in this module if it does not exist 
+# create extension pg_stat_statements before all tests in this module if it does not exist
 # and TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
-# Theoretically this could be in a module or session scope fixture, 
+# Theoretically this could be in a module or session scope fixture,
 # however the code depends on other fixtures that have function scope
 @pytest.mark.remote_cluster
 def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
     if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
-        log.info(f"Creating extension pg_stat_statements")
+        log.info("Creating extension pg_stat_statements")
         query =  LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION pg_stat_statements;")
         run_psql_once_without_explain(remote_compare, query)
-        log.info(f"Reset pg_stat_statements")
+        log.info("Reset pg_stat_statements")
         query =  LabelledQuery("Q_RESET", r"SELECT pg_stat_statements_reset();")
     else:
-        log.info(f"Skipping - Creating extension pg_stat_statements")
-    
+        log.info("Skipping - Creating extension pg_stat_statements")
+
 
 # A list of queries to run.
 # Please do not alter the label for the query, as it is used to identify it.
@@ -237,8 +237,8 @@ def test_user_examples(remote_compare: RemoteCompare):
 @pytest.mark.remote_cluster
 def test_clickbench_collect_pg_stat_statements(remote_compare: RemoteCompare):
     if os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'true':
-        log.info(f"Collecting pg_stat_statements")
+        log.info("Collecting pg_stat_statements")
         query =  LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
         run_psql_once_without_explain(remote_compare, query)
     else:
-        log.info(f"Skipping - Collecting pg_stat_statements")
+        log.info("Skipping - Collecting pg_stat_statements")
