@@ -155,8 +155,8 @@ load_shard_map(shardno_t shard_no, char* connstr)
 	uint64 end_update_counter;
 
 	/*
-	 * There is race condition here between backendc and postmaster which can update shard map.
-	 * We recheck update couner after copying connection string to check that configuration was not changed.
+	 * There is race condition here between backend and postmaster which can update shard map.
+	 * We recheck update counter after copying shard map to check that configuration was not changed.
 	 */
 	do
 	{
