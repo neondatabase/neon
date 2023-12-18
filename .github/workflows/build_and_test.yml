@@ -76,7 +76,7 @@ jobs:
 
       - name: Get buildtools tag
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             IMAGE_TAG=$GITHUB_RUN_ID
           else
             IMAGE_TAG=pinned
