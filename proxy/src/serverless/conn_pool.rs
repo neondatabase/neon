@@ -24,12 +24,11 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    proxy::{neon_options, LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    metrics::{LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    proxy::{connect_compute::ConnectMechanism, neon_options},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
-
-use crate::proxy::ConnectMechanism;
 
 use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
@@ -444,7 +443,7 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
-    crate::proxy::connect_to_compute(
+    crate::proxy::connect_compute::connect_to_compute(
         &TokioMechanism {
             conn_id,
             conn_info,

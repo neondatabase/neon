@@ -5,7 +5,7 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
+use crate::metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
