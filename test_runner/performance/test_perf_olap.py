@@ -22,7 +22,10 @@ class LabelledQuery:
 # and TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
 # Theoretically this could be in a module or session scope fixture,
 # however the code depends on other fixtures that have function scope
-@pytest.mark.skipif(os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'false', reason="Skipping - Creating extension pg_stat_statements")
+@pytest.mark.skipif(
+    os.getenv("TEST_OLAP_COLLECT_PG_STAT_STATEMENTS", "false").lower() == "false",
+    reason="Skipping - Creating extension pg_stat_statements",
+)
 @pytest.mark.remote_cluster
 def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
     log.info("Creating extension pg_stat_statements")
@@ -228,10 +231,12 @@ def test_user_examples(remote_compare: RemoteCompare):
 
 # This must run after all tests in this module
 # Collect pg_stat_statements after running the tests if TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
-@pytest.mark.skipif(os.getenv('TEST_OLAP_COLLECT_PG_STAT_STATEMENTS', 'false').lower() == 'false', reason="Skipping - Collecting pg_stat_statements")
+@pytest.mark.skipif(
+    os.getenv("TEST_OLAP_COLLECT_PG_STAT_STATEMENTS", "false").lower() == "false",
+    reason="Skipping - Collecting pg_stat_statements",
+)
 @pytest.mark.remote_cluster
 def test_clickbench_collect_pg_stat_statements(remote_compare: RemoteCompare):
     log.info("Collecting pg_stat_statements")
     query = LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
     run_psql(remote_compare, query, times=1, explain=False)
-    
