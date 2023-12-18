@@ -2,21 +2,17 @@ use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
-use bytes::Bytes;
 use camino::Utf8Path;
-use futures::stream::Stream;
 use once_cell::sync::OnceCell;
 use remote_storage::{
     AzureConfig, Download, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
 };
 use test_context::{test_context, AsyncTestContext};
-use tokio::task::JoinSet;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 mod common;
 

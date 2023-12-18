@@ -2,25 +2,21 @@ use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
-use bytes::Bytes;
 use camino::Utf8Path;
-use futures::stream::Stream;
 use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
 use test_context::{test_context, AsyncTestContext};
-use tokio::task::JoinSet;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 mod common;
 
-use common::{cleanup, upload_remote_data, upload_simple_remote_data, upload_stream, wrap_stream};
+use common::{cleanup, upload_remote_data, upload_simple_remote_data, upload_stream};
 
 static LOGGING_DONE: OnceCell<()> = OnceCell::new();
 
