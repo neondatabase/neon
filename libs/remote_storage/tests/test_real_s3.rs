@@ -20,7 +20,7 @@ use tracing::{debug, error, info};
 
 mod common;
 
-use common::{upload_stream, wrap_stream, upload_simple_remote_data, cleanup, upload_remote_data};
+use common::{cleanup, upload_remote_data, upload_simple_remote_data, upload_stream, wrap_stream};
 
 static LOGGING_DONE: OnceCell<()> = OnceCell::new();
 

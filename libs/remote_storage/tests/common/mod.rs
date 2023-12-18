@@ -95,7 +95,10 @@ pub(crate) async fn upload_simple_remote_data(
     }
 }
 
-pub(crate) async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<RemotePath>) {
+pub(crate) async fn cleanup(
+    client: &Arc<GenericRemoteStorage>,
+    objects_to_delete: HashSet<RemotePath>,
+) {
     info!(
         "Removing {} objects from the remote storage during cleanup",
         objects_to_delete.len()
