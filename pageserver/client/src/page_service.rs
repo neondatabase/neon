@@ -132,7 +132,7 @@ impl PagestreamClient {
         self.copy_both.send_all(&mut req).await?;
 
         let next: Option<Result<bytes::Bytes, _>> = self.copy_both.next().await;
-        let next = next.unwrap().unwrap();
+        let next: bytes::Bytes = next.unwrap()?;
 
         let msg = PagestreamBeMessage::deserialize(next)?;
         match msg {
