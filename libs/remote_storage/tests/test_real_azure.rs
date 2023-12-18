@@ -7,18 +7,18 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use camino::Utf8Path;
-use once_cell::sync::OnceCell;
 use remote_storage::{
-    AzureConfig, Download, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    AzureConfig, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
 };
 use test_context::{test_context, AsyncTestContext};
 use tracing::{debug, info};
 
 mod common;
 
-use common::{cleanup, upload_remote_data, upload_simple_remote_data, upload_stream, wrap_stream};
-
-static LOGGING_DONE: OnceCell<()> = OnceCell::new();
+use common::{
+    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, upload_stream,
+    wrap_stream, download_to_vec,
+};
 
 const ENABLE_REAL_AZURE_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_AZURE_REMOTE_STORAGE";
 
@@ -218,18 +218,9 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
 
     ctx.client.upload(data, len, &path, None).await?;
 
-    async fn download_and_compare(dl: Download) -> anyhow::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        tokio::io::copy_buf(
-            &mut tokio_util::io::StreamReader::new(dl.download_stream),
-            &mut buf,
-        )
-        .await?;
-        Ok(buf)
-    }
     // Normal download request
     let dl = ctx.client.download(&path).await?;
-    let buf = download_and_compare(dl).await?;
+    let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     // Full range (end specified)
@@ -237,12 +228,12 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
         .client
         .download_byte_range(&path, 0, Some(len as u64))
         .await?;
-    let buf = download_and_compare(dl).await?;
+    let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     // partial range (end specified)
     let dl = ctx.client.download_byte_range(&path, 4, Some(10)).await?;
-    let buf = download_and_compare(dl).await?;
+    let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..10]);
 
     // partial range (end beyond real end)
@@ -250,17 +241,17 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
         .client
         .download_byte_range(&path, 8, Some(len as u64 * 100))
         .await?;
-    let buf = download_and_compare(dl).await?;
+    let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[8..]);
 
     // Partial range (end unspecified)
     let dl = ctx.client.download_byte_range(&path, 4, None).await?;
-    let buf = download_and_compare(dl).await?;
+    let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..]);
 
     // Full range (end unspecified)
     let dl = ctx.client.download_byte_range(&path, 0, None).await?;
-    let buf = download_and_compare(dl).await?;
+    let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
     debug!("Cleanup: deleting file at path {path:?}");
@@ -270,17 +261,6 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
         .with_context(|| format!("{path:?} removal"))?;
 
     Ok(())
-}
-
-fn ensure_logging_ready() {
-    LOGGING_DONE.get_or_init(|| {
-        utils::logging::init(
-            utils::logging::LogFormat::Test,
-            utils::logging::TracingErrorLayerEnablement::Disabled,
-            utils::logging::Output::Stdout,
-        )
-        .expect("logging init failed");
-    });
 }
 
 struct EnabledAzure {

@@ -7,7 +7,6 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use camino::Utf8Path;
-use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
@@ -16,9 +15,9 @@ use tracing::{debug, info};
 
 mod common;
 
-use common::{cleanup, upload_remote_data, upload_simple_remote_data, upload_stream};
-
-static LOGGING_DONE: OnceCell<()> = OnceCell::new();
+use common::{
+    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, upload_stream, wrap_stream, download_to_vec,
+};
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
 
@@ -198,15 +197,65 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     Ok(())
 }
 
-fn ensure_logging_ready() {
-    LOGGING_DONE.get_or_init(|| {
-        utils::logging::init(
-            utils::logging::LogFormat::Test,
-            utils::logging::TracingErrorLayerEnablement::Disabled,
-            utils::logging::Output::Stdout,
-        )
-        .expect("logging init failed");
-    });
+#[test_context(MaybeEnabledS3)]
+#[tokio::test]
+async fn s3_upload_download_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
+    let MaybeEnabledS3::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+
+    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let orig = bytes::Bytes::from_static("remote blob data here".as_bytes());
+
+    let (data, len) = wrap_stream(orig.clone());
+
+    ctx.client.upload(data, len, &path, None).await?;
+
+    // Normal download request
+    let dl = ctx.client.download(&path).await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
+
+    // Full range (end specified)
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 0, Some(len as u64))
+        .await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
+
+    // partial range (end specified)
+    let dl = ctx.client.download_byte_range(&path, 4, Some(10)).await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig[4..10]);
+
+    // partial range (end beyond real end)
+    let dl = ctx
+        .client
+        .download_byte_range(&path, 8, Some(len as u64 * 100))
+        .await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig[8..]);
+
+    // Partial range (end unspecified)
+    let dl = ctx.client.download_byte_range(&path, 4, None).await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig[4..]);
+
+    // Full range (end unspecified)
+    let dl = ctx.client.download_byte_range(&path, 0, None).await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
+
+    debug!("Cleanup: deleting file at path {path:?}");
+    ctx.client
+        .delete(&path)
+        .await
+        .with_context(|| format!("{path:?} removal"))?;
+
+    Ok(())
 }
 
 struct EnabledS3 {

@@ -7,9 +7,12 @@ use anyhow::Context;
 use bytes::Bytes;
 use camino::Utf8Path;
 use futures::stream::Stream;
-use remote_storage::{GenericRemoteStorage, RemotePath};
+use once_cell::sync::OnceCell;
+use remote_storage::{Download, GenericRemoteStorage, RemotePath};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
+
+static LOGGING_DONE: OnceCell<()> = OnceCell::new();
 
 pub(crate) fn upload_stream(
     content: std::borrow::Cow<'static, [u8]>,
@@ -36,6 +39,16 @@ pub(crate) fn wrap_stream(
     let content = futures::future::ready(Ok(content));
 
     (futures::stream::once(content), len)
+}
+
+pub(crate) async fn download_to_vec(dl: Download) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    tokio::io::copy_buf(
+        &mut tokio_util::io::StreamReader::new(dl.download_stream),
+        &mut buf,
+    )
+    .await?;
+    Ok(buf)
 }
 
 // Uploads files `folder{j}/blob{i}.txt`. See test description for more details.
@@ -173,4 +186,15 @@ pub(crate) async fn upload_remote_data(
     } else {
         ControlFlow::Continue(uploads)
     }
+}
+
+pub(crate) fn ensure_logging_ready() {
+    LOGGING_DONE.get_or_init(|| {
+        utils::logging::init(
+            utils::logging::LogFormat::Test,
+            utils::logging::TracingErrorLayerEnablement::Disabled,
+            utils::logging::Output::Stdout,
+        )
+        .expect("logging init failed");
+    });
 }
