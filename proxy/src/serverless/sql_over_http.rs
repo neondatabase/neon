@@ -29,7 +29,7 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::config::HttpConfig;
-use crate::proxy::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;

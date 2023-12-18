@@ -13,8 +13,8 @@ pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
+use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
-use crate::proxy::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;

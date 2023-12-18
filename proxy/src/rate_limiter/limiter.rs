@@ -393,10 +393,10 @@ impl Limiter {
             }
             new_limit
         };
-        crate::proxy::RATE_LIMITER_LIMIT
+        crate::metrics::RATE_LIMITER_LIMIT
             .with_label_values(&["expected"])
             .set(new_limit as i64);
-        crate::proxy::RATE_LIMITER_LIMIT
+        crate::metrics::RATE_LIMITER_LIMIT
             .with_label_values(&["actual"])
             .set(actual_limit as i64);
         self.limits.store(new_limit, Ordering::Release);
@@ -470,7 +470,7 @@ impl reqwest_middleware::Middleware for Limiter {
                 )
             })?;
         info!(duration = ?start.elapsed(), "waiting for token to connect to the control plane");
-        crate::proxy::RATE_LIMITER_ACQUIRE_LATENCY.observe(start.elapsed().as_secs_f64());
+        crate::metrics::RATE_LIMITER_ACQUIRE_LATENCY.observe(start.elapsed().as_secs_f64());
         match next.run(req, extensions).await {
             Ok(response) => {
                 self.release(token, Some(Outcome::from_reqwest_response(&response)))
