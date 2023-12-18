@@ -450,6 +450,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
+    if: ${{ !failure() && !cancelled() }}
     needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
@@ -490,6 +491,7 @@ jobs:
 
   benchmarks:
     needs: [ check-permissions, build-neon, tag]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
@@ -568,6 +570,7 @@ jobs:
             })
 
   coverage-report:
+    if: ${{ !failure() && !cancelled() }}
     needs: [ check-permissions, regress-tests, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -690,6 +693,7 @@ jobs:
             })
 
   trigger-e2e-tests:
+    if: ${{ !failure() && !cancelled() }}
     needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
@@ -894,6 +898,7 @@ jobs:
         run: rm -rf ~/.ecr
 
   vm-compute-node-image:
+    if: ${{ !failure() && !cancelled() }}
     needs: [ check-permissions, tag, compute-node-image ]
     runs-on: [ self-hosted, gen3, large ]
     strategy:
@@ -935,6 +940,7 @@ jobs:
           docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   test-images:
+    if: ${{ !failure() && !cancelled() }}
     needs: [ check-permissions, tag, neon-image, compute-node-image, compute-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
 
@@ -978,6 +984,7 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
+    if: ${{ always() && !failure() && !cancelled() }}
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: [ self-hosted, gen3, small ]
     container: golang:1.19-bullseye
@@ -1134,8 +1141,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
-
+    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch' &&  ${{ !failure() && !cancelled() }}
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
@@ -1205,8 +1211,7 @@ jobs:
 
   promote-compatibility-data:
     needs: [ check-permissions, promote-images, tag, regress-tests ]
-    if: github.ref_name == 'release'
-
+    if: github.ref_name == 'release' && ${{ !failure() && !cancelled() }}
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
