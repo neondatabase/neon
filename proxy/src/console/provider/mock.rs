@@ -142,12 +142,12 @@ async fn get_execute_postgres_query(
 #[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
-        self.do_get_auth_info(creds).await
+    ) -> Result<Option<AuthSecret>, GetAuthInfoError> {
+        self.do_get_auth_info(creds).await?.secret.map(Ok)
     }
 
     async fn get_allowed_ips(
@@ -155,7 +155,11 @@ impl super::Api for Api {
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
+        self.do_get_auth_info(creds)
+            .await?
+            .allowed_ips
+            .map(Arc::new)
+            .map(Ok)
     }
 
     #[tracing::instrument(skip_all)]
