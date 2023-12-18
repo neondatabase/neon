@@ -510,7 +510,7 @@ class PageserverHttpClient(requests.Session):
         assert res_json is None
 
     def timeline_get_lsn_by_timestamp(
-        self, tenant_id: TenantId, timeline_id: TimelineId, timestamp, version: Optional[int]
+        self, tenant_id: TenantId, timeline_id: TimelineId, timestamp, version: Optional[int]=None,
     ):
         log.info(
             f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
