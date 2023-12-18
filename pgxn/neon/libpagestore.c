@@ -14,27 +14,24 @@
  */
 #include "postgres.h"
 
-#include "pagestore_client.h"
-#include "fmgr.h"
 #include "access/xlog.h"
-#include "storage/buf_internals.h"
-#include "storage/lwlock.h"
-#include "storage/ipc.h"
-#include "storage/pg_shmem.h"
-#include "c.h"
-#include "postmaster/interrupt.h"
-
+#include "fmgr.h"
 #include "libpq-fe.h"
-#include "libpq/pqformat.h"
 #include "libpq/libpq.h"
-
+#include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/interrupt.h"
+#include "storage/buf_internals.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "utils/guc.h"
 
 #include "neon.h"
-#include "walproposer.h"
 #include "neon_utils.h"
+#include "pagestore_client.h"
+#include "walproposer.h"
 
 #define PageStoreTrace DEBUG5
 

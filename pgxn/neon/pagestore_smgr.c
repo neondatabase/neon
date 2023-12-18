@@ -54,19 +54,19 @@
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "executor/instrument.h"
-#include "pagestore_client.h"
-#include "postmaster/interrupt.h"
+#include "pgstat.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/interrupt.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
 #include "storage/fsm_internals.h"
-#include "storage/smgr.h"
 #include "storage/md.h"
-#include "pgstat.h"
+#include "storage/smgr.h"
+
+#include "pagestore_client.h"
 
 #if PG_VERSION_NUM >= 150000
-#include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
 #endif
 

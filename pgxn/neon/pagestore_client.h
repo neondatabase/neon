@@ -13,18 +13,15 @@
 #ifndef pageserver_h
 #define pageserver_h
 
-#include "postgres.h"
 #include "neon_pgversioncompat.h"
 
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
-#include "storage/block.h"
-#include "storage/smgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "storage/block.h"
+#include "storage/smgr.h"
 #include "utils/memutils.h"
-
-#include "pg_config.h"
 
 typedef enum
 {
