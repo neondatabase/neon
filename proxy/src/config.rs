@@ -313,7 +313,7 @@ impl CacheOptions {
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
-    /// Example: [`Self::DEFAULT_OPTIONS_NODE_INFO`].
+    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
     fn parse(options: &str) -> anyhow::Result<Self> {
         let mut size = None;
         let mut ttl = None;
