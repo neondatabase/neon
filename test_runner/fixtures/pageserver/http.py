@@ -682,6 +682,34 @@ class PageserverHttpClient(requests.Session):
         assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
         return results[0].value
 
+    def get_metrics_values(
+        self, names: list[str], filter: Optional[Dict[str, str]] = None
+    ) -> Dict[str, float]:
+        """
+        When fetching multiple named metrics, it is more efficient to use this
+        than to call `get_metric_value` repeatedly.
+
+        Throws RuntimeError if no metrics matching `names` are found, or if
+        not all of `names` are found: this method is intended for loading sets
+        of metrics whose existence is coupled.
+        """
+        metrics = self.get_metrics()
+        samples = []
+        for name in names:
+            samples.extend(metrics.query_all(name, filter=filter))
+
+        result = {}
+        for sample in samples:
+            if sample.name in result:
+                raise RuntimeError(f"Multiple values found for {sample.name}")
+            result[sample.name] = sample.value
+
+        if len(result) != len(names):
+            log.info(f"Metrics found: {metrics.metrics}")
+            raise RuntimeError(f"could not find all metrics {' '.join(names)}")
+
+        return result
+
     def layer_map_info(
         self,
         tenant_id: TenantId,
