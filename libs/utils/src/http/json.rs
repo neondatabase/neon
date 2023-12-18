@@ -25,8 +25,12 @@ pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
     if body.remaining() == 0 {
         return Ok(None);
     }
-    serde_json::from_reader(body.reader())
-        .context("Failed to parse json request")
+
+    let mut deser = serde_json::de::Deserializer::from_reader(body.reader());
+
+    serde_path_to_error::deserialize(&mut deser)
+        // intentionally stringify because the debug version is not helpful in python logs
+        .map_err(|e| anyhow::anyhow!("Failed to parse json request: {e}"))
         .map(Some)
         .map_err(ApiError::BadRequest)
 }

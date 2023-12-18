@@ -35,6 +35,8 @@
  *
  *-------------------------------------------------------------------------
  */
+#include <sys/resource.h>
+
 #include "postgres.h"
 #include "libpq/pqformat.h"
 #include "neon.h"
@@ -1069,6 +1071,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 			if (!((dth->n_entries >= 1) && (dth->entries[dth->n_entries - 1].term ==
 											walprop_shared->mineLastElectedTerm)))
 			{
+				/*
+				 * Panic to restart PG as we need to retake basebackup.
+				 * However, don't dump core as this is kinda expected
+				 * scenario.
+				 */
+				disable_core_dump();
 				walprop_log(PANIC,
 							"collected propEpochStartLsn %X/%X, but basebackup LSN %X/%X",
 							LSN_FORMAT_ARGS(wp->propEpochStartLsn),
@@ -1445,7 +1453,12 @@ RecvAppendResponses(Safekeeper *sk)
 
 		if (sk->appendResponse.term > wp->propTerm)
 		{
-			/* Another compute with higher term is running. */
+			/*
+			 * Another compute with higher term is running. Panic to restart
+			 * PG as we likely need to retake basebackup. However, don't dump
+			 * core as this is kinda expected scenario.
+			 */
+			disable_core_dump();
 			walprop_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
 						sk->host, sk->port,
 						sk->appendResponse.term, wp->propTerm);

@@ -36,6 +36,8 @@ use utils::crashsafe::path_with_suffix_extension;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
+use utils::timeout::timeout_cancellable;
+use utils::timeout::TimeoutCancellableError;
 
 use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
@@ -59,7 +61,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::TENANT_ACTIVATION;
+use crate::metrics::TENANT;
 use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
@@ -226,7 +228,7 @@ pub struct Tenant {
 
     /// The value creation timestamp, used to measure activation delay, see:
     /// <https://github.com/neondatabase/neon/issues/4025>
-    loading_started_at: Instant,
+    constructed_at: Instant,
 
     state: watch::Sender<TenantState>,
 
@@ -275,6 +277,11 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
+
+    /// If the tenant is in Activating state, notify this to encourage it
+    /// to proceed to Active as soon as possible, rather than waiting for lazy
+    /// background warmup.
+    pub(crate) activate_now_sem: tokio::sync::Semaphore,
 
     pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
 
@@ -622,6 +629,14 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
+                // Is this tenant being spawned as part of process startup?
+                let starting_up = init_order.is_some();
+                scopeguard::defer! {
+                    if starting_up {
+                        TENANT.startup_complete.inc();
+                    }
+                }
+
                 // Ideally we should use Tenant::set_broken_no_wait, but it is not supposed to be used when tenant is in loading state.
                 let make_broken =
                     |t: &Tenant, err: anyhow::Error| {
@@ -648,8 +663,62 @@ impl Tenant {
                     .as_mut()
                     .and_then(|x| x.initial_tenant_load_remote.take());
 
+                enum AttachType<'a> {
+                    // During pageserver startup, we are attaching this tenant lazily in the background
+                    Warmup(tokio::sync::SemaphorePermit<'a>),
+                    // During pageserver startup, we are attaching this tenant as soon as we can,
+                    // because a client tried to access it.
+                    OnDemand,
+                    // During normal operations after startup, we are attaching a tenant.
+                    Normal,
+                }
+
+                // Before doing any I/O, wait for either or:
+                // - A client to attempt to access to this tenant (on-demand loading)
+                // - A permit to become available in the warmup semaphore (background warmup)
+                //
+                // Some-ness of init_order is how we know if we're attaching during startup or later
+                // in process lifetime.
+                let attach_type = if init_order.is_some() {
+                    tokio::select!(
+                        _ = tenant_clone.activate_now_sem.acquire() => {
+                            tracing::info!("Activating tenant (on-demand)");
+                            AttachType::OnDemand
+                        },
+                        permit_result = conf.concurrent_tenant_warmup.inner().acquire() => {
+                            match permit_result {
+                                Ok(p) => {
+                                    tracing::info!("Activating tenant (warmup)");
+                                    AttachType::Warmup(p)
+                                }
+                                Err(_) => {
+                                    // This is unexpected: the warmup semaphore should stay alive
+                                    // for the lifetime of init_order.  Log a warning and proceed.
+                                    tracing::warn!("warmup_limit semaphore unexpectedly closed");
+                                    AttachType::Normal
+                                }
+                            }
+
+                        }
+                        _ = tenant_clone.cancel.cancelled() => {
+                            // This is safe, but should be pretty rare: it is interesting if a tenant
+                            // stayed in Activating for such a long time that shutdown found it in
+                            // that state.
+                            tracing::info!(state=%tenant_clone.current_state(), "Tenant shut down before activation");
+                            return Ok(());
+                        },
+                    )
+                } else {
+                    AttachType::Normal
+                };
+
+                let preload_timer = TENANT.preload.start_timer();
                 let preload = match mode {
-                    SpawnMode::Create => {None},
+                    SpawnMode::Create => {
+                        // Don't count the skipped preload into the histogram of preload durations
+                        preload_timer.stop_and_discard();
+                        None
+                    },
                     SpawnMode::Normal => {
                         match &remote_storage {
                             Some(remote_storage) => Some(
@@ -659,7 +728,11 @@ impl Tenant {
                                         tracing::info_span!(parent: None, "attach_preload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()),
                                     )
                                     .await {
-                                        Ok(p) => p,
+                                        Ok(p) => {
+                                            preload_timer.observe_duration();
+                                            p
+                                        }
+                                            ,
                                         Err(e) => {
                                             make_broken(&tenant_clone, anyhow::anyhow!(e));
                                                 return Ok(());
@@ -721,15 +794,43 @@ impl Tenant {
                     }
                 }
 
+                // We will time the duration of the attach phase unless this is a creation (attach will do no work)
+                let attach_timer = match mode {
+                    SpawnMode::Create => None,
+                    SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
+                };
                 match tenant_clone.attach(preload, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
+                        if let Some(t)=  attach_timer {t.observe_duration();}
                         tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
+                        if let Some(t)=  attach_timer {t.observe_duration();}
                         make_broken(&tenant_clone, anyhow::anyhow!(e));
                     }
                 }
+
+                // If we are doing an opportunistic warmup attachment at startup, initialize
+                // logical size at the same time.  This is better than starting a bunch of idle tenants
+                // with cold caches and then coming back later to initialize their logical sizes.
+                //
+                // It also prevents the warmup proccess competing with the concurrency limit on
+                // logical size calculations: if logical size calculation semaphore is saturated,
+                // then warmup will wait for that before proceeding to the next tenant.
+                if let AttachType::Warmup(_permit) = attach_type {
+                    let mut futs = FuturesUnordered::new();
+                    let timelines: Vec<_> = tenant_clone.timelines.lock().unwrap().values().cloned().collect();
+                    for t in timelines {
+                        futs.push(t.await_initial_logical_size())
+                    }
+                    tracing::info!("Waiting for initial logical sizes while warming up...");
+                    while futs.next().await.is_some() {
+
+                    }
+                    tracing::info!("Warm-up complete");
+                }
+
                 Ok(())
             }
             .instrument({
@@ -1696,6 +1797,15 @@ impl Tenant {
         Ok(loaded_timeline)
     }
 
+    pub(crate) async fn delete_timeline(
+        self: Arc<Self>,
+        timeline_id: TimelineId,
+    ) -> Result<(), DeleteTimelineError> {
+        DeleteTimelineFlow::run(&self, timeline_id, false).await?;
+
+        Ok(())
+    }
+
     /// perform one garbage collection iteration, removing old data files from disk.
     /// this function is periodically called by gc task.
     /// also it can be explicitly requested through page server api 'do_gc' command.
@@ -1857,7 +1967,7 @@ impl Tenant {
                 );
                 *current_state = TenantState::Active;
 
-                let elapsed = self.loading_started_at.elapsed();
+                let elapsed = self.constructed_at.elapsed();
                 let total_timelines = timelines_accessor.len();
 
                 // log a lot of stuff, because some tenants sometimes suffer from user-visible
@@ -1872,7 +1982,7 @@ impl Tenant {
                     "activation attempt finished"
                 );
 
-                TENANT_ACTIVATION.observe(elapsed.as_secs_f64());
+                TENANT.activation.observe(elapsed.as_secs_f64());
             });
         }
     }
@@ -2127,18 +2237,41 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub(crate) async fn wait_to_become_active(&self) -> Result<(), GetActiveTenantError> {
+    /// The activate_now semaphore is initialized with zero units.  As soon as
+    /// we add a unit, waiters will be able to acquire a unit and proceed.
+    pub(crate) fn activate_now(&self) {
+        self.activate_now_sem.add_permits(1);
+    }
+
+    pub(crate) async fn wait_to_become_active(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), GetActiveTenantError> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
-                    receiver.changed().await.map_err(
-                        |_e: tokio::sync::watch::error::RecvError|
-                            // Tenant existed but was dropped: report it as non-existent
-                            GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_shard_id.tenant_id))
-                    )?;
+                    self.activate_now();
+                    match timeout_cancellable(timeout, &self.cancel, receiver.changed()).await {
+                        Ok(r) => {
+                            r.map_err(
+                            |_e: tokio::sync::watch::error::RecvError|
+                                // Tenant existed but was dropped: report it as non-existent
+                                GetActiveTenantError::NotFound(GetTenantError::NotFound(self.tenant_shard_id.tenant_id))
+                        )?
+                        }
+                        Err(TimeoutCancellableError::Cancelled) => {
+                            return Err(GetActiveTenantError::Cancelled);
+                        }
+                        Err(TimeoutCancellableError::Timeout) => {
+                            return Err(GetActiveTenantError::WaitForActiveTimeout {
+                                latest_state: Some(self.current_state()),
+                                wait_time: timeout,
+                            });
+                        }
+                    }
                 }
                 TenantState::Active { .. } => {
                     return Ok(());
@@ -2463,7 +2596,7 @@ impl Tenant {
             conf,
             // using now here is good enough approximation to catch tenants with really long
             // activation times.
-            loading_started_at: Instant::now(),
+            constructed_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(attached_conf)),
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
@@ -2475,6 +2608,7 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            activate_now_sem: tokio::sync::Semaphore::new(0),
             delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::new(format!("Tenant<{tenant_shard_id}>")),
@@ -3059,6 +3193,7 @@ impl Tenant {
                     storage,
                     &self.tenant_shard_id,
                     &existing_initdb_timeline_id,
+                    &self.cancel,
                 )
                 .await
                 .context("download initdb tar")?;
@@ -3099,6 +3234,7 @@ impl Tenant {
                             &timeline_id,
                             pgdata_zstd.try_clone().await?,
                             tar_zst_size,
+                            &self.cancel,
                         )
                         .await
                     },
@@ -3106,8 +3242,7 @@ impl Tenant {
                     3,
                     u32::MAX,
                     "persist_initdb_tar_zst",
-                    // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-                    backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
                 )
                 .await?;
 

@@ -3,14 +3,15 @@ use async_stream::{stream, try_stream};
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
 use tokio_stream::Stream;
 
-use crate::{list_objects_with_retries, RootTarget, S3Target, TenantId};
-use utils::id::{TenantTimelineId, TimelineId};
+use crate::{list_objects_with_retries, RootTarget, S3Target, TenantShardTimelineId};
+use pageserver_api::shard::TenantShardId;
+use utils::id::TimelineId;
 
 /// Given an S3 bucket, output a stream of TenantIds discovered via ListObjectsv2
 pub fn stream_tenants<'a>(
     s3_client: &'a Client,
     target: &'a RootTarget,
-) -> impl Stream<Item = anyhow::Result<TenantId>> + 'a {
+) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
     try_stream! {
         let mut continuation_token = None;
         let tenants_target = target.tenants_root();
@@ -44,14 +45,14 @@ pub fn stream_tenants<'a>(
     }
 }
 
-/// Given a TenantId, output a stream of the timelines within that tenant, discovered
+/// Given a TenantShardId, output a stream of the timelines within that tenant, discovered
 /// using ListObjectsv2.  The listing is done before the stream is built, so that this
 /// function can be used to generate concurrency on a stream using buffer_unordered.
 pub async fn stream_tenant_timelines<'a>(
     s3_client: &'a Client,
     target: &'a RootTarget,
-    tenant: TenantId,
-) -> anyhow::Result<impl Stream<Item = Result<TenantTimelineId, anyhow::Error>> + 'a> {
+    tenant: TenantShardId,
+) -> anyhow::Result<impl Stream<Item = Result<TenantShardTimelineId, anyhow::Error>> + 'a> {
     let mut timeline_ids: Vec<Result<TimelineId, anyhow::Error>> = Vec::new();
     let mut continuation_token = None;
     let timelines_target = target.timelines_root(&tenant);
@@ -98,7 +99,7 @@ pub async fn stream_tenant_timelines<'a>(
     Ok(stream! {
         for i in timeline_ids {
             let id = i?;
-            yield Ok(TenantTimelineId::new(tenant, id));
+            yield Ok(TenantShardTimelineId::new(tenant, id));
         }
     })
 }

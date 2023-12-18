@@ -16,6 +16,7 @@ pub mod console;
 pub mod error;
 pub mod http;
 pub mod logging;
+pub mod metrics;
 pub mod parse;
 pub mod protocol2;
 pub mod proxy;

@@ -120,7 +120,7 @@ where
 struct PgFrame;
 impl Decoder for PgFrame {
     type Item = Bytes;
-    type Error = io::Error;
+    type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < 5 {
@@ -136,7 +136,7 @@ impl Decoder for PgFrame {
     }
 }
 impl Encoder<Bytes> for PgFrame {
-    type Error = io::Error;
+    type Error = std::io::Error;
 
     fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), Self::Error> {
         dst.extend_from_slice(&item);

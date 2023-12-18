@@ -50,6 +50,8 @@ const_format.workspace = true
 # why is it only here? no other crate should use it, streams are rarely needed.
 tokio-stream = { version = "0.1.14" }
 
+serde_path_to_error.workspace = true
+
 [dev-dependencies]
 byteorder.workspace = true
 bytes.workspace = true

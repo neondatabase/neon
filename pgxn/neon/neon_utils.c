@@ -1,3 +1,6 @@
+
+#include <sys/resource.h>
+
 #include "postgres.h"
 
 #include "access/timeline.h"
@@ -113,4 +116,26 @@ pq_sendint64_le(StringInfo buf, uint64 i)
 	enlargeStringInfo(buf, sizeof(uint64));
 	memcpy(buf->data + buf->len, &i, sizeof(uint64));
 	buf->len += sizeof(uint64);
+}
+
+/*
+ * Disables core dump for the current process.
+ */
+void
+disable_core_dump()
+{
+	struct rlimit rlim;
+
+#ifdef WALPROPOSER_LIB			/* skip in simulation mode */
+	return;
+#endif
+
+	rlim.rlim_cur = 0;
+	rlim.rlim_max = 0;
+	if (setrlimit(RLIMIT_CORE, &rlim))
+	{
+		int			save_errno = errno;
+
+		fprintf(stderr, "WARNING: disable cores setrlimit failed: %s", strerror(save_errno));
+	}
 }
