@@ -4,7 +4,7 @@ use crate::{
     compute,
     config::AuthenticationConfig,
     console::AuthSecret,
-    proxy::LatencyTimer,
+    metrics::LatencyTimer,
     sasl,
     stream::{PqStream, Stream},
 };

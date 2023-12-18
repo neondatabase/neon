@@ -4,7 +4,7 @@ use super::{
 use crate::{
     auth::{self, AuthFlow},
     console::AuthSecret,
-    proxy::LatencyTimer,
+    metrics::LatencyTimer,
     sasl,
     stream::{self, Stream},
 };
