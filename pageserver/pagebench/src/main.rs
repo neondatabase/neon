@@ -1,4 +1,5 @@
 use clap::Parser;
+use utils::logging;
 
 pub(crate) mod cli;
 pub(crate) mod util;
@@ -16,6 +17,13 @@ enum Args {
 }
 
 fn main() {
+    logging::init(
+        logging::LogFormat::Plain,
+        logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stderr,
+    )
+    .unwrap();
+
     let args = Args::parse();
     match args {
         Args::Basebackup(args) => basebackup::main(args),

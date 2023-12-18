@@ -7,18 +7,18 @@ use rand::prelude::*;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
 use tracing::{debug, info, instrument};
-use utils::logging;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::cli;
 use crate::util::tenant_timeline_id::TenantTimelineId;
+use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
+use crate::util::{request_stats, tokio_thread_local_stats};
 
 /// basebackup@LatestLSN
 #[derive(clap::Parser)]
@@ -51,134 +51,27 @@ impl LiveStats {
     }
 }
 
-#[derive(serde::Serialize)]
-struct Output {
-    total: PerTaskOutput,
-}
-
-const LATENCY_PERCENTILES: [f64; 4] = [95.0, 99.00, 99.90, 99.99];
-
-struct LatencyPercentiles {
-    latency_percentiles: [Duration; 4],
-}
-
-impl serde::Serialize for LatencyPercentiles {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-        let mut ser = serializer.serialize_map(Some(LATENCY_PERCENTILES.len()))?;
-        for p in LATENCY_PERCENTILES {
-            ser.serialize_entry(
-                &format!("p{p}"),
-                &format!(
-                    "{}",
-                    &humantime::format_duration(self.latency_percentiles[0])
-                ),
-            )?;
-        }
-        ser.end()
-    }
-}
-
-#[derive(serde::Serialize)]
-struct PerTaskOutput {
-    request_count: u64,
-    #[serde(with = "humantime_serde")]
-    latency_mean: Duration,
-    latency_percentiles: LatencyPercentiles,
-}
-
-struct ThreadLocalStats {
-    latency_histo: hdrhistogram::Histogram<u64>,
-}
-
-impl ThreadLocalStats {
-    fn new() -> Self {
-        Self {
-            // Initialize with fixed bounds so that we panic at runtime instead of resizing the histogram,
-            // which would skew the benchmark results.
-            latency_histo: hdrhistogram::Histogram::new_with_bounds(1, 1_000_000_000, 3).unwrap(),
-        }
-    }
-    fn observe(&mut self, latency: Duration) -> anyhow::Result<()> {
-        let micros: u64 = latency
-            .as_micros()
-            .try_into()
-            .context("latency greater than u64")?;
-        self.latency_histo
-            .record(micros)
-            .context("add to histogram")?;
-        Ok(())
-    }
-    fn output(&self) -> PerTaskOutput {
-        let latency_percentiles = std::array::from_fn(|idx| {
-            let micros = self
-                .latency_histo
-                .value_at_percentile(LATENCY_PERCENTILES[idx]);
-            Duration::from_micros(micros)
-        });
-        PerTaskOutput {
-            request_count: self.latency_histo.len(),
-            latency_mean: Duration::from_micros(self.latency_histo.mean() as u64),
-            latency_percentiles: LatencyPercentiles {
-                latency_percentiles,
-            },
-        }
-    }
-
-    fn add(&mut self, other: &Self) {
-        let Self {
-            ref mut latency_histo,
-        } = self;
-        latency_histo.add(&other.latency_histo).unwrap();
-    }
-}
-
-thread_local! {
-    pub static STATS: RefCell<Arc<Mutex<ThreadLocalStats>>> = std::cell::RefCell::new(
-        Arc::new(Mutex::new(ThreadLocalStats::new()))
-    );
-}
-
-pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    logging::init(
-        logging::LogFormat::Plain,
-        logging::TracingErrorLayerEnablement::Disabled,
-        logging::Output::Stderr,
-    )
-    .unwrap();
-
-    let thread_local_stats = Arc::new(Mutex::new(Vec::new()));
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .on_thread_start({
-            let thread_local_stats = Arc::clone(&thread_local_stats);
-            move || {
-                // pre-initialize the histograms
-                STATS.with(|stats| {
-                    let stats: Arc<_> = Arc::clone(&*stats.borrow());
-                    thread_local_stats.lock().unwrap().push(stats);
-                });
-            }
-        })
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let main_task = rt.spawn(main_impl(args, thread_local_stats));
-    rt.block_on(main_task).unwrap()
-}
-
 struct Target {
     timeline: TenantTimelineId,
     lsn_range: Option<Range<Lsn>>,
 }
 
+#[derive(serde::Serialize)]
+struct Output {
+    total: request_stats::Output,
+}
+
+tokio_thread_local_stats::declare!(STATS: request_stats::Stats);
+
+pub(crate) fn main(args: Args) -> anyhow::Result<()> {
+    tokio_thread_local_stats::main!(STATS, move |thread_local_stats| {
+        main_impl(args, thread_local_stats)
+    })
+}
+
 async fn main_impl(
     args: Args,
-    thread_local_stats: Arc<Mutex<Vec<Arc<Mutex<ThreadLocalStats>>>>>,
+    all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
 ) -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(args));
 
@@ -196,11 +89,12 @@ async fn main_impl(
         },
     )
     .await?;
-
     let mut js = JoinSet::new();
     for timeline in &timelines {
         js.spawn({
             let timeline = *timeline;
+            // FIXME: this triggers initial logical size calculation
+            // https://github.com/neondatabase/neon/issues/6168
             let info = mgmt_api_client
                 .timeline_info(timeline.tenant_id, timeline.timeline_id)
                 .await
@@ -208,7 +102,7 @@ async fn main_impl(
             async move {
                 anyhow::Ok(Target {
                     timeline,
-                    // TODO: lsn_range != latest LSN
+                    // TODO: support lsn_range != latest LSN
                     lsn_range: Some(info.last_record_lsn..(info.last_record_lsn + 1)),
                 })
             }
@@ -302,8 +196,8 @@ async fn main_impl(
 
     let output = Output {
         total: {
-            let mut agg_stats = ThreadLocalStats::new();
-            for stats in thread_local_stats.lock().unwrap().iter() {
+            let mut agg_stats = request_stats::Stats::new();
+            for stats in all_thread_local_stats.lock().unwrap().iter() {
                 let stats = stats.lock().unwrap();
                 agg_stats.add(&stats);
             }
