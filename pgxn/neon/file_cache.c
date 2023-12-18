@@ -100,8 +100,6 @@ static shmem_request_hook_type prev_shmem_request_hook;
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
-void		PGDLLEXPORT FileCacheMonitorMain(Datum main_arg);
-
 /*
  * Local file cache is optional and Neon can work without it.
  * In case of any any errors with this cache, we should disable it but to not throw error.
