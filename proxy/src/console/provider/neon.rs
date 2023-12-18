@@ -159,12 +159,24 @@ impl Api {
 #[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
-        self.do_get_auth_info(extra, creds).await
+    ) -> Result<Option<AuthSecret>, GetAuthInfoError> {
+        let ep = creds.endpoint.clone();
+        let user = creds.inner.user.clone();
+        if let Some(role_secret) = self.caches.role_secret.get(&(ep.clone(), user.clone())) {
+            return Ok(role_secret.clone());
+        }
+        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        self.caches
+            .role_secret
+            .insert((ep.clone(), user), auth_info.secret.clone());
+        self.caches
+            .allowed_ips
+            .insert(ep, Arc::new(auth_info.allowed_ips));
+        Ok(auth_info.secret)
     }
 
     async fn get_allowed_ips(
@@ -172,8 +184,7 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        let key: &str = &creds.endpoint;
-        if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
+        if let Some(allowed_ips) = self.caches.allowed_ips.get(&creds.endpoint) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
                 .inc();
@@ -182,10 +193,14 @@ impl super::Api for Api {
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
             .inc();
-        let allowed_ips = Arc::new(self.do_get_auth_info(extra, creds).await?.allowed_ips);
+        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let ep = creds.endpoint.clone();
+        let user = creds.inner.user.clone();
         self.caches
-            .allowed_ips
-            .insert(key.into(), allowed_ips.clone());
+            .role_secret
+            .insert((ep.clone(), user), auth_info.secret);
+        self.caches.allowed_ips.insert(ep, allowed_ips.clone());
         Ok(allowed_ips)
     }
 
