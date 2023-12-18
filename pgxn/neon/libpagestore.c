@@ -17,7 +17,6 @@
 #include "pagestore_client.h"
 #include "fmgr.h"
 #include "access/xlog.h"
-#include "access/xlogutils.h"
 #include "storage/buf_internals.h"
 #include "storage/lwlock.h"
 #include "storage/ipc.h"
@@ -62,8 +61,8 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int			n_reconnect_attempts = 0;
-int			max_reconnect_attempts = 60;
+static int n_reconnect_attempts = 0;
+static int max_reconnect_attempts = 60;
 
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
@@ -82,8 +81,6 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
 static PagestoreShmemState *pagestore_shared;
 static uint64 pagestore_local_counter = 0;
 static char local_pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
-
-bool		(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
 static bool pageserver_flush(void);
 static void pageserver_disconnect(void);
@@ -627,8 +624,6 @@ pg_init_libpagestore(void)
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
-		old_redo_read_buffer_filter = redo_read_buffer_filter;
-		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 
 	lfc_init();
