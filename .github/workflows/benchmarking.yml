@@ -128,6 +128,8 @@ jobs:
     # - neon-captest-reuse: Reusing existing project
     # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
+    env:
+      RUN_AWS_RDS_AND_AURORA: ${{ github.event.inputs.run_AWS_RDS_AND_AURORA || 'false' }}
     runs-on: ubuntu-latest
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
@@ -135,63 +137,63 @@ jobs:
       tpch-compare-matrix: ${{ steps.tpch-compare-matrix.outputs.matrix }}
 
     steps:
-      - name: Generate matrix for pgbench benchmark
-        id: pgbench-compare-matrix
-        run: |
-          matrix='{
-            "platform": [
-              "neon-captest-new",
-              "neon-captest-reuse",
-              "neonvm-captest-new"
-            ],
-            "db_size": [ "10gb" ],
-            "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
-                        { "platform": "neon-captest-new",        "db_size": "50gb" },
-                        { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
-                        { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
-          }'
+    - name: Generate matrix for pgbench benchmark
+      id: pgbench-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-new",
+            "neon-captest-reuse",
+            "neonvm-captest-new"
+          ],
+          "db_size": [ "10gb" ],
+          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
+                      { "platform": "neon-captest-new",        "db_size": "50gb" },
+                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
+                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
+        }'
 
-          if [ "$(date +%A)" = "Saturday" ]; then
-            matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                     { "platform": "rds-aurora",   "db_size": "50gb"}]')
-          fi
+        if [ "$(date +%A)" = "Saturday" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
+                                                    { "platform": "rds-aurora",   "db_size": "50gb"}]')
+        fi
 
-          echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
-      - name: Generate matrix for OLAP benchmarks
-        id: olap-compare-matrix
-        run: |
-          matrix='{
-            "platform": [
-              "neon-captest-reuse"
-            ]
-          }'
+    - name: Generate matrix for OLAP benchmarks
+      id: olap-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-reuse"
+          ]
+        }'
 
-          if [ "$(date +%A)" = "Saturday" ] || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}; then
-            matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
-                                                      { "platform": "rds-aurora"   }]')
-          fi
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
+                                                    { "platform": "rds-aurora"   }]')
+        fi
 
-          echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
-      - name: Generate matrix for TPC-H benchmarks
-        id: tpch-compare-matrix
-        run: |
-          matrix='{
-            "platform": [
-              "neon-captest-reuse"
-            ],
-            "scale": [
-              "10"
-            ]
-          }'
+    - name: Generate matrix for TPC-H benchmarks
+      id: tpch-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-reuse"
+          ],
+          "scale": [
+            "10"
+          ]
+        }'
 
-          if [ "$(date +%A)" = "Saturday" ] || ${{ github.event.inputs.run_AWS_RDS_AND_AURORA }}; then
-            matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
-                                                      { "platform": "rds-aurora",   "scale": "10" }]')
-          fi
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
+                                                    { "platform": "rds-aurora",   "scale": "10" }]')
+        fi
 
-          echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
+        echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
   pgbench-compare:
     needs: [ generate-matrices ]
