@@ -11,31 +11,31 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron: "0 3 * * *" # run once a day, timezone is utc
+    - cron: '0 3 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
-        description: "Project region id. If not set, the default region will be used"
+        description: 'Project region id. If not set, the default region will be used'
         required: false
-        default: "aws-us-east-2"
+        default: 'aws-us-east-2'
       save_perf_report:
         type: boolean
-        description: "Publish perf report. If not set, the report will be published only for the main branch"
+        description: 'Publish perf report. If not set, the report will be published only for the main branch'
         required: false
       collect_olap_explain:
         type: boolean
-        description: "Collect EXPLAIN ANALYZE for OLAP queries. If not set, EXPLAIN ANALYZE will not be collected"
+        description: 'Collect EXPLAIN ANALYZE for OLAP queries. If not set, EXPLAIN ANALYZE will not be collected'
         required: false
         default: false
       collect_pg_stat_statements:
         type: boolean
-        description: "Collect pg_stat_statements for OLAP queries. If not set, pg_stat_statements will not be collected"
+        description: 'Collect pg_stat_statements for OLAP queries. If not set, pg_stat_statements will not be collected'
         required: false
         default: false
       run_AWS_RDS_AND_AURORA:
         type: boolean
-        description: "AWS-RDS and AWS-AURORA normally only run on Saturday. Set this to true to run them on every workflow_dispatch"
+        description: 'AWS-RDS and AWS-AURORA normally only run on Saturday. Set this to true to run them on every workflow_dispatch'
         required: false
         default: false
 
@@ -51,14 +51,14 @@ concurrency:
 jobs:
   bench:
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "300"
-      TEST_PG_BENCH_SCALES_MATRIX: "10,100"
+      TEST_PG_BENCH_DURATIONS_MATRIX: '300'
+      TEST_PG_BENCH_SCALES_MATRIX: '10,100'
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: "neon-staging"
+      PLATFORM: 'neon-staging'
 
     runs-on: [self-hosted, us-east-2, x64]
     container:
@@ -96,8 +96,8 @@ jobs:
           extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
 
       - name: Delete Neon Project
         if: ${{ always() }}
@@ -114,7 +114,7 @@ jobs:
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
-          channel-id: "C033QLM5P7D" # dev-staging-stream
+          channel-id: 'C033QLM5P7D' # dev-staging-stream
           slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -201,7 +201,7 @@ jobs:
       matrix: ${{fromJson(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
 
     env:
-      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
+      TEST_PG_BENCH_DURATIONS_MATRIX: '60m'
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
@@ -284,8 +284,8 @@ jobs:
           extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
         env:
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
 
       - name: Benchmark simple-update
         uses: ./.github/actions/run-python-test-set
@@ -297,8 +297,8 @@ jobs:
           extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
         env:
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
 
       - name: Benchmark select-only
         uses: ./.github/actions/run-python-test-set
@@ -310,8 +310,8 @@ jobs:
           extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
         env:
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
 
       - name: Delete Neon Project
         if: ${{ steps.create-neon-project.outputs.project_id && always() }}
@@ -328,7 +328,7 @@ jobs:
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
-          channel-id: "C033QLM5P7D" # dev-staging-stream
+          channel-id: 'C033QLM5P7D' # dev-staging-stream
           slack-message: "Periodic perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -414,8 +414,8 @@ jobs:
           save_perf_report: ${{ env.SAVE_PERF_REPORT }}
           extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
         env:
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
           TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
           TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
@@ -429,7 +429,7 @@ jobs:
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
-          channel-id: "C033QLM5P7D" # dev-staging-stream
+          channel-id: 'C033QLM5P7D' # dev-staging-stream
           slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -520,8 +520,8 @@ jobs:
           save_perf_report: ${{ env.SAVE_PERF_REPORT }}
           extra_params: -m remote_cluster --timeout 21600 -k test_tpch
         env:
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
           TEST_OLAP_SCALE: ${{ matrix.scale }}
 
@@ -533,7 +533,7 @@ jobs:
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
-          channel-id: "C033QLM5P7D" # dev-staging-stream
+          channel-id: 'C033QLM5P7D' # dev-staging-stream
           slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -610,8 +610,8 @@ jobs:
           save_perf_report: ${{ env.SAVE_PERF_REPORT }}
           extra_params: -m remote_cluster --timeout 21600 -k test_user_examples
         env:
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+          VIP_VAP_ACCESS_TOKEN: '${{ secrets.VIP_VAP_ACCESS_TOKEN }}'
+          PERF_TEST_RESULT_CONNSTR: '${{ secrets.PERF_TEST_RESULT_CONNSTR }}'
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
       - name: Create Allure report
@@ -622,7 +622,7 @@ jobs:
         if: ${{ github.event.schedule && failure() }}
         uses: slackapi/slack-github-action@v1
         with:
-          channel-id: "C033QLM5P7D" # dev-staging-stream
+          channel-id: 'C033QLM5P7D' # dev-staging-stream
           slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
