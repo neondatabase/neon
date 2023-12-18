@@ -3,8 +3,6 @@ use std::sync::Arc;
 use humantime::Duration;
 use tokio::task::JoinSet;
 
-use utils::logging;
-
 use crate::{cli, util::tenant_timeline_id::TenantTimelineId};
 
 #[derive(clap::Parser)]
@@ -26,13 +24,6 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn main(args: Args) -> anyhow::Result<()> {
-    logging::init(
-        logging::LogFormat::Plain,
-        logging::TracingErrorLayerEnablement::Disabled,
-        logging::Output::Stderr,
-    )
-    .unwrap();
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
