@@ -259,7 +259,7 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
-            .instrument(tracing::info_span!("get_value_reconstruct_data", layer=%self))
+            .instrument(tracing::debug_span!("get_value_reconstruct_data", layer=%self))
             .await
     }
 
