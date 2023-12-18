@@ -182,6 +182,7 @@ def test_tpch(query: LabelledQuery, remote_compare: RemoteCompare, scale: str):
 
     run_psql(remote_compare, query, times=1)
 
+
 @pytest.mark.remote_cluster
 def test_user_examples(remote_compare: RemoteCompare):
     query = LabelledQuery(
