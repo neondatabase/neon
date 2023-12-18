@@ -133,7 +133,14 @@ If each tenant gets a hard limit of 10k GetPage/second, we can serve up to 10 te
 The mechanism for backpressure will be TCP-based implicit backpressure.
 The compute team isn't concerned about prefetch queue depth.
 Pageserver will implement it by delaying the reading of requests from the libpq connection(s).
-Pageserver will implement starvation prevention, but not guaranteed fairness, among connections by using a fair semaphore.
+
+The rate limit will be implemented using a per-tenant token bucket.
+The bucket will be be shared among all connections to the tenant.
+The bucket implementation supports starvation-preventing `await`ing.
+The current candidate for the implementation is [`leaky_bucket`](https://docs.rs/leaky-bucket/).
+The getpage@lsn benchmark that's being added in https://github.com/neondatabase/neon/issues/5771
+can be used to evaluate the overhead of sharing the bucket among connections of a tenant.
+A possible technique to mitigate the impact of sharing the bucket would be to maintain a buffer of a few tokens per connection handler.
 
 Regarding metrics / the internal GetPage latency SLO:
 we will measure the GetPage latency SLO _after_ the throttler and introduce a new metric to measure the amount of throttling, quantified by:
