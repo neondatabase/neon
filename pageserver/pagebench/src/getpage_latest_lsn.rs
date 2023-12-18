@@ -4,7 +4,7 @@ use pageserver::pgdatadir_mapping::key_to_rel_block;
 use pageserver::repository;
 use pageserver_api::key::is_rel_block_key;
 use pageserver_client::page_service::RelTagBlockNo;
-use utils::id::TenantId;
+
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::cli;
+
 use crate::util::tenant_timeline_id::TenantTimelineId;
 
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
@@ -31,6 +33,8 @@ pub(crate) struct Args {
     mgmt_api_endpoint: String,
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
     page_service_connstring: String,
+    #[clap(long)]
+    pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
     num_clients: NonZeroUsize,
     #[clap(long)]
@@ -195,51 +199,18 @@ async fn main_impl(
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
-        None, // TODO: support jwt in args
+        args.pageserver_jwt.as_deref(),
     ));
 
     // discover targets
-    let mut timelines: Vec<TenantTimelineId> = Vec::new();
-    if args.targets.is_some() {
-        timelines = args.targets.clone().unwrap();
-    } else {
-        let mut tenants: Vec<TenantId> = Vec::new();
-        for ti in mgmt_api_client.list_tenants().await? {
-            if !ti.id.is_unsharded() {
-                anyhow::bail!(
-                    "only unsharded tenants are supported at this time: {}",
-                    ti.id
-                );
-            }
-            tenants.push(ti.id.tenant_id)
-        }
-        let mut js = JoinSet::new();
-        for tenant_id in tenants {
-            js.spawn({
-                let mgmt_api_client = Arc::clone(&mgmt_api_client);
-                async move {
-                    (
-                        tenant_id,
-                        mgmt_api_client.tenant_details(tenant_id).await.unwrap(),
-                    )
-                }
-            });
-        }
-        while let Some(res) = js.join_next().await {
-            let (tenant_id, details) = res.unwrap();
-            for timeline_id in details.timelines {
-                timelines.push(TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                });
-            }
-        }
-    }
-
-    info!("timelines:\n{:?}", timelines);
-    info!("number of timelines:\n{:?}", timelines.len());
-
-
+    let timelines: Vec<TenantTimelineId> = cli::targets::discover(
+        &mgmt_api_client,
+        cli::targets::Spec {
+            limit_to_first_n_targets: args.limit_to_first_n_targets,
+            targets: args.targets.clone(),
+        },
+    )
+    .await?;
 
     let mut js = JoinSet::new();
     for timeline in &timelines {

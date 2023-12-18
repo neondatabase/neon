@@ -3,7 +3,7 @@ use std::str::FromStr;
 use anyhow::Context;
 use utils::id::{TenantId, TimelineId};
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, PartialOrd, Ord)]
 pub(crate) struct TenantTimelineId {
     pub(crate) tenant_id: TenantId,
     pub(crate) timeline_id: TimelineId,

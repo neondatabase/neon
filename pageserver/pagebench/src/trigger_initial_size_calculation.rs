@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use humantime::Duration;
 use tokio::task::JoinSet;
-use tracing::info;
-use utils::{id::TenantId, logging};
 
-use crate::util::tenant_timeline_id::TenantTimelineId;
+use utils::logging;
+
+use crate::{cli, util::tenant_timeline_id::TenantTimelineId};
 
 #[derive(clap::Parser)]
 pub(crate) struct Args {
@@ -20,7 +20,8 @@ pub(crate) struct Args {
         help = "if specified, poll mgmt api to check whether init logical size calculation has completed"
     )]
     poll_for_completion: Option<Duration>,
-
+    #[clap(long)]
+    limit_to_first_n_targets: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -46,48 +47,18 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
 
     let mgmt_api_client = Arc::new(pageserver_client::mgmt_api::Client::new(
         args.mgmt_api_endpoint.clone(),
-        None, // TODO: support jwt in args
+        args.pageserver_jwt.as_deref(),
     ));
 
     // discover targets
-    let mut timelines: Vec<TenantTimelineId> = Vec::new();
-    if args.targets.is_some() {
-        timelines = args.targets.clone().unwrap();
-    } else {
-        let mut tenants: Vec<TenantId> = Vec::new();
-        for ti in mgmt_api_client.list_tenants().await? {
-            if !ti.id.is_unsharded() {
-                anyhow::bail!(
-                    "only unsharded tenants are supported at this time: {}",
-                    ti.id
-                );
-            }
-            tenants.push(ti.id.tenant_id)
-        }
-        let mut js = JoinSet::new();
-        for tenant_id in tenants {
-            js.spawn({
-                let mgmt_api_client = Arc::clone(&mgmt_api_client);
-                async move {
-                    (
-                        tenant_id,
-                        mgmt_api_client.tenant_details(tenant_id).await.unwrap(),
-                    )
-                }
-            });
-        }
-        while let Some(res) = js.join_next().await {
-            let (tenant_id, details) = res.unwrap();
-            for timeline_id in details.timelines {
-                timelines.push(TenantTimelineId {
-                    tenant_id,
-                    timeline_id,
-                });
-            }
-        }
-    }
-
-    info!("timelines:\n{:?}", timelines);
+    let timelines: Vec<TenantTimelineId> = cli::targets::discover(
+        &mgmt_api_client,
+        cli::targets::Spec {
+            limit_to_first_n_targets: args.limit_to_first_n_targets,
+            targets: args.targets.clone(),
+        },
+    )
+    .await?;
 
     // kick it off
 
