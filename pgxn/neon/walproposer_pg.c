@@ -1482,6 +1482,21 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 #if PG_MAJORVERSION_NUM >= 16
 	if (WalSndCtl != NULL)
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
+
+	/*
+	 * Now that we prepared the condvar, check flush ptr again -- it might have
+	 * changed before we subscribed to cv so we missed the wakeup.
+	 *
+	 * Do that only when we're interested in new WAL: without sync-safekeepers
+	 * and if election already passed.
+	 */
+	if (!wp->config->syncSafekeepers && wp->availableLsn != InvalidXLogRecPtr && GetFlushRecPtr(NULL) > wp->availableLsn)
+	{
+		ConditionVariableCancelSleep();
+		ResetLatch(MyLatch);
+		*events = WL_LATCH_SET;
+		return 1;
+	}
 #endif
 
 	/*
