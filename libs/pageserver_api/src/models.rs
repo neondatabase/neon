@@ -812,6 +812,16 @@ impl PagestreamBeMessage {
         }
         Ok(ok)
     }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Exists(_) => "Exists",
+            Self::Nblocks(_) => "Nblocks",
+            Self::GetPage(_) => "GetPage",
+            Self::Error(_) => "Error",
+            Self::DbSize(_) => "DbSize",
+        }
+    }
 }
 
 #[cfg(test)]

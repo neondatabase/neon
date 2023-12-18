@@ -134,12 +134,18 @@ impl PagestreamClient {
         let next: Option<Result<bytes::Bytes, _>> = self.copy_both.next().await;
         let next = next.unwrap().unwrap();
 
-        match PagestreamBeMessage::deserialize(next)? {
-            PagestreamBeMessage::Exists(_) => todo!(),
-            PagestreamBeMessage::Nblocks(_) => todo!(),
+        let msg = PagestreamBeMessage::deserialize(next)?;
+        match msg {
             PagestreamBeMessage::GetPage(p) => Ok(p),
             PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
-            PagestreamBeMessage::DbSize(_) => todo!(),
+            PagestreamBeMessage::Exists(_)
+            | PagestreamBeMessage::Nblocks(_)
+            | PagestreamBeMessage::DbSize(_) => {
+                anyhow::bail!(
+                    "unexpected be message kind in response to getpage request: {}",
+                    msg.kind()
+                )
+            }
         }
     }
 }
