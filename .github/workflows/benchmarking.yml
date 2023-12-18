@@ -11,7 +11,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron: '0 3 * * *' # run once a day, timezone is utc
+    - cron:   '0 3 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
@@ -155,7 +155,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                    { "platform": "rds-aurora",   "db_size": "50gb"}]')
+                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -171,7 +171,7 @@ jobs:
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
-                                                    { "platform": "rds-aurora"   }]')
+                                                   { "platform": "rds-aurora"   }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -366,75 +366,75 @@ jobs:
       options: --init
 
     steps:
-      - uses: actions/checkout@v3
+    - uses: actions/checkout@v3
 
-      - name: Download Neon artifact
-        uses: ./.github/actions/download
-        with:
-          name: neon-${{ runner.os }}-release-artifact
-          path: /tmp/neon/
-          prefix: latest
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
 
-      - name: Add Postgres binaries to PATH
-        run: |
-          ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-          echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
+    - name: Add Postgres binaries to PATH
+      run: |
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
-      - name: Set up Connection String
-        id: set-up-connstr
-        run: |
-          case "${PLATFORM}" in
-            neon-captest-reuse)
-              CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
-              ;;
-            rds-aurora)
-              CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_CLICKBENCH_10M_CONNSTR }}
-              ;;
-            rds-postgres)
-              CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
-              ;;
-            *)
-              echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
-              exit 1
-              ;;
-          esac
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        case "${PLATFORM}" in
+          neon-captest-reuse)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
+            ;;
+          rds-aurora)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_CLICKBENCH_10M_CONNSTR }}
+            ;;
+          rds-postgres)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
+            ;;
+          *)
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            exit 1
+            ;;
+        esac
 
-          echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-          QUERY="SELECT version();"
-          if [[ "${PLATFORM}" = "neon"* ]]; then
-            QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
-          fi
-          psql ${CONNSTR} -c "${QUERY}"
+        QUERY="SELECT version();"
+        if [[ "${PLATFORM}" = "neon"* ]]; then
+          QUERY="${QUERY} SHOW neon.tenant_id; SHOW neon.timeline_id;"
+        fi
+        psql ${CONNSTR} -c "${QUERY}"
 
-      - name: ClickBench benchmark
-        uses: ./.github/actions/run-python-test-set
-        with:
-          build_type: ${{ env.BUILD_TYPE }}
-          test_selection: performance/test_perf_olap.py
-          run_in_parallel: false
-          save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-          extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
-        env:
-          VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
-          PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-          TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
-          TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
-          BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-          TEST_OLAP_SCALE: 10
+    - name: ClickBench benchmark
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance/test_perf_olap.py
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
+      env:
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain || 'false' }}
+        TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements || 'false' }}
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        TEST_OLAP_SCALE: 10
 
-      - name: Create Allure report
-        if: ${{ !cancelled() }}
-        uses: ./.github/actions/allure-report-generate
+    - name: Create Allure report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
 
-      - name: Post to a Slack channel
-        if: ${{ github.event.schedule && failure() }}
-        uses: slackapi/slack-github-action@v1
-        with:
-          channel-id: "C033QLM5P7D" # dev-staging-stream
-          slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   tpch-compare:
     # TCP-H DB for rds-aurora and rds-Postgres deployed to the same clusters
