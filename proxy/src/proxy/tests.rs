@@ -505,9 +505,15 @@ async fn connect_to_compute_success() {
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![Connect]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap();
     mechanism.verify();
 }
 
@@ -516,9 +522,15 @@ async fn connect_to_compute_retry() {
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![Retry, Wake, Retry, Connect]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap();
     mechanism.verify();
 }
 
@@ -528,9 +540,15 @@ async fn connect_to_compute_non_retry_1() {
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![Retry, Wake, Retry, Fail]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap_err();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap_err();
     mechanism.verify();
 }
 
@@ -540,9 +558,15 @@ async fn connect_to_compute_non_retry_2() {
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![Fail, Wake, Retry, Connect]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap();
     mechanism.verify();
 }
 
@@ -556,9 +580,15 @@ async fn connect_to_compute_non_retry_3() {
         Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
     ]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap_err();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap_err();
     mechanism.verify();
 }
 
@@ -568,9 +598,15 @@ async fn wake_retry() {
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![Retry, WakeRetry, Wake, Connect]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap();
     mechanism.verify();
 }
 
@@ -580,8 +616,14 @@ async fn wake_non_retry() {
     use ConnectAction::*;
     let mechanism = TestConnectMechanism::new(vec![Retry, WakeFail]);
     let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
-        .await
-        .unwrap_err();
+    connect_to_compute(
+        &mechanism,
+        cache,
+        &extra,
+        &creds,
+        &mut LatencyTimer::new("test"),
+    )
+    .await
+    .unwrap_err();
     mechanism.verify();
 }

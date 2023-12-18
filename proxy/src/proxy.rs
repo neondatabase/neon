@@ -26,6 +26,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
+use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -219,6 +220,10 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     // Extract credentials which we're going to use for auth.
     let creds = {
         let hostname = mode.hostname(stream.get_ref());
+
+        // record the endpoint ID if we have it
+        ctx.endpoint_id = hostname.map(SmolStr::from);
+
         let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
@@ -241,7 +246,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         endpoint_rate_limiter,
     );
     cancel_map
-        .with_session(|session| client.connect_to_db(session, mode, &config.authentication_config))
+        .with_session(|session| {
+            client.connect_to_db(ctx, session, mode, &config.authentication_config)
+        })
         .await
 }
 
@@ -448,6 +455,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     #[tracing::instrument(name = "", fields(ep = %self.creds.get_endpoint().unwrap_or_default()), skip_all)]
     async fn connect_to_db(
         self,
+        ctx: &mut RequestContext,
         session: cancellation::Session<'_>,
         mode: ClientMode,
         config: &'static AuthenticationConfig,
@@ -480,17 +488,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             ),
             options: neon_options(params),
         };
-        let mut latency_timer = LatencyTimer::new(proto);
 
         let user = creds.get_user().to_owned();
         let auth_result = match creds
-            .authenticate(
-                &extra,
-                &mut stream,
-                mode.allow_cleartext(),
-                config,
-                &mut latency_timer,
-            )
+            .authenticate(ctx, &extra, &mut stream, mode.allow_cleartext(), config)
             .await
         {
             Ok(auth_result) => auth_result,
@@ -513,7 +514,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             node_info,
             &extra,
             &creds,
-            latency_timer,
+            &mut ctx.latency_timer,
         )
         .or_else(|e| stream.throw_error(e))
         .await?;

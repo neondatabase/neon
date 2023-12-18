@@ -13,6 +13,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
@@ -121,6 +122,7 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 }
 
 fn get_conn_info(
+    ctx: &mut RequestContext,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
 ) -> Result<ConnInfo, anyhow::Error> {
@@ -176,6 +178,9 @@ fn get_conn_info(
         }
     }
 
+    let hostname: SmolStr = hostname.into();
+    ctx.endpoint_id = Some(hostname.clone());
+
     let pairs = connection_url.query_pairs();
 
     let mut options = Option::None;
@@ -190,7 +195,7 @@ fn get_conn_info(
     Ok(ConnInfo {
         username: username.into(),
         dbname: dbname.into(),
-        hostname: hostname.into(),
+        hostname,
         password: password.into(),
         options,
     })
@@ -302,7 +307,7 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(headers, sni_hostname)?;
+    let conn_info = get_conn_info(ctx, headers, sni_hostname)?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -350,9 +355,7 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool
-        .get(conn_info, !allow_pool, ctx.session_id, ctx.peer_addr)
-        .await?;
+    let mut client = conn_pool.get(ctx, conn_info, !allow_pool).await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)

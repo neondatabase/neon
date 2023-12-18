@@ -127,7 +127,7 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra,
     creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
-    mut latency_timer: LatencyTimer,
+    latency_timer: &mut LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
     M::ConnectError: ShouldRetry + std::fmt::Debug,

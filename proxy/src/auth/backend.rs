@@ -10,6 +10,7 @@ use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::AuthSecret;
+use crate::context::RequestContext;
 use crate::proxy::connect_compute::handle_try_wake;
 use crate::proxy::retry::retry_after;
 use crate::scram;
@@ -22,7 +23,6 @@ use crate::{
         provider::{CachedNodeInfo, ConsoleReqExtra},
         Api,
     },
-    metrics::LatencyTimer,
     stream, url,
 };
 use futures::TryFutureExt;
@@ -166,20 +166,22 @@ impl TryFrom<ClientCredentials> for ComputeUserInfo {
 ///
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
+    ctx: &mut RequestContext,
     api: &impl console::Api,
     extra: &ConsoleReqExtra,
     creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
-    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
     let (info, unauthenticated_password) = match creds.try_into() {
         Err(info) => {
-            let res = hacks::password_hack_no_authentication(info, client, latency_timer).await?;
+            let res = hacks::password_hack_no_authentication(info, client, &mut ctx.latency_timer)
+                .await?;
+            ctx.endpoint_id = Some(res.info.endpoint.clone());
             (res.info, Some(res.keys))
         }
         Ok(info) => (info, None),
@@ -202,13 +204,13 @@ async fn auth_quirks(
         AuthSecret::Scram(scram::ServerSecret::mock(&info.inner.user, rand::random()))
     });
     match authenticate_with_secret(
+        ctx,
         secret,
         info,
         client,
         unauthenticated_password,
         allow_cleartext,
         config,
-        latency_timer,
     )
     .await
     {
@@ -224,13 +226,13 @@ async fn auth_quirks(
 }
 
 async fn authenticate_with_secret(
+    ctx: &mut RequestContext,
     secret: AuthSecret,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     unauthenticated_password: Option<Vec<u8>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
-    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     if let Some(password) = unauthenticated_password {
         let auth_outcome = validate_password_and_exchange(&password, secret)?;
@@ -253,34 +255,26 @@ async fn authenticate_with_secret(
     // Perform cleartext auth if we're allowed to do that.
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
-        return hacks::authenticate_cleartext(info, client, latency_timer, secret).await;
+        return hacks::authenticate_cleartext(info, client, &mut ctx.latency_timer, secret).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
-    classic::authenticate(info, client, config, latency_timer, secret).await
+    classic::authenticate(info, client, config, &mut ctx.latency_timer, secret).await
 }
 
 /// Authenticate the user and then wake a compute (or retrieve an existing compute session from cache)
 /// only if authentication was successfuly.
 async fn auth_and_wake_compute(
+    ctx: &mut RequestContext,
     api: &impl console::Api,
     extra: &ConsoleReqExtra,
     creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
-    latency_timer: &mut LatencyTimer,
 ) -> auth::Result<(CachedNodeInfo, ComputeUserInfo)> {
-    let compute_credentials = auth_quirks(
-        api,
-        extra,
-        creds,
-        client,
-        allow_cleartext,
-        config,
-        latency_timer,
-    )
-    .await?;
+    let compute_credentials =
+        auth_quirks(ctx, api, extra, creds, client, allow_cleartext, config).await?;
 
     let mut num_retries = 0;
     let mut node = loop {
@@ -343,11 +337,11 @@ impl<'a> BackendType<'a, ClientCredentials> {
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
         self,
+        ctx: &mut RequestContext,
         extra: &ConsoleReqExtra,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
-        latency_timer: &mut LatencyTimer,
     ) -> auth::Result<(CachedNodeInfo, BackendType<'a, ComputeUserInfo>)> {
         use BackendType::*;
 
@@ -360,13 +354,13 @@ impl<'a> BackendType<'a, ClientCredentials> {
                 );
 
                 let (cache_info, user_info) = auth_and_wake_compute(
+                    ctx,
                     &*api,
                     extra,
                     creds,
                     client,
                     allow_cleartext,
                     config,
-                    latency_timer,
                 )
                 .await?;
                 (cache_info, BackendType::Console(api, user_info))
@@ -380,13 +374,13 @@ impl<'a> BackendType<'a, ClientCredentials> {
                 );
 
                 let (cache_info, user_info) = auth_and_wake_compute(
+                    ctx,
                     &*api,
                     extra,
                     creds,
                     client,
                     allow_cleartext,
                     config,
-                    latency_timer,
                 )
                 .await?;
                 (cache_info, BackendType::Postgres(api, user_info))
