@@ -147,7 +147,7 @@ impl super::Api for Api {
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<Option<AuthSecret>, GetAuthInfoError> {
-        self.do_get_auth_info(creds).await?.secret.map(Ok)
+        Ok(self.do_get_auth_info(creds).await?.secret)
     }
 
     async fn get_allowed_ips(
@@ -155,11 +155,7 @@ impl super::Api for Api {
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        self.do_get_auth_info(creds)
-            .await?
-            .allowed_ips
-            .map(Arc::new)
-            .map(Ok)
+        Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
     }
 
     #[tracing::instrument(skip_all)]
