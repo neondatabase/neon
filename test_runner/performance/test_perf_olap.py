@@ -106,7 +106,7 @@ def get_scale() -> List[str]:
     return [scale]
 
 
-# run the query times times plus once with EXPLAIN VERBOSE if TEST_OLAP_COLLECT_EXPLAIN is set to true (default false)
+# run the query times times plus once with EXPLAIN VERBOSE if explain is requestd
 def run_psql(
     env: RemoteCompare, labelled_query: LabelledQuery, times: int, explain: bool = False
 ) -> None:
