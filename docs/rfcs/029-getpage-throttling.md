@@ -103,8 +103,8 @@ Candidates are:
     * This outsources policy to console/control plane, with obvious advantages for flexible structuring of what service we offer to customers.
     * Note that this is not a mechanism to guarantee a minium provisioned rate, i.e., this is not a mechanism to guarantee a certain QoS for a tenant.
 * fair share among active connections|timelines|tenants per instance
-    * example: divide available IOPS evenly among the tenants that were active in the last 5min
-    * needs definition of "active", and knowledge of available IOPS in advance
+    * example: each connection|timeline|tenant gets a fair fraction of the machine's GetPage/second capacity
+    * NB: needs definition of "active", and knowledge of available GetPage/second capacity in advance
 * ...
 
 
