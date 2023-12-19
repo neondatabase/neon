@@ -1,14 +1,12 @@
 #ifndef __NEON_WALPROPOSER_H__
 #define __NEON_WALPROPOSER_H__
 
-#include "postgres.h"
-#include "access/xlogdefs.h"
-#include "port.h"
-#include "access/xlog_internal.h"
 #include "access/transam.h"
+#include "access/xlogdefs.h"
+#include "access/xlog_internal.h"
 #include "nodes/replnodes.h"
-#include "utils/uuid.h"
 #include "replication/walreceiver.h"
+#include "utils/uuid.h"
 
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
