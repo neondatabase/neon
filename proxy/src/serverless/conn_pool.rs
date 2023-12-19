@@ -431,7 +431,6 @@ async fn connect_to_compute(
         application_name: APP_NAME.to_string(),
         options: console_options,
     };
-    // TODO(anna): this is a bit hacky way, consider using console notification listener.
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(&extra).await?;
         if !check_peer_addr_is_in_list(&peer_addr, &allowed_ips) {

@@ -14,29 +14,25 @@
  */
 #include "postgres.h"
 
-#include "pagestore_client.h"
-#include "fmgr.h"
 #include "access/xlog.h"
-#include "access/xlogutils.h"
 #include "common/hashfn.h"
-#include "storage/buf_internals.h"
-#include "storage/lwlock.h"
-#include "storage/ipc.h"
-#include "storage/pg_shmem.h"
-#include "c.h"
-#include "postmaster/interrupt.h"
-
+#include "fmgr.h"
 #include "libpq-fe.h"
-#include "libpq/pqformat.h"
 #include "libpq/libpq.h"
-
+#include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/interrupt.h"
+#include "storage/buf_internals.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "utils/guc.h"
 
 #include "neon.h"
-#include "walproposer.h"
 #include "neon_utils.h"
+#include "pagestore_client.h"
+#include "walproposer.h"
 
 #define PageStoreTrace DEBUG5
 
@@ -52,9 +48,9 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int			n_reconnect_attempts = 0;
-int			max_reconnect_attempts = 60;
-int			stripe_size;
+static int	n_reconnect_attempts = 0;
+static int	max_reconnect_attempts = 60;
+static int	stripe_size;
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
@@ -695,9 +691,9 @@ pg_init_libpagestore(void)
 							"sharding stripe size",
 							NULL,
 							&stripe_size,
-							256, 1, INT_MAX,
+							32768, 1, INT_MAX,
 							PGC_SIGHUP,
-							GUC_UNIT_MB,
+							GUC_UNIT_BLOCKS,
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("neon.max_cluster_size",
@@ -760,8 +756,6 @@ pg_init_libpagestore(void)
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
-		old_redo_read_buffer_filter = redo_read_buffer_filter;
-		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 
 	lfc_init();

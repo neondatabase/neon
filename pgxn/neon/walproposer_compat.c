@@ -3,11 +3,13 @@
  * This is needed to avoid linking to full postgres server installation. This file
  * is compiled as a part of libwalproposer static library.
  */
+#include "postgres.h"
 
 #include <stdio.h>
-#include "walproposer.h"
-#include "utils/datetime.h"
+
 #include "miscadmin.h"
+#include "utils/datetime.h"
+#include "walproposer.h"
 
 void
 ExceptionalCondition(const char *conditionName,

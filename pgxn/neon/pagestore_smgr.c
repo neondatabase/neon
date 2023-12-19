@@ -47,25 +47,26 @@
 
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xlogdefs.h"
 #include "access/xloginsert.h"
 #include "access/xlog_internal.h"
-#include "access/xlogdefs.h"
+#include "access/xlogutils.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "executor/instrument.h"
-#include "pagestore_client.h"
-#include "postmaster/interrupt.h"
+#include "pgstat.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/interrupt.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
 #include "storage/fsm_internals.h"
-#include "storage/smgr.h"
 #include "storage/md.h"
-#include "pgstat.h"
+#include "storage/smgr.h"
+
+#include "pagestore_client.h"
 
 #if PG_VERSION_NUM >= 150000
-#include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
 #endif
 
@@ -105,6 +106,9 @@ typedef enum
 
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+
+static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
+static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
 /*
  * Prefetch implementation:
@@ -242,7 +246,7 @@ typedef struct PrefetchState
 	PrefetchRequest prf_buffer[];	/* prefetch buffers */
 } PrefetchState;
 
-PrefetchState *MyPState;
+static PrefetchState *MyPState;
 
 #define GetPrfSlot(ring_index) ( \
 	( \
@@ -260,7 +264,7 @@ PrefetchState *MyPState;
 	) \
 )
 
-XLogRecPtr	prefetch_lsn = 0;
+static XLogRecPtr prefetch_lsn = 0;
 
 static bool compact_prefetch_buffers(void);
 static void consume_prefetch_responses(void);
@@ -1425,6 +1429,9 @@ neon_init(void)
 
 	MyPState->prf_hash = prfh_create(MyPState->hashctx,
 									 readahead_buffer_size, NULL);
+
+	old_redo_read_buffer_filter = redo_read_buffer_filter;
+	redo_read_buffer_filter = neon_redo_read_buffer_filter;
 
 #ifdef DEBUG_COMPARE_LOCAL
 	mdinit();
@@ -2924,7 +2931,7 @@ get_fsm_physical_block(BlockNumber heapblk)
  * contents, where with REDO locking it would wait on block 1 and see
  * block 3 with post-REDO contents only.
  */
-bool
+static bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 {
 	XLogRecPtr	end_recptr = record->EndRecPtr;

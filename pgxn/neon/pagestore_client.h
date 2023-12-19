@@ -13,7 +13,6 @@
 #ifndef pageserver_h
 #define pageserver_h
 
-#include "postgres.h"
 #include "neon_pgversioncompat.h"
 
 #include "access/xlogdefs.h"
@@ -23,6 +22,8 @@
 #include "storage/buf_internals.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "storage/block.h"
+#include "storage/smgr.h"
 #include "utils/memutils.h"
 
 #include "pg_config.h"
@@ -167,11 +168,8 @@ extern page_server_api *page_server;
 extern char *page_server_connstring;
 extern int	flush_every_n_requests;
 extern int	readahead_buffer_size;
-extern bool seqscan_prefetch_enabled;
-extern int	seqscan_prefetch_distance;
 extern char *neon_timeline;
 extern char *neon_tenant;
-extern bool wal_redo;
 extern int32 max_cluster_size;
 
 extern shardno_t get_shard_number(BufferTag* tag);
