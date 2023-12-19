@@ -33,11 +33,8 @@ dashmap = { version = "5", default-features = false, features = ["raw-api"] }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 futures = { version = "0.3" }
-futures-channel = { version = "0.3", features = ["sink"] }
-futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
-futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 hex = { version = "0.4", features = ["serde"] }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -56,7 +53,6 @@ regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "default-tls", "json", "multipart", "rustls-tls", "stream"] }
-ring = { version = "0.16" }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
