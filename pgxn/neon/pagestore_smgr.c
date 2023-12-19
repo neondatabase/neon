@@ -2813,7 +2813,7 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 		consume_prefetch_responses();
 		resp = page_server->receive();
 	} while (resp == NULL);
-	elog(LOG, "Get SLRU segment %d at %X/%X %d blocks", segno, LSN_FORMAT_ARGS(request_lsn), ((NeonGetSlruSegmentResponse *) resp)->n_blocks);
+
 	switch (resp->tag)
 	{
 		case T_NeonGetSlruSegmentResponse:
