@@ -1,19 +1,24 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{
     metrics::SECONDARY_MODE,
     tenant::{
-        config::AttachmentMode, mgr::TenantManager, remote_timeline_client::remote_heatmap_path,
-        span::debug_assert_current_span_has_tenant_id, Tenant,
+        config::AttachmentMode,
+        mgr::TenantManager,
+        remote_timeline_client::remote_heatmap_path,
+        span::debug_assert_current_span_has_tenant_id,
+        tasks::{warn_when_period_overrun, BackgroundLoopKind},
+        Tenant,
     },
 };
 
 use md5;
 use pageserver_api::shard::TenantShardId;
+use rand::Rng;
 use remote_storage::GenericRemoteStorage;
 
 use super::{
@@ -25,7 +30,7 @@ use super::{
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
+use tracing::{info_span, instrument, Instrument};
 use utils::{backoff, completion::Barrier};
 
 use super::{heatmap::HeatMapTenant, UploadCommand};
@@ -43,6 +48,8 @@ impl HasBarrier for WriteInProgress {
 struct UploadPending {
     tenant: Arc<Tenant>,
     last_digest: Option<md5::Digest>,
+    target_time: Option<Instant>,
+    period: Option<Duration>,
 }
 
 impl TenantScoped for UploadPending {
@@ -154,7 +161,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         let tenants = self.tenant_manager.get_attached_active_tenant_shards();
 
         yielding_loop(1000, &self.cancel, tenants.into_iter(), |tenant| {
-            match tenant.get_heatmap_period() {
+            let period = match tenant.get_heatmap_period() {
                 None => {
                     // Heatmaps are disabled for this tenant
                     return;
@@ -166,9 +173,11 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
                     result.want_interval = match result.want_interval {
                         None => Some(period),
                         Some(existing) => Some(std::cmp::min(period, existing)),
-                    }
+                    };
+
+                    period
                 }
-            }
+            };
 
             // Stale attachments do not upload anything: if we are in this state, there is probably some
             // other attachment in mode Single or Multi running on another pageserver, and we don't
@@ -182,11 +191,15 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             let state = self
                 .tenants
                 .entry(*tenant.get_tenant_shard_id())
-                .or_insert_with(|| UploaderTenantState {
-                    tenant: Arc::downgrade(&tenant),
-                    last_upload: None,
-                    next_upload: Some(Instant::now()),
-                    last_digest: None,
+                .or_insert_with(|| {
+                    let jittered_period = rand::thread_rng().gen_range(Duration::ZERO..period);
+
+                    UploaderTenantState {
+                        tenant: Arc::downgrade(&tenant),
+                        last_upload: None,
+                        next_upload: Some(now.checked_add(jittered_period).unwrap_or(now)),
+                        last_digest: None,
+                    }
                 });
 
             // Decline to do the upload if insufficient time has passed
@@ -198,6 +211,8 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             result.jobs.push(UploadPending {
                 tenant,
                 last_digest,
+                target_time: state.next_upload,
+                period: Some(period),
             });
         })
         .await
@@ -215,10 +230,13 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         let UploadPending {
             tenant,
             last_digest,
+            target_time,
+            period,
         } = job;
 
         let remote_storage = self.remote_storage.clone();
         let (completion, barrier) = utils::completion::channel();
+        let tenant_shard_id = *tenant.get_tenant_shard_id();
         join_set.spawn(async move {
             // Guard for the barrier in [`WriteInProgress`]
             let _completion = completion;
@@ -253,6 +271,16 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             };
 
             let now = Instant::now();
+
+            // If the job had a target execution time, we may check our final execution
+            // time against that for observability purposes.
+            if let (Some(target_time), Some(period)) = (target_time, period) {
+                // Elapsed time includes any scheduling lag as well as the execution of the job
+                let elapsed = now.duration_since(target_time);
+
+                warn_when_period_overrun(elapsed, period, BackgroundLoopKind::HeatmapUpload);
+            }
+
             let next_upload = tenant
                 .get_heatmap_period()
                 .and_then(|period| now.checked_add(period));
@@ -265,7 +293,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
                     next_upload,
                 })
                 .ok();
-        });
+        }.instrument(info_span!("secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
         WriteInProgress { barrier }
     }
 
@@ -284,6 +312,8 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
             // Ignore our state for last digest: this forces an upload even if nothing has changed
             last_digest: None,
             tenant,
+            target_time: None,
+            period: None,
         })
     }
 
@@ -330,7 +360,6 @@ enum UploadHeatmapError {
 
 /// The inner upload operation.  This will skip if `last_digest` is Some and matches the digest
 /// of the object we would have uploaded.
-#[instrument(skip_all, fields(tenant_id = %tenant.get_tenant_shard_id().tenant_id, shard_id = %tenant.get_tenant_shard_id().shard_slug()))]
 async fn upload_tenant_heatmap(
     remote_storage: GenericRemoteStorage,
     tenant: &Arc<Tenant>,

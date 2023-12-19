@@ -96,6 +96,21 @@ pub(super) trait TenantScoped {
     fn get_tenant_shard_id(&self) -> &TenantShardId;
 }
 
+pub(super) trait ScheduledJob {
+    /// Indicative intended time of execution: jobs are executed _after_ this time,
+    /// but how much after is an indicator of whether we're keeping up with schedudling
+    /// goals.
+    fn get_target_time(&self) -> Option<Instant> {
+        None
+    }
+
+    /// If the job runs on a periodic basis, expose the period here.  This is used
+    /// together with the target time to determine whether the job is considered late.
+    fn get_period(&self) -> Option<Duration> {
+        None
+    }
+}
+
 /// For types that contain a Barrier that may be waited on
 pub(super) trait HasBarrier {
     fn get_barrier(&self) -> Barrier;
@@ -199,10 +214,12 @@ where
                 .checked_add(self.scheduling_interval)
                 .unwrap_or_else(|| {
                     tracing::warn!(
-                        "Scheduling interval invalid ({}s), running immediately!",
+                        "Scheduling interval invalid ({}s)",
                         self.scheduling_interval.as_secs_f64()
                     );
-                    Instant::now()
+                    // unwrap(): this constant is small, cannot fail to add to time unless
+                    // we are close to the end of the universe.
+                    Instant::now().checked_add(MIN_SCHEDULING_INTERVAL).unwrap()
                 });
             loop {
                 tokio::select! {

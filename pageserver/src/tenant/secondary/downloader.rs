@@ -13,6 +13,7 @@ use crate::{
         remote_timeline_client::{index::LayerFileMetadata, HEATMAP_BASENAME},
         span::debug_assert_current_span_has_tenant_id,
         storage_layer::{Layer, LayerFileName},
+        tasks::{warn_when_period_overrun, BackgroundLoopKind},
         timeline::{DiskUsageEvictionInfo, LocalLayerInfoForDiskUsageEviction},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
@@ -31,11 +32,12 @@ use anyhow::Context;
 
 use chrono::format::{DelayedFormat, StrftimeItems};
 use pageserver_api::shard::TenantShardId;
+use rand::Rng;
 use remote_storage::GenericRemoteStorage;
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{instrument, Instrument};
+use tracing::{info_span, instrument, Instrument};
 use utils::{completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId};
 
 use super::{
@@ -86,7 +88,8 @@ pub(super) struct SecondaryDetailTimeline {
 /// to TenantManager
 #[derive(Default, Debug)]
 pub(super) struct SecondaryDetail {
-    freshened_at: Option<Instant>,
+    last_download: Option<Instant>,
+    next_download: Option<Instant>,
     pub(super) timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
 }
 
@@ -171,6 +174,9 @@ struct SecondaryDownloader {
 
 struct PendingDownload {
     secondary_state: Arc<SecondaryTenant>,
+    last_download: Option<Instant>,
+    target_time: Option<Instant>,
+    period: Option<Duration>,
 }
 
 impl TenantScoped for PendingDownload {
@@ -230,7 +236,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         // Update freshened_at even if there was an error: we don't want errored tenants to implicitly
         // take priority to run again.
         let mut detail = secondary_state.detail.lock().unwrap();
-        detail.freshened_at = Some(Instant::now());
+        detail.next_download = Some(Instant::now() + DOWNLOAD_FRESHEN_INTERVAL);
     }
 
     async fn schedule(&mut self) -> SchedulingResult<PendingDownload> {
@@ -246,22 +252,41 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                 tenants.push(secondary_state.clone());
             });
 
-        // Step 2: filter out tenants which are not elegible to run yet
+        // Step 2: filter out tenants which are not yet elegible to run
         let now = Instant::now();
-        let tenants = tenants.into_iter().filter(|c| {
-            let detail = c.detail.lock().unwrap();
-            match detail.freshened_at {
-                None => true, // Not yet freshened, therefore elegible to run
-                Some(t) => {
-                    let since = now.duration_since(t);
-                    since > DOWNLOAD_FRESHEN_INTERVAL
-                }
-            }
-        });
-
         result.jobs = tenants
-            .map(|t| PendingDownload { secondary_state: t })
+            .into_iter()
+            .filter_map(|c| {
+                let (last_download, next_download) = {
+                    let mut detail = c.detail.lock().unwrap();
+                    if detail.next_download.is_none() {
+                        // Initialize with a jitter: this spreads initial downloads on startup
+                        // or mass-attach across our freshen interval.
+                        let jittered_period =
+                            rand::thread_rng().gen_range(Duration::ZERO..DOWNLOAD_FRESHEN_INTERVAL);
+                        detail.next_download = Some(now.checked_add(jittered_period).expect(
+                        "Using our constant, which is known to be small compared with clock range",
+                    ));
+                    }
+                    (detail.last_download, detail.next_download.unwrap())
+                };
+
+                if now < next_download {
+                    Some(PendingDownload {
+                        secondary_state: c,
+                        last_download,
+                        target_time: Some(next_download),
+                        period: Some(DOWNLOAD_FRESHEN_INTERVAL),
+                    })
+                } else {
+                    None
+                }
+            })
             .collect();
+
+        // Step 3: sort by target execution time to run most urgent first.
+        result.jobs.sort_by_key(|j| j.target_time);
+
         result
     }
 
@@ -278,6 +303,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         };
 
         Ok(PendingDownload {
+            target_time: None,
+            period: None,
+            last_download: None,
             secondary_state: tenant,
         })
     }
@@ -288,11 +316,17 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         result_tx: tokio::sync::mpsc::UnboundedSender<CompleteDownload>,
         job: PendingDownload,
     ) -> RunningDownload {
-        let PendingDownload { secondary_state } = job;
+        let PendingDownload {
+            secondary_state,
+            last_download,
+            target_time,
+            period,
+        } = job;
 
         let (completion, barrier) = utils::completion::channel();
         let remote_storage = self.remote_storage.clone();
         let conf = self.tenant_manager.get_conf();
+        let tenant_shard_id = *secondary_state.get_tenant_shard_id();
         join_set.spawn(async move {
             let _completion = completion;
 
@@ -303,13 +337,31 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                 tracing::info!("Failed to freshen secondary content: {e:#}")
             };
 
+            // If the job had a target execution time, we may check our final execution
+            // time against that for observability purposes.
+            if let (Some(target_time), Some(period)) = (target_time, period) {
+                // Only track execution lag if this isn't our first download: otherwise, it is expected
+                // that execution will have taken longer than our configured interval, for example
+                // when starting up a pageserver and 
+                if last_download.is_some() {
+                    // Elapsed time includes any scheduling lag as well as the execution of the job
+                    let elapsed = Instant::now().duration_since(target_time);
+
+                    warn_when_period_overrun(
+                        elapsed,
+                        period,
+                        BackgroundLoopKind::SecondaryDownload,
+                    );
+                }
+            }
+
             result_tx
                 .send(CompleteDownload {
                     secondary_state,
                     completed_at: Instant::now(),
                 })
                 .ok();
-        });
+        }.instrument(info_span!("secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
         RunningDownload { barrier }
     }
 }
@@ -462,8 +514,9 @@ impl<'a> TenantDownloader<'a> {
         }
     }
 
-    #[instrument(skip_all, name="secondary_download", fields(tenant_id=%self.secondary_state.get_tenant_shard_id().tenant_id, shard_id=%self.secondary_state.get_tenant_shard_id().shard_slug()))]
     async fn download(&self) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         // For the duration of a download, we must hold the SecondaryTenant::gate, to ensure
         // cover our access to local storage.
         let Ok(_guard) = self.secondary_state.gate.enter() else {
