@@ -48,6 +48,9 @@ pub(crate) enum DeleteTenantError {
     #[error("Timeline {0}")]
     Timeline(#[from] DeleteTimelineError),
 
+    #[error("Cancelled")]
+    Cancelled,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

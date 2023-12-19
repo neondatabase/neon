@@ -1106,6 +1106,7 @@ impl TenantManager {
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
+        activation_timeout: Duration,
     ) -> Result<(), DeleteTenantError> {
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
@@ -1118,7 +1119,6 @@ impl TenantManager {
         //
         // See https://github.com/neondatabase/neon/issues/5080
 
-        // TODO(sharding): make delete API sharding-aware
         let slot_guard =
             tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
 
@@ -1130,6 +1130,30 @@ impl TenantManager {
                 return Err(DeleteTenantError::NotAttached);
             }
         };
+
+        match tenant.current_state() {
+            TenantState::Broken { .. } | TenantState::Stopping { .. } => {
+                // If a tenant is broken or stopping, DeleteTenantFlow can
+                // handle it: broken tenants proceed to delete, stopping tenants
+                // are checked for deletion already in progress.
+            }
+            _ => {
+                tenant
+                    .wait_to_become_active(activation_timeout)
+                    .await
+                    .map_err(|e| match e {
+                        GetActiveTenantError::WillNotBecomeActive(_) => {
+                            DeleteTenantError::InvalidState(tenant.current_state())
+                        }
+                        GetActiveTenantError::Cancelled => DeleteTenantError::Cancelled,
+                        GetActiveTenantError::NotFound(_) => DeleteTenantError::NotAttached,
+                        GetActiveTenantError::WaitForActiveTimeout {
+                            latest_state: _latest_state,
+                            wait_time: _wait_time,
+                        } => DeleteTenantError::InvalidState(tenant.current_state()),
+                    })?;
+            }
+        }
 
         let result = DeleteTenantFlow::run(
             self.conf,

@@ -308,6 +308,7 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
             SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
+            Cancelled => ApiError::ShuttingDown,
         }
     }
 }
@@ -888,7 +889,7 @@ async fn tenant_delete_handler(
 
     state
         .tenant_manager
-        .delete_tenant(tenant_shard_id)
+        .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard = %tenant_shard_id.shard_slug()
