@@ -1140,7 +1140,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch' &&  ${{ !failure() && !cancelled() }}
+    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
@@ -1210,7 +1210,7 @@ jobs:
 
   promote-compatibility-data:
     needs: [ check-permissions, promote-images, tag, regress-tests ]
-    if: github.ref_name == 'release' && ${{ !failure() && !cancelled() }}
+    if: github.ref_name == 'release' 
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
