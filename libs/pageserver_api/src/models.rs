@@ -656,6 +656,7 @@ enum PagestreamBeMessageTag {
     GetPage = 102,
     Error = 103,
     DbSize = 104,
+    GetSlruSegment = 105,
 }
 impl TryFrom<u8> for PagestreamBeMessageTag {
     type Error = u8;
@@ -666,6 +667,7 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
             102 => Ok(PagestreamBeMessageTag::GetPage),
             103 => Ok(PagestreamBeMessageTag::Error),
             104 => Ok(PagestreamBeMessageTag::DbSize),
+            105 => Ok(PagestreamBeMessageTag::GetSlruSegment),
             _ => Err(value),
         }
     }
@@ -894,7 +896,7 @@ impl PagestreamBeMessage {
             }
 
             Self::GetSlruSegment(resp) => {
-                bytes.put_u8(105); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::GetSlruSegment as u8);
                 bytes.put_u32((resp.segment.len() / BLCKSZ as usize) as u32);
                 bytes.put(&resp.segment[..]);
             }
@@ -938,6 +940,14 @@ impl PagestreamBeMessage {
                     let db_size = buf.read_i64::<BigEndian>()?;
                     Self::DbSize(PagestreamDbSizeResponse { db_size })
                 }
+                Tag::GetSlruSegment => {
+                    let n_blocks = buf.read_u32::<BigEndian>()?;
+                    let mut segment = vec![0; n_blocks as usize * BLCKSZ as usize];
+                    buf.read_exact(&mut segment)?;
+                    Self::GetSlruSegment(PagestreamGetSlruSegmentResponse {
+                        segment: segment.into(),
+                    })
+                }
             };
         let remaining = buf.into_inner();
         if !remaining.is_empty() {
@@ -956,6 +966,7 @@ impl PagestreamBeMessage {
             Self::GetPage(_) => "GetPage",
             Self::Error(_) => "Error",
             Self::DbSize(_) => "DbSize",
+            Self::GetSlruSegment(_) => "GetSlruSegment",
         }
     }
 }
