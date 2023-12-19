@@ -31,7 +31,7 @@ impl RequestKind {
     }
 }
 
-pub(super) struct RequestTyped<C>([C; 4]);
+pub(super) struct RequestTyped<C>([C; 5]);
 
 impl<C> RequestTyped<C> {
     pub(super) fn get(&self, kind: RequestKind) -> &C {
@@ -41,7 +41,7 @@ impl<C> RequestTyped<C> {
     fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
         use RequestKind::*;
         let mut it = [Get, Put, Delete, List].into_iter();
-        let arr = std::array::from_fn::<C, 4, _>(|index| {
+        let arr = std::array::from_fn::<C, 5, _>(|index| {
             let next = it.next().unwrap();
             assert_eq!(index, next.as_index());
             f(next)
