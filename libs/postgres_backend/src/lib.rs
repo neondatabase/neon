@@ -6,7 +6,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::Context;
 use bytes::Bytes;
-use futures::pin_mut;
+use futures::{pin_mut, TryFutureExt, FutureExt};
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -1029,4 +1029,116 @@ pub enum CopyStreamHandlerEnd {
     /// Some other error
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(Clone)]
+pub struct MakeRustlsConnect {
+    config: Arc<rustls::ClientConfig>,
+}
+
+impl MakeRustlsConnect {
+    pub fn new(config: rustls::ClientConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+        }
+    }
+}
+
+impl<S> tokio_postgres::tls::MakeTlsConnect<S> for MakeRustlsConnect
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = RustlsStream<S>;
+    type TlsConnect = RustlsConnect;
+    type Error = io::Error;
+
+    fn make_tls_connect(&mut self, hostname: &str) -> io::Result<RustlsConnect> {
+        rustls::pki_types::ServerName::try_from(hostname)
+            .map(|dns_name| {
+                RustlsConnect(Some(RustlsConnectData {
+                    hostname: dns_name.to_owned(),
+                    connector: Arc::clone(&self.config).into(),
+                }))
+            })
+            .or(Ok(RustlsConnect(None)))
+    }
+}
+
+pub struct RustlsConnect(Option<RustlsConnectData>);
+
+struct RustlsConnectData {
+    hostname: rustls::pki_types::ServerName<'static>,
+    connector: tokio_rustls::TlsConnector,
+}
+
+impl<S> tokio_postgres::tls::TlsConnect<S> for RustlsConnect
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = RustlsStream<S>;
+    type Error = io::Error;
+    type Future = Pin<Box<dyn Future<Output = io::Result<RustlsStream<S>>> + Send>>;
+
+    fn connect(self, stream: S) -> Self::Future {
+        match self.0 {
+            None => Box::pin(core::future::ready(Err(io::ErrorKind::InvalidInput.into()))),
+            Some(c) => c
+                .connector
+                .connect(c.hostname, stream)
+                .map_ok(|s| RustlsStream(Box::pin(s)))
+                .boxed(),
+        }
+    }
+}
+
+pub struct RustlsStream<S>(Pin<Box<tokio_rustls::client:: TlsStream<S>>>);
+
+impl<S> tokio_postgres::tls::TlsStream for RustlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn channel_binding(&self) -> tokio_postgres::tls::ChannelBinding {
+        let (_, session) = self.0.get_ref();
+        match session.peer_certificates() {
+            Some(certs) if !certs.is_empty() => {
+                let sha256 = ring::digest::digest(&ring::digest::SHA256, certs[0].as_ref());
+                tokio_postgres::tls::ChannelBinding::tls_server_end_point(sha256.as_ref().into())
+            }
+            _ => tokio_postgres::tls::ChannelBinding::none(),
+        }
+    }
+}
+
+impl<S> AsyncRead for RustlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task:: Context,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<tokio::io::Result<()>> {
+        self.0.as_mut().poll_read(cx, buf)
+    }
+}
+
+impl<S> AsyncWrite for RustlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task:: Context,
+        buf: &[u8],
+    ) -> Poll<tokio::io::Result<usize>> {
+        self.0.as_mut().poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut std::task:: Context) -> Poll<tokio::io::Result<()>> {
+        self.0.as_mut().poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut std::task:: Context) -> Poll<tokio::io::Result<()>> {
+        self.0.as_mut().poll_shutdown(cx)
+    }
 }

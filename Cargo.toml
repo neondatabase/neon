@@ -115,11 +115,12 @@ reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"
 reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_19"] }
 reqwest-middleware = "0.2.0"
 reqwest-retry = "0.2.2"
+ring = "0.17"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
-rustls = "0.21"
-rustls-pemfile = "1"
+rustls = "0.22.1"
+rustls-pemfile = "2.0.0"
 rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
@@ -143,11 +144,11 @@ tar = "0.4"
 task-local-extensions = "0.1.4"
 test-context = "0.1"
 thiserror = "1.0"
-tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
+tls-listener = { version = "0.9.0", features = ["rustls"] }
 tokio = { version = "1.17", features = ["macros"] }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.10.0"
-tokio-rustls = "0.24"
+tokio-rustls = "0.25.0"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
@@ -202,7 +203,7 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.11"
+rcgen = "0.12"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.9"
@@ -212,6 +213,8 @@ tonic-build = "0.9"
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+
+tls-listener = { git = "https://github.com/conradludgate/tls-listener", branch="main" }
 
 ################# Binary contents sections
 

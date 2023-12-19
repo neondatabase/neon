@@ -12,6 +12,7 @@ use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
 use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
@@ -20,7 +21,11 @@ use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
 fn generate_certs(
     hostname: &str,
     common_name: &str,
-) -> anyhow::Result<(rustls::Certificate, rustls::Certificate, rustls::PrivateKey)> {
+) -> anyhow::Result<(
+    CertificateDer<'static>,
+    CertificateDer<'static>,
+    PrivateKeyDer<'static>,
+)> {
     let ca = rcgen::Certificate::from_params({
         let mut params = rcgen::CertificateParams::default();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -37,9 +42,9 @@ fn generate_certs(
     })?;
 
     Ok((
-        rustls::Certificate(ca.serialize_der()?),
-        rustls::Certificate(cert.serialize_der_with_signer(&ca)?),
-        rustls::PrivateKey(cert.serialize_private_key_der()),
+        CertificateDer::from(ca.serialize_der()?),
+        CertificateDer::from(cert.serialize_der_with_signer(&ca)?),
+        PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(cert.serialize_private_key_der())),
     ))
 }
 
@@ -74,7 +79,6 @@ fn generate_tls_config<'a>(
 
     let tls_config = {
         let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(vec![cert.clone()], key.clone())?
             .into();
@@ -93,7 +97,6 @@ fn generate_tls_config<'a>(
 
     let client_config = {
         let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates({
                 let mut store = rustls::RootCertStore::empty();
                 store.add(&ca)?;

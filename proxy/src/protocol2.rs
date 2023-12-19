@@ -328,19 +328,23 @@ impl<T: AsyncRead> AsyncRead for WithClientIp<T> {
 
 impl AsyncAccept for ProxyProtocolAccept {
     type Connection = WithClientIp<AddrStream>;
-
+    type Address = std::net::SocketAddr;
     type Error = io::Error;
 
     fn poll_accept(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Connection, Self::Error>>> {
+    ) -> Poll<Result<(Self::Connection, Self::Address), Self::Error>> {
+        use hyper::server::accept::Accept;
         let conn = ready!(Pin::new(&mut self.incoming).poll_accept(cx)?);
         let Some(conn) = conn else {
-            return Poll::Ready(None);
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "no incoming connection?",
+            )));
         };
-
-        Poll::Ready(Some(Ok(WithClientIp::new(conn))))
+        let addr = conn.remote_addr();
+        Poll::Ready(Ok((WithClientIp::new(conn), addr)))
     }
 }
 

@@ -1,5 +1,6 @@
 /// Test postgres_backend_async with tokio_postgres
 use once_cell::sync::Lazy;
+use postgres_backend::MakeRustlsConnect;
 use postgres_backend::{AuthType, Handler, PostgresBackend, QueryError};
 use pq_proto::{BeMessage, RowDescriptor};
 use std::io::Cursor;
@@ -9,7 +10,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{Config, NoTls, SimpleQueryMessage};
-use tokio_postgres_rustls::MakeRustlsConnect;
 
 // generate client, server test streams
 async fn make_tcp_pair() -> (TcpStream, TcpStream) {
@@ -72,14 +72,21 @@ async fn simple_select() {
     }
 }
 
-static KEY: Lazy<rustls::PrivateKey> = Lazy::new(|| {
+static KEY: Lazy<rustls::pki_types::PrivatePkcs1KeyDer<'static>> = Lazy::new(|| {
     let mut cursor = Cursor::new(include_bytes!("key.pem"));
-    rustls::PrivateKey(rustls_pemfile::rsa_private_keys(&mut cursor).unwrap()[0].clone())
+
+    let key = rustls_pemfile::rsa_private_keys(&mut cursor)
+        .next()
+        .unwrap()
+        .unwrap();
+    key.secret_pkcs1_der().to_owned().into()
 });
 
-static CERT: Lazy<rustls::Certificate> = Lazy::new(|| {
+static CERT: Lazy<rustls::pki_types::CertificateDer<'static>> = Lazy::new(|| {
     let mut cursor = Cursor::new(include_bytes!("cert.pem"));
-    rustls::Certificate(rustls_pemfile::certs(&mut cursor).unwrap()[0].clone())
+    let cert = rustls_pemfile::certs(&mut cursor).next().unwrap().unwrap();
+
+    cert.into_owned()
 });
 
 // test that basic select with ssl works
@@ -87,10 +94,10 @@ static CERT: Lazy<rustls::Certificate> = Lazy::new(|| {
 async fn simple_select_ssl() {
     let (client_sock, server_sock) = make_tcp_pair().await;
 
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs1(KEY.secret_pkcs1_der().to_owned().into());
     let server_cfg = rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(vec![CERT.clone()], KEY.clone())
+        .with_single_cert(vec![CERT.clone()], key)
         .unwrap();
     let tls_config = Some(Arc::new(server_cfg));
     let pgbackend =
@@ -102,14 +109,13 @@ async fn simple_select_ssl() {
     });
 
     let client_cfg = rustls::ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates({
             let mut store = rustls::RootCertStore::empty();
-            store.add(&CERT).unwrap();
+            store.add(CERT.clone()).unwrap();
             store
         })
         .with_no_client_auth();
-    let mut make_tls_connect = tokio_postgres_rustls::MakeRustlsConnect::new(client_cfg);
+    let mut make_tls_connect = MakeRustlsConnect::new(client_cfg);
     let tls_connect = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
         &mut make_tls_connect,
         "localhost",

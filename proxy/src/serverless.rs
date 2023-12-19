@@ -77,14 +77,19 @@ pub async fn task_main(
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
-        if let Err(err) = conn {
-            error!("failed to accept TLS connection for websockets: {err:?}");
-            ready(false)
-        } else {
-            ready(true)
-        }
-    });
+    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming)
+        .map(|x| match x {
+            Ok((conn, _)) => Ok(conn),
+            Err(e) => Err(e),
+        })
+        .filter(|conn| {
+            if let Err(err) = conn {
+                error!("failed to accept TLS connection for websockets: {err:?}");
+                ready(false)
+            } else {
+                ready(true)
+            }
+        });
 
     let make_svc = hyper::service::make_service_fn(
         |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {

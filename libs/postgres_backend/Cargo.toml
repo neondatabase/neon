@@ -9,10 +9,12 @@ async-trait.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 futures.workspace = true
+ring.workspace = true
 rustls.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 
@@ -22,5 +24,4 @@ workspace_hack.workspace = true
 [dev-dependencies]
 once_cell.workspace = true
 rustls-pemfile.workspace = true
-tokio-postgres.workspace = true
-tokio-postgres-rustls.workspace = true
+# tokio-postgres-rustls.workspace = true
