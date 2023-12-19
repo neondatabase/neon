@@ -9,7 +9,7 @@ use pbkdf2::{
 };
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::{collections::HashMap, net::IpAddr, sync::Arc, sync::Weak};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, sync::Weak, time::Duration};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -18,7 +18,7 @@ use std::{
     ops::Deref,
     sync::atomic::{self, AtomicUsize},
 };
-use tokio::time;
+use tokio::time::{self, Instant};
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
@@ -69,7 +69,7 @@ struct ConnPoolEntry {
 pub struct EndpointConnPool {
     pools: HashMap<(SmolStr, SmolStr), DbUserConnPool>,
     total_conns: usize,
-    max_conns_per_endpoint: usize,
+    max_conns: usize,
 }
 
 impl EndpointConnPool {
@@ -109,7 +109,7 @@ impl EndpointConnPool {
         let total_conns = {
             let mut pool = pool.write();
 
-            if pool.total_conns < pool.max_conns_per_endpoint {
+            if pool.total_conns < pool.max_conns {
                 // we create this db-user entry in get, so it should not be None
                 if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
                     pool_entries.conns.push(ConnPoolEntry {
@@ -188,10 +188,6 @@ pub struct GlobalConnPool {
     max_conns_per_endpoint: usize,
 
     proxy_config: &'static crate::config::ProxyConfig,
-
-    // Using a lock to remove any race conditions.
-    // Eg cleaning up connections while a new connection is returned
-    closed: RwLock<bool>,
 }
 
 impl GlobalConnPool {
@@ -201,13 +197,10 @@ impl GlobalConnPool {
             global_pool_size: AtomicUsize::new(0),
             max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
             proxy_config: config,
-            closed: RwLock::new(false),
         })
     }
 
     pub fn shutdown(&self) {
-        *self.closed.write() = true;
-
         self.global_pool.retain(|_, endpoint_pool| {
             let mut pool = endpoint_pool.write();
             // by clearing this hashmap, we remove the slots that a connection can be returned to.
@@ -228,12 +221,6 @@ impl GlobalConnPool {
     ) -> anyhow::Result<Client> {
         let mut client: Option<ClientInner> = None;
         let mut latency_timer = LatencyTimer::new("http");
-
-        // let pool = if force_new {
-        //     None
-        // } else {
-        //     Some((conn_info.clone(), self.clone()))
-        // };
 
         let mut hash_valid = false;
         let mut endpoint_pool = Weak::new();
@@ -364,7 +351,7 @@ impl GlobalConnPool {
         let new_pool = Arc::new(RwLock::new(EndpointConnPool {
             pools: HashMap::new(),
             total_conns: 0,
-            max_conns_per_endpoint: self.max_conns_per_endpoint,
+            max_conns: self.max_conns_per_endpoint,
         }));
 
         // find or create a pool for this endpoint
@@ -530,10 +517,20 @@ async fn connect_to_compute_once(
     tokio::spawn(
         async move {
             let _conn_gauge = conn_gauge;
+            let mut idle_since = Instant::now();
             poll_fn(move |cx| {
                 if matches!(rx.has_changed(), Ok(true)) {
                     session = *rx.borrow_and_update();
                     info!(%session, "changed session");
+                    idle_since = Instant::now();
+                }
+
+                if idle_since.elapsed() > Duration::from_secs(300) {
+                    idle_since = Instant::now();
+                    if let Some(pool) = pool.clone().upgrade() {
+                        // remove client from pool - should close the connection if it's idle
+                        pool.write().remove_client(db_user.clone(), conn_id);
+                    }
                 }
 
                 loop {
@@ -551,20 +548,23 @@ async fn connect_to_compute_once(
                         }
                         Some(Err(e)) => {
                             error!(%session, "connection error: {}", e);
-                            return Poll::Ready(())
+                            break
                         }
                         None => {
                             info!("connection closed");
-                            return Poll::Ready(())
+                            break
                         }
                     }
                 }
+
+                // remove from connection pool
+                if let Some(pool) = pool.clone().upgrade() {
+                    pool.write().remove_client(db_user.clone(), conn_id);
+                }
+
+                Poll::Ready(())
             }).await;
 
-            // remove from connection pool
-            if let Some(pool) = pool.upgrade() {
-                pool.write().remove_client(db_user, conn_id);
-            }
         }
         .instrument(span)
     );
