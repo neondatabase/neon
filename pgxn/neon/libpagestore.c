@@ -596,11 +596,6 @@ CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 		i += 1;
 	} while (sep != NULL);
 
-	if (i == 0)
-	{
-		neon_log(LOG, "No shards were specified");
-		return false;
-	}
 	return true;
 }
 
