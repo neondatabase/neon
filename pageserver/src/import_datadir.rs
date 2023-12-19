@@ -21,6 +21,7 @@ use tracing::*;
 use walkdir::WalkDir;
 
 use crate::context::RequestContext;
+use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::Timeline;
@@ -319,6 +320,8 @@ async fn import_wal(
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                WAL_INGEST.records_committed.inc();
+
                 modification.commit(ctx).await?;
                 last_lsn = lsn;
 
