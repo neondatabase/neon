@@ -29,7 +29,7 @@ class LabelledQuery:
 @pytest.mark.remote_cluster
 def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
     log.info("Creating extension pg_stat_statements")
-    query = LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION pg_stat_statements;")
+    query = LabelledQuery("Q_CREATE_EXTENSION", r"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;")
     run_psql(remote_compare, query, times=1, explain=False)
     log.info("Reset pg_stat_statements")
     query = LabelledQuery("Q_RESET", r"SELECT pg_stat_statements_reset();")
