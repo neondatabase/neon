@@ -953,8 +953,8 @@ page_server_request(void const *req)
 
 
 	/*
-	 * TODO: temporary workarround - we stream all WAL only to shard 0, so metadata and forks other than main
-	 * should be requested from shard 0. We still need to call get_shard_no() to check if shard map is up-to-date
+	 * Current sharding model assumes that all metadata is present only at shard 0.
+	 * We still need to call get_shard_no() to check if shard map is up-to-date.
 	 */
 	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest || ((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
 	{
@@ -2861,7 +2861,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 #define FSM_TREE_DEPTH	((SlotsPerFSMPage >= 1626) ? 3 : 4)
 
 /*
- * TODO: May be it is better to make correspondent fgunctio from freespace.c public?
+ * TODO: May be it is better to make correspondent function from freespace.c public?
  */
 static BlockNumber
 get_fsm_physical_block(BlockNumber heapblk)
