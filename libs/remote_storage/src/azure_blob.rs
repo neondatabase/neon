@@ -324,12 +324,14 @@ impl RemoteStorage for AzureBlobStorage {
         Ok(())
     }
 
+    #[allow(clippy::diverging_sub_expression)]
     async fn time_travel_recover(
         &self,
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
     ) -> anyhow::Result<()> {
         // TODO use Azure point in time recovery feature for this
+        // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview
         unimplemented!()
     }
 }
