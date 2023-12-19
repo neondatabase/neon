@@ -117,7 +117,7 @@ impl SimulationApi {
         let state = self.safekeepers.borrow_mut();
         RefMut::filter_map(state, |v| {
             v.iter_mut()
-                .find(|conn| conn.socket.as_ref().is_some_and(|s| s.id() == tcp.id()))
+                .find(|conn| conn.socket.as_ref().is_some_and(|s| s.connection_id() == tcp.connection_id()))
         })
         .ok()
     }
@@ -188,7 +188,7 @@ impl ApiImpl for SimulationApi {
         let peeked = self.os.epoll_peek(0);
         match peeked {
             Some(NodeEvent::Message((_, tcp))) => {
-                if tcp.id() != conn.socket.as_ref().unwrap().id() {
+                if tcp.connection_id() != conn.socket.as_ref().unwrap().connection_id() {
                     return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN;
                 }
             }

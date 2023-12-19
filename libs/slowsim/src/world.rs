@@ -10,7 +10,7 @@ use std::{
 };
 use tracing::{debug, error, trace};
 
-use crate::executor::Runtime;
+use crate::{executor::Runtime, network::NetworkTask};
 
 use super::{
     chan::Chan,
@@ -41,17 +41,11 @@ pub struct World {
     /// Timers and stuff.
     timing: Mutex<Timing>,
 
-    /// Network connection counter.
-    connection_counter: AtomicU64,
-
-    /// Network options.
-    network_options: Arc<NetworkOptions>,
-
     /// Internal event log.
     events: Mutex<Vec<SEvent>>,
 
-    /// Connections.
-    connections: Mutex<Vec<Arc<VirtualConnection>>>,
+    /// Separate task that processes all network messages.
+    network_task: Arc<NetworkTask>,
 
     /// Tmp executor.
     tmp_runtime: Mutex<Runtime>,
@@ -60,7 +54,6 @@ pub struct World {
 impl World {
     pub fn new(
         seed: u64,
-        network_options: Arc<NetworkOptions>,
     ) -> World {
         World {
             nodes: Mutex::new(Vec::new()),
@@ -68,10 +61,7 @@ impl World {
             wait_group: WaitGroup::new(),
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             timing: Mutex::new(Timing::new()),
-            connection_counter: AtomicU64::new(0),
-            network_options,
             events: Mutex::new(Vec::new()),
-            connections: Mutex::new(Vec::new()),
             tmp_runtime: Mutex::new(Runtime::new()),
         }
     }
@@ -121,45 +111,10 @@ impl World {
     pub fn open_tcp(self: &Arc<World>, src: &Arc<Node>, dst: NodeId) -> TCP {
         // TODO: replace unwrap() with /dev/null socket.
         let dst = self.get_node(dst).unwrap();
+        let dst_accept = dst.network.lock().clone();
 
-        let id = self
-            .connection_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        let conn = VirtualConnection::new(
-            id,
-            self.clone(),
-            src.network_chan(),
-            dst.network_chan(),
-            src.clone(),
-            dst,
-            self.network_options.clone(),
-        );
-
-        // MessageDirection(0) is src->dst
-        TCP::new(conn, 0)
-    }
-
-    pub fn open_tcp_nopoll(self: &Arc<World>, src: &Arc<Node>, dst: NodeId) -> TCP {
-        // TODO: replace unwrap() with /dev/null socket.
-        let dst = self.get_node(dst).unwrap();
-
-        let id = self
-            .connection_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        let conn = VirtualConnection::new(
-            id,
-            self.clone(),
-            Chan::new(), // creating a new channel to read from
-            dst.network_chan(),
-            src.clone(),
-            dst,
-            self.network_options.clone(),
-        );
-
-        // MessageDirection(0) is src->dst
-        TCP::new(conn, 0)
+        let rng = self.new_rng();
+        self.network_task.start_new_connection(rng, dst_accept)
     }
 
     /// Blocks the current thread until all nodes will park or finish.
@@ -286,10 +241,6 @@ impl World {
         let mut res = Vec::new();
         std::mem::swap(&mut res, &mut events);
         res
-    }
-
-    pub fn add_conn(&self, conn: Arc<VirtualConnection>) {
-        self.connections.lock().push(conn);
     }
 
     pub fn deallocate(&self) {

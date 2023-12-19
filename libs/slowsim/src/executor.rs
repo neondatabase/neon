@@ -153,12 +153,17 @@ impl ThreadContext {
     fn inc_wake(&self) {
         self.wakeup.store(1, Ordering::SeqCst);
     }
+
+    /// Internal function used for event queues.
+    pub(crate) fn schedule_wakeup(&self, after_ms: u64) {
+        self.clock.get().unwrap().schedule_wakeup(after_ms as u64, self.clone());
+    }
 }
 
 // Internal functions.
 impl ThreadContext {
     /// Blocks thread until it's woken up by the executor. If `after_ms` is 0, is will be
-    /// worken on the next step. If `after_ms` > 0, wakeup is scheduled after that time.
+    /// woken on the next step. If `after_ms` > 0, wakeup is scheduled after that time.
     /// Otherwise wakeup is not scheduled inside `yield_me`, and should be arranged before
     /// calling this function.
     fn yield_me(self: &Arc<Self>, after_ms: i64) {

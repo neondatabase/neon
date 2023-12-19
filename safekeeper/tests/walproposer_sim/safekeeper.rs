@@ -199,7 +199,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
             match event {
                 NodeEvent::Accept(tcp) => {
                     conns.insert(
-                        tcp.id(),
+                        tcp.connection_id(),
                         ConnState {
                             tcp,
                             greeting: false,
@@ -210,7 +210,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
                     );
                 }
                 NodeEvent::Message((msg, tcp)) => {
-                    let conn = conns.get_mut(&tcp.id());
+                    let conn = conns.get_mut(&tcp.connection_id());
                     if let Some(conn) = conn {
                         let res = conn.process_any(msg, &mut global);
                         if res.is_err() {
