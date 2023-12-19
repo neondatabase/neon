@@ -654,6 +654,7 @@ impl<'a> TenantDownloader<'a> {
                 timeline.timeline_id,
                 &layer.name,
                 &LayerFileMetadata::from(&layer.metadata),
+                &self.secondary_state.cancel,
             )
             .await
             {
