@@ -11,11 +11,11 @@ use crate::console::{CachedNodeInfo, NodeInfo};
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
+use postgres_backend::{MakeRustlsConnect, RustlsStream};
 use rstest::rstest;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(
@@ -78,9 +78,10 @@ fn generate_tls_config<'a>(
     let (ca, cert, key) = generate_certs(hostname, common_name)?;
 
     let tls_config = {
+        let key_clone = rustls::pki_types::PrivateKeyDer::Pkcs1(key.secret_der().to_owned().into());
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key.clone())?
+            .with_single_cert(vec![cert.clone()], key_clone)?
             .into();
 
         let mut cert_resolver = CertResolver::new();
@@ -99,7 +100,7 @@ fn generate_tls_config<'a>(
         let config = rustls::ClientConfig::builder()
             .with_root_certificates({
                 let mut store = rustls::RootCertStore::empty();
-                store.add(&ca)?;
+                store.add(ca)?;
                 store
             })
             .with_no_client_auth();

@@ -140,7 +140,7 @@ impl TlsServerEndPoint {
             oid_registry::OID_PKCS1_SHA256WITHRSA,
         ];
 
-        let pem = x509_parser::parse_x509_certificate(&cert)
+        let pem = x509_parser::parse_x509_certificate(cert)
             .context("Failed to parse PEM object from cerficiate")?
             .1;
 
@@ -150,8 +150,7 @@ impl TlsServerEndPoint {
         let oid = pem.signature_algorithm.oid();
         let alg = reg.get(oid);
         if sha256_oids.contains(oid) {
-            let tls_server_end_point: [u8; 32] =
-                Sha256::new().chain_update(&cert).finalize().into();
+            let tls_server_end_point: [u8; 32] = Sha256::new().chain_update(cert).finalize().into();
             info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
             Ok(Self::Sha256(tls_server_end_point))
         } else {
@@ -198,7 +197,6 @@ impl CertResolver {
 
         let cert_chain = {
             rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                .into_iter()
                 .collect::<Result<Vec<_>, _>>()
                 .with_context(|| {
                     format!(
@@ -213,14 +211,14 @@ impl CertResolver {
     pub fn add_cert(
         &mut self,
         priv_key: PrivateKeyDer,
-        cert_chain: Vec<CertificateDer>,
+        cert_chain: Vec<CertificateDer<'static>>,
         is_default: bool,
     ) -> anyhow::Result<()> {
         let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
 
         let first_cert = &cert_chain[0];
         let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-        let pem = x509_parser::parse_x509_certificate(&first_cert)
+        let pem = x509_parser::parse_x509_certificate(first_cert)
             .context("Failed to parse PEM object from cerficiate")?
             .1;
 
