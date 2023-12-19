@@ -1,5 +1,5 @@
 - name: Fetch state dumps from safekeepers
-  hosts: safekeepers
+  hosts: safekeeper
   gather_facts: False
   remote_user: "{{ remote_user }}"
     
@@ -8,6 +8,8 @@
       get_url:
         url: "http://{{ inventory_hostname }}:7676/v1/debug_dump?dump_all=true&dump_disk_content=false"
         dest: "/tmp/{{ inventory_hostname }}.json"
+        headers:
+          Authorization: "Bearer {{ auth_token }}"
 
     - name: Fetch file from remote hosts
       fetch:
