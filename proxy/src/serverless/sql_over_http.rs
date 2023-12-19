@@ -359,7 +359,7 @@ async fn handle_inner(
     let payload: Payload = serde_json::from_slice(&body)?;
 
     let mut client = conn_pool
-        .get(&conn_info, !allow_pool, session_id, peer_addr)
+        .get(conn_info, !allow_pool, session_id, peer_addr)
         .await?;
 
     let mut response = Response::builder()

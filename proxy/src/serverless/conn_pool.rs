@@ -9,7 +9,7 @@ use pbkdf2::{
 };
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::{collections::HashMap, net::IpAddr, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, sync::Weak};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -69,6 +69,73 @@ struct ConnPoolEntry {
 pub struct EndpointConnPool {
     pools: HashMap<(SmolStr, SmolStr), DbUserConnPool>,
     total_conns: usize,
+    max_conns_per_endpoint: usize,
+}
+
+impl EndpointConnPool {
+    fn get_conn_entry(&mut self, db_user: (SmolStr, SmolStr)) -> Option<ConnPoolEntry> {
+        let Self {
+            pools, total_conns, ..
+        } = self;
+        pools
+            .get_mut(&db_user)
+            .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
+    }
+
+    fn remove_client(&mut self, db_user: (SmolStr, SmolStr), conn_id: uuid::Uuid) {
+        let Self {
+            pools, total_conns, ..
+        } = self;
+        if let Some(pool) = pools.get_mut(&db_user) {
+            let old_len = pool.conns.len();
+            pool.conns.retain(|conn| conn.conn.conn_id != conn_id);
+            let new_len = pool.conns.len();
+            let removed = old_len - new_len;
+            *total_conns -= removed;
+        }
+    }
+
+    fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
+        let conn_id = client.conn_id;
+
+        if client.inner.is_closed() {
+            info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
+            return Ok(());
+        }
+
+        // return connection to the pool
+        let mut returned = false;
+        let mut per_db_size = 0;
+        let total_conns = {
+            let mut pool = pool.write();
+
+            if pool.total_conns < pool.max_conns_per_endpoint {
+                // we create this db-user entry in get, so it should not be None
+                if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
+                    pool_entries.conns.push(ConnPoolEntry {
+                        conn: client,
+                        _last_access: std::time::Instant::now(),
+                    });
+
+                    returned = true;
+                    per_db_size = pool_entries.conns.len();
+
+                    pool.total_conns += 1;
+                }
+            }
+
+            pool.total_conns
+        };
+
+        // do logging outside of the mutex
+        if returned {
+            info!(%conn_id, "pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
+        } else {
+            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
+        }
+
+        Ok(())
+    }
 }
 
 /// 4096 is the number of rounds that SCRAM-SHA-256 recommends.
@@ -85,6 +152,21 @@ const PARAMS: Params = Params {
 pub struct DbUserConnPool {
     conns: Vec<ConnPoolEntry>,
     password_hash: Option<PasswordHashString>,
+}
+
+impl DbUserConnPool {
+    fn get_conn_entry(&mut self, conns: &mut usize) -> Option<ConnPoolEntry> {
+        let old_len = self.conns.len();
+
+        self.conns.retain(|conn| !conn.conn.inner.is_closed());
+        let conn = self.conns.pop();
+
+        let new_len = self.conns.len();
+        let removed = old_len - new_len;
+        *conns -= removed;
+
+        conn
+    }
 }
 
 pub struct GlobalConnPool {
@@ -139,7 +221,7 @@ impl GlobalConnPool {
 
     pub async fn get(
         self: &Arc<Self>,
-        conn_info: &ConnInfo,
+        conn_info: ConnInfo,
         force_new: bool,
         session_id: uuid::Uuid,
         peer_addr: IpAddr,
@@ -147,15 +229,17 @@ impl GlobalConnPool {
         let mut client: Option<ClientInner> = None;
         let mut latency_timer = LatencyTimer::new("http");
 
-        let pool = if force_new {
-            None
-        } else {
-            Some((conn_info.clone(), self.clone()))
-        };
+        // let pool = if force_new {
+        //     None
+        // } else {
+        //     Some((conn_info.clone(), self.clone()))
+        // };
 
         let mut hash_valid = false;
+        let mut endpoint_pool = Weak::new();
         if !force_new {
             let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+            endpoint_pool = Arc::downgrade(&pool);
             let mut hash = None;
 
             // find a pool entry by (dbname, username) if exists
@@ -180,12 +264,8 @@ impl GlobalConnPool {
                 // we will continue with the regular connection flow
                 if validate.is_ok() {
                     hash_valid = true;
-                    let mut pool = pool.write();
-                    if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
-                        if let Some(entry) = pool_entries.conns.pop() {
-                            client = Some(entry.conn);
-                            pool.total_conns -= 1;
-                        }
+                    if let Some(entry) = pool.write().get_conn_entry(conn_info.db_and_user()) {
+                        client = Some(entry.conn)
                     }
                 }
             }
@@ -198,11 +278,12 @@ impl GlobalConnPool {
                 info!(%conn_id, "pool: cached connection '{conn_info}' is closed, opening a new one");
                 connect_to_compute(
                     self.proxy_config,
-                    conn_info,
+                    &conn_info,
                     conn_id,
                     session_id,
                     latency_timer,
                     peer_addr,
+                    endpoint_pool.clone(),
                 )
                 .await
             } else {
@@ -214,18 +295,19 @@ impl GlobalConnPool {
                 );
                 latency_timer.pool_hit();
                 latency_timer.success();
-                return Ok(Client::new(client, pool).await);
+                return Ok(Client::new(client, conn_info, endpoint_pool).await);
             }
         } else {
             let conn_id = uuid::Uuid::new_v4();
             info!(%conn_id, "pool: opening a new connection '{conn_info}'");
             connect_to_compute(
                 self.proxy_config,
-                conn_info,
+                &conn_info,
                 conn_id,
                 session_id,
                 latency_timer,
                 peer_addr,
+                endpoint_pool.clone(),
             )
             .await
         };
@@ -269,59 +351,7 @@ impl GlobalConnPool {
             _ => {}
         }
         let new_client = new_client?;
-        Ok(Client::new(new_client, pool).await)
-    }
-
-    fn put(&self, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
-        let conn_id = client.conn_id;
-
-        // We want to hold this open while we return. This ensures that the pool can't close
-        // while we are in the middle of returning the connection.
-        let closed = self.closed.read();
-        if *closed {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is closed");
-            return Ok(());
-        }
-
-        if client.inner.is_closed() {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
-            return Ok(());
-        }
-
-        let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
-
-        // return connection to the pool
-        let mut returned = false;
-        let mut per_db_size = 0;
-        let total_conns = {
-            let mut pool = pool.write();
-
-            if pool.total_conns < self.max_conns_per_endpoint {
-                // we create this db-user entry in get, so it should not be None
-                if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
-                    pool_entries.conns.push(ConnPoolEntry {
-                        conn: client,
-                        _last_access: std::time::Instant::now(),
-                    });
-
-                    returned = true;
-                    per_db_size = pool_entries.conns.len();
-
-                    pool.total_conns += 1;
-                }
-            }
-
-            pool.total_conns
-        };
-
-        // do logging outside of the mutex
-        if returned {
-            info!(%conn_id, "pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
-        } else {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
-        }
-
-        Ok(())
+        Ok(Client::new(new_client, conn_info, endpoint_pool).await)
     }
 
     fn get_or_create_endpoint_pool(&self, endpoint: &SmolStr) -> Arc<RwLock<EndpointConnPool>> {
@@ -334,6 +364,7 @@ impl GlobalConnPool {
         let new_pool = Arc::new(RwLock::new(EndpointConnPool {
             pools: HashMap::new(),
             total_conns: 0,
+            max_conns_per_endpoint: self.max_conns_per_endpoint,
         }));
 
         // find or create a pool for this endpoint
@@ -363,6 +394,7 @@ impl GlobalConnPool {
 }
 
 struct TokioMechanism<'a> {
+    pool: Weak<RwLock<EndpointConnPool>>,
     conn_info: &'a ConnInfo,
     session_id: uuid::Uuid,
     conn_id: uuid::Uuid,
@@ -385,6 +417,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
             timeout,
             self.conn_id,
             self.session_id,
+            self.pool.clone(),
         )
         .await
     }
@@ -403,6 +436,7 @@ async fn connect_to_compute(
     session_id: uuid::Uuid,
     latency_timer: LatencyTimer,
     peer_addr: IpAddr,
+    pool: Weak<RwLock<EndpointConnPool>>,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -447,6 +481,7 @@ async fn connect_to_compute(
             conn_id,
             conn_info,
             session_id,
+            pool,
         },
         node_info,
         &extra,
@@ -462,6 +497,7 @@ async fn connect_to_compute_once(
     timeout: time::Duration,
     conn_id: uuid::Uuid,
     mut session: uuid::Uuid,
+    pool: Weak<RwLock<EndpointConnPool>>,
 ) -> Result<ClientInner, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
@@ -490,6 +526,7 @@ async fn connect_to_compute_once(
         branch_id: node_info.aux.branch_id.clone(),
     };
 
+    let db_user = conn_info.db_and_user();
     tokio::spawn(
         async move {
             let _conn_gauge = conn_gauge;
@@ -522,7 +559,12 @@ async fn connect_to_compute_once(
                         }
                     }
                 }
-            }).await
+            }).await;
+
+            // remove from connection pool
+            if let Some(pool) = pool.upgrade() {
+                pool.write().remove_client(db_user, conn_id);
+            }
         }
         .instrument(span)
     );
@@ -552,23 +594,27 @@ pub struct Client {
     conn_id: uuid::Uuid,
     span: Span,
     inner: Option<ClientInner>,
-    pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
+    conn_info: ConnInfo,
+    pool: Weak<RwLock<EndpointConnPool>>,
 }
 
 pub struct Discard<'a> {
     conn_id: uuid::Uuid,
-    pool: &'a mut Option<(ConnInfo, Arc<GlobalConnPool>)>,
+    conn_info: &'a ConnInfo,
+    pool: &'a mut Weak<RwLock<EndpointConnPool>>,
 }
 
 impl Client {
     pub(self) async fn new(
         inner: ClientInner,
-        pool: Option<(ConnInfo, Arc<GlobalConnPool>)>,
+        conn_info: ConnInfo,
+        pool: Weak<RwLock<EndpointConnPool>>,
     ) -> Self {
         Self {
             conn_id: inner.conn_id,
             inner: Some(inner),
             span: Span::current(),
+            conn_info,
             pool,
         }
     }
@@ -577,6 +623,7 @@ impl Client {
             inner,
             pool,
             conn_id,
+            conn_info,
             span: _,
         } = self;
         (
@@ -586,6 +633,7 @@ impl Client {
                 .inner,
             Discard {
                 pool,
+                conn_info,
                 conn_id: *conn_id,
             },
         )
@@ -601,14 +649,14 @@ impl Client {
 
 impl Discard<'_> {
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        if status != ReadyForQueryStatus::Idle {
-            if let Some((conn_info, _)) = self.pool.take() {
-                info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is not idle")
-            }
+        let conn_info = &self.conn_info;
+        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
+            info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is not idle")
         }
     }
     pub fn discard(&mut self) {
-        if let Some((conn_info, _)) = self.pool.take() {
+        let conn_info = &self.conn_info;
+        if std::mem::take(self.pool).strong_count() > 0 {
             info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
         }
     }
@@ -628,16 +676,17 @@ impl Deref for Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        let conn_info = self.conn_info.clone();
         let client = self
             .inner
             .take()
             .expect("client inner should not be removed");
-        if let Some((conn_info, conn_pool)) = self.pool.take() {
+        if let Some(conn_pool) = std::mem::take(&mut self.pool).upgrade() {
             let current_span = self.span.clone();
             // return connection to the pool
             tokio::task::spawn_blocking(move || {
                 let _span = current_span.enter();
-                let _ = conn_pool.put(&conn_info, client);
+                let _ = EndpointConnPool::put(&conn_pool, &conn_info, client);
             });
         }
     }
