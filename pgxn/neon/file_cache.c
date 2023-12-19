@@ -13,32 +13,30 @@
  *-------------------------------------------------------------------------
  */
 
+#include "postgres.h"
+
 #include <sys/file.h>
 #include <unistd.h>
 #include <fcntl.h>
 
-#include "postgres.h"
-
 #include "neon_pgversioncompat.h"
 
+#include "access/parallel.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "pgstat.h"
 #include "pagestore_client.h"
-#include "access/parallel.h"
+#include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include RELFILEINFO_HDR
 #include "storage/buf_internals.h"
-#include "storage/latch.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/latch.h"
 #include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "utils/builtins.h"
 #include "utils/dynahash.h"
 #include "utils/guc.h"
-#include "storage/fd.h"
-#include "storage/pg_shmem.h"
-#include "storage/buf_internals.h"
-#include "pgstat.h"
 
 /*
  * Local file cache is used to temporary store relations pages in local file system.
@@ -101,8 +99,6 @@ static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
-
-void		PGDLLEXPORT FileCacheMonitorMain(Datum main_arg);
 
 /*
  * Local file cache is optional and Neon can work without it.
