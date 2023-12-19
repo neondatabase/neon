@@ -154,9 +154,10 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     // run in. Therefore, wait a little bit before and after. The alternative would be
     // to take the time from S3 headers.
     async fn time_point() -> SystemTime {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        const WAIT_TIME: u64 = 700;
+        tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
         let ret = SystemTime::now();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
         ret
     }
     async fn list_files(client: &Arc<GenericRemoteStorage>) -> anyhow::Result<HashSet<RemotePath>> {
@@ -201,10 +202,12 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
 
     let t2_files = list_files(&ctx.client).await?;
     let t2 = time_point().await;
+    println!("at t2: {t2_files:?}");
 
     // No changes after recovery to t2 (no-op)
     ctx.client.time_travel_recover(None, t2).await?;
     let t2_files_recovered = list_files(&ctx.client).await?;
+    println!("after recovery to t2: {t2_files_recovered:?}");
     assert_eq!(t2_files, t2_files_recovered);
     let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2).await?).await?;
     assert_eq!(path2_recovered_t2, new_data.as_bytes());
@@ -212,6 +215,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     // after recovery to t1: path1 is back, path2 has the old content
     ctx.client.time_travel_recover(None, t1).await?;
     let t1_files_recovered = list_files(&ctx.client).await?;
+    println!("after recovery to t1: {t1_files_recovered:?}");
     assert_eq!(t1_files, t1_files_recovered);
     let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2).await?).await?;
     assert_eq!(path2_recovered_t1, old_data.as_bytes());
@@ -219,6 +223,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     // after recovery to t0: everything is gone except for path1
     ctx.client.time_travel_recover(None, t0).await?;
     let t0_files_recovered = list_files(&ctx.client).await?;
+    println!("after recovery to t0: {t0_files_recovered:?}");
     assert_eq!(t0_files, t0_files_recovered);
 
     // cleanup
