@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::TenantDetails;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -857,11 +858,14 @@ async fn tenant_status(
         }
 
         let state = tenant.current_state();
-        Result::<_, ApiError>::Ok(TenantInfo {
-            id: tenant_shard_id,
-            state: state.clone(),
-            current_physical_size: Some(current_physical_size),
-            attachment_status: state.attachment_status(),
+        Result::<_, ApiError>::Ok(TenantDetails {
+            tenant_info: TenantInfo {
+                id: tenant_shard_id,
+                state: state.clone(),
+                current_physical_size: Some(current_physical_size),
+                attachment_status: state.attachment_status(),
+            },
+            timelines: tenant.list_timeline_ids(),
         })
     }
     .instrument(info_span!("tenant_status_handler",
