@@ -67,7 +67,7 @@ pub struct NodeRegisterRequest {
     pub listen_http_port: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TenantLocateResponseShard {
     pub shard_id: TenantShardId,
     pub node_id: NodeId,

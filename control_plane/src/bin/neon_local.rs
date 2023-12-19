@@ -921,6 +921,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                     )
                 })
                 .collect::<Vec<_>>();
+            assert!(!pageservers.is_empty());
             let stripe_size = locate_result.shard_params.stripe_size.map(|s| s.0 as usize);
 
             let ps_conf = env.get_pageserver_conf(pageserver_id)?;

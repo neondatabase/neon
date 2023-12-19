@@ -737,6 +737,15 @@ async fn handle_tenant_locate(req: Request<Body>) -> Result<Response<Body>, ApiE
         ));
     }
     let shard_params = shard_params.expect("result is non-empty, therefore this is set");
+    tracing::info!(
+        "Located tenant {} on shards {}",
+        tenant_id,
+        result
+            .iter()
+            .map(|s| format!("{:?}", s))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     json_response(
         StatusCode::OK,

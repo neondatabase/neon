@@ -481,6 +481,7 @@ impl Endpoint {
         }
 
         let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
+        assert!(!pageserver_connstring.is_empty());
 
         let mut safekeeper_connstrings = Vec::new();
         if self.mode == ComputeMode::Primary {
