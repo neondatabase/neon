@@ -222,7 +222,7 @@ where
     async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
 
-        let on_demand_slru_download = true; // TODO: should it be feature flag, config parameter or whatever else ?
+        let on_demand_slru_download = !self.full_backup; // TODO: should it be feature flag, config parameter or whatever else ?
 
         // Create pgdata subdirs structure
         for dir in PGDATA_SUBDIRS.iter() {
