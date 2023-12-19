@@ -50,7 +50,6 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
-      build-tools-tag: ${{steps.buildtools-tag.outputs.image_tag}}
 
     steps:
       - name: Checkout
@@ -74,50 +73,19 @@ jobs:
         shell: bash
         id: build-tag
 
-      - name: Get buildtools tag
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            IMAGE_TAG=$GITHUB_RUN_ID
-          else
-            IMAGE_TAG=pinned
-          fi
-          
-          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-        shell: bash
-        id: buildtools-tag
-
-  check-if-build-tools-dockerfile-changed:
-    needs: [ check-permissions ]
-    runs-on: ubuntu-latest
-    outputs:
-      docker_file_changed: ${{ steps.dockerfile.outputs.docker_file_changed }}
-    steps:
-      - name: Check if Dockerfile.buildtools has changed
-        id: dockerfile
-        run: |
-          updated_files=$(gh pr --repo neondatabase/neon diff ${{ github.event.pull_request.number }} --name-only)
-          if [[ $updated_files == *"Dockerfile.buildtools"* ]]; then
-            echo "docker_file_changed=true" >> $GITHUB_OUTPUT
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build-buildtools-image:
-    needs: [ check-permissions, check-if-build-tools-dockerfile-changed, tag]
+    needs: [ check-permissions ]
     uses: ./.github/workflows/build_and_push_docker_image.yml
-    if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
     with:
       dockerfile-path: Dockerfile.buildtools
       image-name: build-tools
-      tag: ${{ needs.tag.outputs.build-tools-tag}}
     secrets: inherit
 
   check-codestyle-python:
-    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image , tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -147,11 +115,10 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -215,11 +182,10 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -449,10 +415,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, tag ]
+    needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -488,10 +454,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    needs: [ check-permissions, build-neon, tag]
+    needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -520,12 +486,12 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, tag ]
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-buildtools-image, tag ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -567,10 +533,10 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, tag ]
+    needs: [ check-permissions, regress-tests, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.tag.outputs.build-tools-tag }}
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -734,7 +700,6 @@ jobs:
             }"
 
   neon-image:
-    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -774,7 +739,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-                           --build-arg TAG=${{ needs.tag.outputs.build-tools-tag }}
+                           --build-arg TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
@@ -784,7 +749,6 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-tools-image:
-    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     runs-on: [ self-hosted, gen3, large ]
     needs: [ check-permissions, build-buildtools-image, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -821,7 +785,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
-                           --build-arg TAG=${{needs.tag.outputs.build-tools-tag}}
+                           --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -832,7 +796,6 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-node-image:
-    if: always() && contains(fromJSON('["success", "skipped"]'), needs.build-buildtools-image.result)
     needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
@@ -881,7 +844,7 @@ jobs:
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
-                           --build-arg TAG=${{needs.tag.outputs.build-tools-tag}}
+                           --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
