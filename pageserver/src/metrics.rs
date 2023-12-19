@@ -1019,12 +1019,62 @@ static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static SMGR_QUERY_TIME_GLOBAL_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {
+    [
+        1,
+        10,
+        20,
+        40,
+        60,
+        80,
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800,
+        900,
+        1_000, // 1ms
+        2_000,
+        4_000,
+        6_000,
+        8_000,
+        10_000, // 10ms
+        20_000,
+        40_000,
+        60_000,
+        80_000,
+        100_000,
+        200_000,
+        400_000,
+        600_000,
+        800_000,
+        1_000_000, // 1s
+        2_000_000,
+        4_000_000,
+        6_000_000,
+        8_000_000,
+        10_000_000, // 10s
+        20_000_000,
+        50_000_000,
+        100_000_000,
+        200_000_000,
+        1_000_000_000, // 1000s
+    ]
+    .into_iter()
+    .map(Duration::from_micros)
+    .map(|d| d.as_secs_f64())
+    .collect()
+});
+
 static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds_global",
         "Time spent on smgr query handling, aggregated by query type.",
         &["smgr_query_type"],
-        CRITICAL_OP_BUCKETS.into(),
+        SMGR_QUERY_TIME_GLOBAL_BUCKETS.clone(),
     )
     .expect("failed to define a metric")
 });
