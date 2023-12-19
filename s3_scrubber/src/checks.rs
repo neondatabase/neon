@@ -44,7 +44,6 @@ impl TimelineAnalysis {
 pub(crate) fn branch_cleanup_and_check_errors(
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
-    s3_root: &RootTarget,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
     s3_data: Option<S3TimelineBlobData>,
@@ -76,8 +75,8 @@ pub(crate) fn branch_cleanup_and_check_errors(
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
                     index_part,
-                    index_part_generation,
-                    s3_layers,
+                    index_part_generation: _index_part_generation,
+                    s3_layers: _s3_layers,
                 } => {
                     if !IndexPart::KNOWN_VERSIONS.contains(&index_part.get_version()) {
                         result.errors.push(format!(
@@ -127,52 +126,6 @@ pub(crate) fn branch_cleanup_and_check_errors(
                                 metadata.shard
                             ))
                         }
-                    }
-
-                    let orphan_layers: Vec<(LayerFileName, Generation)> = s3_layers
-                        .into_iter()
-                        .filter(|(_layer_name, gen)|
-                            // A layer is only considered orphaned if it has a generation below
-                            // the index.  If the generation is >= the index, then the layer may
-                            // be an upload from a running pageserver, or even an upload from
-                            // a new generation that didn't upload an index yet.
-                            //
-                            // Even so, a layer that is not referenced by the index could just
-                            // be something enqueued for deletion, so while this check is valid
-                            // for indicating that a layer is garbage, it is not an indicator
-                            // of a problem.
-                            gen < &index_part_generation)
-                        .collect();
-
-                    if !orphan_layers.is_empty() {
-                        // An orphan layer is not an error: it's arguably not even a warning, but it is helpful to report
-                        // these as a hint that there is something worth cleaning up here.
-                        result.warnings.push(format!(
-                            "index_part.json does not contain layers from S3: {:?}",
-                            orphan_layers
-                                .iter()
-                                .map(|(layer_name, gen)| format!(
-                                    "{}{}",
-                                    layer_name.file_name(),
-                                    gen.get_suffix()
-                                ))
-                                .collect::<Vec<_>>(),
-                        ));
-                        result.garbage_keys.extend(orphan_layers.iter().map(
-                            |(layer_name, layer_gen)| {
-                                let mut key = s3_root.timeline_root(id).prefix_in_bucket;
-                                let delimiter = s3_root.delimiter();
-                                if !key.ends_with(delimiter) {
-                                    key.push_str(delimiter);
-                                }
-                                key.push_str(&format!(
-                                    "{}{}",
-                                    &layer_name.file_name(),
-                                    layer_gen.get_suffix()
-                                ));
-                                key
-                            },
-                        ));
                     }
                 }
                 BlobDataParseResult::Relic => {}
@@ -269,6 +222,19 @@ impl TenantObjectListing {
         layer_ref.ref_count += 1;
 
         true
+    }
+
+    pub(crate) fn get_orphans(&self) -> Vec<(ShardIndex, TimelineId, LayerFileName, Generation)> {
+        let mut result = Vec::new();
+        for ((shard_index, timeline_id), layers) in &self.shard_timelines {
+            for ((layer_file, generation), layer_ref) in layers {
+                if layer_ref.ref_count == 0 {
+                    result.push((*shard_index, *timeline_id, layer_file.clone(), *generation))
+                }
+            }
+        }
+
+        result
     }
 }
 
