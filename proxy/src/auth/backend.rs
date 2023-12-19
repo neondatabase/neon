@@ -192,14 +192,46 @@ async fn auth_quirks(
     if !check_peer_addr_is_in_list(&info.inner.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed());
     }
-    let secret = api.get_role_secret(extra, &info).await?.unwrap_or_else(|| {
+    let cached_secret = api.get_role_secret(extra, &info).await?;
+
+    let secret = cached_secret.clone().unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
         // prevent malicious probing (possible due to missing protocol steps).
         // This mocked secret will never lead to successful authentication.
         info!("authentication info not found, mocking it");
         AuthSecret::Scram(scram::ServerSecret::mock(&info.inner.user, rand::random()))
     });
+    match authenticate_with_secret(
+        secret,
+        info,
+        client,
+        unauthenticated_password,
+        allow_cleartext,
+        config,
+        latency_timer,
+    )
+    .await
+    {
+        Ok(keys) => Ok(keys),
+        Err(e) => {
+            if e.is_auth_failed() {
+                // The password could have been changed, so we invalidate the cache.
+                cached_secret.invalidate();
+            }
+            Err(e)
+        }
+    }
+}
 
+async fn authenticate_with_secret(
+    secret: AuthSecret,
+    info: ComputeUserInfo,
+    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    unauthenticated_password: Option<Vec<u8>>,
+    allow_cleartext: bool,
+    config: &'static AuthenticationConfig,
+    latency_timer: &mut LatencyTimer,
+) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     if let Some(password) = unauthenticated_password {
         let auth_outcome = validate_password_and_exchange(&password, secret)?;
         let keys = match auth_outcome {

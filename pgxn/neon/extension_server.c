@@ -1,4 +1,3 @@
-
 /*-------------------------------------------------------------------------
  *
  * extension_server.c
@@ -10,20 +9,10 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
-#include "tcop/pquery.h"
-#include "tcop/utility.h"
-#include "access/xact.h"
-#include "utils/hsearch.h"
-#include "utils/memutils.h"
-#include "commands/defrem.h"
-#include "miscadmin.h"
-#include "utils/acl.h"
-#include "fmgr.h"
-#include "utils/guc.h"
-#include "port.h"
-#include "fmgr.h"
 
 #include <curl/curl.h>
+
+#include "utils/guc.h"
 
 static int	extension_server_port = 0;
 

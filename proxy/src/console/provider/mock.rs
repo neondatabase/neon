@@ -6,6 +6,7 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
+use crate::console::provider::CachedRoleSecret;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -146,8 +147,10 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Option<AuthSecret>, GetAuthInfoError> {
-        Ok(self.do_get_auth_info(creds).await?.secret)
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        Ok(CachedRoleSecret::new_uncached(
+            self.do_get_auth_info(creds).await?.secret,
+        ))
     }
 
     async fn get_allowed_ips(

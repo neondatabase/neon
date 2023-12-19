@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::TenantDetails;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -592,8 +593,6 @@ async fn get_lsn_by_timestamp_handler(
         )));
     }
 
-    let version: Option<u8> = parse_query_param(&request, "version")?;
-
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
@@ -606,31 +605,18 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
-
-    if version.unwrap_or(0) > 1 {
-        #[derive(serde::Serialize)]
-        struct Result {
-            lsn: Lsn,
-            kind: &'static str,
-        }
-        let (lsn, kind) = match result {
-            LsnForTimestamp::Present(lsn) => (lsn, "present"),
-            LsnForTimestamp::Future(lsn) => (lsn, "future"),
-            LsnForTimestamp::Past(lsn) => (lsn, "past"),
-            LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
-        };
-        json_response(StatusCode::OK, Result { lsn, kind })
-    } else {
-        // FIXME: this is a temporary crutch not to break backwards compatibility
-        // See https://github.com/neondatabase/neon/pull/5608
-        let result = match result {
-            LsnForTimestamp::Present(lsn) => format!("{lsn}"),
-            LsnForTimestamp::Future(_lsn) => "future".into(),
-            LsnForTimestamp::Past(_lsn) => "past".into(),
-            LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-        };
-        json_response(StatusCode::OK, result)
+    #[derive(serde::Serialize)]
+    struct Result {
+        lsn: Lsn,
+        kind: &'static str,
     }
+    let (lsn, kind) = match result {
+        LsnForTimestamp::Present(lsn) => (lsn, "present"),
+        LsnForTimestamp::Future(lsn) => (lsn, "future"),
+        LsnForTimestamp::Past(lsn) => (lsn, "past"),
+        LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
+    };
+    json_response(StatusCode::OK, Result { lsn, kind })
 }
 
 async fn get_timestamp_of_lsn_handler(
@@ -872,11 +858,14 @@ async fn tenant_status(
         }
 
         let state = tenant.current_state();
-        Result::<_, ApiError>::Ok(TenantInfo {
-            id: tenant_shard_id,
-            state: state.clone(),
-            current_physical_size: Some(current_physical_size),
-            attachment_status: state.attachment_status(),
+        Result::<_, ApiError>::Ok(TenantDetails {
+            tenant_info: TenantInfo {
+                id: tenant_shard_id,
+                state: state.clone(),
+                current_physical_size: Some(current_physical_size),
+                attachment_status: state.attachment_status(),
+            },
+            timelines: tenant.list_timeline_ids(),
         })
     }
     .instrument(info_span!("tenant_status_handler",

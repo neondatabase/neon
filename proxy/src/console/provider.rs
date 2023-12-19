@@ -254,6 +254,7 @@ pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
 pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
 pub type AllowedIpsCache = TimedLru<SmolStr, Arc<Vec<String>>>;
 pub type RoleSecretCache = TimedLru<(SmolStr, SmolStr), Option<AuthSecret>>;
+pub type CachedRoleSecret = timed_lru::Cached<&'static RoleSecretCache>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
@@ -264,7 +265,7 @@ pub trait Api {
         &self,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Option<AuthSecret>, errors::GetAuthInfoError>;
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,

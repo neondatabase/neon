@@ -64,6 +64,18 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn tenant_details(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<pageserver_api::models::TenantDetails> {
+        let uri = format!("{}/v1/tenant/{tenant_id}", self.mgmt_api_endpoint);
+        self.get(uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn list_timelines(
         &self,
         tenant_id: TenantId,
