@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::checks::{
     branch_cleanup_and_check_errors, list_timeline_blobs, BlobDataParseResult, S3TimelineBlobData,
-    TimelineAnalysis,
+    TenantObjectListing, TimelineAnalysis,
 };
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
@@ -191,7 +191,7 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
 
     // Generate a stream of TenantTimelineId
     let timelines = tenants.map_ok(|t| stream_tenant_timelines(&s3_client, &target, t));
-    let timelines = timelines.try_buffer_unordered(CONCURRENCY);
+    let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 
     // Generate a stream of S3TimelineBlobData
@@ -204,17 +204,73 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
         Ok((ttid, data))
     }
     let timelines = timelines.map_ok(|ttid| report_on_timeline(&s3_client, &target, ttid));
-    let timelines = timelines.try_buffer_unordered(CONCURRENCY);
+    let timelines = timelines.try_buffered(CONCURRENCY);
 
+    // We must gather all the TenantShardTimelineId->S3TimelineBlobData for each tenant, because different
+    // shards in the same tenant might refer to one anothers' keys if a shard split has happened.
+
+    let mut tenant_id = None;
+    let mut tenant_objects = TenantObjectListing::default();
+    let mut tenant_timeline_results = Vec::new();
+
+    fn analyze_tenant(
+        summary: &mut MetadataSummary,
+        target: &RootTarget,
+        mut tenant_objects: TenantObjectListing,
+        timelines: Vec<(TenantShardTimelineId, S3TimelineBlobData)>,
+    ) {
+        for (ttid, data) in timelines {
+            let analysis = branch_cleanup_and_check_errors(
+                &ttid,
+                &mut tenant_objects,
+                target,
+                None,
+                None,
+                Some(data),
+            );
+            summary.update_analysis(&ttid, &analysis);
+        }
+    }
+
+    // Iterate through  all the timeline results.  These are in key-order, so
+    // all results for the same tenant will be adjacent.  We accumulate these,
+    // and then call `analyze_tenant` to flush, when we see the next tenant ID.
     let mut summary = MetadataSummary::new();
     pin_mut!(timelines);
     while let Some(i) = timelines.next().await {
         let (ttid, data) = i?;
         summary.update_data(&data);
 
-        let analysis = branch_cleanup_and_check_errors(&ttid, &target, None, None, Some(data));
+        match tenant_id {
+            None => tenant_id = Some(ttid.tenant_shard_id.tenant_id),
+            Some(prev_tenant_id) => {
+                if prev_tenant_id != ttid.tenant_shard_id.tenant_id {
+                    let tenant_objects = std::mem::take(&mut tenant_objects);
+                    let timelines = std::mem::take(&mut tenant_timeline_results);
+                    analyze_tenant(&mut summary, &target, tenant_objects, timelines);
+                    tenant_id = Some(ttid.tenant_shard_id.tenant_id);
+                }
+            }
+        }
 
-        summary.update_analysis(&ttid, &analysis);
+        if let BlobDataParseResult::Parsed {
+            index_part: _index_part,
+            index_part_generation: _index_part_generation,
+            s3_layers,
+        } = &data.blob_data
+        {
+            tenant_objects.push(ttid, s3_layers.clone());
+        }
+        tenant_timeline_results.push((ttid, data));
+    }
+
+    if !tenant_timeline_results.is_empty() {
+        analyze_tenant(
+            &mut summary,
+            &target,
+            tenant_objects,
+            tenant_timeline_results,
+        );
     }
 
     Ok(summary)

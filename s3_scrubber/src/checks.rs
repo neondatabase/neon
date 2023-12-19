@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
+use pageserver::tenant::remote_timeline_client::index::IndexLayerMetadata;
+use pageserver_api::shard::ShardIndex;
 use tracing::{error, info, warn};
 use utils::generation::Generation;
+use utils::id::TimelineId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
@@ -40,6 +43,7 @@ impl TimelineAnalysis {
 
 pub(crate) fn branch_cleanup_and_check_errors(
     id: &TenantShardTimelineId,
+    tenant_objects: &mut TenantObjectListing,
     s3_root: &RootTarget,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
@@ -73,7 +77,7 @@ pub(crate) fn branch_cleanup_and_check_errors(
                 BlobDataParseResult::Parsed {
                     index_part,
                     index_part_generation,
-                    mut s3_layers,
+                    s3_layers,
                 } => {
                     if !IndexPart::KNOWN_VERSIONS.contains(&index_part.get_version()) {
                         result.errors.push(format!(
@@ -111,16 +115,16 @@ pub(crate) fn branch_cleanup_and_check_errors(
                             ))
                         }
 
-                        let layer_map_key = (layer, metadata.generation);
-                        if !s3_layers.remove(&layer_map_key) {
+                        if !tenant_objects.check_ref(id.timeline_id, &layer, &metadata) {
                             // FIXME: this will emit false positives if an index was
                             // uploaded concurrently with our scan.  To make this check
                             // correct, we need to try sending a HEAD request for the
                             // layer we think is missing.
                             result.errors.push(format!(
-                                "index_part.json contains a layer {}{} that is not present in remote storage",
-                                layer_map_key.0.file_name(),
-                                layer_map_key.1.get_suffix()
+                                "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
+                                layer.file_name(),
+                                metadata.generation.get_suffix(),
+                                metadata.shard
                             ))
                         }
                     }
@@ -202,6 +206,70 @@ pub(crate) fn branch_cleanup_and_check_errors(
     }
 
     result
+}
+
+#[derive(Default)]
+pub(crate) struct LayerRef {
+    ref_count: usize,
+}
+
+/// Top-level index of objects in a tenant.  This may be used by any shard-timeline within
+/// the tenant to query whether an object exists.
+#[derive(Default)]
+pub(crate) struct TenantObjectListing {
+    shard_timelines:
+        HashMap<(ShardIndex, TimelineId), HashMap<(LayerFileName, Generation), LayerRef>>,
+}
+
+impl TenantObjectListing {
+    /// Having done an S3 listing of the keys within a timeline prefix, merge them into the overall
+    /// list of layer keys for the Tenant.
+    pub(crate) fn push(
+        &mut self,
+        ttid: TenantShardTimelineId,
+        layers: HashSet<(LayerFileName, Generation)>,
+    ) {
+        let shard_index = ShardIndex::new(
+            ttid.tenant_shard_id.shard_number,
+            ttid.tenant_shard_id.shard_count,
+        );
+        let replaced = self.shard_timelines.insert(
+            (shard_index, ttid.timeline_id),
+            layers
+                .into_iter()
+                .map(|l| (l, LayerRef::default()))
+                .collect(),
+        );
+
+        assert!(
+            replaced.is_none(),
+            "Built from an S3 object listing, which should never repeat a key"
+        );
+    }
+
+    /// Having loaded a timeline index, check if a layer referenced by the index exists.  If it does,
+    /// the layer's refcount will be incremented.  Later, after calling this for all references in all indices
+    /// in a tenant, orphan layers may be detected by their zero refcounts.
+    ///
+    /// Returns true if the layer exists
+    pub(crate) fn check_ref(
+        &mut self,
+        timeline_id: TimelineId,
+        layer_file: &LayerFileName,
+        metadata: &IndexLayerMetadata,
+    ) -> bool {
+        let Some(shard_tl) = self.shard_timelines.get_mut(&(metadata.shard, timeline_id)) else {
+            return false;
+        };
+
+        let Some(layer_ref) = shard_tl.get_mut(&(layer_file.clone(), metadata.generation)) else {
+            return false;
+        };
+
+        layer_ref.ref_count += 1;
+
+        true
+    }
 }
 
 #[derive(Debug)]
