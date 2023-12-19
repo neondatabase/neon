@@ -2487,13 +2487,14 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "8.3.0"
+version = "9.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6971da4d9c3aa03c3d8f3ff0f4155b534aad021292003895a469716b2a230378"
+checksum = "5c7ea04a7c5c055c175f189b6dc6ba036fd62306b58c66c9f6389036c503a3f4"
 dependencies = [
  "base64 0.21.1",
- "pem 1.1.1",
- "ring 0.16.20",
+ "js-sys",
+ "pem 3.0.3",
+ "ring 0.17.6",
  "serde",
  "serde_json",
  "simple_asn1",
@@ -3291,18 +3292,19 @@ checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
 
 [[package]]
 name = "pem"
-version = "1.1.1"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8835c273a76a90455d7344889b0964598e3316e2a79ede8e36f16bdcf2228b8"
+checksum = "6b13fe415cdf3c8e44518e18a7c95a13431d9bdf6d15367d82b23c377fdd441a"
 dependencies = [
- "base64 0.13.1",
+ "base64 0.21.1",
+ "serde",
 ]
 
 [[package]]
 name = "pem"
-version = "2.0.1"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b13fe415cdf3c8e44518e18a7c95a13431d9bdf6d15367d82b23c377fdd441a"
+checksum = "1b8fcc794035347fb64beda2d3b462595dd2753e3f268d89c5aae77e8cf2c310"
 dependencies = [
  "base64 0.21.1",
  "serde",
@@ -6316,7 +6318,6 @@ dependencies = [
  "regex-automata 0.4.3",
  "regex-syntax 0.8.2",
  "reqwest",
- "ring 0.16.20",
  "rustls",
  "scopeguard",
  "serde",
