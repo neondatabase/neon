@@ -167,15 +167,6 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
             .into_iter()
             .collect::<HashSet<_>>())
     }
-    async fn download_to_buf(dl: remote_storage::Download) -> anyhow::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        tokio::io::copy_buf(
-            &mut tokio_util::io::StreamReader::new(dl.download_stream),
-            &mut buf,
-        )
-        .await?;
-        Ok(buf)
-    }
 
     let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
@@ -215,14 +206,14 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     ctx.client.time_travel_recover(None, t2).await?;
     let t2_files_recovered = list_files(&ctx.client).await?;
     assert_eq!(t2_files, t2_files_recovered);
-    let path2_recovered_t2 = download_to_buf(ctx.client.download(&path2).await?).await?;
+    let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2).await?).await?;
     assert_eq!(path2_recovered_t2, new_data.as_bytes());
 
     // after recovery to t1: path1 is back, path2 has the old content
     ctx.client.time_travel_recover(None, t1).await?;
     let t1_files_recovered = list_files(&ctx.client).await?;
     assert_eq!(t1_files, t1_files_recovered);
-    let path2_recovered_t1 = download_to_buf(ctx.client.download(&path2).await?).await?;
+    let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2).await?).await?;
     assert_eq!(path2_recovered_t1, old_data.as_bytes());
 
     // after recovery to t0: everything is gone except for path1
