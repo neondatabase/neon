@@ -522,14 +522,18 @@ pub(crate) mod initial_logical_size {
     impl StartCalculation {
         pub(crate) fn first(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
             let circumstances_label: &'static str = circumstances.into();
-            self.0.with_label_values(&["first", circumstances_label]);
+            self.0
+                .with_label_values(&["first", circumstances_label])
+                .inc();
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
             }
         }
         pub(crate) fn retry(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
             let circumstances_label: &'static str = circumstances.into();
-            self.0.with_label_values(&["retry", circumstances_label]);
+            self.0
+                .with_label_values(&["retry", circumstances_label])
+                .inc();
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
             }
