@@ -199,6 +199,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v3
@@ -330,7 +334,9 @@ jobs:
 
       - name: Run cargo test
         run: |
-          ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES
+          for io_engine in std-fs tokio-epoll-uring ; do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES
+          done
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
@@ -415,6 +421,7 @@ jobs:
       matrix:
         build_type: [ debug, release ]
         pg_version: [ v14, v15, v16 ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -437,6 +444,7 @@ jobs:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: ${{ matrix.pageserver_virtual_file_io_engine }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
@@ -455,6 +463,7 @@ jobs:
       matrix:
         pytest_split_group: [ 1, 2, 3, 4 ]
         build_type: [ release ]
+        pageserver_virtual_file_io_engine: [ std-fs, tokio-epoll-uring ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -471,6 +480,7 @@ jobs:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: "${{ matrix.pageserver_virtual_file_io_engine }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -1097,6 +1107,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v3
