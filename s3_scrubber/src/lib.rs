@@ -271,7 +271,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
                     .account_id(sso_account)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
-                    .region(bucket_region)
+                    .region(bucket_region.clone())
                     .build(),
             ),
             None => chain,
