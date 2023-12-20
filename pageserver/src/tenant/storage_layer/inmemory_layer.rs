@@ -312,17 +312,11 @@ impl InMemoryLayer {
         Ok(())
     }
 
-    pub(crate) async fn put_tombstone(&self, _key_range: Range<Key>, _lsn: Lsn) -> Result<()> {
-        // TODO: Currently, we just leak the storage for any deleted keys
-
-        Ok(())
-    }
-
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
+        // TODO: Currently, we just leak the storage for any deleted keys
         Ok(())
     }
 
-    /// Make the layer non-writeable. Only call once.
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {

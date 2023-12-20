@@ -2468,12 +2468,6 @@ impl Timeline {
         Ok(())
     }
 
-    async fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
-        let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_tombstone(key_range, lsn).await?;
-        Ok(())
-    }
-
     async fn put_tombstones(&self, tombstones: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
         if let Some((_, lsn)) = tombstones.first() {
             let layer = self.get_layer_for_write(*lsn).await?;
@@ -4507,10 +4501,6 @@ impl<'a> TimelineWriter<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         self.tl.put_values(batch, ctx).await
-    }
-
-    pub(crate) async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
-        self.tl.put_tombstone(key_range, lsn).await
     }
 
     pub(crate) async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
