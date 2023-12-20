@@ -71,7 +71,7 @@ class EvictionOrder(str, enum.Enum):
     RELATIVE_ORDER_EQUAL = "relative_equal"
     RELATIVE_ORDER_SPARE = "relative_spare"
 
-    def as_toml(self) -> Dict[str, Any]:
+    def config(self) -> Dict[str, Any]:
         if self == EvictionOrder.ABSOLUTE_ORDER:
             return {"type": "AbsoluteAccessed"}
         elif self == EvictionOrder.RELATIVE_ORDER_EQUAL:
@@ -80,9 +80,6 @@ class EvictionOrder(str, enum.Enum):
             return {"type": "RelativeAccessed", "args": {"highest_layer_count_loses_first": True}}
         else:
             raise RuntimeError(f"not implemented: {self}")
-
-    def as_json(self) -> Dict[str, Any]:
-        return self.as_toml()
 
 
 @dataclass
@@ -136,7 +133,7 @@ class EvictionEnv:
             "max_usage_pct": max_usage_pct,
             "min_avail_bytes": min_avail_bytes,
             "mock_statvfs": mock_behavior,
-            "eviction_order": eviction_order.as_toml(),
+            "eviction_order": eviction_order.config(),
         }
 
         enc = toml.TomlEncoder()
@@ -310,7 +307,7 @@ def test_pageserver_evicts_until_pressure_is_relieved(
     target = total_on_disk // 2
 
     response = pageserver_http.disk_usage_eviction_run(
-        {"evict_bytes": target, "eviction_order": order.as_json()}
+        {"evict_bytes": target, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 
@@ -373,7 +370,7 @@ def test_pageserver_respects_overridden_resident_size(
 
     # do one run
     response = ps_http.disk_usage_eviction_run(
-        {"evict_bytes": target, "eviction_order": order.as_json()}
+        {"evict_bytes": target, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 
@@ -419,7 +416,7 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: E
     target = total_on_disk
 
     response = ps_http.disk_usage_eviction_run(
-        {"evict_bytes": target, "eviction_order": order.as_json()}
+        {"evict_bytes": target, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 
@@ -466,7 +463,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
     # So, set target to all occupied space, except 2*env.layer_size per tenant
     target = du_by_timeline[cold] + (du_by_timeline[warm] // 2) - 2 * 2 * env.layer_size
     response = ps_http.disk_usage_eviction_run(
-        {"evict_bytes": target, "eviction_order": order.as_json()}
+        {"evict_bytes": target, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 
