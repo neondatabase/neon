@@ -14,6 +14,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
+    key::is_rel_block_key,
     models::{
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
         TimelineState,
@@ -508,21 +509,25 @@ impl Timeline {
         // The cached image can be returned directly if there is no WAL between the cached image
         // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
         // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn, ctx).await {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => {
-                        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
-                        return Ok(cached_img); // exact LSN match, return the image
+        let cached_page_img = if is_rel_block_key(&key) && key.field6 != 0xffffffff {
+            None
+        } else {
+            match self.lookup_cached_page(&key, lsn, ctx).await {
+                Some((cached_lsn, cached_img)) => {
+                    match cached_lsn.cmp(&lsn) {
+                        Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
+                        Ordering::Equal => {
+                            MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
+                            return Ok(cached_img); // exact LSN match, return the image
+                        }
+                        Ordering::Greater => {
+                            unreachable!("the returned lsn should never be after the requested lsn")
+                        }
                     }
-                    Ordering::Greater => {
-                        unreachable!("the returned lsn should never be after the requested lsn")
-                    }
+                    Some((cached_lsn, cached_img))
                 }
-                Some((cached_lsn, cached_img))
+                None => None,
             }
-            None => None,
         };
 
         let mut reconstruct_state = ValueReconstructState {
@@ -4189,7 +4194,9 @@ impl Timeline {
                     Err(e) => return Err(PageReconstructError::from(e)),
                 };
 
-                if img.len() == page_cache::PAGE_SZ {
+                if img.len() == page_cache::PAGE_SZ
+                    && !(is_rel_block_key(&key) && key.field6 != 0xffffffff)
+                {
                     let cache = page_cache::get();
                     if let Err(e) = cache
                         .memorize_materialized_page(
