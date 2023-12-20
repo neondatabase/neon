@@ -207,6 +207,10 @@ async fn main_impl(
                     let r = &all_ranges[weights.sample(&mut rng)];
                     let key: i128 = rng.gen_range(r.start..r.end);
                     let key = repository::Key::from_i128(key);
+                    if key.field6 == 0xffffffff {
+                        // Hack around bug
+                        continue;
+                    }
                     let (rel_tag, block_no) =
                         key_to_rel_block(key).expect("we filter non-rel-block keys out above");
                     (r, RelTagBlockNo { rel_tag, block_no })
