@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use slowsim::{
+use desim::{
     network::TCP,
     node_os::NodeOs,
     proto::AnyMessage,
@@ -200,7 +200,7 @@ impl ApiImpl for SimulationApi {
             .epoll_recv(0)
             .expect("message from safekeeper is ready");
         let msg = match event {
-            slowsim::world::NodeEvent::Message((msg, tcp)) => {
+            desim::world::NodeEvent::Message((msg, tcp)) => {
                 assert!(tcp.id() == conn.socket.as_ref().unwrap().id());
                 msg
             }
@@ -208,7 +208,7 @@ impl ApiImpl for SimulationApi {
         };
 
         let b = match msg {
-            slowsim::proto::AnyMessage::Bytes(b) => b,
+            desim::proto::AnyMessage::Bytes(b) => b,
             _ => unreachable!(),
         };
 
@@ -221,7 +221,7 @@ impl ApiImpl for SimulationApi {
         let mut conn = self.get_conn(sk);
         debug!("conn_blocking_write to {}: {:?}", conn.node_id, buf);
         let socket = conn.socket.as_mut().unwrap();
-        socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
+        socket.send(desim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
             buf,
         )));
         true
@@ -235,7 +235,7 @@ impl ApiImpl for SimulationApi {
         let mut conn = self.get_conn(sk);
         debug!("conn_async_write to {}: {:?}", conn.node_id, buf);
         if let Some(socket) = conn.socket.as_mut() {
-            socket.send(slowsim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
+            socket.send(desim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
                 buf,
             )));
         } else {
@@ -315,13 +315,13 @@ impl ApiImpl for SimulationApi {
             timeout_millis, peek
         );
 
-        let event: slowsim::world::NodeEvent = match peek {
+        let event: desim::world::NodeEvent = match peek {
             Some(event) => event,
             None => return walproposer::walproposer::WaitResult::Timeout,
         };
 
         let res = match event {
-            slowsim::world::NodeEvent::Closed(tcp) => {
+            desim::world::NodeEvent::Closed(tcp) => {
                 let ev2 = self.os.epoll_recv(0);
                 assert!(ev2.is_some());
                 let mut sk = self.find_conn(tcp);
@@ -334,9 +334,9 @@ impl ApiImpl for SimulationApi {
                     walproposer::walproposer::WaitResult::Latch
                 }
             }
-            slowsim::world::NodeEvent::Message((msg, tcp)) => {
+            desim::world::NodeEvent::Message((msg, tcp)) => {
                 let _ = match msg {
-                    slowsim::proto::AnyMessage::Bytes(b) => b,
+                    desim::proto::AnyMessage::Bytes(b) => b,
                     _ => unreachable!(),
                 };
                 // walproposer must read the message
@@ -345,14 +345,14 @@ impl ApiImpl for SimulationApi {
                     WL_SOCKET_READABLE,
                 )
             }
-            slowsim::world::NodeEvent::Internal(_) => {
+            desim::world::NodeEvent::Internal(_) => {
                 let ev2 = self.os.epoll_recv(0);
                 assert!(ev2.is_some());
                 // TODO: distinguish different types?
                 walproposer::walproposer::WaitResult::Latch
             }
-            slowsim::world::NodeEvent::Accept(_) => unreachable!(),
-            slowsim::world::NodeEvent::WakeTimeout(_) => unreachable!(),
+            desim::world::NodeEvent::Accept(_) => unreachable!(),
+            desim::world::NodeEvent::WakeTimeout(_) => unreachable!(),
         };
         debug!(
             "wait_event_set, timeout_millis={}, res={:?}",
@@ -490,7 +490,7 @@ impl ApiImpl for SimulationApi {
         );
 
         let conn = self.os.open_tcp_nopoll(async_conn.node_id);
-        conn.send(slowsim::proto::AnyMessage::Bytes(replication_prompt.into()));
+        conn.send(desim::proto::AnyMessage::Bytes(replication_prompt.into()));
 
         while startpos < endpos {
             let event = conn.recv();

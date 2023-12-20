@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use safekeeper::safekeeper::SafeKeeperState;
-use slowsim::sync::Mutex;
+use desim::sync::Mutex;
 use utils::id::TenantTimelineId;
 
 pub struct Disk {

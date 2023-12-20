@@ -16,7 +16,7 @@ use safekeeper::{
     wal_storage::Storage,
     SafeKeeperConf,
 };
-use slowsim::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+use desim::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
 use tracing::{debug, info_span};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},

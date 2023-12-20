@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use once_cell::sync::OnceCell;
-use slowsim::{sync::Mutex, world::World};
+use desim::{sync::Mutex, world::World};
 use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
 
 #[derive(Clone)]

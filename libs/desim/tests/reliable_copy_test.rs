@@ -2,11 +2,11 @@
 mod reliable_copy_test {
     use anyhow::Result;
     use parking_lot::Mutex;
-    use slowsim::executor::{self, PollSome};
-    use slowsim::network::{Delay, NetworkOptions};
-    use slowsim::proto::ReplCell;
-    use slowsim::world::{NodeId, World, NetEvent};
-    use slowsim::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+    use desim::executor::{self, PollSome};
+    use desim::network::{Delay, NetworkOptions};
+    use desim::proto::ReplCell;
+    use desim::world::{NodeId, World, NetEvent};
+    use desim::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
     use std::sync::Arc;
     use tracing::info;
 

@@ -2,7 +2,7 @@ use std::{str::FromStr, sync::Arc};
 
 use crate::walproposer_sim::{safekeeper::run_server, wp_api::SimulationApi};
 use rand::{Rng, SeedableRng};
-use slowsim::{
+use desim::{
     network::{Delay, NetworkOptions},
     proto::AnyMessage,
     time::EmptyEvent,
