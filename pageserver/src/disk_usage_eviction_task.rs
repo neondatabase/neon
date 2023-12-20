@@ -845,6 +845,8 @@ mod finite_f32 {
     impl FiniteF32 {
         pub fn try_from_normalized(value: f32) -> Result<Self, f32> {
             if (0.0..=1.0).contains(&value) {
+                // -0.0 is within the range, make sure it is assumed 0.0..=1.0
+                let value = value.abs();
                 Ok(FiniteF32(value))
             } else {
                 Err(value)
