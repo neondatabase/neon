@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
+use crate::attachment_service::AttachmentService;
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 
@@ -654,7 +655,7 @@ impl Endpoint {
         }
     }
 
-    pub async fn reconfigure(&self, pageservers: Vec<(Host, u16)>) -> Result<()> {
+    pub async fn reconfigure(&self, mut pageservers: Vec<(Host, u16)>) -> Result<()> {
         let mut spec: ComputeSpec = {
             let spec_path = self.endpoint_path().join("spec.json");
             let file = std::fs::File::open(spec_path)?;
@@ -664,7 +665,26 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        spec.pageserver_connstring = Some(Self::build_pageserver_connstr(&pageservers));
+        // If we weren't given explicit pageservers, query the attachment service
+        if pageservers.is_empty() {
+            let attachment_service = AttachmentService::from_env(&self.env);
+            let locate_result = attachment_service.tenant_locate(self.tenant_id).await?;
+            pageservers = locate_result
+                .shards
+                .into_iter()
+                .map(|shard| {
+                    (
+                        Host::parse(&shard.listen_pg_addr)
+                            .expect("Attachment service reported bad hostname"),
+                        shard.listen_pg_port,
+                    )
+                })
+                .collect::<Vec<_>>();
+        }
+
+        let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
+        assert!(!pageserver_connstr.is_empty());
+        spec.pageserver_connstring = Some(pageserver_connstr);
 
         let client = reqwest::Client::new();
         let response = client
