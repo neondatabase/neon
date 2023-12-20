@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Type-related stuff
-from typing import Callable, ClassVar, Dict, Iterator, Optional
+from typing import Any, Callable, ClassVar, Dict, Iterator, Optional
 
 import pytest
 from _pytest.config import Config
@@ -20,6 +20,7 @@ from _pytest.terminal import TerminalReporter
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
+from fixtures.utils import humantime_to_ms
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -408,6 +409,34 @@ class NeonBenchmarker:
             "MB",
             report=MetricReport.LOWER_IS_BETTER,
         )
+
+    def record_pagebench_results(self, name: str, results: Dict[str, Any]):
+        total = results["total"]
+
+        metric = "request_count"
+        self.record(
+            f"{name}.{metric}",
+            total[metric],
+            "",
+            report=MetricReport.HIGHER_IS_BETTER,
+        )
+
+        metric = "latency_mean"
+        self.record(
+            f"{name}.{metric}",
+            humantime_to_ms(total[metric]),
+            "ms",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
+
+        metric = "latency_percentiles"
+        for k, v in total[metric].items():
+            self.record(
+                f"{name}.{metric}.{k}",
+                humantime_to_ms(v),
+                "ms",
+                report=MetricReport.LOWER_IS_BETTER,
+            )
 
 
 @pytest.fixture(scope="function")

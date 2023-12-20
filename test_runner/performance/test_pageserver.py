@@ -120,3 +120,5 @@ def test_getpage_throughput(
         results = json.load(f)
 
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
+
+    zenbenchmark.record_pagebench_results("get-page-latest-lsn", results)
