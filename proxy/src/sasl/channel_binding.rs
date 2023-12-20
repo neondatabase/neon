@@ -36,9 +36,9 @@ impl<'a> ChannelBinding<&'a str> {
 
 impl<T: std::fmt::Display> ChannelBinding<T> {
     /// Encode channel binding data as base64 for subsequent checks.
-    pub fn encode<E>(
+    pub fn encode<'a, E>(
         &self,
-        get_cbind_data: impl FnOnce(&T) -> Result<String, E>,
+        get_cbind_data: impl FnOnce(&T) -> Result<&'a [u8], E>,
     ) -> Result<std::borrow::Cow<'static, str>, E> {
         use ChannelBinding::*;
         Ok(match self {
@@ -51,12 +51,11 @@ impl<T: std::fmt::Display> ChannelBinding<T> {
                 "eSws".into()
             }
             Required(mode) => {
-                let msg = format!(
-                    "p={mode},,{data}",
-                    mode = mode,
-                    data = get_cbind_data(mode)?
-                );
-                base64::encode(msg).into()
+                use std::io::Write;
+                let mut cbind_input = vec![];
+                write!(&mut cbind_input, "p={mode},,",).unwrap();
+                cbind_input.extend_from_slice(get_cbind_data(mode)?);
+                base64::encode(&cbind_input).into()
             }
         })
     }
@@ -77,7 +76,7 @@ mod tests {
         ];
 
         for (cb, input) in cases {
-            assert_eq!(cb.encode(|_| anyhow::Ok("bar".to_owned()))?, input);
+            assert_eq!(cb.encode(|_| anyhow::Ok(b"bar"))?, input);
         }
 
         Ok(())

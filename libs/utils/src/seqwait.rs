@@ -58,7 +58,7 @@ where
 // to get that.
 impl<T: Ord> PartialOrd for Waiter<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.wake_num.partial_cmp(&self.wake_num)
+        Some(self.cmp(other))
     }
 }
 
@@ -124,6 +124,9 @@ where
             // Prevent new waiters; wake all those that exist.
             // Wake everyone with an error.
             let mut internal = self.internal.lock().unwrap();
+
+            // Block any future waiters from starting
+            internal.shutdown = true;
 
             // This will steal the entire waiters map.
             // When we drop it all waiters will be woken.

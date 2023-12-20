@@ -42,13 +42,12 @@
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
 use std::{
-    collections::HashMap,
-    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
+use camino::Utf8Path;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -60,7 +59,11 @@ use utils::serde_percent::Percent;
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{self, storage_layer::PersistentLayer, timeline::EvictionError, Timeline},
+    tenant::{
+        self,
+        storage_layer::{AsLayerDesc, EvictionError, Layer},
+        Timeline,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +111,7 @@ pub fn launch_disk_usage_global_eviction_task(
                 _ = background_jobs_barrier.wait() => { }
             };
 
-            disk_usage_eviction_task(&state, task_config, storage, &conf.tenants_path(), cancel)
+            disk_usage_eviction_task(&state, task_config, &storage, &conf.tenants_path(), cancel)
                 .await;
             Ok(())
         },
@@ -121,8 +124,8 @@ pub fn launch_disk_usage_global_eviction_task(
 async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
-    storage: GenericRemoteStorage,
-    tenants_dir: &Path,
+    storage: &GenericRemoteStorage,
+    tenants_dir: &Utf8Path,
     cancel: CancellationToken,
 ) {
     scopeguard::defer! {
@@ -148,7 +151,7 @@ async fn disk_usage_eviction_task(
             let res = disk_usage_eviction_task_iteration(
                 state,
                 task_config,
-                &storage,
+                storage,
                 tenants_dir,
                 &cancel,
             )
@@ -184,7 +187,7 @@ async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir: &Path,
+    tenants_dir: &Utf8Path,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
@@ -271,9 +274,9 @@ struct LayerCount {
     count: usize,
 }
 
-pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
+pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     state: &State,
-    storage: &GenericRemoteStorage,
+    _storage: &GenericRemoteStorage,
     usage_pre: U,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
@@ -314,7 +317,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 .unwrap()
                 .as_micros(),
             partition,
-            desc.tenant_id,
+            desc.tenant_shard_id,
             desc.timeline_id,
             candidate.layer,
         );
@@ -325,15 +328,16 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // Walk through the list of candidates, until we have accumulated enough layers to get
     // us back under the pressure threshold. 'usage_planned' is updated so that it tracks
     // how much disk space would be used after evicting all the layers up to the current
-    // point in the list. The layers are collected in 'batched', grouped per timeline.
+    // point in the list.
     //
     // If we get far enough in the list that we start to evict layers that are below
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
-    let mut batched: HashMap<_, Vec<Arc<dyn PersistentLayer>>> = HashMap::new();
     let mut warned = None;
     let mut usage_planned = usage_pre;
-    for (i, (partition, candidate)) in candidates.into_iter().enumerate() {
+    let mut evicted_amount = 0;
+
+    for (i, (partition, candidate)) in candidates.iter().enumerate() {
         if !usage_planned.has_pressure() {
             debug!(
                 no_candidates_evicted = i,
@@ -342,17 +346,13 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             break;
         }
 
-        if partition == MinResidentSizePartition::Below && warned.is_none() {
+        if partition == &MinResidentSizePartition::Below && warned.is_none() {
             warn!(?usage_pre, ?usage_planned, candidate_no=i, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
             warned = Some(usage_planned);
         }
 
         usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
-
-        batched
-            .entry(TimelineKey(candidate.timeline))
-            .or_default()
-            .push(candidate.layer);
+        evicted_amount += 1;
     }
 
     let usage_planned = match warned {
@@ -367,66 +367,82 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     };
     debug!(?usage_planned, "usage planned");
 
-    // phase2: evict victims batched by timeline
+    // phase2: evict layers
 
-    // After the loop, `usage_assumed` is the post-eviction usage,
+    let mut js = tokio::task::JoinSet::new();
+    let limit = 1000;
+
+    let mut evicted = candidates.into_iter().take(evicted_amount).fuse();
+    let mut consumed_all = false;
+
+    // After the evictions, `usage_assumed` is the post-eviction usage,
     // according to internal accounting.
     let mut usage_assumed = usage_pre;
     let mut evictions_failed = LayerCount::default();
-    for (timeline, batch) in batched {
-        let tenant_id = timeline.tenant_id;
-        let timeline_id = timeline.timeline_id;
-        let batch_size = batch.len();
 
-        debug!(%timeline_id, "evicting batch for timeline");
+    let evict_layers = async move {
+        loop {
+            let next = if js.len() >= limit || consumed_all {
+                js.join_next().await
+            } else if !js.is_empty() {
+                // opportunistically consume ready result, one per each new evicted
+                futures::future::FutureExt::now_or_never(js.join_next()).and_then(|x| x)
+            } else {
+                None
+            };
 
-        async {
-            let results = timeline.evict_layers(storage, &batch, cancel.clone()).await;
-
-            match results {
-                Err(e) => {
-                    warn!("failed to evict batch: {:#}", e);
-                }
-                Ok(results) => {
-                    assert_eq!(results.len(), batch.len());
-                    for (result, layer) in results.into_iter().zip(batch.iter()) {
-                        let file_size = layer.layer_desc().file_size;
-                        match result {
-                            Some(Ok(())) => {
-                                usage_assumed.add_available_bytes(file_size);
-                            }
-                            Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                                unreachable!("get_local_layers_for_disk_usage_eviction finds only local layers")
-                            }
-                            Some(Err(EvictionError::FileNotFound)) => {
-                                evictions_failed.file_sizes += file_size;
-                                evictions_failed.count += 1;
-                            }
-                            Some(Err(
-                                e @ EvictionError::LayerNotFound(_)
-                                | e @ EvictionError::StatFailed(_),
-                            )) => {
-                                let e = utils::error::report_compact_sources(&e);
-                                warn!(%layer, "failed to evict layer: {e}");
-                                evictions_failed.file_sizes += file_size;
-                                evictions_failed.count += 1;
-                            }
-                            None => {
-                                assert!(cancel.is_cancelled());
-                                return;
-                            }
-                        }
+            if let Some(next) = next {
+                match next {
+                    Ok(Ok(file_size)) => {
+                        usage_assumed.add_available_bytes(file_size);
                     }
+                    Ok(Err((file_size, EvictionError::NotFound | EvictionError::Downloaded))) => {
+                        evictions_failed.file_sizes += file_size;
+                        evictions_failed.count += 1;
+                    }
+                    Err(je) if je.is_cancelled() => unreachable!("not used"),
+                    Err(je) if je.is_panic() => { /* already logged */ }
+                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
                 }
             }
-        }
-        .instrument(tracing::info_span!("evict_batch", %tenant_id, %timeline_id, batch_size))
-        .await;
 
-        if cancel.is_cancelled() {
+            if consumed_all && js.is_empty() {
+                break;
+            }
+
+            // calling again when consumed_all is fine as evicted is fused.
+            let Some((_partition, candidate)) = evicted.next() else {
+                consumed_all = true;
+                continue;
+            };
+
+            js.spawn(async move {
+                let rtc = candidate.timeline.remote_client.as_ref().expect(
+                    "holding the witness, all timelines must have a remote timeline client",
+                );
+                let file_size = candidate.layer.layer_desc().file_size;
+                candidate
+                    .layer
+                    .evict_and_wait(rtc)
+                    .await
+                    .map(|()| file_size)
+                    .map_err(|e| (file_size, e))
+            });
+
+            tokio::task::yield_now().await;
+        }
+
+        (usage_assumed, evictions_failed)
+    };
+
+    let (usage_assumed, evictions_failed) = tokio::select! {
+        tuple = evict_layers => { tuple },
+        _ = cancel.cancelled() => {
+            // dropping joinset will abort all pending evict_and_waits and that is fine, our
+            // requests will still stand
             return Ok(IterationOutcome::Cancelled);
         }
-    }
+    };
 
     Ok(IterationOutcome::Finished(IterationOutcomeFinished {
         before: usage_pre,
@@ -441,7 +457,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 #[derive(Clone)]
 struct EvictionCandidate {
     timeline: Arc<Timeline>,
-    layer: Arc<dyn PersistentLayer>,
+    layer: Layer,
     last_activity_ts: SystemTime,
 }
 
@@ -503,7 +519,7 @@ async fn collect_eviction_candidates(
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
-        let tenant = match tenant::mgr::get_tenant(*tenant_id, true).await {
+        let tenant = match tenant::mgr::get_tenant(*tenant_id, true) {
             Ok(tenant) => tenant,
             Err(e) => {
                 // this can happen if tenant has lifecycle transition after we fetched it
@@ -511,6 +527,11 @@ async fn collect_eviction_candidates(
                 continue;
             }
         };
+
+        if tenant.cancel.is_cancelled() {
+            info!(%tenant_id, "Skipping tenant for eviction, it is shutting down");
+            continue;
+        }
 
         // collect layers from all timelines in this tenant
         //
@@ -525,7 +546,7 @@ async fn collect_eviction_candidates(
                 continue;
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
-            debug!(tenant_id=%tl.tenant_id, timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+            debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
             tenant_candidates.extend(
                 info.resident_layers
                     .into_iter()
@@ -620,9 +641,8 @@ impl std::ops::Deref for TimelineKey {
 }
 
 mod filesystem_level_usage {
-    use std::path::Path;
-
     use anyhow::Context;
+    use camino::Utf8Path;
 
     use crate::statvfs::Statvfs;
 
@@ -664,7 +684,7 @@ mod filesystem_level_usage {
     }
 
     pub fn get<'a>(
-        tenants_dir: &Path,
+        tenants_dir: &Utf8Path,
         config: &'a DiskUsageEvictionTaskConfig,
     ) -> anyhow::Result<Usage<'a>> {
         let mock_config = {

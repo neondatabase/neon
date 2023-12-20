@@ -10,6 +10,8 @@
  */
 #include "postgres.h"
 
+#include "../neon/neon_pgversioncompat.h"
+
 #include "access/relation.h"
 #include "access/xact.h"
 #include "access/xlog.h"
@@ -39,8 +41,13 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  * Linkage to functions in neon module.
  * The signature here would need to be updated whenever function parameters change in pagestore_smgr.c
  */
-typedef void (*neon_read_at_lsn_type) (RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
+#if PG_MAJORVERSION_NUM < 16
+typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 									   XLogRecPtr request_lsn, bool request_latest, char *buffer);
+#else
+typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+									   XLogRecPtr request_lsn, bool request_latest, void *buffer);
+#endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
 
@@ -115,7 +122,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			uint32		buf_state;
 			Buffer		bufferid;
 			bool		isvalid;
-			RelFileNode rnode;
+			NRelFileInfo rinfo;
 			ForkNumber	forknum;
 			BlockNumber blocknum;
 
@@ -128,7 +135,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			else
 				isvalid = false;
 			bufferid = BufferDescriptorGetBuffer(bufHdr);
-			rnode = bufHdr->tag.rnode;
+			rinfo = BufTagGetNRelFileInfo(bufHdr->tag);
 			forknum = bufHdr->tag.forkNum;
 			blocknum = bufHdr->tag.blockNum;
 
@@ -141,7 +148,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 			 */
 			if (isvalid)
 			{
-				if (ReadRecentBuffer(rnode, forknum, blocknum, bufferid))
+				if (ReadRecentBuffer(rinfo, forknum, blocknum, bufferid))
 					ReleaseBuffer(bufferid);
 			}
 		}
@@ -238,7 +245,7 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	neon_read_at_lsn(rel->rd_node, forknum, blkno, read_lsn, request_latest, raw_page_data);
+	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, read_lsn, request_latest, raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -267,10 +274,17 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	{
-		RelFileNode rnode = {
+		NRelFileInfo rinfo = {
+#if PG_MAJORVERSION_NUM < 16
 			.spcNode = PG_GETARG_OID(0),
 			.dbNode = PG_GETARG_OID(1),
-		.relNode = PG_GETARG_OID(2)};
+			.relNode = PG_GETARG_OID(2)
+#else
+			.spcOid = PG_GETARG_OID(0),
+			.dbOid = PG_GETARG_OID(1),
+			.relNumber = PG_GETARG_OID(2)
+#endif
+		};
 
 		ForkNumber	forknum = PG_GETARG_UINT32(3);
 
@@ -284,7 +298,7 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
-		neon_read_at_lsn(rnode, forknum, blkno, read_lsn, request_latest, raw_page_data);
+		neon_read_at_lsn(rinfo, forknum, blkno, read_lsn, request_latest, raw_page_data);
 		PG_RETURN_BYTEA_P(raw_page);
 	}
 }

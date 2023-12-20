@@ -30,7 +30,7 @@ cleanup() {
 echo "clean up containers if exists"
 cleanup
 
-for pg_version in 14 15; do
+for pg_version in 14 15 16; do
     echo "start containers (pg_version=$pg_version)."
     PG_VERSION=$pg_version docker compose -f $COMPOSE_FILE up --build -d
 

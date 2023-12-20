@@ -35,5 +35,5 @@ def test_read_request_tracing(neon_env_builder: NeonEnvBuilder):
     # Stop postgres so we drop the connection and flush the traces
     endpoint.stop()
 
-    trace_path = env.repo_dir / "traces" / str(tenant_id) / str(timeline_id)
+    trace_path = env.pageserver.workdir / "traces" / str(tenant_id) / str(timeline_id)
     assert trace_path.exists()

@@ -16,13 +16,12 @@ from pytest_httpserver import HTTPServer
 
 
 def test_threshold_based_eviction(
-    request,
     httpserver: HTTPServer,
     httpserver_listen_address,
     pg_bin: PgBin,
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Start with metrics collection enabled, so that the eviction task
     # imitates its accesses. We'll use a non-existent endpoint to make it fail.
@@ -33,14 +32,17 @@ def test_threshold_based_eviction(
         synthetic_size_calculation_interval="2s"
         metric_collection_endpoint="http://{host}:{port}/nonexistent"
     """
-    metrics_refused_log_line = ".*metrics endpoint refused the sent metrics.*/nonexistent.*"
+    metrics_refused_log_line = (
+        ".*metrics_collection:.* upload consumption_metrics (still failed|failed, will retry).*"
+    )
     env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.append(metrics_refused_log_line)
-
-    # these can happen whenever we run consumption metrics collection
-    env.pageserver.allowed_errors.append(r".*failed to calculate logical size at \S+: cancelled")
-    env.pageserver.allowed_errors.append(
-        r".*failed to calculate synthetic size for tenant \S+: failed to calculate some logical_sizes"
+    env.pageserver.allowed_errors.extend(
+        [
+            metrics_refused_log_line,
+            # these can happen whenever we run consumption metrics collection
+            r".*failed to calculate logical size at \S+: cancelled",
+            r".*failed to calculate synthetic size for tenant \S+: failed to calculate some logical_sizes",
+        ]
     )
 
     tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
@@ -69,8 +71,7 @@ def test_threshold_based_eviction(
     }
 
     # restart because changing tenant config is not instant
-    env.pageserver.stop()
-    env.pageserver.start()
+    env.pageserver.restart()
 
     assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",

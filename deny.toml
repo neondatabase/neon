@@ -23,7 +23,7 @@ vulnerability = "deny"
 unmaintained = "warn"
 yanked = "warn"
 notice = "warn"
-ignore = ["RUSTSEC-2023-0052"]
+ignore = []
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
@@ -74,9 +74,29 @@ highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
-deny = []
+
 skip = []
 skip-tree = []
+
+[[bans.deny]]
+# we use tokio, the same rationale applies for async-{io,waker,global-executor,executor,channel,lock}, smol
+# if you find yourself here while adding a dependency, try "default-features = false", ask around on #rust
+name = "async-std"
+
+[[bans.deny]]
+name = "async-io"
+
+[[bans.deny]]
+name = "async-waker"
+
+[[bans.deny]]
+name = "async-global-executor"
+
+[[bans.deny]]
+name = "async-executor"
+
+[[bans.deny]]
+name = "smol"
 
 # This section is considered when running `cargo deny check sources`.
 # More documentation about the 'sources' section can be found here:

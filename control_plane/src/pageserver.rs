@@ -6,67 +6,33 @@
 //!
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Write};
+
+use std::io;
+use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::{io, result};
+use std::time::Duration;
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{self, TenantInfo, TimelineInfo};
+use camino::Utf8PathBuf;
+use futures::SinkExt;
+use pageserver_api::models::{self, LocationConfig, TenantInfo, TimelineInfo};
+use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
-use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::{IntoUrl, Method};
-use thiserror::Error;
 use utils::auth::{Claims, Scope};
 use utils::{
-    http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
 
+use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
-#[derive(Error, Debug)]
-pub enum PageserverHttpError {
-    #[error("Reqwest error: {0}")]
-    Transport(#[from] reqwest::Error),
-
-    #[error("Error: {0}")]
-    Response(String),
-}
-
-impl From<anyhow::Error> for PageserverHttpError {
-    fn from(e: anyhow::Error) -> Self {
-        Self::Response(e.to_string())
-    }
-}
-
-type Result<T> = result::Result<T, PageserverHttpError>;
-
-pub trait ResponseErrorMessageExt: Sized {
-    fn error_from_body(self) -> Result<Self>;
-}
-
-impl ResponseErrorMessageExt for Response {
-    fn error_from_body(self) -> Result<Self> {
-        let status = self.status();
-        if !(status.is_client_error() || status.is_server_error()) {
-            return Ok(self);
-        }
-
-        // reqwest does not export its error construction utility functions, so let's craft the message ourselves
-        let url = self.url().to_owned();
-        Err(PageserverHttpError::Response(
-            match self.json::<HttpErrorBody>() {
-                Ok(err_body) => format!("Error: {}", err_body.msg),
-                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
-            },
-        ))
-    }
-}
+/// Directory within .neon which will be used by default for LocalFs remote storage.
+pub const PAGESERVER_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/pageserver";
 
 //
 // Control routines for pageserver.
@@ -76,43 +42,52 @@ impl ResponseErrorMessageExt for Response {
 #[derive(Debug)]
 pub struct PageServerNode {
     pub pg_connection_config: PgConnectionConfig,
+    pub conf: PageServerConf,
     pub env: LocalEnv,
-    pub http_client: Client,
-    pub http_base_url: String,
+    pub http_client: mgmt_api::Client,
 }
 
 impl PageServerNode {
-    pub fn from_env(env: &LocalEnv) -> PageServerNode {
-        let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
-            .expect("Unable to parse listen_pg_addr");
+    pub fn from_env(env: &LocalEnv, conf: &PageServerConf) -> PageServerNode {
+        let (host, port) =
+            parse_host_port(&conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
         Self {
             pg_connection_config: PgConnectionConfig::new_host_port(host, port),
+            conf: conf.clone(),
             env: env.clone(),
-            http_client: Client::new(),
-            http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
+            http_client: mgmt_api::Client::new(
+                format!("http://{}", conf.listen_http_addr),
+                {
+                    match conf.http_auth_type {
+                        AuthType::Trust => None,
+                        AuthType::NeonJWT => Some(
+                            env.generate_auth_token(&Claims::new(None, Scope::PageServerApi))
+                                .unwrap(),
+                        ),
+                    }
+                }
+                .as_deref(),
+            ),
         }
     }
 
-    // pageserver conf overrides defined by neon_local configuration.
-    fn neon_local_overrides(&self) -> Vec<String> {
-        let id = format!("id={}", self.env.pageserver.id);
+    /// Merge overrides provided by the user on the command line with our default overides derived from neon_local configuration.
+    ///
+    /// These all end up on the command line of the `pageserver` binary.
+    fn neon_local_overrides(&self, cli_overrides: &[&str]) -> Vec<String> {
+        let id = format!("id={}", self.conf.id);
         // FIXME: the paths should be shell-escaped to handle paths with spaces, quotas etc.
         let pg_distrib_dir_param = format!(
             "pg_distrib_dir='{}'",
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let http_auth_type_param =
-            format!("http_auth_type='{}'", self.env.pageserver.http_auth_type);
-        let listen_http_addr_param = format!(
-            "listen_http_addr='{}'",
-            self.env.pageserver.listen_http_addr
-        );
+        let http_auth_type_param = format!("http_auth_type='{}'", self.conf.http_auth_type);
+        let listen_http_addr_param = format!("listen_http_addr='{}'", self.conf.listen_http_addr);
 
-        let pg_auth_type_param = format!("pg_auth_type='{}'", self.env.pageserver.pg_auth_type);
-        let listen_pg_addr_param =
-            format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+        let pg_auth_type_param = format!("pg_auth_type='{}'", self.conf.pg_auth_type);
+        let listen_pg_addr_param = format!("listen_pg_addr='{}'", self.conf.listen_pg_addr);
 
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
@@ -126,43 +101,61 @@ impl PageServerNode {
             broker_endpoint_param,
         ];
 
-        if self.env.pageserver.http_auth_type != AuthType::Trust
-            || self.env.pageserver.pg_auth_type != AuthType::Trust
-        {
-            overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
+        if let Some(control_plane_api) = &self.env.control_plane_api {
+            overrides.push(format!(
+                "control_plane_api='{}'",
+                control_plane_api.as_str()
+            ));
         }
+
+        if !cli_overrides
+            .iter()
+            .any(|c| c.starts_with("remote_storage"))
+        {
+            overrides.push(format!(
+                "remote_storage={{local_path='../{PAGESERVER_REMOTE_STORAGE_DIR}'}}"
+            ));
+        }
+
+        if self.conf.http_auth_type != AuthType::Trust || self.conf.pg_auth_type != AuthType::Trust
+        {
+            // Keys are generated in the toplevel repo dir, pageservers' workdirs
+            // are one level below that, so refer to keys with ../
+            overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
+        }
+
+        // Apply the user-provided overrides
+        overrides.extend(cli_overrides.iter().map(|&c| c.to_owned()));
+
         overrides
     }
 
     /// Initializes a pageserver node by creating its config with the overrides provided.
     pub fn initialize(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         // First, run `pageserver --init` and wait for it to write a config into FS and exit.
-        self.pageserver_init(config_overrides).with_context(|| {
-            format!(
-                "Failed to run init for pageserver node {}",
-                self.env.pageserver.id,
-            )
-        })
+        self.pageserver_init(config_overrides)
+            .with_context(|| format!("Failed to run init for pageserver node {}", self.conf.id))
     }
 
     pub fn repo_path(&self) -> PathBuf {
-        self.env.pageserver_data_dir()
+        self.env.pageserver_data_dir(self.conf.id)
     }
 
     /// The pid file is created by the pageserver process, with its pid stored inside.
     /// Other pageservers cannot lock the same file and overwrite it for as long as the current
     /// pageserver runs. (Unless someone removes the file manually; never do that!)
-    fn pid_file(&self) -> PathBuf {
-        self.repo_path().join("pageserver.pid")
+    fn pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(self.repo_path().join("pageserver.pid"))
+            .expect("non-Unicode path")
     }
 
-    pub fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
-        self.start_node(config_overrides, false)
+    pub async fn start(&self, config_overrides: &[&str]) -> anyhow::Result<Child> {
+        self.start_node(config_overrides, false).await
     }
 
     fn pageserver_init(&self, config_overrides: &[&str]) -> anyhow::Result<()> {
         let datadir = self.repo_path();
-        let node_id = self.env.pageserver.id;
+        let node_id = self.conf.id;
         println!(
             "Initializing pageserver node {} at '{}' in {:?}",
             node_id,
@@ -170,6 +163,10 @@ impl PageServerNode {
             datadir
         );
         io::stdout().flush()?;
+
+        if !datadir.exists() {
+            std::fs::create_dir(&datadir)?;
+        }
 
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!("Cannot start pageserver node {node_id} in path that has no string representation: {datadir:?}")
@@ -194,43 +191,48 @@ impl PageServerNode {
         Ok(())
     }
 
-    fn start_node(&self, config_overrides: &[&str], update_config: bool) -> anyhow::Result<Child> {
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
-
+    async fn start_node(
+        &self,
+        config_overrides: &[&str],
+        update_config: bool,
+    ) -> anyhow::Result<Child> {
+        // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
             "Starting pageserver node {} at '{}' in {:?}",
-            self.env.pageserver.id,
+            self.conf.id,
             self.pg_connection_config.raw_address(),
             datadir
         );
-        io::stdout().flush()?;
+        io::stdout().flush().context("flush stdout")?;
 
         let datadir_path_str = datadir.to_str().with_context(|| {
             format!(
                 "Cannot start pageserver node {} in path that has no string representation: {:?}",
-                self.env.pageserver.id, datadir,
+                self.conf.id, datadir,
             )
         })?;
         let mut args = self.pageserver_basic_args(config_overrides, datadir_path_str);
         if update_config {
             args.push(Cow::Borrowed("--update-config"));
         }
-
         background_process::start_process(
             "pageserver",
             &datadir,
             &self.env.pageserver_bin(),
             args.iter().map(Cow::as_ref),
             self.pageserver_env_variables()?,
-            background_process::InitialPidFile::Expect(&self.pid_file()),
-            || match self.check_status() {
-                Ok(()) => Ok(true),
-                Err(PageserverHttpError::Transport(_)) => Ok(false),
-                Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+            background_process::InitialPidFile::Expect(self.pid_file()),
+            || async {
+                let st = self.check_status().await;
+                match st {
+                    Ok(()) => Ok(true),
+                    Err(mgmt_api::Error::ReceiveBody(_)) => Ok(false),
+                    Err(e) => Err(anyhow::anyhow!("Failed to check node status: {e}")),
+                }
             },
         )
+        .await
     }
 
     fn pageserver_basic_args<'a>(
@@ -240,8 +242,7 @@ impl PageServerNode {
     ) -> Vec<Cow<'a, str>> {
         let mut args = vec![Cow::Borrowed("-D"), Cow::Borrowed(datadir_path_str)];
 
-        let mut overrides = self.neon_local_overrides();
-        overrides.extend(config_overrides.iter().map(|&c| c.to_owned()));
+        let overrides = self.neon_local_overrides(config_overrides);
         for config_override in overrides {
             args.push(Cow::Borrowed("-c"));
             args.push(Cow::Owned(config_override));
@@ -254,7 +255,7 @@ impl PageServerNode {
         // FIXME: why is this tied to pageserver's auth type? Whether or not the safekeeper
         // needs a token, and how to generate that token, seems independent to whether
         // the pageserver requires a token in incoming requests.
-        Ok(if self.env.pageserver.http_auth_type != AuthType::Trust {
+        Ok(if self.conf.http_auth_type != AuthType::Trust {
             // Generate a token to connect from the pageserver to a safekeeper
             let token = self
                 .env
@@ -277,46 +278,34 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
+    pub async fn page_server_psql_client(
+        &self,
+    ) -> anyhow::Result<(
+        tokio_postgres::Client,
+        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+    )> {
         let mut config = self.pg_connection_config.clone();
-        if self.env.pageserver.pg_auth_type == AuthType::NeonJWT {
+        if self.conf.pg_auth_type == AuthType::NeonJWT {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
             config = config.set_password(Some(token));
         }
-        Ok(config.connect_no_tls()?)
+        Ok(config.connect_no_tls().await?)
     }
 
-    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> anyhow::Result<RequestBuilder> {
-        let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.http_auth_type == AuthType::NeonJWT {
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
-            builder = builder.bearer_auth(token)
-        }
-        Ok(builder)
+    pub async fn check_status(&self) -> mgmt_api::Result<()> {
+        self.http_client.status().await
     }
 
-    pub fn check_status(&self) -> Result<()> {
-        self.http_request(Method::GET, format!("{}/status", self.http_base_url))?
-            .send()?
-            .error_from_body()?;
-        Ok(())
+    pub async fn tenant_list(&self) -> mgmt_api::Result<Vec<TenantInfo>> {
+        self.http_client.list_tenants().await
     }
 
-    pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
-        Ok(self
-            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))?
-            .send()?
-            .error_from_body()?
-            .json()?)
-    }
-
-    pub fn tenant_create(
+    pub async fn tenant_create(
         &self,
-        new_tenant_id: Option<TenantId>,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
@@ -380,35 +369,21 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
+            heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
         };
 
-        // If tenant ID was not specified, generate one
-        let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
-
         let request = models::TenantCreateRequest {
-            new_tenant_id,
+            new_tenant_id: TenantShardId::unsharded(new_tenant_id),
+            generation,
             config,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         }
-        self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))?
-            .json(&request)
-            .send()?
-            .error_from_body()?
-            .json::<Option<String>>()
-            .with_context(|| {
-                format!("Failed to parse tenant creation response for tenant id: {new_tenant_id:?}")
-            })?
-            .context("No tenant id was found in the tenant creation response")
-            .and_then(|tenant_id_string| {
-                tenant_id_string.parse().with_context(|| {
-                    format!("Failed to parse response string as tenant id: '{tenant_id_string}'")
-                })
-            })
+        Ok(self.http_client.tenant_create(&request).await?)
     }
 
-    pub fn tenant_config(
+    pub async fn tenant_config(
         &self,
         tenant_id: TenantId,
         mut settings: HashMap<&str, &str>,
@@ -479,6 +454,7 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'gc_feedback' as bool")?,
+                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
             }
         };
 
@@ -486,59 +462,48 @@ impl PageServerNode {
             bail!("Unrecognized tenant settings: {settings:?}")
         }
 
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
-            .json(&models::TenantConfigRequest { tenant_id, config })
-            .send()?
-            .error_from_body()?;
+        self.http_client
+            .tenant_config(&models::TenantConfigRequest { tenant_id, config })
+            .await?;
 
         Ok(())
     }
 
-    pub fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
-        let timeline_infos: Vec<TimelineInfo> = self
-            .http_request(
-                Method::GET,
-                format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-            )?
-            .send()?
-            .error_from_body()?
-            .json()?;
-
-        Ok(timeline_infos)
+    pub async fn location_config(
+        &self,
+        tenant_id: TenantId,
+        config: LocationConfig,
+        flush_ms: Option<Duration>,
+    ) -> anyhow::Result<()> {
+        Ok(self
+            .http_client
+            .location_config(tenant_id, config, flush_ms)
+            .await?)
     }
 
-    pub fn timeline_create(
+    pub async fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
+        Ok(self.http_client.list_timelines(*tenant_id).await?)
+    }
+
+    pub async fn timeline_create(
         &self,
         tenant_id: TenantId,
         new_timeline_id: Option<TimelineId>,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
+        existing_initdb_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
         // If timeline ID was not specified, generate one
         let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
-
-        self.http_request(
-            Method::POST,
-            format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-        )?
-        .json(&models::TimelineCreateRequest {
+        let req = models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,
             pg_version,
-        })
-        .send()?
-        .error_from_body()?
-        .json::<Option<TimelineInfo>>()
-        .with_context(|| {
-            format!("Failed to parse timeline creation response for tenant id: {tenant_id}")
-        })?
-        .with_context(|| {
-            format!(
-                "No timeline id was found in the timeline creation response for tenant {tenant_id}"
-            )
-        })
+            existing_initdb_timeline_id,
+        };
+        Ok(self.http_client.timeline_create(tenant_id, &req).await?)
     }
 
     /// Import a basebackup prepared using either:
@@ -550,7 +515,7 @@ impl PageServerNode {
     /// * `timeline_id` - id to assign to imported timeline
     /// * `base` - (start lsn of basebackup, path to `base.tar` file)
     /// * `pg_wal` - if there's any wal to import: (end lsn, path to `pg_wal.tar`)
-    pub fn timeline_import(
+    pub async fn timeline_import(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -558,36 +523,60 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let mut client = self.page_server_psql_client()?;
+        let (client, conn) = self.page_server_psql_client().await?;
+        // The connection object performs the actual communication with the database,
+        // so spawn it off to run on its own.
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        tokio::pin!(client);
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
-        let base_tarfile = File::open(base_tarfile_path)?;
-        let mut base_reader = BufReader::new(base_tarfile);
+        let base_tarfile = tokio::fs::File::open(base_tarfile_path).await?;
+        let base_tarfile = tokio_util::io::ReaderStream::new(base_tarfile);
 
         // Init wal reader if necessary
         let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
-            let wal_tarfile = File::open(wal_tarfile_path)?;
-            let wal_reader = BufReader::new(wal_tarfile);
+            let wal_tarfile = tokio::fs::File::open(wal_tarfile_path).await?;
+            let wal_reader = tokio_util::io::ReaderStream::new(wal_tarfile);
             (end_lsn, Some(wal_reader))
         } else {
             (start_lsn, None)
         };
 
-        // Import base
-        let import_cmd = format!(
-            "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
-        );
-        let mut writer = client.copy_in(&import_cmd)?;
-        io::copy(&mut base_reader, &mut writer)?;
-        writer.finish()?;
+        let copy_in = |reader, cmd| {
+            let client = &client;
+            async move {
+                let writer = client.copy_in(&cmd).await?;
+                let writer = std::pin::pin!(writer);
+                let mut writer = writer.sink_map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
+                });
+                let mut reader = std::pin::pin!(reader);
+                writer.send_all(&mut reader).await?;
+                writer.into_inner().finish().await?;
+                anyhow::Ok(())
+            }
+        };
 
+        // Import base
+        copy_in(
+            base_tarfile,
+            format!(
+                "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
+            ),
+        )
+        .await?;
         // Import wal if necessary
-        if let Some(mut wal_reader) = wal_reader {
-            let import_cmd = format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}");
-            let mut writer = client.copy_in(&import_cmd)?;
-            io::copy(&mut wal_reader, &mut writer)?;
-            writer.finish()?;
+        if let Some(wal_reader) = wal_reader {
+            copy_in(
+                wal_reader,
+                format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}"),
+            )
+            .await?;
         }
 
         Ok(())

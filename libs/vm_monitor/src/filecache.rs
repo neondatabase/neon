@@ -21,11 +21,6 @@ pub struct FileCacheState {
 
 #[derive(Debug)]
 pub struct FileCacheConfig {
-    /// Whether the file cache is *actually* stored in memory (e.g. by writing to
-    /// a tmpfs or shmem file). If true, the size of the file cache will be counted against the
-    /// memory available for the cgroup.
-    pub(crate) in_memory: bool,
-
     /// The size of the file cache, in terms of the size of the resource it consumes
     /// (currently: only memory)
     ///
@@ -62,12 +57,11 @@ pub struct FileCacheConfig {
 impl Default for FileCacheConfig {
     fn default() -> Self {
         Self {
-            in_memory: true,
-            // 75 %
             resource_multiplier: 0.75,
-            // 640 MiB; (512 + 128)
-            min_remaining_after_cache: NonZeroU64::new(640 * MiB).unwrap(),
-            // ensure any increase in file cache size is split 90-10 with 10% to other memory
+            // 256 MiB - lower than when in memory because overcommitting is safe; if we don't have
+            // memory, the kernel will just evict from its page cache, rather than e.g. killing
+            // everything.
+            min_remaining_after_cache: NonZeroU64::new(256 * MiB).unwrap(),
             spread_factor: 0.1,
         }
     }

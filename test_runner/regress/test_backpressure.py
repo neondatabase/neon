@@ -24,8 +24,6 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
     log.info("checks started")
 
     with pg_cur(endpoint) as cur:
-        cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
-
         cur.execute("select pg_size_bytes(current_setting('max_replication_write_lag'))")
         res = cur.fetchone()
         max_replication_write_lag_bytes = res[0]
@@ -102,9 +100,13 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
     # Create a branch for us
     env.neon_cli.create_branch("test_backpressure")
 
-    endpoint = env.endpoints.create_start(
+    endpoint = env.endpoints.create(
         "test_backpressure", config_lines=["max_replication_write_lag=30MB"]
     )
+    # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
+    # which is needed for backpressure_lsns() to work
+    endpoint.respec(skip_pg_catalog_updates=False)
+    endpoint.start()
     log.info("postgres is running on 'test_backpressure' branch")
 
     # setup check thread

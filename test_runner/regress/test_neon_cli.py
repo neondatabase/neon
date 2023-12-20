@@ -124,11 +124,58 @@ def test_cli_ipv4_listeners(neon_env_builder: NeonEnvBuilder):
 
 
 def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
+    """
+    Basic start/stop with default single-instance config for
+    safekeeper and pageserver
+    """
     env = neon_env_builder.init_start()
 
     # Stop default ps/sk
-    env.neon_cli.pageserver_stop()
+    env.neon_cli.pageserver_stop(env.pageserver.id)
     env.neon_cli.safekeeper_stop()
+    env.neon_cli.attachment_service_stop(False)
+
+    # Keep NeonEnv state up to date, it usually owns starting/stopping services
+    env.pageserver.running = False
+
+    # Default start
+    res = env.neon_cli.raw_cli(["start"])
+    res.check_returncode()
+
+    # Default stop
+    res = env.neon_cli.raw_cli(["stop"])
+    res.check_returncode()
+
+
+def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
+    """
+    Basic start/stop with explicitly configured counts of pageserver
+    and safekeeper
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_safekeepers = 2
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID)
+    env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID + 1)
+
+    # Keep NeonEnv state up to date, it usually owns starting/stopping services
+    env.pageservers[0].running = False
+    env.pageservers[1].running = False
+
+    # Addressing a nonexistent ID throws
+    with pytest.raises(RuntimeError):
+        env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID + 100)
+
+    # Using the single-pageserver shortcut property throws when there are multiple pageservers
+    with pytest.raises(AssertionError):
+        _drop = env.pageserver
+
+    env.neon_cli.safekeeper_stop(neon_env_builder.safekeepers_id_start + 1)
+    env.neon_cli.safekeeper_stop(neon_env_builder.safekeepers_id_start + 2)
+
+    # Stop this to get out of the way of the following `start`
+    env.neon_cli.attachment_service_stop(False)
 
     # Default start
     res = env.neon_cli.raw_cli(["start"])

@@ -26,10 +26,11 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
+    pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        storage_layer::PersistentLayer,
+        tasks::BackgroundLoopKind,
         timeline::EvictionError,
         LogicalSizeCalculationCause, Tenant,
     },
@@ -59,9 +60,12 @@ impl Timeline {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
-            Some(self.tenant_id),
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
-            &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
+            &format!(
+                "layer eviction for {}/{}",
+                self.tenant_shard_id, self.timeline_id
+            ),
             false,
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -76,7 +80,7 @@ impl Timeline {
         );
     }
 
-    #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
+    #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
         use crate::tenant::tasks::random_init_delay;
         {
@@ -129,7 +133,11 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::tenant::tasks::warn_when_period_overrun(
+                    elapsed,
+                    p.period,
+                    BackgroundLoopKind::Eviction,
+                );
                 crate::metrics::EVICTION_ITERATION_DURATION
                     .get_metric_with_label_values(&[
                         &format!("{}", p.period.as_secs()),
@@ -149,6 +157,17 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
+
+        let acquire_permit = crate::tenant::tasks::concurrent_background_tasks_rate_limit_permit(
+            BackgroundLoopKind::Eviction,
+            ctx,
+        );
+
+        let _permit = tokio::select! {
+            permit = acquire_permit => permit,
+            _ = cancel.cancelled() => return ControlFlow::Break(()),
+            _ = self.cancel.cancelled() => return ControlFlow::Break(()),
+        };
 
         // If we evict layers but keep cached values derived from those layers, then
         // we face a storm of on-demand downloads after pageserver restart.
@@ -193,16 +212,37 @@ impl Timeline {
         // Gather layers for eviction.
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
         // We don't want to hold the layer map lock during eviction.
+
         // So, we just need to deal with this.
-        let candidates: Vec<Arc<dyn PersistentLayer>> = {
+
+        let remote_client = match self.remote_client.as_ref() {
+            Some(c) => c,
+            None => {
+                error!("no remote storage configured, cannot evict layers");
+                return ControlFlow::Continue(());
+            }
+        };
+
+        let mut js = tokio::task::JoinSet::new();
+        {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
-            let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = guard.get_from_desc(&hist_layer);
-                if hist_layer.is_remote_layer() {
-                    continue;
-                }
+
+                // guard against eviction while we inspect it; it might be that eviction_task and
+                // disk_usage_eviction_task both select the same layers to be evicted, and
+                // seemingly free up double the space. both succeeding is of no consequence.
+                let guard = match hist_layer.keep_resident().await {
+                    Ok(Some(l)) => l,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        // these should not happen, but we cannot make them statically impossible right
+                        // now.
+                        tracing::warn!(layer=%hist_layer, "failed to keep the layer resident: {e:#}");
+                        continue;
+                    }
+                };
 
                 let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
                     // We only use this fallback if there's an implementation error.
@@ -232,68 +272,49 @@ impl Timeline {
                         continue;
                     }
                 };
+                let layer = guard.drop_eviction_guard();
                 if no_activity_for > p.threshold {
-                    candidates.push(hist_layer)
+                    let remote_client = remote_client.clone();
+                    // this could cause a lot of allocations in some cases
+                    js.spawn(async move { layer.evict_and_wait(&remote_client).await });
+                    stats.candidates += 1;
                 }
             }
-            candidates
-        };
-        stats.candidates = candidates.len();
-
-        let remote_client = match self.remote_client.as_ref() {
-            None => {
-                error!(
-                    num_candidates = candidates.len(),
-                    "no remote storage configured, cannot evict layers"
-                );
-                return ControlFlow::Continue(());
-            }
-            Some(c) => c,
         };
 
-        let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
-            .await
-        {
-            Err(pre_err) => {
-                stats.errors += candidates.len();
-                error!("could not do any evictions: {pre_err:#}");
-                return ControlFlow::Continue(());
+        let join_all = async move {
+            while let Some(next) = js.join_next().await {
+                match next {
+                    Ok(Ok(())) => stats.evicted += 1,
+                    Ok(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
+                        stats.not_evictable += 1;
+                    }
+                    Err(je) if je.is_cancelled() => unreachable!("not used"),
+                    Err(je) if je.is_panic() => {
+                        /* already logged */
+                        stats.errors += 1;
+                    }
+                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
+                }
             }
-            Ok(results) => results,
+            stats
         };
-        assert_eq!(results.len(), candidates.len());
-        for (l, result) in candidates.iter().zip(results) {
-            match result {
-                None => {
-                    stats.skipped_for_shutdown += 1;
-                }
-                Some(Ok(())) => {
-                    stats.evicted += 1;
-                }
-                Some(Err(EvictionError::CannotEvictRemoteLayer)) => {
-                    stats.not_evictable += 1;
-                }
-                Some(Err(EvictionError::FileNotFound)) => {
-                    // compaction/gc removed the file while we were waiting on layer_removal_cs
-                    stats.not_evictable += 1;
-                }
-                Some(Err(
-                    e @ EvictionError::LayerNotFound(_) | e @ EvictionError::StatFailed(_),
-                )) => {
-                    let e = utils::error::report_compact_sources(&e);
-                    warn!(layer = %l, "failed to evict layer: {e}");
-                    stats.not_evictable += 1;
+
+        tokio::select! {
+            stats = join_all => {
+                if stats.candidates == stats.not_evictable {
+                    debug!(stats=?stats, "eviction iteration complete");
+                } else if stats.errors > 0 || stats.not_evictable > 0 {
+                    warn!(stats=?stats, "eviction iteration complete");
+                } else {
+                    info!(stats=?stats, "eviction iteration complete");
                 }
             }
+            _ = cancel.cancelled() => {
+                // just drop the joinset to "abort"
+            }
         }
-        if stats.candidates == stats.not_evictable {
-            debug!(stats=?stats, "eviction iteration complete");
-        } else if stats.errors > 0 || stats.not_evictable > 0 {
-            warn!(stats=?stats, "eviction iteration complete");
-        } else {
-            info!(stats=?stats, "eviction iteration complete");
-        }
+
         ControlFlow::Continue(())
     }
 
@@ -313,8 +334,7 @@ impl Timeline {
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_timeline_cached_layer_accesses(cancel, ctx)
-                    .await;
+                self.imitate_timeline_cached_layer_accesses(ctx).await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
@@ -328,15 +348,17 @@ impl Timeline {
         // Make one of the tenant's timelines draw the short straw and run the calculation.
         // The others wait until the calculation is done so that they take into account the
         // imitated accesses that the winner made.
-        let Ok(tenant) = crate::tenant::mgr::get_tenant(self.tenant_id, true).await else {
-            // likely, we're shutting down
-            return ControlFlow::Break(());
+        let tenant = match crate::tenant::mgr::get_tenant(self.tenant_shard_id, true) {
+            Ok(t) => t,
+            Err(_) => {
+                return ControlFlow::Break(());
+            }
         };
         let mut state = tenant.eviction_task_tenant_state.lock().await;
         match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < inter_imitate_period => { /* no need to run */ }
             _ => {
-                self.imitate_synthetic_size_calculation_worker(&tenant, ctx, cancel)
+                self.imitate_synthetic_size_calculation_worker(&tenant, cancel, ctx)
                     .await;
                 state.last_layer_access_imitation = Some(tokio::time::Instant::now());
             }
@@ -352,21 +374,12 @@ impl Timeline {
 
     /// Recompute the values which would cause on-demand downloads during restart.
     #[instrument(skip_all)]
-    async fn imitate_timeline_cached_layer_accesses(
-        &self,
-        cancel: &CancellationToken,
-        ctx: &RequestContext,
-    ) {
+    async fn imitate_timeline_cached_layer_accesses(&self, ctx: &RequestContext) {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(
-                lsn,
-                LogicalSizeCalculationCause::EvictionTaskImitation,
-                cancel.clone(),
-                ctx,
-            )
+            .calculate_logical_size(lsn, LogicalSizeCalculationCause::EvictionTaskImitation, ctx)
             .instrument(info_span!("calculate_logical_size"))
             .await;
 
@@ -392,9 +405,16 @@ impl Timeline {
             if size.is_err() {
                 // ignore, see above comment
             } else {
-                warn!(
-                    "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
-                );
+                match e {
+                    CollectKeySpaceError::Cancelled => {
+                        // Shutting down, ignore
+                    }
+                    err => {
+                        warn!(
+                            "failed to collect keyspace but succeeded in calculating logical size: {err:#}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -404,8 +424,8 @@ impl Timeline {
     async fn imitate_synthetic_size_calculation_worker(
         &self,
         tenant: &Arc<Tenant>,
-        ctx: &RequestContext,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) {
         if self.conf.metric_collection_endpoint.is_none() {
             // We don't start the consumption metrics task if this is not set in the config.
@@ -444,6 +464,7 @@ impl Timeline {
             None,
             &mut throwaway_cache,
             LogicalSizeCalculationCause::EvictionTaskImitation,
+            cancel,
             ctx,
         )
         .instrument(info_span!("gather_inputs"));

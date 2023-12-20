@@ -5,26 +5,28 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use pageserver_api::shard::TenantShardId;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde::de::IntoDeserializer;
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::ConnectionId;
+use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
 use reqwest::Url;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
 use utils::{
-    id::{NodeId, TenantId, TimelineId},
+    id::{NodeId, TimelineId},
     logging::LogFormat,
 };
 
@@ -32,12 +34,14 @@ use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
-    TENANT_ATTACHING_MARKER_FILENAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
+    TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX,
-    TIMELINE_UNINIT_MARK_SUFFIX,
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
+    TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
+
+use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
 
 pub mod defaults {
     use crate::tenant::config::defaults::*;
@@ -59,20 +63,24 @@ pub mod defaults {
 
     pub const DEFAULT_LOG_FORMAT: &str = "plain";
 
+    pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
+
     pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
+    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
+
+    pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
 
     ///
     /// Default built-in configuration file.
     ///
     pub const DEFAULT_CONFIG_FILE: &str = formatcp!(
-        r###"
+        r#"
 # Initial configuration file created by 'pageserver --init'
 #listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
 #listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
@@ -90,6 +98,7 @@ pub mod defaults {
 #log_format = '{DEFAULT_LOG_FORMAT}'
 
 #concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
+#concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
@@ -115,9 +124,11 @@ pub mod defaults {
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 #gc_feedback = false
 
+#heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
+
 [remote_storage]
 
-"###
+"#
     );
 }
 
@@ -151,18 +162,18 @@ pub struct PageServerConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // repositories.
-    pub workdir: PathBuf,
+    pub workdir: Utf8PathBuf,
 
-    pub pg_distrib_dir: PathBuf,
+    pub pg_distrib_dir: Utf8PathBuf,
 
     // Authentication
     /// authentication method for the HTTP mgmt API
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
-    /// Path to a file containing public key for verifying JWT tokens.
+    /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
-    pub auth_validation_public_key_path: Option<PathBuf>,
+    pub auth_validation_public_key_path: Option<Utf8PathBuf>,
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
@@ -173,6 +184,11 @@ pub struct PageServerConf {
     pub broker_keepalive_interval: Duration,
 
     pub log_format: LogFormat,
+
+    /// Number of tenants which will be concurrently loaded from remote storage proactively on startup,
+    /// does not limit tenants loaded in response to client I/O.  A lower value implicitly deprioritizes
+    /// loading such tenants, vs. other work in the system.
+    pub concurrent_tenant_warmup: ConfigurableSemaphore,
 
     /// Number of concurrent [`Tenant::gather_size_inputs`](crate::tenant::Tenant::gather_size_inputs) allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
@@ -204,6 +220,19 @@ pub struct PageServerConf {
     /// has it's initial logical size calculated. Not running background tasks for some seconds is
     /// not terrible.
     pub background_task_maximum_delay: Duration,
+
+    pub control_plane_api: Option<Url>,
+
+    /// JWT token for use with the control plane API.
+    pub control_plane_api_token: Option<SecretString>,
+
+    /// If true, pageserver will make best-effort to operate without a control plane: only
+    /// for use in major incidents.
+    pub control_plane_emergency_mode: bool,
+
+    /// How many heatmap uploads may be done concurrency: lower values implicitly deprioritize
+    /// heatmap uploads vs. other remote storage operations.
+    pub heatmap_upload_concurrency: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -246,15 +275,15 @@ struct PageServerConfigBuilder {
     page_cache_size: BuilderValue<usize>,
     max_file_descriptors: BuilderValue<usize>,
 
-    workdir: BuilderValue<PathBuf>,
+    workdir: BuilderValue<Utf8PathBuf>,
 
-    pg_distrib_dir: BuilderValue<PathBuf>,
+    pg_distrib_dir: BuilderValue<Utf8PathBuf>,
 
     http_auth_type: BuilderValue<AuthType>,
     pg_auth_type: BuilderValue<AuthType>,
 
     //
-    auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
+    auth_validation_public_key_path: BuilderValue<Option<Utf8PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
     id: BuilderValue<NodeId>,
@@ -264,6 +293,7 @@ struct PageServerConfigBuilder {
 
     log_format: BuilderValue<LogFormat>,
 
+    concurrent_tenant_warmup: BuilderValue<NonZeroUsize>,
     concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
@@ -278,6 +308,12 @@ struct PageServerConfigBuilder {
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
 
     background_task_maximum_delay: BuilderValue<Duration>,
+
+    control_plane_api: BuilderValue<Option<Url>>,
+    control_plane_api_token: BuilderValue<Option<SecretString>>,
+    control_plane_emergency_mode: BuilderValue<bool>,
+
+    heatmap_upload_concurrency: BuilderValue<usize>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -295,10 +331,12 @@ impl Default for PageServerConfigBuilder {
             superuser: Set(DEFAULT_SUPERUSER.to_string()),
             page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
-            workdir: Set(PathBuf::new()),
-            pg_distrib_dir: Set(env::current_dir()
-                .expect("cannot access current directory")
-                .join("pg_install")),
+            workdir: Set(Utf8PathBuf::new()),
+            pg_distrib_dir: Set(Utf8PathBuf::from_path_buf(
+                env::current_dir().expect("cannot access current directory"),
+            )
+            .expect("non-Unicode path")
+            .join("pg_install")),
             http_auth_type: Set(AuthType::Trust),
             pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
@@ -313,6 +351,8 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
+            concurrent_tenant_warmup: Set(NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
+                .expect("Invalid default constant")),
             concurrent_tenant_size_logical_size_queries: Set(
                 ConfigurableSemaphore::DEFAULT_INITIAL,
             ),
@@ -340,6 +380,12 @@ impl Default for PageServerConfigBuilder {
                 DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
             )
             .unwrap()),
+
+            control_plane_api: Set(None),
+            control_plane_api_token: Set(None),
+            control_plane_emergency_mode: Set(false),
+
+            heatmap_upload_concurrency: Set(DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
         }
     }
 }
@@ -377,11 +423,11 @@ impl PageServerConfigBuilder {
         self.max_file_descriptors = BuilderValue::Set(max_file_descriptors)
     }
 
-    pub fn workdir(&mut self, workdir: PathBuf) {
+    pub fn workdir(&mut self, workdir: Utf8PathBuf) {
         self.workdir = BuilderValue::Set(workdir)
     }
 
-    pub fn pg_distrib_dir(&mut self, pg_distrib_dir: PathBuf) {
+    pub fn pg_distrib_dir(&mut self, pg_distrib_dir: Utf8PathBuf) {
         self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
     }
 
@@ -395,7 +441,7 @@ impl PageServerConfigBuilder {
 
     pub fn auth_validation_public_key_path(
         &mut self,
-        auth_validation_public_key_path: Option<PathBuf>,
+        auth_validation_public_key_path: Option<Utf8PathBuf>,
     ) {
         self.auth_validation_public_key_path = BuilderValue::Set(auth_validation_public_key_path)
     }
@@ -418,6 +464,10 @@ impl PageServerConfigBuilder {
 
     pub fn log_format(&mut self, log_format: LogFormat) {
         self.log_format = BuilderValue::Set(log_format)
+    }
+
+    pub fn concurrent_tenant_warmup(&mut self, u: NonZeroUsize) {
+        self.concurrent_tenant_warmup = BuilderValue::Set(u);
     }
 
     pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: NonZeroUsize) {
@@ -468,7 +518,26 @@ impl PageServerConfigBuilder {
         self.background_task_maximum_delay = BuilderValue::Set(delay);
     }
 
+    pub fn control_plane_api(&mut self, api: Option<Url>) {
+        self.control_plane_api = BuilderValue::Set(api)
+    }
+
+    pub fn control_plane_api_token(&mut self, token: Option<SecretString>) {
+        self.control_plane_api_token = BuilderValue::Set(token)
+    }
+
+    pub fn control_plane_emergency_mode(&mut self, enabled: bool) {
+        self.control_plane_emergency_mode = BuilderValue::Set(enabled)
+    }
+
+    pub fn heatmap_upload_concurrency(&mut self, value: usize) {
+        self.heatmap_upload_concurrency = BuilderValue::Set(value)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
+        let concurrent_tenant_warmup = self
+            .concurrent_tenant_warmup
+            .ok_or(anyhow!("missing concurrent_tenant_warmup"))?;
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
             .ok_or(anyhow!(
@@ -521,6 +590,7 @@ impl PageServerConfigBuilder {
                 .broker_keepalive_interval
                 .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
                 concurrent_tenant_size_logical_size_queries,
             ),
@@ -553,6 +623,19 @@ impl PageServerConfigBuilder {
             background_task_maximum_delay: self
                 .background_task_maximum_delay
                 .ok_or(anyhow!("missing background_task_maximum_delay"))?,
+            control_plane_api: self
+                .control_plane_api
+                .ok_or(anyhow!("missing control_plane_api"))?,
+            control_plane_api_token: self
+                .control_plane_api_token
+                .ok_or(anyhow!("missing control_plane_api_token"))?,
+            control_plane_emergency_mode: self
+                .control_plane_emergency_mode
+                .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
+
+            heatmap_upload_concurrency: self
+                .heatmap_upload_concurrency
+                .ok_or(anyhow!("missing heatmap_upload_concurrency"))?,
         })
     }
 }
@@ -562,142 +645,152 @@ impl PageServerConf {
     // Repository paths, relative to workdir.
     //
 
-    pub fn tenants_path(&self) -> PathBuf {
-        self.workdir.join("tenants")
+    pub fn tenants_path(&self) -> Utf8PathBuf {
+        self.workdir.join(TENANTS_SEGMENT_NAME)
     }
 
-    pub fn tenant_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenants_path().join(tenant_id.to_string())
+    pub fn deletion_prefix(&self) -> Utf8PathBuf {
+        self.workdir.join("deletion")
     }
 
-    pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id)
-            .join(TENANT_ATTACHING_MARKER_FILENAME)
+    pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        self.deletion_prefix()
+            .join(format!("{sequence:016x}-{VERSION:02x}.list"))
     }
 
-    pub fn tenant_ignore_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id).join(IGNORED_TENANT_FILE_NAME)
+    pub fn deletion_header_path(&self) -> Utf8PathBuf {
+        // Encode a version in the filename, so that if we ever switch away from JSON we can
+        // increment this.
+        const VERSION: u8 = 1;
+
+        self.deletion_prefix().join(format!("header-{VERSION:02x}"))
+    }
+
+    pub fn tenant_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenants_path().join(tenant_shard_id.to_string())
+    }
+
+    pub fn tenant_ignore_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(IGNORED_TENANT_FILE_NAME)
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain tenant's tenantconf file should be located.
-    pub fn tenant_config_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id).join(TENANT_CONFIG_NAME)
+    ///
+    /// Legacy: superseded by tenant_location_config_path.  Eventually
+    /// remove this function.
+    pub fn tenant_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id).join(TENANT_CONFIG_NAME)
     }
 
-    pub fn timelines_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id).join(TIMELINES_SEGMENT_NAME)
+    pub fn tenant_location_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(TENANT_LOCATION_CONFIG_NAME)
     }
 
-    pub fn timeline_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
-        self.timelines_path(tenant_id).join(timeline_id.to_string())
+    pub fn timelines_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(TIMELINES_SEGMENT_NAME)
+    }
+
+    pub fn timeline_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.timelines_path(tenant_shard_id)
+            .join(timeline_id.to_string())
     }
 
     pub fn timeline_uninit_mark_file_path(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&tenant_id, &timeline_id),
+            self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_UNINIT_MARK_SUFFIX,
         )
     }
 
     pub fn timeline_delete_mark_file_path(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         path_with_suffix_extension(
-            self.timeline_path(&tenant_id, &timeline_id),
+            self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
     }
 
-    pub fn tenant_deleted_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id)
+    pub fn tenant_deleted_mark_file_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
             .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
 
-    pub fn traces_path(&self) -> PathBuf {
+    pub fn traces_path(&self) -> Utf8PathBuf {
         self.workdir.join("traces")
     }
 
     pub fn trace_path(
         &self,
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         connection_id: &ConnectionId,
-    ) -> PathBuf {
+    ) -> Utf8PathBuf {
         self.traces_path()
-            .join(tenant_id.to_string())
+            .join(tenant_shard_id.to_string())
             .join(timeline_id.to_string())
             .join(connection_id.to_string())
     }
 
     /// Points to a place in pageserver's local directory,
     /// where certain timeline's metadata file should be located.
-    pub fn metadata_path(&self, tenant_id: &TenantId, timeline_id: &TimelineId) -> PathBuf {
-        self.timeline_path(tenant_id, timeline_id)
+    pub fn metadata_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Utf8PathBuf {
+        self.timeline_path(tenant_shard_id, timeline_id)
             .join(METADATA_FILE_NAME)
     }
 
-    /// Files on the remote storage are stored with paths, relative to the workdir.
-    /// That path includes in itself both tenant and timeline ids, allowing to have a unique remote storage path.
-    ///
-    /// Errors if the path provided does not start from pageserver's workdir.
-    pub fn remote_path(&self, local_path: &Path) -> anyhow::Result<RemotePath> {
-        local_path
-            .strip_prefix(&self.workdir)
-            .context("Failed to strip workdir prefix")
-            .and_then(RemotePath::new)
-            .with_context(|| {
-                format!(
-                    "Failed to resolve remote part of path {:?} for base {:?}",
-                    local_path, self.workdir
-                )
-            })
-    }
-
     /// Turns storage remote path of a file into its local path.
-    pub fn local_path(&self, remote_path: &RemotePath) -> PathBuf {
+    pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
         remote_path.with_base(&self.workdir)
     }
 
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
+        #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 => Ok(path.join(format!("v{pg_version}"))),
-            15 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+        Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        match pg_version {
-            14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+        Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
     /// Parse a configuration file (pageserver.toml) into a PageServerConf struct,
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Path) -> anyhow::Result<Self> {
+    pub fn parse_and_validate(toml: &Document, workdir: &Utf8Path) -> anyhow::Result<Self> {
         let mut builder = PageServerConfigBuilder::default();
         builder.workdir(workdir.to_owned());
 
@@ -716,10 +809,10 @@ impl PageServerConf {
                     builder.max_file_descriptors(parse_toml_u64(key, item)? as usize)
                 }
                 "pg_distrib_dir" => {
-                    builder.pg_distrib_dir(PathBuf::from(parse_toml_string(key, item)?))
+                    builder.pg_distrib_dir(Utf8PathBuf::from(parse_toml_string(key, item)?))
                 }
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
-                    PathBuf::from(parse_toml_string(key, item)?),
+                    Utf8PathBuf::from(parse_toml_string(key, item)?),
                 )),
                 "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
                 "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
@@ -727,7 +820,7 @@ impl PageServerConf {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
                 "tenant_config" => {
-                    t_conf = Self::parse_toml_tenant_conf(item)?;
+                    t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
                 "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
@@ -735,6 +828,11 @@ impl PageServerConf {
                 "log_format" => builder.log_format(
                     LogFormat::from_config(&parse_toml_string(key, item)?)?
                 ),
+                "concurrent_tenant_warmup" => builder.concurrent_tenant_warmup({
+                    let input = parse_toml_string(key, item)?;
+                    let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
+                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
+                }),
                 "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
                     let input = parse_toml_string(key, item)?;
                     let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
@@ -758,6 +856,28 @@ impl PageServerConf {
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
+                "control_plane_api" => {
+                    let parsed = parse_toml_string(key, item)?;
+                    if parsed.is_empty() {
+                        builder.control_plane_api(None)
+                    } else {
+                        builder.control_plane_api(Some(parsed.parse().context("failed to parse control plane URL")?))
+                    }
+                },
+                "control_plane_api_token" => {
+                    let parsed = parse_toml_string(key, item)?;
+                    if parsed.is_empty() {
+                        builder.control_plane_api_token(None)
+                    } else {
+                        builder.control_plane_api_token(Some(parsed.into()))
+                    }
+                },
+                "control_plane_emergency_mode" => {
+                    builder.control_plane_emergency_mode(parse_toml_bool(key, item)?)
+                },
+                "heatmap_upload_concurrency" => {
+                    builder.heatmap_upload_concurrency(parse_toml_u64(key, item)? as usize)
+                },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -771,8 +891,7 @@ impl PageServerConf {
             ensure!(
                 auth_validation_public_key_path.exists(),
                 format!(
-                    "Can't find auth_validation_public_key at '{}'",
-                    auth_validation_public_key_path.display()
+                    "Can't find auth_validation_public_key at '{auth_validation_public_key_path}'",
                 )
             );
         }
@@ -782,118 +901,14 @@ impl PageServerConf {
         Ok(conf)
     }
 
-    // subroutine of parse_and_validate to parse `[tenant_conf]` section
-
-    pub fn parse_toml_tenant_conf(item: &toml_edit::Item) -> Result<TenantConfOpt> {
-        let mut t_conf: TenantConfOpt = Default::default();
-        if let Some(checkpoint_distance) = item.get("checkpoint_distance") {
-            t_conf.checkpoint_distance =
-                Some(parse_toml_u64("checkpoint_distance", checkpoint_distance)?);
-        }
-
-        if let Some(checkpoint_timeout) = item.get("checkpoint_timeout") {
-            t_conf.checkpoint_timeout = Some(parse_toml_duration(
-                "checkpoint_timeout",
-                checkpoint_timeout,
-            )?);
-        }
-
-        if let Some(compaction_target_size) = item.get("compaction_target_size") {
-            t_conf.compaction_target_size = Some(parse_toml_u64(
-                "compaction_target_size",
-                compaction_target_size,
-            )?);
-        }
-
-        if let Some(compaction_period) = item.get("compaction_period") {
-            t_conf.compaction_period =
-                Some(parse_toml_duration("compaction_period", compaction_period)?);
-        }
-
-        if let Some(compaction_threshold) = item.get("compaction_threshold") {
-            t_conf.compaction_threshold =
-                Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
-        }
-
-        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
-            t_conf.image_creation_threshold = Some(
-                parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?,
-            );
-        }
-
-        if let Some(gc_horizon) = item.get("gc_horizon") {
-            t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
-        }
-
-        if let Some(gc_period) = item.get("gc_period") {
-            t_conf.gc_period = Some(parse_toml_duration("gc_period", gc_period)?);
-        }
-
-        if let Some(pitr_interval) = item.get("pitr_interval") {
-            t_conf.pitr_interval = Some(parse_toml_duration("pitr_interval", pitr_interval)?);
-        }
-        if let Some(walreceiver_connect_timeout) = item.get("walreceiver_connect_timeout") {
-            t_conf.walreceiver_connect_timeout = Some(parse_toml_duration(
-                "walreceiver_connect_timeout",
-                walreceiver_connect_timeout,
-            )?);
-        }
-        if let Some(lagging_wal_timeout) = item.get("lagging_wal_timeout") {
-            t_conf.lagging_wal_timeout = Some(parse_toml_duration(
-                "lagging_wal_timeout",
-                lagging_wal_timeout,
-            )?);
-        }
-        if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
-            t_conf.max_lsn_wal_lag =
-                Some(deserialize_from_item("max_lsn_wal_lag", max_lsn_wal_lag)?);
-        }
-        if let Some(trace_read_requests) = item.get("trace_read_requests") {
-            t_conf.trace_read_requests =
-                Some(trace_read_requests.as_bool().with_context(|| {
-                    "configure option trace_read_requests is not a bool".to_string()
-                })?);
-        }
-
-        if let Some(eviction_policy) = item.get("eviction_policy") {
-            t_conf.eviction_policy = Some(
-                deserialize_from_item("eviction_policy", eviction_policy)
-                    .context("parse eviction_policy")?,
-            );
-        }
-
-        if let Some(item) = item.get("min_resident_size_override") {
-            t_conf.min_resident_size_override = Some(
-                deserialize_from_item("min_resident_size_override", item)
-                    .context("parse min_resident_size_override")?,
-            );
-        }
-
-        if let Some(item) = item.get("evictions_low_residence_duration_metric_threshold") {
-            t_conf.evictions_low_residence_duration_metric_threshold = Some(parse_toml_duration(
-                "evictions_low_residence_duration_metric_threshold",
-                item,
-            )?);
-        }
-
-        if let Some(gc_feedback) = item.get("gc_feedback") {
-            t_conf.gc_feedback = Some(
-                gc_feedback
-                    .as_bool()
-                    .with_context(|| "configure option gc_feedback is not a bool".to_string())?,
-            );
-        }
-
-        Ok(t_conf)
-    }
-
     #[cfg(test)]
-    pub fn test_repo_dir(test_name: &str) -> PathBuf {
-        PathBuf::from(format!("../tmp_check/test_{test_name}"))
+    pub fn test_repo_dir(test_name: &str) -> Utf8PathBuf {
+        let test_output_dir = std::env::var("TEST_OUTPUT").unwrap_or("../tmp_check".into());
+        Utf8PathBuf::from(format!("{test_output_dir}/test_{test_name}"))
     }
 
-    pub fn dummy_conf(repo_dir: PathBuf) -> Self {
-        let pg_distrib_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
+    pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
+        let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
         PageServerConf {
             id: NodeId(0),
@@ -915,6 +930,10 @@ impl PageServerConf {
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
+                    .expect("Invalid default constant"),
+            ),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
             ),
@@ -926,6 +945,10 @@ impl PageServerConf {
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
             background_task_maximum_delay: Duration::ZERO,
+            control_plane_api: None,
+            control_plane_api_token: None,
+            control_plane_emergency_mode: false,
+            heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
         }
     }
 }
@@ -1058,8 +1081,8 @@ mod tests {
         num::{NonZeroU32, NonZeroUsize},
     };
 
+    use camino_tempfile::{tempdir, Utf8TempDir};
     use remote_storage::{RemoteStorageKind, S3Config};
-    use tempfile::{tempdir, TempDir};
     use utils::serde_percent::Percent;
 
     use super::*;
@@ -1098,8 +1121,7 @@ background_task_maximum_delay = '334 s'
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
         let config_string = format!(
-            "pg_distrib_dir='{}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-            pg_distrib_dir.display()
+            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
         );
         let toml = config_string.parse()?;
 
@@ -1130,6 +1152,9 @@ background_task_maximum_delay = '334 s'
                     storage_broker::DEFAULT_KEEPALIVE_INTERVAL
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
+                concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
+                ),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
@@ -1149,6 +1174,10 @@ background_task_maximum_delay = '334 s'
                 background_task_maximum_delay: humantime::parse_duration(
                     defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
                 )?,
+                control_plane_api: None,
+                control_plane_api_token: None,
+                control_plane_emergency_mode: false,
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1163,8 +1192,7 @@ background_task_maximum_delay = '334 s'
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
 
         let config_string = format!(
-            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{}'\nbroker_endpoint = '{broker_endpoint}'",
-            pg_distrib_dir.display()
+            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",
         );
         let toml = config_string.parse()?;
 
@@ -1193,6 +1221,9 @@ background_task_maximum_delay = '334 s'
                 broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
+                concurrent_tenant_warmup: ConfigurableSemaphore::new(
+                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
+                ),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
@@ -1204,6 +1235,10 @@ background_task_maximum_delay = '334 s'
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
                 background_task_maximum_delay: Duration::from_secs(334),
+                control_plane_api: None,
+                control_plane_api_token: None,
+                control_plane_emergency_mode: false,
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1222,23 +1257,18 @@ background_task_maximum_delay = '334 s'
         let identical_toml_declarations = &[
             format!(
                 r#"[remote_storage]
-local_path = '{}'"#,
-                local_storage_path.display()
+local_path = '{local_storage_path}'"#,
             ),
-            format!(
-                "remote_storage={{local_path='{}'}}",
-                local_storage_path.display()
-            ),
+            format!("remote_storage={{local_path='{local_storage_path}'}}"),
         ];
 
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
-                pg_distrib_dir.display(),
             );
 
             let toml = config_string.parse()?;
@@ -1253,12 +1283,6 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_syncs: NonZeroUsize::new(
-                        remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS
-                    )
-                        .unwrap(),
-                    max_sync_errors: NonZeroU32::new(remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS)
-                        .unwrap(),
                     storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
                 },
                 "Remote storage config should correctly parse the local FS config and fill other storage defaults"
@@ -1301,11 +1325,10 @@ concurrency_limit = {s3_concurrency_limit}"#
         for remote_storage_config_str in identical_toml_declarations {
             let config_string = format!(
                 r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 {remote_storage_config_str}"#,
-                pg_distrib_dir.display(),
             );
 
             let toml = config_string.parse()?;
@@ -1320,8 +1343,6 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    max_concurrent_syncs,
-                    max_sync_errors,
                     storage: RemoteStorageKind::AwsS3(S3Config {
                         bucket_name: bucket_name.clone(),
                         bucket_region: bucket_region.clone(),
@@ -1347,12 +1368,11 @@ broker_endpoint = '{broker_endpoint}'
 
         let config_string = format!(
             r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{}'
+pg_distrib_dir='{pg_distrib_dir}'
 broker_endpoint = '{broker_endpoint}'
 
 [tenant_config]
 trace_read_requests = {trace_read_requests}"#,
-            pg_distrib_dir.display(),
         );
 
         let toml = config_string.parse()?;
@@ -1367,12 +1387,43 @@ trace_read_requests = {trace_read_requests}"#,
     }
 
     #[test]
+    fn parse_incorrect_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"
+            [tenant_config]
+            checkpoint_distance = -1 # supposed to be an u64
+        "#
+        .to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let error = TenantConfOpt::try_from(item.to_owned()).unwrap_err();
+
+        let expected_error_str = "checkpoint_distance: invalid value: integer `-1`, expected u64";
+        assert_eq!(error.to_string(), expected_error_str);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_override_tenant_config() -> anyhow::Result<()> {
+        let config_string = r#"tenant_config={ min_resident_size_override =  400 }"#.to_string();
+
+        let toml: Document = config_string.parse()?;
+        let item = toml.get("tenant_config").unwrap();
+        let conf = TenantConfOpt::try_from(item.to_owned()).unwrap();
+
+        assert_eq!(conf.min_resident_size_override, Some(400));
+
+        Ok(())
+    }
+
+    #[test]
     fn eviction_pageserver_config_parse() -> anyhow::Result<()> {
         let tempdir = tempdir()?;
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
 
         let pageserver_conf_toml = format!(
-            r#"pg_distrib_dir = "{}"
+            r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
 id = 222
@@ -1390,7 +1441,6 @@ kind = "LayerAccessThreshold"
 period = "20m"
 threshold = "20m"
 "#,
-            pg_distrib_dir.display(),
         );
         let toml: Document = pageserver_conf_toml.parse()?;
         let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
@@ -1431,7 +1481,7 @@ threshold = "20m"
         Ok(())
     }
 
-    fn prepare_fs(tempdir: &TempDir) -> anyhow::Result<(PathBuf, PathBuf)> {
+    fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
         let tempdir_path = tempdir.path();
 
         let workdir = tempdir_path.join("workdir");

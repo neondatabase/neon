@@ -1,12 +1,15 @@
 [workspace]
+resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
     "pageserver",
     "pageserver/ctl",
+    "pageserver/client",
     "proxy",
     "safekeeper",
     "storage_broker",
+    "s3_scrubber",
     "workspace_hack",
     "trace",
     "libs/compute_api",
@@ -24,6 +27,7 @@ members = [
     "libs/tracing-utils",
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
+    "libs/walproposer",
 ]
 
 [workspace.package]
@@ -33,15 +37,20 @@ license = "Apache-2.0"
 ## All dependency versions, used in the project
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
-async-compression = { version = "0.4.0", features = ["tokio", "gzip"] }
+arc-swap = "1.6"
+async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
+azure_core = "0.18"
+azure_identity = "0.18"
+azure_storage = "0.18"
+azure_storage_blobs = "0.18"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
-aws-config = { version = "0.55", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "0.27"
-aws-smithy-http = "0.55"
-aws-credential-types = "0.55"
-aws-types = "0.55"
+aws-config = { version = "1.0", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "1.0"
+aws-smithy-async = { version = "1.0", default-features = false, features=["rt-tokio"] }
+aws-smithy-types = "1.0"
+aws-credential-types = "1.0"
 axum = { version = "0.6.20", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"
@@ -49,6 +58,7 @@ bindgen = "0.65"
 bstr = "1.0"
 byteorder = "1.4"
 bytes = "1.0"
+camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
@@ -57,7 +67,7 @@ comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
 crossbeam-utils = "0.8.5"
-dashmap = "5.5.0"
+dashmap = { version = "5.5.0", features = ["raw-api"] }
 either = "1.8"
 enum-map = "2.4.2"
 enumset = "1.0.12"
@@ -73,13 +83,15 @@ hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
 hostname = "0.3.1"
+http-types = { version = "2", default-features = false }
 humantime = "2.1"
 humantime-serde = "1.1.1"
 hyper = "0.14"
-hyper-tungstenite = "0.9"
+hyper-tungstenite = "0.11"
 inotify = "0.10.2"
+ipnet = "2.9.0"
 itertools = "0.10"
-jsonwebtoken = "8"
+jsonwebtoken = "9"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
@@ -98,41 +110,47 @@ pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
-regex = "1.4"
+regex = "1.10.2"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_19"] }
 reqwest-middleware = "0.2.0"
 reqwest-retry = "0.2.2"
 routerify = "3"
 rpds = "0.13"
-rustls = "0.20"
+rustc-hash = "1.1.0"
+rustls = "0.21"
 rustls-pemfile = "1"
 rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
-sentry = { version = "0.30", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
+sd-notify = "0.4.1"
+sentry = { version = "0.31", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+serde_path_to_error = "0.1"
 serde_with = "2.0"
+serde_assert = "0.5.0"
 sha2 = "0.10.2"
 signal-hook = "0.3"
 smallvec = "1.11"
+smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
 svg_fmt = "0.4.1"
 sync_wrapper = "0.1.2"
 tar = "0.4"
+task-local-extensions = "0.1.4"
 test-context = "0.1"
 thiserror = "1.0"
-tls-listener = { version = "0.6", features = ["rustls", "hyper-h1"] }
+tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
 tokio = { version = "1.17", features = ["macros"] }
 tokio-io-timeout = "1.2.0"
-tokio-postgres-rustls = "0.9.0"
-tokio-rustls = "0.23"
+tokio-postgres-rustls = "0.10.0"
+tokio-rustls = "0.24"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
@@ -143,7 +161,7 @@ tracing-subscriber = { version = "0.3", default_features = false, features = ["s
 url = "2.2"
 uuid = { version = "1.2", features = ["v4", "serde"] }
 walkdir = "2.3.2"
-webpki-roots = "0.23"
+webpki-roots = "0.25"
 x509-parser = "0.15"
 
 ## TODO replace this with tracing
@@ -151,11 +169,11 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 ## Other git libraries
 heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
@@ -165,6 +183,7 @@ compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
+pageserver_client = { path = "./pageserver/client" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
@@ -176,22 +195,23 @@ tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
+walproposer = { version = "0.1", path = "./libs/walproposer/" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.10"
-rstest = "0.17"
-tempfile = "3.4"
+rcgen = "0.11"
+rstest = "0.18"
+camino-tempfile = "1.0.2"
 tonic-build = "0.9"
 
 [patch.crates-io]
 
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="9011f7110db12b5e15afaf98f8ac834501d50ddc" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 ################# Binary contents sections
 

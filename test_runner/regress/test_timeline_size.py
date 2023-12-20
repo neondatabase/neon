@@ -134,15 +134,82 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
         res = endpoint_main.safe_psql(
             """
             SELECT
-                pg_size_pretty(pg_cluster_size()),
+                pg_size_pretty(neon.pg_cluster_size()),
                 pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
-            FROM backpressure_lsns();
-            """
+            FROM neon.backpressure_lsns();
+            """,
+            dbname="postgres",
         )[0]
         log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
         received_lsn_lag = res[1]
 
         time.sleep(polling_interval)
+
+
+def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota_on_startup")
+
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+
+    endpoint_main = env.endpoints.create(
+        "test_timeline_size_quota_on_startup",
+        # Set small limit for the test
+        config_lines=["neon.max_cluster_size=30MB"],
+    )
+    endpoint_main.start()
+
+    log.info("postgres is running on 'test_timeline_size_quota_on_startup' branch")
+
+    with closing(endpoint_main.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE foo (t text)")
+
+            # Insert many rows. This query must fail because of space limit
+            try:
+                for _i in range(5000):
+                    cur.execute(
+                        """
+                        INSERT INTO foo
+                            SELECT 'long string to consume some space' || g
+                            FROM generate_series(1, 100) g
+                    """
+                    )
+
+                # If we get here, the timeline size limit failed
+                log.error("Query unexpectedly succeeded")
+                raise AssertionError()
+
+            except psycopg2.errors.DiskFull as err:
+                log.info(f"Query expectedly failed with: {err}")
+
+    # Restart endpoint that reached the limit to ensure that it doesn't fail on startup
+    # i.e. the size limit is not enforced during startup.
+    endpoint_main.stop()
+    # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
+    # which is needed for neon.pg_cluster_size() to work
+    endpoint_main.respec(skip_pg_catalog_updates=False)
+    endpoint_main.start()
+
+    # ensure that the limit is enforced after startup
+    with closing(endpoint_main.connect()) as conn:
+        with conn.cursor() as cur:
+            # This query must fail because of space limit
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO foo
+                        SELECT 'long string to consume some space' || g
+                        FROM generate_series(1, 100000) g
+                """
+                )
+                # If we get here, the timeline size limit failed
+                log.error("Query unexpectedly succeeded")
+                raise AssertionError()
+
+            except psycopg2.errors.DiskFull as err:
+                log.info(f"Query expectedly failed with: {err}")
 
 
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
@@ -152,17 +219,20 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
     wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
-    endpoint_main = env.endpoints.create_start(
+    endpoint_main = env.endpoints.create(
         "test_timeline_size_quota",
         # Set small limit for the test
         config_lines=["neon.max_cluster_size=30MB"],
     )
+    # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
+    # which is needed for pg_cluster_size() to work
+    endpoint_main.respec(skip_pg_catalog_updates=False)
+    endpoint_main.start()
+
     log.info("postgres is running on 'test_timeline_size_quota' branch")
 
     with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
-
             cur.execute("CREATE TABLE foo (t text)")
 
             wait_for_pageserver_catchup(endpoint_main)
@@ -211,7 +281,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
             wait_for_pageserver_catchup(endpoint_main)
 
-            cur.execute("SELECT * from pg_size_pretty(pg_cluster_size())")
+            cur.execute("SELECT * from pg_size_pretty(neon.pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
             log.info(f"pg_cluster_size = {pg_cluster_size}")
 
@@ -230,7 +300,8 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # load in some data
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
@@ -301,14 +372,8 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     # message emitted by the code behind failpoint "timeline-calculate-logical-size-check-dir-exists"
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_init(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+def test_timeline_physical_size_init(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -339,19 +404,12 @@ def test_timeline_physical_size_init(
     )
 
     assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id),
     )
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_post_checkpoint(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+def test_timeline_physical_size_post_checkpoint(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -371,20 +429,16 @@ def test_timeline_physical_size_post_checkpoint(
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
-    assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
-    )
-
-
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_post_compaction(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
+    def check():
+        assert_physical_size_invariants(
+            get_physical_size_values(env, env.initial_tenant, new_timeline_id),
         )
+
+    wait_until(10, 1, check)
+
+
+def test_timeline_physical_size_post_compaction(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Disable background compaction as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -423,23 +477,15 @@ def test_timeline_physical_size_post_compaction(
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_compact(env.initial_tenant, new_timeline_id)
 
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id),
     )
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_timeline_physical_size_post_gc(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+def test_timeline_physical_size_post_gc(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Disable background compaction and GC as we don't want it to happen after `get_physical_size` request
     # and before checking the expected size on disk, which makes the assertion failed
@@ -476,12 +522,10 @@ def test_timeline_physical_size_post_gc(
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
-        get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
-        remote_storage_kind,
+        get_physical_size_values(env, env.initial_tenant, new_timeline_id),
     )
 
 
@@ -523,7 +567,7 @@ def test_timeline_size_metrics(
     ).value
 
     # assert that the physical size metric matches the actual physical size on disk
-    timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
+    timeline_path = env.pageserver.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
 
     # Check that the logical size metric is sane, and matches
@@ -565,16 +609,10 @@ def test_timeline_size_metrics(
     assert math.isclose(dbsize_sum, tl_logical_size_metric, abs_tol=2 * 1024 * 1024)
 
 
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
-def test_tenant_physical_size(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
-):
+def test_tenant_physical_size(neon_env_builder: NeonEnvBuilder):
     random.seed(100)
 
-    if remote_storage_kind is not None:
-        neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_timeline_physical_size_init"
-        )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
 
@@ -582,12 +620,10 @@ def test_tenant_physical_size(
     client = env.pageserver.http_client()
 
     tenant, timeline = env.neon_cli.create_tenant()
-    if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
     def get_timeline_resident_physical_size(timeline: TimelineId):
-        sizes = get_physical_size_values(env, tenant, timeline, remote_storage_kind)
-        assert_physical_size_invariants(sizes, remote_storage_kind)
+        sizes = get_physical_size_values(env, tenant, timeline)
+        assert_physical_size_invariants(sizes)
         return sizes.prometheus_resident_physical
 
     timeline_total_resident_physical_size = get_timeline_resident_physical_size(timeline)
@@ -607,8 +643,7 @@ def test_tenant_physical_size(
         wait_for_last_flush_lsn(env, endpoint, tenant, timeline)
         pageserver_http.timeline_checkpoint(tenant, timeline)
 
-        if remote_storage_kind is not None:
-            wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
+        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
         timeline_total_resident_physical_size += get_timeline_resident_physical_size(timeline)
 
@@ -637,7 +672,6 @@ def get_physical_size_values(
     env: NeonEnv,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    remote_storage_kind: Optional[RemoteStorageKind],
 ) -> TimelinePhysicalSizeValues:
     res = TimelinePhysicalSizeValues()
 
@@ -653,38 +687,30 @@ def get_physical_size_values(
     res.prometheus_resident_physical = metrics.query_one(
         "pageserver_resident_physical_size", metrics_filter
     ).value
-    if remote_storage_kind is not None:
-        res.prometheus_remote_physical = metrics.query_one(
-            "pageserver_remote_physical_size", metrics_filter
-        ).value
-    else:
-        res.prometheus_remote_physical = None
+    res.prometheus_remote_physical = metrics.query_one(
+        "pageserver_remote_physical_size", metrics_filter
+    ).value
 
     detail = client.timeline_detail(
         tenant_id, timeline_id, include_timeline_dir_layer_file_size_sum=True
     )
     res.api_current_physical = detail["current_physical_size"]
 
-    timeline_path = env.timeline_dir(tenant_id, timeline_id)
+    timeline_path = env.pageserver.timeline_dir(tenant_id, timeline_id)
     res.python_timelinedir_layerfiles_physical = get_timeline_dir_size(timeline_path)
 
     return res
 
 
-def assert_physical_size_invariants(
-    sizes: TimelinePhysicalSizeValues, remote_storage_kind: Optional[RemoteStorageKind]
-):
+def assert_physical_size_invariants(sizes: TimelinePhysicalSizeValues):
     # resident phyiscal size is defined as
     assert sizes.python_timelinedir_layerfiles_physical == sizes.prometheus_resident_physical
     assert sizes.python_timelinedir_layerfiles_physical == sizes.layer_map_file_size_sum
 
     # we don't do layer eviction, so, all layers are resident
     assert sizes.api_current_physical == sizes.prometheus_resident_physical
-    if remote_storage_kind is not None:
-        assert sizes.prometheus_resident_physical == sizes.prometheus_remote_physical
-        # XXX would be nice to assert layer file physical storage utilization here as well, but we can only do that for LocalFS
-    else:
-        assert sizes.prometheus_remote_physical is None
+    assert sizes.prometheus_resident_physical == sizes.prometheus_remote_physical
+    # XXX would be nice to assert layer file physical storage utilization here as well, but we can only do that for LocalFS
 
 
 # Timeline logical size initialization is an asynchronous background task that runs once,
@@ -707,3 +733,142 @@ def wait_for_timeline_size_init(
     raise Exception(
         f"timed out while waiting for current_logical_size of a timeline to reach its non-incremental value, details: {timeline_details}"
     )
+
+
+def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
+    """
+    Tenants warmuping up opportunistically will wait for one another's logical size calculations to complete
+    before proceeding.  However, they skip this if a client is actively trying to access them.
+
+    This test is not purely about logical sizes, but logical size calculation is the phase that we
+    use as a proxy for "warming up" in this test: it happens within the semaphore guard used
+    to limit concurrent tenant warm-up.
+    """
+
+    # We will run with the limit set to 1, so that once we have one tenant stuck
+    # in a pausable failpoint, the rest are prevented from proceeding through warmup.
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # Create some tenants
+    n_tenants = 10
+    tenant_ids = {env.initial_tenant}
+    for _i in range(0, n_tenants - 1):
+        tenant_id = TenantId.generate()
+        env.pageserver.tenant_create(tenant_id)
+
+        # Empty tenants are not subject to waiting for logical size calculations, because
+        # those hapen on timeline level
+        timeline_id = TimelineId.generate()
+        env.neon_cli.create_timeline(
+            new_branch_name="main", tenant_id=tenant_id, timeline_id=timeline_id
+        )
+
+        tenant_ids.add(tenant_id)
+
+    # Restart pageserver with logical size calculations paused
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
+    )
+
+    def get_tenant_states():
+        states = {}
+        for tenant_id in tenant_ids:
+            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
+            states[tenant_id] = tenant["state"]["slug"]
+        log.info(f"Tenant states: {states}")
+        return states
+
+    def at_least_one_active():
+        assert "Active" in set(get_tenant_states().values())
+
+    # One tenant should activate, then get stuck in their logical size calculation
+    wait_until(10, 1, at_least_one_active)
+
+    # Wait some walltime to gain confidence that other tenants really are stuck and not proceeding to activate
+    time.sleep(5)
+
+    # We should see one tenant win the activation race, and enter logical size calculation.  The rest
+    # will stay in Attaching state, waiting for the "warmup_limit" semaphore
+    expect_activated = 1
+    states = get_tenant_states()
+    assert len([s for s in states.values() if s == "Active"]) == expect_activated
+    assert len([s for s in states.values() if s == "Attaching"]) == n_tenants - expect_activated
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
+    )
+
+    # This is zero, and subsequent checks are expect_activated - 1, because this counter does not
+    # count how may tenants are Active, it counts how many have finished warmup.  The first tenant
+    # that reached Active is still stuck in its local size calculation, and has therefore not finished warmup.
+    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == 0
+
+    # If a client accesses one of the blocked tenants, it should skip waiting for warmup and
+    # go active as fast as it can.
+    stuck_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+
+    endpoint = env.endpoints.create_start(branch_name="main", tenant_id=stuck_tenant_id)
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10) g",
+        ]
+    )
+    endpoint.stop()
+
+    # That one that we successfully accessed is now Active
+    expect_activated += 1
+    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
+        == expect_activated - 1
+    )
+
+    # The ones we didn't touch are still in Attaching
+    assert (
+        len([s for s in get_tenant_states().values() if s == "Attaching"])
+        == n_tenants - expect_activated
+    )
+
+    # Timeline creation operations also wake up Attaching tenants
+    stuck_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+    pageserver_http.timeline_create(env.pg_version, stuck_tenant_id, TimelineId.generate())
+    expect_activated += 1
+    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        len([s for s in get_tenant_states().values() if s == "Attaching"])
+        == n_tenants - expect_activated
+    )
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
+        == expect_activated - 1
+    )
+
+    # When we unblock logical size calculation, all tenants should proceed to active state via
+    # the warmup route.
+    pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
+
+    def all_active():
+        assert all(s == "Active" for s in get_tenant_states().values())
+
+    wait_until(10, 1, all_active)
+
+    # Final control check: restarting with no failpoints at all results in all tenants coming active
+    # without being prompted by client I/O
+    env.pageserver.stop()
+    env.pageserver.start()
+    wait_until(10, 1, all_active)
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
+    )
+    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == n_tenants

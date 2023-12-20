@@ -17,3 +17,6 @@ def test_build_info_metric(neon_env_builder: NeonEnvBuilder, link_proxy: NeonPro
 
         assert "revision" in sample.labels
         assert len(sample.labels["revision"]) > 0
+
+        assert "build_tag" in sample.labels
+        assert len(sample.labels["build_tag"]) > 0

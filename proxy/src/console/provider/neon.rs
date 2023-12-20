@@ -3,11 +3,15 @@
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, CachedRoleSecret, ConsoleReqExtra,
+    NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, http, scram};
+use crate::metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
+use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use itertools::Itertools;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -16,12 +20,27 @@ use tracing::{error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     caches: &'static ApiCaches,
+    locks: &'static ApiLocks,
+    jwt: String,
 }
 
 impl Api {
     /// Construct an API object containing the auth parameters.
-    pub fn new(endpoint: http::Endpoint, caches: &'static ApiCaches) -> Self {
-        Self { endpoint, caches }
+    pub fn new(
+        endpoint: http::Endpoint,
+        caches: &'static ApiCaches,
+        locks: &'static ApiLocks,
+    ) -> Self {
+        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
+            Ok(v) => v,
+            Err(_) => "".to_string(),
+        };
+        Self {
+            endpoint,
+            caches,
+            locks,
+            jwt,
+        }
     }
 
     pub fn url(&self) -> &str {
@@ -30,20 +49,21 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
+    ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
             let request = self
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
+                .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(creds.project().expect("impossible"))),
-                    ("role", Some(creds.user)),
+                    ("application_name", extra.application_name.as_str()),
+                    ("project", creds.endpoint.as_str()),
+                    ("role", creds.inner.user.as_str()),
                 ])
                 .build()?;
 
@@ -55,16 +75,25 @@ impl Api {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => return Ok(None),
+                    Some(http::StatusCode::NOT_FOUND) => return Ok(AuthInfo::default()),
                     _otherwise => return Err(e.into()),
                 },
             };
 
             let secret = scram::ServerSecret::parse(&body.role_secret)
-                .map(AuthInfo::Scram)
+                .map(AuthSecret::Scram)
                 .ok_or(GetAuthInfoError::BadSecret)?;
-
-            Ok(Some(secret))
+            let allowed_ips = body
+                .allowed_ips
+                .into_iter()
+                .flatten()
+                .map(String::from)
+                .collect_vec();
+            ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
+            Ok(AuthInfo {
+                secret: Some(secret),
+                allowed_ips,
+            })
         }
         .map_err(crate::error::log_error)
         .instrument(info_span!("http", id = request_id))
@@ -73,22 +102,28 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let project = creds.project().expect("impossible");
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
-            let request = self
+            let mut request_builder = self
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
+                .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(project)),
-                ])
-                .build()?;
+                    ("application_name", extra.application_name.as_str()),
+                    ("project", creds.endpoint.as_str()),
+                ]);
+
+            request_builder = if extra.options.is_empty() {
+                request_builder
+            } else {
+                request_builder.query(&extra.options_as_deep_object())
+            };
+            let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
@@ -106,11 +141,11 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            config.host(&host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
-                aux: body.aux.into(),
+                aux: body.aux,
                 allow_self_signed_compute: false,
             };
 
@@ -125,21 +160,59 @@ impl Api {
 #[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
-        self.do_get_auth_info(extra, creds).await
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        let ep = creds.endpoint.clone();
+        let user = creds.inner.user.clone();
+        if let Some(role_secret) = self.caches.role_secret.get(&(ep.clone(), user.clone())) {
+            return Ok(role_secret);
+        }
+        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let (_, secret) = self
+            .caches
+            .role_secret
+            .insert((ep.clone(), user), auth_info.secret.clone());
+        self.caches
+            .allowed_ips
+            .insert(ep, Arc::new(auth_info.allowed_ips));
+        Ok(secret)
+    }
+
+    async fn get_allowed_ips(
+        &self,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
+    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+        if let Some(allowed_ips) = self.caches.allowed_ips.get(&creds.endpoint) {
+            ALLOWED_IPS_BY_CACHE_OUTCOME
+                .with_label_values(&["hit"])
+                .inc();
+            return Ok(Arc::new(allowed_ips.to_vec()));
+        }
+        ALLOWED_IPS_BY_CACHE_OUTCOME
+            .with_label_values(&["miss"])
+            .inc();
+        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let ep = creds.endpoint.clone();
+        let user = creds.inner.user.clone();
+        self.caches
+            .role_secret
+            .insert((ep.clone(), user), auth_info.secret);
+        self.caches.allowed_ips.insert(ep, allowed_ips.clone());
+        Ok(allowed_ips)
     }
 
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key = creds.project().expect("impossible");
+        let key: &str = &creds.inner.cache_key;
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
@@ -150,9 +223,22 @@ impl super::Api for Api {
             return Ok(cached);
         }
 
+        let key: Arc<str> = key.into();
+
+        let permit = self.locks.get_wake_compute_permit(&key).await?;
+
+        // after getting back a permit - it's possible the cache was filled
+        // double check
+        if permit.should_check_cache() {
+            if let Some(cached) = self.caches.node_info.get(&key) {
+                info!(key = &*key, "found cached compute node info");
+                return Ok(cached);
+            }
+        }
+
         let node = self.do_wake_compute(extra, creds).await?;
-        let (_, cached) = self.caches.node_info.insert(key.into(), node);
-        info!(key = key, "created a cache entry for compute node info");
+        let (_, cached) = self.caches.node_info.insert(key.clone(), node);
+        info!(key = &*key, "created a cache entry for compute node info");
 
         Ok(cached)
     }
@@ -183,9 +269,9 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     Err(ApiError::Console { status, text })
 }
 
-fn parse_host_port(input: &str) -> Option<(&str, u16)> {
-    let (host, port) = input.split_once(':')?;
-    Some((host, port.parse().ok()?))
+fn parse_host_port(input: &str) -> Option<(String, u16)> {
+    let parsed: SocketAddr = input.parse().ok()?;
+    Some((parsed.ip().to_string(), parsed.port()))
 }
 
 #[cfg(test)]

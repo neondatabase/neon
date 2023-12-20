@@ -45,8 +45,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::RemoteExtSpec;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{NodeId, TenantId, TimelineId};
 
 use crate::local_env::LocalEnv;
@@ -57,19 +57,17 @@ use compute_api::responses::{ComputeState, ComputeStatus};
 use compute_api::spec::{Cluster, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
-#[serde_as]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct EndpointConf {
     endpoint_id: String,
-    #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     timeline_id: TimelineId,
     mode: ComputeMode,
     pg_port: u16,
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    pageserver_id: NodeId,
 }
 
 //
@@ -82,19 +80,16 @@ pub struct ComputeControlPlane {
     pub endpoints: BTreeMap<String, Arc<Endpoint>>,
 
     env: LocalEnv,
-    pageserver: Arc<PageServerNode>,
 }
 
 impl ComputeControlPlane {
     // Load current endpoints from the endpoints/ subdirectories
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
-        let pageserver = Arc::new(PageServerNode::from_env(&env));
-
         let mut endpoints = BTreeMap::default();
         for endpoint_dir in std::fs::read_dir(env.endpoints_path())
             .with_context(|| format!("failed to list {}", env.endpoints_path().display()))?
         {
-            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env, &pageserver)?;
+            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env)?;
             endpoints.insert(ep.endpoint_id.clone(), Arc::new(ep));
         }
 
@@ -102,7 +97,6 @@ impl ComputeControlPlane {
             base_port: 55431,
             endpoints,
             env,
-            pageserver,
         })
     }
 
@@ -125,20 +119,30 @@ impl ComputeControlPlane {
         http_port: Option<u16>,
         pg_version: u32,
         mode: ComputeMode,
+        pageserver_id: NodeId,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let http_port = http_port.unwrap_or_else(|| self.get_port() + 1);
+        let pageserver =
+            PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
+
         let ep = Arc::new(Endpoint {
             endpoint_id: endpoint_id.to_owned(),
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), http_port),
             env: self.env.clone(),
-            pageserver: Arc::clone(&self.pageserver),
+            pageserver,
             timeline_id,
             mode,
             tenant_id,
             pg_version,
-            skip_pg_catalog_updates: false,
+            // We don't setup roles and databases in the spec locally, so we don't need to
+            // do catalog updates. Catalog updates also include check availability
+            // data creation. Yet, we have tests that check that size and db dump
+            // before and after start are the same. So, skip catalog updates,
+            // with this we basically test a case of waking up an idle compute, where
+            // we also skip catalog updates in the cloud.
+            skip_pg_catalog_updates: true,
         });
 
         ep.create_endpoint_dir()?;
@@ -152,7 +156,8 @@ impl ComputeControlPlane {
                 http_port,
                 pg_port,
                 pg_version,
-                skip_pg_catalog_updates: false,
+                skip_pg_catalog_updates: true,
+                pageserver_id,
             })?,
         )?;
         std::fs::write(
@@ -164,6 +169,30 @@ impl ComputeControlPlane {
             .insert(ep.endpoint_id.clone(), Arc::clone(&ep));
 
         Ok(ep)
+    }
+
+    pub fn check_conflicting_endpoints(
+        &self,
+        mode: ComputeMode,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<()> {
+        if matches!(mode, ComputeMode::Primary) {
+            // this check is not complete, as you could have a concurrent attempt at
+            // creating another primary, both reading the state before checking it here,
+            // but it's better than nothing.
+            let mut duplicates = self.endpoints.iter().filter(|(_k, v)| {
+                v.tenant_id == tenant_id
+                    && v.timeline_id == timeline_id
+                    && v.mode == mode
+                    && v.status() != "stopped"
+            });
+
+            if let Some((key, _)) = duplicates.next() {
+                bail!("attempting to create a duplicate primary endpoint on tenant {tenant_id}, timeline {timeline_id}: endpoint {key:?} exists already. please don't do this, it is not supported.");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -187,18 +216,14 @@ pub struct Endpoint {
     // These are not part of the endpoint as such, but the environment
     // the endpoint runs in.
     pub env: LocalEnv,
-    pageserver: Arc<PageServerNode>,
+    pageserver: PageServerNode,
 
     // Optimizations
     skip_pg_catalog_updates: bool,
 }
 
 impl Endpoint {
-    fn from_dir_entry(
-        entry: std::fs::DirEntry,
-        env: &LocalEnv,
-        pageserver: &Arc<PageServerNode>,
-    ) -> Result<Endpoint> {
+    fn from_dir_entry(entry: std::fs::DirEntry, env: &LocalEnv) -> Result<Endpoint> {
         if !entry.file_type()?.is_dir() {
             anyhow::bail!(
                 "Endpoint::from_dir_entry failed: '{}' is not a directory",
@@ -214,12 +239,15 @@ impl Endpoint {
         let conf: EndpointConf =
             serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
+        let pageserver =
+            PageServerNode::from_env(env, env.get_pageserver_conf(conf.pageserver_id)?);
+
         Ok(Endpoint {
             pg_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.pg_port),
             http_address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.http_port),
             endpoint_id,
             env: env.clone(),
-            pageserver: Arc::clone(pageserver),
+            pageserver,
             timeline_id: conf.timeline_id,
             mode: conf.mode,
             tenant_id: conf.tenant_id,
@@ -247,7 +275,7 @@ impl Endpoint {
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
-        conf.append("wal_level", "replica");
+        conf.append("wal_level", "logical");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
         // It also defines how often the walreciever will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");
@@ -408,19 +436,35 @@ impl Endpoint {
             );
         }
 
-        // Also wait for the compute_ctl process to die. It might have some cleanup
-        // work to do after postgres stops, like syncing safekeepers, etc.
-        //
+        Ok(())
+    }
+
+    fn wait_for_compute_ctl_to_exit(&self) -> Result<()> {
         // TODO use background_process::stop_process instead
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
         crate::background_process::wait_until_stopped("compute_ctl", pid)?;
-
         Ok(())
     }
 
-    pub fn start(
+    fn read_postgresql_conf(&self) -> Result<String> {
+        // Slurp the endpoints/<endpoint id>/postgresql.conf file into
+        // memory. We will include it in the spec file that we pass to
+        // `compute_ctl`, and `compute_ctl` will write it to the postgresql.conf
+        // in the data directory.
+        let postgresql_conf_path = self.endpoint_path().join("postgresql.conf");
+        match std::fs::read(&postgresql_conf_path) {
+            Ok(content) => Ok(String::from_utf8(content)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("".to_string()),
+            Err(e) => Err(anyhow::Error::new(e).context(format!(
+                "failed to read config file in {}",
+                postgresql_conf_path.to_str().unwrap()
+            ))),
+        }
+    }
+
+    pub async fn start(
         &self,
         auth_token: &Option<String>,
         safekeepers: Vec<NodeId>,
@@ -430,21 +474,7 @@ impl Endpoint {
             anyhow::bail!("The endpoint is already running");
         }
 
-        // Slurp the endpoints/<endpoint id>/postgresql.conf file into
-        // memory. We will include it in the spec file that we pass to
-        // `compute_ctl`, and `compute_ctl` will write it to the postgresql.conf
-        // in the data directory.
-        let postgresql_conf_path = self.endpoint_path().join("postgresql.conf");
-        let postgresql_conf = match std::fs::read(&postgresql_conf_path) {
-            Ok(content) => String::from_utf8(content)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "".to_string(),
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context(format!(
-                    "failed to read config file in {}",
-                    postgresql_conf_path.to_str().unwrap()
-                )))
-            }
-        };
+        let postgresql_conf = self.read_postgresql_conf()?;
 
         // We always start the compute node from scratch, so if the Postgres
         // data dir exists from a previous launch, remove it first.
@@ -472,11 +502,24 @@ impl Endpoint {
             }
         }
 
+        // check for file remote_extensions_spec.json
+        // if it is present, read it and pass to compute_ctl
+        let remote_extensions_spec_path = self.endpoint_path().join("remote_extensions_spec.json");
+        let remote_extensions_spec = std::fs::File::open(remote_extensions_spec_path);
+        let remote_extensions: Option<RemoteExtSpec>;
+
+        if let Ok(spec_file) = remote_extensions_spec {
+            remote_extensions = serde_json::from_reader(spec_file).ok();
+        } else {
+            remote_extensions = None;
+        };
+
         // Create spec file
         let spec = ComputeSpec {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
+            features: vec![],
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -493,7 +536,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            remote_extensions: None,
+            remote_extensions,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -544,7 +587,7 @@ impl Endpoint {
         const MAX_ATTEMPTS: u32 = 10 * 30; // Wait up to 30 s
         loop {
             attempt += 1;
-            match self.get_status() {
+            match self.get_status().await {
                 Ok(state) => {
                     match state.status {
                         ComputeStatus::Init => {
@@ -586,8 +629,8 @@ impl Endpoint {
     }
 
     // Call the /status HTTP API
-    pub fn get_status(&self) -> Result<ComputeState> {
-        let client = reqwest::blocking::Client::new();
+    pub async fn get_status(&self) -> Result<ComputeState> {
+        let client = reqwest::Client::new();
 
         let response = client
             .request(
@@ -598,16 +641,73 @@ impl Endpoint {
                     self.http_address.port()
                 ),
             )
-            .send()?;
+            .send()
+            .await?;
 
         // Interpret the response
         let status = response.status();
         if !(status.is_client_error() || status.is_server_error()) {
-            Ok(response.json()?)
+            Ok(response.json().await?)
         } else {
             // reqwest does not export its error construction utility functions, so let's craft the message ourselves
             let url = response.url().to_owned();
-            let msg = match response.text() {
+            let msg = match response.text().await {
+                Ok(err_body) => format!("Error: {}", err_body),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
+    pub async fn reconfigure(&self, pageserver_id: Option<NodeId>) -> Result<()> {
+        let mut spec: ComputeSpec = {
+            let spec_path = self.endpoint_path().join("spec.json");
+            let file = std::fs::File::open(spec_path)?;
+            serde_json::from_reader(file)?
+        };
+
+        let postgresql_conf = self.read_postgresql_conf()?;
+        spec.cluster.postgresql_conf = Some(postgresql_conf);
+
+        if let Some(pageserver_id) = pageserver_id {
+            let endpoint_config_path = self.endpoint_path().join("endpoint.json");
+            let mut endpoint_conf: EndpointConf = {
+                let file = std::fs::File::open(&endpoint_config_path)?;
+                serde_json::from_reader(file)?
+            };
+            endpoint_conf.pageserver_id = pageserver_id;
+            std::fs::write(
+                endpoint_config_path,
+                serde_json::to_string_pretty(&endpoint_conf)?,
+            )?;
+
+            let pageserver =
+                PageServerNode::from_env(&self.env, self.env.get_pageserver_conf(pageserver_id)?);
+            let ps_http_conf = &pageserver.pg_connection_config;
+            let (host, port) = (ps_http_conf.host(), ps_http_conf.port());
+            spec.pageserver_connstring = Some(format!("postgresql://no_user@{host}:{port}"));
+        }
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!(
+                "http://{}:{}/configure",
+                self.http_address.ip(),
+                self.http_address.port()
+            ))
+            .body(format!(
+                "{{\"spec\":{}}}",
+                serde_json::to_string_pretty(&spec)?
+            ))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text().await {
                 Ok(err_body) => format!("Error: {}", err_body),
                 Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
             };
@@ -623,15 +723,25 @@ impl Endpoint {
         // Postgres is always started from scratch, so stop
         // without destroy only used for testing and debugging.
         //
+        self.pg_ctl(
+            if destroy {
+                &["-m", "immediate", "stop"]
+            } else {
+                &["stop"]
+            },
+            &None,
+        )?;
+
+        // Also wait for the compute_ctl process to die. It might have some cleanup
+        // work to do after postgres stops, like syncing safekeepers, etc.
+        //
+        self.wait_for_compute_ctl_to_exit()?;
         if destroy {
-            self.pg_ctl(&["-m", "immediate", "stop"], &None)?;
             println!(
                 "Destroying postgres data directory '{}'",
                 self.pgdata().to_str().unwrap()
             );
             std::fs::remove_dir_all(self.endpoint_path())?;
-        } else {
-            self.pg_ctl(&["stop"], &None)?;
         }
         Ok(())
     }

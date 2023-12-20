@@ -214,27 +214,24 @@ where
     }
 }
 
+/// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn flush<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,
 ) -> Result<(), io::Error> {
     while write_buf.has_remaining() {
-        let bytes_written = stream.write(write_buf.chunk()).await?;
+        let bytes_written = stream.write_buf(write_buf).await?;
         if bytes_written == 0 {
             return Err(io::Error::new(
                 ErrorKind::WriteZero,
                 "failed to write message",
             ));
         }
-        // The advanced part will be garbage collected, likely during shifting
-        // data left on next attempt to write to buffer when free space is not
-        // enough.
-        write_buf.advance(bytes_written);
     }
-    write_buf.clear();
     stream.flush().await
 }
 
+/// Cancellation safe as long as the AsyncWrite is cancellation safe.
 async fn shutdown<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,

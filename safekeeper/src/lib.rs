@@ -1,12 +1,16 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
 use tokio::runtime::Runtime;
 
-use std::path::PathBuf;
 use std::time::Duration;
 use storage_broker::Uri;
 
-use utils::id::{NodeId, TenantId, TenantTimelineId};
+use utils::{
+    auth::SwappableJwtAuth,
+    id::{NodeId, TenantId, TenantTimelineId},
+};
 
 mod auth;
 pub mod broker;
@@ -19,6 +23,7 @@ pub mod json_ctrl;
 pub mod metrics;
 pub mod pull_timeline;
 pub mod receive_wal;
+pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;
@@ -50,7 +55,7 @@ pub struct SafeKeeperConf {
     // that during unit testing, because the current directory is global
     // to the process but different unit tests work on different
     // data directories to avoid clashing with each other.
-    pub workdir: PathBuf,
+    pub workdir: Utf8PathBuf,
     pub my_id: NodeId,
     pub listen_pg_addr: String,
     pub listen_pg_addr_tenant_only: Option<String>,
@@ -61,22 +66,23 @@ pub struct SafeKeeperConf {
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
+    pub peer_recovery_enabled: bool,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
-    pub http_auth: Option<Arc<JwtAuth>>,
+    pub http_auth: Option<Arc<SwappableJwtAuth>>,
     pub current_thread_runtime: bool,
 }
 
 impl SafeKeeperConf {
-    pub fn tenant_dir(&self, tenant_id: &TenantId) -> PathBuf {
+    pub fn tenant_dir(&self, tenant_id: &TenantId) -> Utf8PathBuf {
         self.workdir.join(tenant_id.to_string())
     }
 
-    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> PathBuf {
+    pub fn timeline_dir(&self, ttid: &TenantTimelineId) -> Utf8PathBuf {
         self.tenant_dir(&ttid.tenant_id)
             .join(ttid.timeline_id.to_string())
     }
@@ -86,7 +92,7 @@ impl SafeKeeperConf {
     #[cfg(test)]
     fn dummy() -> Self {
         SafeKeeperConf {
-            workdir: PathBuf::from("./"),
+            workdir: Utf8PathBuf::from("./"),
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_pg_addr_tenant_only: None,
@@ -99,6 +105,7 @@ impl SafeKeeperConf {
                 .parse()
                 .expect("failed to parse default broker endpoint"),
             broker_keepalive_interval: Duration::from_secs(5),
+            peer_recovery_enabled: true,
             wal_backup_enabled: true,
             backup_parallel_jobs: 1,
             pg_auth: None,

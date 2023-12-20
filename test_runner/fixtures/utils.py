@@ -3,16 +3,30 @@ import json
 import os
 import re
 import subprocess
-import tarfile
+import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+)
 from urllib.parse import urlencode
 
 import allure
+import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
+from fixtures.pageserver.types import (
+    parse_delta_layer,
+    parse_image_layer,
+)
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgBin
@@ -26,48 +40,128 @@ def get_self_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def subprocess_capture(capture_dir: Path, cmd: List[str], **kwargs: Any) -> str:
-    """Run a process and capture its output
+def subprocess_capture(
+    capture_dir: Path,
+    cmd: List[str],
+    *,
+    check=False,
+    echo_stderr=False,
+    echo_stdout=False,
+    capture_stdout=False,
+    timeout=None,
+    with_command_header=True,
+    **popen_kwargs: Any,
+) -> Tuple[str, Optional[str], int]:
+    """Run a process and bifurcate its output to files and the `log` logger
 
-    Output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
+    stderr and stdout are always captured in files.  They are also optionally
+    echoed to the log (echo_stderr, echo_stdout), and/or captured and returned
+    (capture_stdout).
+
+    File output will go to files named "cmd_NNN.stdout" and "cmd_NNN.stderr"
     where "cmd" is the name of the program and NNN is an incrementing
     counter.
 
     If those files already exist, we will overwrite them.
-    Returns basepath for files with captured output.
+
+    Returns 3-tuple of:
+     - The base path for output files
+     - Captured stdout, or None
+     - The exit status of the process
     """
     assert isinstance(cmd, list)
-    base = f"{os.path.basename(cmd[0])}_{global_counter()}"
+    base_cmd = os.path.basename(cmd[0])
+    base = f"{base_cmd}_{global_counter()}"
     basepath = os.path.join(capture_dir, base)
     stdout_filename = f"{basepath}.stdout"
     stderr_filename = f"{basepath}.stderr"
 
+    # Since we will stream stdout and stderr concurrently, need to do it in a thread.
+    class OutputHandler(threading.Thread):
+        def __init__(self, in_file, out_file, echo: bool, capture: bool):
+            super().__init__()
+            self.in_file = in_file
+            self.out_file = out_file
+            self.echo = echo
+            self.capture = capture
+            self.captured = ""
+
+        def run(self):
+            first = with_command_header
+            for line in self.in_file:
+                if first:
+                    # do this only after receiving any input so that we can
+                    # keep deleting empty files, or leave it out completly if
+                    # it was unwanted (using the file as input later for example)
+                    first = False
+                    # prefix the files with the command line so that we can
+                    # later understand which file is for what command
+                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode("utf-8"))
+
+                # Only bother decoding if we are going to do something more than stream to a file
+                if self.echo or self.capture:
+                    string = line.decode(encoding="utf-8", errors="replace")
+
+                    if self.echo:
+                        log.info(string.strip())
+
+                    if self.capture:
+                        self.captured += string
+
+                self.out_file.write(line)
+
+    captured = None
     try:
-        with open(stdout_filename, "w") as stdout_f:
-            with open(stderr_filename, "w") as stderr_f:
+        with open(stdout_filename, "wb") as stdout_f:
+            with open(stderr_filename, "wb") as stderr_f:
                 log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
-                subprocess.run(cmd, **kwargs, stdout=stdout_f, stderr=stderr_f)
+
+                p = subprocess.Popen(
+                    cmd,
+                    **popen_kwargs,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                stdout_handler = OutputHandler(
+                    p.stdout, stdout_f, echo=echo_stdout, capture=capture_stdout
+                )
+                stdout_handler.start()
+                stderr_handler = OutputHandler(p.stderr, stderr_f, echo=echo_stderr, capture=False)
+                stderr_handler.start()
+
+                r = p.wait(timeout=timeout)
+
+                stdout_handler.join()
+                stderr_handler.join()
+
+                if check and r != 0:
+                    raise subprocess.CalledProcessError(r, " ".join(cmd))
+
+                if capture_stdout:
+                    captured = stdout_handler.captured
     finally:
         # Remove empty files if there is no output
         for filename in (stdout_filename, stderr_filename):
             if os.stat(filename).st_size == 0:
                 os.remove(filename)
 
-    return basepath
+    return (basepath, captured, r)
 
 
 _global_counter = 0
+_global_counter_lock = threading.Lock()
 
 
 def global_counter() -> int:
-    """A really dumb global counter.
+    """A really dumb but thread-safe global counter.
 
     This is useful for giving output files a unique number, so if we run the
     same command multiple times we can keep their output separate.
     """
-    global _global_counter
-    _global_counter += 1
-    return _global_counter
+    global _global_counter, _global_counter_lock
+    with _global_counter_lock:
+        _global_counter += 1
+        return _global_counter
 
 
 def print_gc_result(row: Dict[str, Any]):
@@ -125,26 +219,6 @@ def get_timeline_dir_size(path: Path) -> int:
     return sz
 
 
-def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
-    """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
-    parts = f_name.split("__")
-    key_parts = parts[0].split("-")
-    return int(key_parts[0], 16), int(key_parts[1], 16), int(parts[1], 16)
-
-
-def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
-    """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
-    parts = f_name.split("__")
-    key_parts = parts[0].split("-")
-    lsn_parts = parts[1].split("-")
-    return (
-        int(key_parts[0], 16),
-        int(key_parts[1], 16),
-        int(lsn_parts[0], 16),
-        int(lsn_parts[1], 16),
-    )
-
-
 def get_scale_for_db(size_mb: int) -> int:
     """Returns pgbench scale factor for given target db size in MB.
 
@@ -155,7 +229,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html)"
+    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
 )
 
 
@@ -164,25 +238,35 @@ def allure_attach_from_dir(dir: Path):
 
     for attachment in Path(dir).glob("**/*"):
         if ATTACHMENT_NAME_REGEX.fullmatch(attachment.name) and attachment.stat().st_size > 0:
-            source = str(attachment)
             name = str(attachment.relative_to(dir))
 
-            # compress files larger than 1Mb, they're hardly readable in a browser
-            if attachment.stat().st_size > 1024 * 1024:
-                source = f"{attachment}.tar.gz"
-                with tarfile.open(source, "w:gz") as tar:
-                    tar.add(attachment, arcname=attachment.name)
-                name = f"{name}.tar.gz"
+            # compress files that are larger than 1Mb, they're hardly readable in a browser
+            if attachment.stat().st_size > 1024**2:
+                compressed = attachment.with_suffix(".zst")
 
-            if source.endswith(".tar.gz"):
+                cctx = zstandard.ZstdCompressor()
+                with attachment.open("rb") as fin, compressed.open("wb") as fout:
+                    cctx.copy_stream(fin, fout)
+
+                name = f"{name}.zst"
+                attachment = compressed
+
+            source = str(attachment)
+            if source.endswith(".gz"):
                 attachment_type = "application/gzip"
-                extension = "tar.gz"
+                extension = "gz"
+            elif source.endswith(".zst"):
+                attachment_type = "application/zstd"
+                extension = "zst"
             elif source.endswith(".svg"):
                 attachment_type = "image/svg+xml"
                 extension = "svg"
             elif source.endswith(".html"):
                 attachment_type = "text/html"
                 extension = "html"
+            elif source.endswith(".walredo"):
+                attachment_type = "application/octet-stream"
+                extension = "walredo"
             else:
                 attachment_type = "text/plain"
                 extension = attachment.suffix.removeprefix(".")

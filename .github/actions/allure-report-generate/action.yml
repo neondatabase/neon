@@ -76,8 +76,8 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.23.1
-        ALLURE_ZIP_SHA256: 11141bfe727504b3fd80c0f9801eb317407fd0ac983ebb57e671f14bac4bcd86
+        ALLURE_VERSION: 2.24.0
+        ALLURE_ZIP_SHA256: 60b1d6ce65d9ef24b23cf9c2c19fd736a123487c38e54759f1ed1a7a77353c90
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this
     - name: Acquire lock
@@ -203,6 +203,10 @@ runs:
         COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         BASE_S3_URL: ${{ steps.generate-report.outputs.base-s3-url }}
       run: |
+        if [ ! -d "${WORKDIR}/report/data/test-cases" ]; then
+          exit 0
+        fi
+
         export DATABASE_URL=${REGRESS_TEST_RESULT_CONNSTR_NEW}
 
         ./scripts/pysync

@@ -1,11 +1,15 @@
 //! This module provides a wrapper around a real RemoteStorage implementation that
 //! causes the first N attempts at each upload or download operatio to fail. For
 //! testing purposes.
+use bytes::Bytes;
+use futures::stream::Stream;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::{Download, DownloadError, RemotePath, RemoteStorage, StorageMetadata};
+use crate::{
+    Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
+};
 
 pub struct UnreliableWrapper {
     inner: crate::GenericRemoteStorage,
@@ -95,9 +99,18 @@ impl RemoteStorage for UnreliableWrapper {
         self.inner.list_files(folder).await
     }
 
+    async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
+        self.inner.list(prefix, mode).await
+    }
+
     async fn upload(
         &self,
-        data: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,

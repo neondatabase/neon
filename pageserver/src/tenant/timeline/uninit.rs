@@ -1,6 +1,7 @@
-use std::{collections::hash_map::Entry, fs, path::PathBuf, sync::Arc};
+use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
+use camino::Utf8PathBuf;
 use tracing::{error, info, info_span, warn};
 use utils::{crashsafe, fs_ext, id::TimelineId, lsn::Lsn};
 
@@ -18,14 +19,14 @@ use super::Timeline;
 pub struct UninitializedTimeline<'t> {
     pub(crate) owning_tenant: &'t Tenant,
     timeline_id: TimelineId,
-    raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark)>,
+    raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark<'t>)>,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
         owning_tenant: &'t Tenant,
         timeline_id: TimelineId,
-        raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark)>,
+        raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark<'t>)>,
     ) -> Self {
         Self {
             owning_tenant,
@@ -42,37 +43,52 @@ impl<'t> UninitializedTimeline<'t> {
     /// The caller is responsible for activating the timeline (function `.activate()`).
     pub(crate) fn finish_creation(mut self) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
-        let tenant_id = self.owning_tenant.tenant_id;
+        let tenant_shard_id = self.owning_tenant.tenant_shard_id;
 
-        let (new_timeline, uninit_mark) = self.raw_timeline.take().with_context(|| {
-            format!("No timeline for initalization found for {tenant_id}/{timeline_id}")
-        })?;
+        if self.raw_timeline.is_none() {
+            return Err(anyhow::anyhow!(
+                "No timeline for initialization found for {tenant_shard_id}/{timeline_id}"
+            ));
+        }
 
         // Check that the caller initialized disk_consistent_lsn
-        let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
+        let new_disk_consistent_lsn = self
+            .raw_timeline
+            .as_ref()
+            .expect("checked above")
+            .0
+            .get_disk_consistent_lsn();
+
         anyhow::ensure!(
             new_disk_consistent_lsn.is_valid(),
-            "new timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
+            "new timeline {tenant_shard_id}/{timeline_id} has invalid disk_consistent_lsn"
         );
 
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         match timelines.entry(timeline_id) {
             Entry::Occupied(_) => anyhow::bail!(
-                "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
+                "Found freshly initialized timeline {tenant_shard_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
+                // after taking here should be no fallible operations, because the drop guard will not
+                // cleanup after and would block for example the tenant deletion
+                let (new_timeline, uninit_mark) =
+                    self.raw_timeline.take().expect("already checked");
+
+                // this is the mutual exclusion between different retries to create the timeline;
+                // this should be an assertion.
                 uninit_mark.remove_uninit_mark().with_context(|| {
                     format!(
-                        "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
+                        "Failed to remove uninit mark file for timeline {tenant_shard_id}/{timeline_id}"
                     )
                 })?;
                 v.insert(Arc::clone(&new_timeline));
 
                 new_timeline.maybe_spawn_flush_loop();
+
+                Ok(new_timeline)
             }
         }
-
-        Ok(new_timeline)
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -118,7 +134,7 @@ impl<'t> UninitializedTimeline<'t> {
             .with_context(|| {
                 format!(
                     "No raw timeline {}/{} found",
-                    self.owning_tenant.tenant_id, self.timeline_id
+                    self.owning_tenant.tenant_shard_id, self.timeline_id
                 )
             })?
             .0)
@@ -128,7 +144,7 @@ impl<'t> UninitializedTimeline<'t> {
 impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
         if let Some((_, uninit_mark)) = self.raw_timeline.take() {
-            let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_id, timeline_id = %self.timeline_id).entered();
+            let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_shard_id.tenant_id, shard_id = %self.owning_tenant.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id).entered();
             error!("Timeline got dropped without initializing, cleaning its files");
             cleanup_timeline_directory(uninit_mark);
         }
@@ -153,18 +169,55 @@ pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
 ///
 /// XXX: it's important to create it near the timeline dir, not inside it to ensure timeline dir gets removed first.
 #[must_use]
-pub(crate) struct TimelineUninitMark {
+pub(crate) struct TimelineUninitMark<'t> {
+    owning_tenant: &'t Tenant,
+    timeline_id: TimelineId,
     uninit_mark_deleted: bool,
-    uninit_mark_path: PathBuf,
-    pub(crate) timeline_path: PathBuf,
+    uninit_mark_path: Utf8PathBuf,
+    pub(crate) timeline_path: Utf8PathBuf,
 }
 
-impl TimelineUninitMark {
-    pub(crate) fn new(uninit_mark_path: PathBuf, timeline_path: PathBuf) -> Self {
-        Self {
-            uninit_mark_deleted: false,
-            uninit_mark_path,
-            timeline_path,
+/// Errors when acquiring exclusive access to a timeline ID for creation
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum TimelineExclusionError {
+    #[error("Already exists")]
+    AlreadyExists(Arc<Timeline>),
+    #[error("Already creating")]
+    AlreadyCreating,
+
+    // e.g. I/O errors, or some failure deep in postgres initdb
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl<'t> TimelineUninitMark<'t> {
+    pub(crate) fn new(
+        owning_tenant: &'t Tenant,
+        timeline_id: TimelineId,
+        uninit_mark_path: Utf8PathBuf,
+        timeline_path: Utf8PathBuf,
+    ) -> Result<Self, TimelineExclusionError> {
+        // Lock order: this is the only place we take both locks.  During drop() we only
+        // lock creating_timelines
+        let timelines = owning_tenant.timelines.lock().unwrap();
+        let mut creating_timelines: std::sync::MutexGuard<
+            '_,
+            std::collections::HashSet<TimelineId>,
+        > = owning_tenant.timelines_creating.lock().unwrap();
+
+        if let Some(existing) = timelines.get(&timeline_id) {
+            Err(TimelineExclusionError::AlreadyExists(existing.clone()))
+        } else if creating_timelines.contains(&timeline_id) {
+            Err(TimelineExclusionError::AlreadyCreating)
+        } else {
+            creating_timelines.insert(timeline_id);
+            Ok(Self {
+                owning_tenant,
+                timeline_id,
+                uninit_mark_deleted: false,
+                uninit_mark_path,
+                timeline_path,
+            })
         }
     }
 
@@ -191,25 +244,30 @@ impl TimelineUninitMark {
     }
 }
 
-impl Drop for TimelineUninitMark {
+impl Drop for TimelineUninitMark<'_> {
     fn drop(&mut self) {
         if !self.uninit_mark_deleted {
             if self.timeline_path.exists() {
                 error!(
                     "Uninit mark {} is not removed, timeline {} stays uninitialized",
-                    self.uninit_mark_path.display(),
-                    self.timeline_path.display()
+                    self.uninit_mark_path, self.timeline_path
                 )
             } else {
                 // unblock later timeline creation attempts
                 warn!(
                     "Removing intermediate uninit mark file {}",
-                    self.uninit_mark_path.display()
+                    self.uninit_mark_path
                 );
                 if let Err(e) = self.delete_mark_file_if_present() {
                     error!("Failed to remove the uninit mark file: {e}")
                 }
             }
         }
+
+        self.owning_tenant
+            .timelines_creating
+            .lock()
+            .unwrap()
+            .remove(&self.timeline_id);
     }
 }

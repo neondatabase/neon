@@ -1,11 +1,14 @@
+use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
@@ -93,14 +96,34 @@ pub(crate) static READ_NUM_FS_LAYERS: Lazy<Histogram> = Lazy::new(|| {
 });
 
 // Metrics collected on operations on the storage repository.
-pub(crate) static RECONSTRUCT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+
+pub(crate) struct ReconstructTimeMetrics {
+    ok: Histogram,
+    err: Histogram,
+}
+
+pub(crate) static RECONSTRUCT_TIME: Lazy<ReconstructTimeMetrics> = Lazy::new(|| {
+    let inner = register_histogram_vec!(
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value (reconstruct a page from deltas)",
+        &["result"],
         CRITICAL_OP_BUCKETS.into(),
     )
-    .expect("failed to define a metric")
+    .expect("failed to define a metric");
+    ReconstructTimeMetrics {
+        ok: inner.get_metric_with_label_values(&["ok"]).unwrap(),
+        err: inner.get_metric_with_label_values(&["err"]).unwrap(),
+    }
 });
+
+impl ReconstructTimeMetrics {
+    pub(crate) fn for_result<T, E>(&self, result: &Result<T, E>) -> &Histogram {
+        match result {
+            Ok(_) => &self.ok,
+            Err(_) => &self.err,
+        }
+    }
+}
 
 pub(crate) static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
@@ -127,22 +150,24 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub struct PageCacheMetrics {
+pub struct PageCacheMetricsForTaskKind {
     pub read_accesses_materialized_page: IntCounter,
-    pub read_accesses_ephemeral: IntCounter,
     pub read_accesses_immutable: IntCounter,
 
-    pub read_hits_ephemeral: IntCounter,
     pub read_hits_immutable: IntCounter,
     pub read_hits_materialized_page_exact: IntCounter,
     pub read_hits_materialized_page_older_lsn: IntCounter,
+}
+
+pub struct PageCacheMetrics {
+    map: EnumMap<TaskKind, EnumMap<PageContentKind, PageCacheMetricsForTaskKind>>,
 }
 
 static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_hits_total",
         "Number of read accesses to the page cache that hit",
-        &["key_kind", "hit_kind"]
+        &["task_kind", "key_kind", "content_kind", "hit_kind"]
     )
     .expect("failed to define a metric")
 });
@@ -151,54 +176,72 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_accesses_total",
         "Number of read accesses to the page cache",
-        &["key_kind"]
+        &["task_kind", "key_kind", "content_kind"]
     )
     .expect("failed to define a metric")
 });
 
 pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
-    read_accesses_materialized_page: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["materialized_page"])
-            .unwrap()
-    },
+    map: EnumMap::from_array(std::array::from_fn(|task_kind| {
+        let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
+        let task_kind: &'static str = task_kind.into();
+        EnumMap::from_array(std::array::from_fn(|content_kind| {
+            let content_kind = <PageContentKind as enum_map::Enum>::from_usize(content_kind);
+            let content_kind: &'static str = content_kind.into();
+            PageCacheMetricsForTaskKind {
+                read_accesses_materialized_page: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                        ])
+                        .unwrap()
+                },
 
-    read_accesses_ephemeral: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["ephemeral"])
-            .unwrap()
-    },
+                read_accesses_immutable: {
+                    PAGE_CACHE_READ_ACCESSES
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind])
+                        .unwrap()
+                },
 
-    read_accesses_immutable: {
-        PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["immutable"])
-            .unwrap()
-    },
+                read_hits_immutable: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[task_kind, "immutable", content_kind, "-"])
+                        .unwrap()
+                },
 
-    read_hits_ephemeral: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["ephemeral", "-"])
-            .unwrap()
-    },
+                read_hits_materialized_page_exact: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "exact",
+                        ])
+                        .unwrap()
+                },
 
-    read_hits_immutable: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["immutable", "-"])
-            .unwrap()
-    },
-
-    read_hits_materialized_page_exact: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["materialized_page", "exact"])
-            .unwrap()
-    },
-
-    read_hits_materialized_page_older_lsn: {
-        PAGE_CACHE_READ_HITS
-            .get_metric_with_label_values(&["materialized_page", "older_lsn"])
-            .unwrap()
-    },
+                read_hits_materialized_page_older_lsn: {
+                    PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[
+                            task_kind,
+                            "materialized_page",
+                            content_kind,
+                            "older_lsn",
+                        ])
+                        .unwrap()
+                },
+            }
+        }))
+    })),
 });
+
+impl PageCacheMetrics {
+    pub(crate) fn for_ctx(&self, ctx: &RequestContext) -> &PageCacheMetricsForTaskKind {
+        &self.map[ctx.task_kind()][ctx.page_content_kind()]
+    }
+}
 
 pub struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
@@ -243,6 +286,95 @@ pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheS
     },
 });
 
+pub(crate) mod page_cache_eviction_metrics {
+    use std::num::NonZeroUsize;
+
+    use metrics::{register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Outcome {
+        FoundSlotUnused { iters: NonZeroUsize },
+        FoundSlotEvicted { iters: NonZeroUsize },
+        ItersExceeded { iters: NonZeroUsize },
+    }
+
+    static ITERS_TOTAL_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_iters_total",
+            "Counter for the number of iterations in the find_victim loop",
+            &["outcome"],
+        )
+        .expect("failed to define a metric")
+    });
+
+    static CALLS_VEC: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_page_cache_find_victim_calls",
+            "Incremented at the end of each find_victim() call.\
+             Filter by outcome to get e.g., eviction rate.",
+            &["outcome"]
+        )
+        .unwrap()
+    });
+
+    pub(crate) fn observe(outcome: Outcome) {
+        macro_rules! dry {
+            ($label:literal, $iters:expr) => {{
+                static LABEL: &'static str = $label;
+                static ITERS_TOTAL: Lazy<IntCounter> =
+                    Lazy::new(|| ITERS_TOTAL_VEC.with_label_values(&[LABEL]));
+                static CALLS: Lazy<IntCounter> =
+                    Lazy::new(|| CALLS_VEC.with_label_values(&[LABEL]));
+                ITERS_TOTAL.inc_by(($iters.get()) as u64);
+                CALLS.inc();
+            }};
+        }
+        match outcome {
+            Outcome::FoundSlotUnused { iters } => dry!("found_empty", iters),
+            Outcome::FoundSlotEvicted { iters } => {
+                dry!("found_evicted", iters)
+            }
+            Outcome::ItersExceeded { iters } => {
+                dry!("err_iters_exceeded", iters);
+                super::page_cache_errors_inc(super::PageCacheErrorKind::EvictIterLimit);
+            }
+        }
+    }
+}
+
+pub(crate) static PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_page_cache_acquire_pinned_slot_seconds",
+        "Time spent acquiring a pinned slot in the page cache",
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
+static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "page_cache_errors_total",
+        "Number of timeouts while acquiring a pinned slot in the page cache",
+        &["error_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+#[derive(IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum PageCacheErrorKind {
+    AcquirePinnedSlotTimeout,
+    EvictIterLimit,
+}
+
+pub(crate) fn page_cache_errors_inc(error_kind: PageCacheErrorKind) {
+    PAGE_CACHE_ERRORS
+        .get_metric_with_label_values(&[error_kind.into()])
+        .unwrap()
+        .inc();
+}
+
 pub(crate) static WAIT_LSN_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wait_lsn_seconds",
@@ -270,12 +402,28 @@ static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static RESIDENT_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_resident_physical_size_global",
+        "Like `pageserver_resident_physical_size`, but without tenant/timeline dimensions."
+    )
+    .expect("failed to define a metric")
+});
+
 static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_remote_physical_size",
         "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
         &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static REMOTE_PHYSICAL_SIZE_GLOBAL: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_remote_physical_size_global",
+        "Like `pageserver_remote_physical_size`, but without tenant/timeline dimensions."
     )
     .expect("failed to define a metric")
 });
@@ -304,6 +452,133 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define current logical size metric")
 });
+
+pub(crate) mod initial_logical_size {
+    use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
+    use once_cell::sync::Lazy;
+
+    pub(crate) struct StartCalculation(IntCounterVec);
+    pub(crate) static START_CALCULATION: Lazy<StartCalculation> = Lazy::new(|| {
+        StartCalculation(
+            register_int_counter_vec!(
+                "pageserver_initial_logical_size_start_calculation",
+                "Incremented each time we start an initial logical size calculation attempt. \
+                 The `circumstances` label provides some additional details.",
+                &["attempt", "circumstances"]
+            )
+            .unwrap(),
+        )
+    });
+
+    struct DropCalculation {
+        first: IntCounter,
+        retry: IntCounter,
+    }
+
+    static DROP_CALCULATION: Lazy<DropCalculation> = Lazy::new(|| {
+        let vec = register_int_counter_vec!(
+            "pageserver_initial_logical_size_drop_calculation",
+            "Incremented each time we abort a started size calculation attmpt.",
+            &["attempt"]
+        )
+        .unwrap();
+        DropCalculation {
+            first: vec.with_label_values(&["first"]),
+            retry: vec.with_label_values(&["retry"]),
+        }
+    });
+
+    pub(crate) struct Calculated {
+        pub(crate) births: IntCounter,
+        pub(crate) deaths: IntCounter,
+    }
+
+    pub(crate) static CALCULATED: Lazy<Calculated> = Lazy::new(|| Calculated {
+        births: register_int_counter!(
+            "pageserver_initial_logical_size_finish_calculation",
+            "Incremented every time we finish calculation of initial logical size.\
+             If everything is working well, this should happen at most once per Timeline object."
+        )
+        .unwrap(),
+        deaths: register_int_counter!(
+            "pageserver_initial_logical_size_drop_finished_calculation",
+            "Incremented when we drop a finished initial logical size calculation result.\
+             Mainly useful to turn pageserver_initial_logical_size_finish_calculation into a gauge."
+        )
+        .unwrap(),
+    });
+
+    pub(crate) struct OngoingCalculationGuard {
+        inc_drop_calculation: Option<IntCounter>,
+    }
+
+    #[derive(strum_macros::IntoStaticStr)]
+    pub(crate) enum StartCircumstances {
+        EmptyInitial,
+        SkippedConcurrencyLimiter,
+        AfterBackgroundTasksRateLimit,
+    }
+
+    impl StartCalculation {
+        pub(crate) fn first(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0
+                .with_label_values(&["first", circumstances_label])
+                .inc();
+            OngoingCalculationGuard {
+                inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
+            }
+        }
+        pub(crate) fn retry(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
+            let circumstances_label: &'static str = circumstances.into();
+            self.0
+                .with_label_values(&["retry", circumstances_label])
+                .inc();
+            OngoingCalculationGuard {
+                inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
+            }
+        }
+    }
+
+    impl Drop for OngoingCalculationGuard {
+        fn drop(&mut self) {
+            if let Some(counter) = self.inc_drop_calculation.take() {
+                counter.inc();
+            }
+        }
+    }
+
+    impl OngoingCalculationGuard {
+        pub(crate) fn calculation_result_saved(mut self) -> FinishedCalculationGuard {
+            drop(self.inc_drop_calculation.take());
+            CALCULATED.births.inc();
+            FinishedCalculationGuard {
+                inc_on_drop: CALCULATED.deaths.clone(),
+            }
+        }
+    }
+
+    pub(crate) struct FinishedCalculationGuard {
+        inc_on_drop: IntCounter,
+    }
+
+    impl Drop for FinishedCalculationGuard {
+        fn drop(&mut self) {
+            self.inc_on_drop.inc();
+        }
+    }
+
+    // context: https://github.com/neondatabase/neon/issues/5963
+    pub(crate) static TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE: Lazy<IntCounter> =
+        Lazy::new(|| {
+            register_int_counter!(
+                "pageserver_initial_logical_size_timelines_where_walreceiver_got_approximate_size",
+                "Counter for the following event: walreceiver calls\
+                 Timeline::get_current_logical_size() and it returns `Approximate` for the first time."
+            )
+            .unwrap()
+        });
+}
 
 pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
@@ -380,7 +655,7 @@ static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(||
         "pageserver_evictions_with_low_residence_duration",
         "If a layer is evicted that was resident for less than `low_threshold`, it is counted to this counter. \
          Residence duration is determined using the `residence_duration_data_source`.",
-        &["tenant_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
+        &["tenant_id", "shard_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
     )
     .expect("failed to define a metric")
 });
@@ -413,14 +688,54 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_is_loading")
 });
 
-/// How long did tenants take to go from construction to active state?
-pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+/// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
+/// like how long it took to load.
+///
+/// Note that these are process-global metrics, _not_ per-tenant metrics.  Per-tenant
+/// metrics are rather expensive, and usually fine grained stuff makes more sense
+/// at a timeline level than tenant level.
+pub(crate) struct TenantMetrics {
+    /// How long did tenants take to go from construction to active state?
+    pub(crate) activation: Histogram,
+    pub(crate) preload: Histogram,
+    pub(crate) attach: Histogram,
+
+    /// How many tenants are included in the initial startup of the pagesrever?
+    pub(crate) startup_scheduled: IntCounter,
+    pub(crate) startup_complete: IntCounter,
+}
+
+pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| {
+    TenantMetrics {
+    activation: register_histogram!(
         "pageserver_tenant_activation_seconds",
         "Time taken by tenants to activate, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
-    .expect("Failed to register pageserver_tenant_activation_seconds metric")
+    .expect("Failed to register metric"),
+    preload: register_histogram!(
+        "pageserver_tenant_preload_seconds",
+        "Time taken by tenants to load remote metadata on startup/attach, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    attach: register_histogram!(
+        "pageserver_tenant_attach_seconds",
+        "Time taken by tenants to intialize, after remote metadata is already loaded",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    startup_scheduled: register_int_counter!(
+        "pageserver_tenant_startup_scheduled",
+        "Number of tenants included in pageserver startup (doesn't count tenants attached later)"
+    ).expect("Failed to register metric"),
+    startup_complete: register_int_counter!(
+        "pageserver_tenant_startup_complete",
+        "Number of tenants that have completed warm-up, or activated on-demand during initial startup: \
+         should eventually reach `pageserver_tenant_startup_scheduled_total`.  Does not include broken \
+         tenants: such cases will lead to this metric never reaching the scheduled count."
+    ).expect("Failed to register metric"),
+}
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
@@ -444,10 +759,16 @@ impl EvictionsWithLowResidenceDurationBuilder {
         }
     }
 
-    fn build(&self, tenant_id: &str, timeline_id: &str) -> EvictionsWithLowResidenceDuration {
+    fn build(
+        &self,
+        tenant_id: &str,
+        shard_id: &str,
+        timeline_id: &str,
+    ) -> EvictionsWithLowResidenceDuration {
         let counter = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
             .get_metric_with_label_values(&[
                 tenant_id,
+                shard_id,
                 timeline_id,
                 self.data_source,
                 &EvictionsWithLowResidenceDuration::threshold_label_value(self.threshold),
@@ -478,21 +799,24 @@ impl EvictionsWithLowResidenceDuration {
     pub fn change_threshold(
         &mut self,
         tenant_id: &str,
+        shard_id: &str,
         timeline_id: &str,
         new_threshold: Duration,
     ) {
         if new_threshold == self.threshold {
             return;
         }
-        let mut with_new =
-            EvictionsWithLowResidenceDurationBuilder::new(self.data_source, new_threshold)
-                .build(tenant_id, timeline_id);
+        let mut with_new = EvictionsWithLowResidenceDurationBuilder::new(
+            self.data_source,
+            new_threshold,
+        )
+        .build(tenant_id, shard_id, timeline_id);
         std::mem::swap(self, &mut with_new);
-        with_new.remove(tenant_id, timeline_id);
+        with_new.remove(tenant_id, shard_id, timeline_id);
     }
 
     // This could be a `Drop` impl, but, we need the `tenant_id` and `timeline_id`.
-    fn remove(&mut self, tenant_id: &str, timeline_id: &str) {
+    fn remove(&mut self, tenant_id: &str, shard_id: &str, timeline_id: &str) {
         let Some(_counter) = self.counter.take() else {
             return;
         };
@@ -501,6 +825,7 @@ impl EvictionsWithLowResidenceDuration {
 
         let removed = EVICTIONS_WITH_LOW_RESIDENCE_DURATION.remove_label_values(&[
             tenant_id,
+            shard_id,
             timeline_id,
             self.data_source,
             &threshold,
@@ -537,26 +862,78 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     30.000,   // 30000 ms
 ];
 
-/// Tracks time taken by fs operations near VirtualFile.
+/// VirtualFile fs operation variants.
 ///
 /// Operations:
 /// - open ([`std::fs::OpenOptions::open`])
-/// - close (dropping [`std::fs::File`])
+/// - close (dropping [`crate::virtual_file::VirtualFile`])
 /// - close-by-replace (close by replacement algorithm)
 /// - read (`read_at`)
 /// - write (`write_at`)
 /// - seek (modify internal position or file length query)
 /// - fsync ([`std::fs::File::sync_all`])
 /// - metadata ([`std::fs::File::metadata`])
-pub(crate) static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_io_operations_seconds",
-        "Time spent in IO operations",
-        &["operation"],
-        STORAGE_IO_TIME_BUCKETS.into()
-    )
-    .expect("failed to define a metric")
-});
+#[derive(
+    Debug, Clone, Copy, strum_macros::EnumCount, strum_macros::EnumIter, strum_macros::FromRepr,
+)]
+pub(crate) enum StorageIoOperation {
+    Open,
+    OpenAfterReplace,
+    Close,
+    CloseByReplace,
+    Read,
+    Write,
+    Seek,
+    Fsync,
+    Metadata,
+}
+
+impl StorageIoOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageIoOperation::Open => "open",
+            StorageIoOperation::OpenAfterReplace => "open-after-replace",
+            StorageIoOperation::Close => "close",
+            StorageIoOperation::CloseByReplace => "close-by-replace",
+            StorageIoOperation::Read => "read",
+            StorageIoOperation::Write => "write",
+            StorageIoOperation::Seek => "seek",
+            StorageIoOperation::Fsync => "fsync",
+            StorageIoOperation::Metadata => "metadata",
+        }
+    }
+}
+
+/// Tracks time taken by fs operations near VirtualFile.
+#[derive(Debug)]
+pub(crate) struct StorageIoTime {
+    metrics: [Histogram; StorageIoOperation::COUNT],
+}
+
+impl StorageIoTime {
+    fn new() -> Self {
+        let storage_io_histogram_vec = register_histogram_vec!(
+            "pageserver_io_operations_seconds",
+            "Time spent in IO operations",
+            &["operation"],
+            STORAGE_IO_TIME_BUCKETS.into()
+        )
+        .expect("failed to define a metric");
+        let metrics = std::array::from_fn(|i| {
+            let op = StorageIoOperation::from_repr(i).unwrap();
+            storage_io_histogram_vec
+                .get_metric_with_label_values(&[op.as_str()])
+                .unwrap()
+        });
+        Self { metrics }
+    }
+
+    pub(crate) fn get(&self, op: StorageIoOperation) -> &Histogram {
+        &self.metrics[op as usize]
+    }
+}
+
+pub(crate) static STORAGE_IO_TIME_METRIC: Lazy<StorageIoTime> = Lazy::new(StorageIoTime::new);
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
 
@@ -569,6 +946,25 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub(crate) mod virtual_file_descriptor_cache {
+    use super::*;
+
+    pub(crate) static SIZE_MAX: Lazy<UIntGauge> = Lazy::new(|| {
+        register_uint_gauge!(
+            "pageserver_virtual_file_descriptor_cache_size_max",
+            "Maximum number of open file descriptors in the cache."
+        )
+        .unwrap()
+    });
+
+    // SIZE_CURRENT: derive it like so:
+    // ```
+    // sum (pageserver_io_operations_seconds_count{operation=~"^(open|open-after-replace)$")
+    // -ignoring(operation)
+    // sum(pageserver_io_operations_seconds_count{operation=~"^(close|close-by-replace)$"}
+    // ```
+}
 
 #[derive(Debug)]
 struct GlobalAndPerTimelineHistogram {
@@ -627,12 +1023,62 @@ static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static SMGR_QUERY_TIME_GLOBAL_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {
+    [
+        1,
+        10,
+        20,
+        40,
+        60,
+        80,
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800,
+        900,
+        1_000, // 1ms
+        2_000,
+        4_000,
+        6_000,
+        8_000,
+        10_000, // 10ms
+        20_000,
+        40_000,
+        60_000,
+        80_000,
+        100_000,
+        200_000,
+        400_000,
+        600_000,
+        800_000,
+        1_000_000, // 1s
+        2_000_000,
+        4_000_000,
+        6_000_000,
+        8_000_000,
+        10_000_000, // 10s
+        20_000_000,
+        50_000_000,
+        100_000_000,
+        200_000_000,
+        1_000_000_000, // 1000s
+    ]
+    .into_iter()
+    .map(Duration::from_micros)
+    .map(|d| d.as_secs_f64())
+    .collect()
+});
+
 static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds_global",
         "Time spent on smgr query handling, aggregated by query type.",
         &["smgr_query_type"],
-        CRITICAL_OP_BUCKETS.into(),
+        SMGR_QUERY_TIME_GLOBAL_BUCKETS.clone(),
     )
     .expect("failed to define a metric")
 });
@@ -815,6 +1261,133 @@ static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy
     .expect("failed to define a metric")
 });
 
+pub(crate) struct TenantManagerMetrics {
+    pub(crate) tenant_slots: UIntGauge,
+    pub(crate) tenant_slot_writes: IntCounter,
+    pub(crate) unexpected_errors: IntCounter,
+}
+
+pub(crate) static TENANT_MANAGER: Lazy<TenantManagerMetrics> = Lazy::new(|| {
+    TenantManagerMetrics {
+    tenant_slots: register_uint_gauge!(
+        "pageserver_tenant_manager_slots",
+        "How many slots currently exist, including all attached, secondary and in-progress operations",
+    )
+    .expect("failed to define a metric"),
+    tenant_slot_writes: register_int_counter!(
+        "pageserver_tenant_manager_slot_writes",
+        "Writes to a tenant slot, including all of create/attach/detach/delete"
+    )
+    .expect("failed to define a metric"),
+    unexpected_errors: register_int_counter!(
+        "pageserver_tenant_manager_unexpected_errors_total",
+        "Number of unexpected conditions encountered: nonzero value indicates a non-fatal bug."
+    )
+    .expect("failed to define a metric"),
+}
+});
+
+pub(crate) struct DeletionQueueMetrics {
+    pub(crate) keys_submitted: IntCounter,
+    pub(crate) keys_dropped: IntCounter,
+    pub(crate) keys_executed: IntCounter,
+    pub(crate) keys_validated: IntCounter,
+    pub(crate) dropped_lsn_updates: IntCounter,
+    pub(crate) unexpected_errors: IntCounter,
+    pub(crate) remote_errors: IntCounterVec,
+}
+pub(crate) static DELETION_QUEUE: Lazy<DeletionQueueMetrics> = Lazy::new(|| {
+    DeletionQueueMetrics{
+
+    keys_submitted: register_int_counter!(
+        "pageserver_deletion_queue_submitted_total",
+        "Number of objects submitted for deletion"
+    )
+    .expect("failed to define a metric"),
+
+    keys_dropped: register_int_counter!(
+        "pageserver_deletion_queue_dropped_total",
+        "Number of object deletions dropped due to stale generation."
+    )
+    .expect("failed to define a metric"),
+
+    keys_executed: register_int_counter!(
+        "pageserver_deletion_queue_executed_total",
+        "Number of objects deleted. Only includes objects that we actually deleted, sum with pageserver_deletion_queue_dropped_total for the total number of keys processed to completion"
+    )
+    .expect("failed to define a metric"),
+
+    keys_validated: register_int_counter!(
+        "pageserver_deletion_queue_validated_total",
+        "Number of keys validated for deletion.  Sum with pageserver_deletion_queue_dropped_total for the total number of keys that have passed through the validation stage."
+    )
+    .expect("failed to define a metric"),
+
+    dropped_lsn_updates: register_int_counter!(
+        "pageserver_deletion_queue_dropped_lsn_updates_total",
+        "Updates to remote_consistent_lsn dropped due to stale generation number."
+    )
+    .expect("failed to define a metric"),
+    unexpected_errors: register_int_counter!(
+        "pageserver_deletion_queue_unexpected_errors_total",
+        "Number of unexpected condiions that may stall the queue: any value above zero is unexpected."
+    )
+    .expect("failed to define a metric"),
+    remote_errors: register_int_counter_vec!(
+        "pageserver_deletion_queue_remote_errors_total",
+        "Retryable remote I/O errors while executing deletions, for example 503 responses to DeleteObjects",
+        &["op_kind"],
+    )
+    .expect("failed to define a metric")
+}
+});
+
+pub(crate) struct WalIngestMetrics {
+    pub(crate) records_received: IntCounter,
+    pub(crate) records_committed: IntCounter,
+    pub(crate) records_filtered: IntCounter,
+}
+
+pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
+    records_received: register_int_counter!(
+        "pageserver_wal_ingest_records_received",
+        "Number of WAL records received from safekeepers"
+    )
+    .expect("failed to define a metric"),
+    records_committed: register_int_counter!(
+        "pageserver_wal_ingest_records_committed",
+        "Number of WAL records which resulted in writes to pageserver storage"
+    )
+    .expect("failed to define a metric"),
+    records_filtered: register_int_counter!(
+        "pageserver_wal_ingest_records_filtered",
+        "Number of WAL records filtered out due to sharding"
+    )
+    .expect("failed to define a metric"),
+});
+pub(crate) struct SecondaryModeMetrics {
+    pub(crate) upload_heatmap: IntCounter,
+    pub(crate) upload_heatmap_errors: IntCounter,
+    pub(crate) upload_heatmap_duration: Histogram,
+}
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+    upload_heatmap: register_int_counter!(
+        "pageserver_secondary_upload_heatmap",
+        "Number of heatmaps written to remote storage by attached tenants"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_errors: register_int_counter!(
+        "pageserver_secondary_upload_heatmap_errors",
+        "Failures writing heatmap to remote storage"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_duration: register_histogram!(
+        "pageserver_secondary_upload_heatmap_duration",
+        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+    )
+    .expect("failed to define a metric"),
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
@@ -863,6 +1436,17 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
         &["event"],
     )
     .expect("Failed to register tenant_task_events metric")
+});
+
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_background_loop_semaphore_wait_start_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls started",
+        "pageserver_background_loop_semaphore_wait_finish_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+        &["task"],
+    )
+    .unwrap()
 });
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -977,15 +1561,6 @@ pub(crate) static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub(crate) static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the Postgres WAL redo process",
-        redo_histogram_time_buckets!(),
-    )
-    .expect("failed to define a metric")
-});
-
 pub(crate) static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_records_histogram",
@@ -1012,6 +1587,72 @@ pub(crate) static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub(crate) static WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_wal_redo_process_launch_duration",
+        "Histogram of the duration of successful WalRedoProcess::launch calls",
+        redo_histogram_time_buckets!(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) struct WalRedoProcessCounters {
+    pub(crate) started: IntCounter,
+    pub(crate) killed_by_cause: enum_map::EnumMap<WalRedoKillCause, IntCounter>,
+    pub(crate) active_stderr_logger_tasks_started: IntCounter,
+    pub(crate) active_stderr_logger_tasks_finished: IntCounter,
+}
+
+#[derive(Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
+pub(crate) enum WalRedoKillCause {
+    WalRedoProcessDrop,
+    NoLeakChildDrop,
+    Startup,
+}
+
+impl Default for WalRedoProcessCounters {
+    fn default() -> Self {
+        let started = register_int_counter!(
+            "pageserver_wal_redo_process_started_total",
+            "Number of WAL redo processes started",
+        )
+        .unwrap();
+
+        let killed = register_int_counter_vec!(
+            "pageserver_wal_redo_process_stopped_total",
+            "Number of WAL redo processes stopped",
+            &["cause"],
+        )
+        .unwrap();
+
+        let active_stderr_logger_tasks_started = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_started_total",
+            "Number of active walredo stderr logger tasks that have started",
+        )
+        .unwrap();
+
+        let active_stderr_logger_tasks_finished = register_int_counter!(
+            "pageserver_walredo_stderr_logger_tasks_finished_total",
+            "Number of active walredo stderr logger tasks that have finished",
+        )
+        .unwrap();
+
+        Self {
+            started,
+            killed_by_cause: EnumMap::from_array(std::array::from_fn(|i| {
+                let cause = <WalRedoKillCause as enum_map::Enum>::from_usize(i);
+                let cause_str: &'static str = cause.into();
+                killed.with_label_values(&[cause_str])
+            })),
+            active_stderr_logger_tasks_started,
+            active_stderr_logger_tasks_finished,
+        }
+    }
+}
+
+pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
+    Lazy::new(WalRedoProcessCounters::default);
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
 pub struct StorageTimeMetricsTimer {
@@ -1080,6 +1721,7 @@ impl StorageTimeMetrics {
 #[derive(Debug)]
 pub struct TimelineMetrics {
     tenant_id: String,
+    shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
@@ -1089,7 +1731,7 @@ pub struct TimelineMetrics {
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
-    pub resident_physical_size_gauge: UIntGauge,
+    resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -1100,11 +1742,12 @@ pub struct TimelineMetrics {
 
 impl TimelineMetrics {
     pub fn new(
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
     ) -> Self {
-        let tenant_id = tenant_id.to_string();
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
         let flush_time_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
@@ -1141,11 +1784,12 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let evictions_with_low_residence_duration =
-            evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
+        let evictions_with_low_residence_duration = evictions_with_low_residence_duration_builder
+            .build(&tenant_id, &shard_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
+            shard_id,
             timeline_id,
             flush_time_histo,
             compact_time_histo,
@@ -1165,14 +1809,38 @@ impl TimelineMetrics {
             ),
         }
     }
+
+    pub(crate) fn record_new_file_metrics(&self, sz: u64) {
+        self.resident_physical_size_add(sz);
+        self.num_persistent_files_created.inc_by(1);
+        self.persistent_bytes_written.inc_by(sz);
+    }
+
+    pub(crate) fn resident_physical_size_sub(&self, sz: u64) {
+        self.resident_physical_size_gauge.sub(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(sz);
+    }
+
+    pub(crate) fn resident_physical_size_add(&self, sz: u64) {
+        self.resident_physical_size_gauge.add(sz);
+        crate::metrics::RESIDENT_PHYSICAL_SIZE_GLOBAL.add(sz);
+    }
+
+    pub(crate) fn resident_physical_size_get(&self) -> u64 {
+        self.resident_physical_size_gauge.get()
+    }
 }
 
 impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
+        let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        {
+            RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
+            let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+        }
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
@@ -1181,7 +1849,7 @@ impl Drop for TimelineMetrics {
         self.evictions_with_low_residence_duration
             .write()
             .unwrap()
-            .remove(tenant_id, timeline_id);
+            .remove(tenant_id, shard_id, timeline_id);
 
         // The following metrics are born outside of the TimelineMetrics lifecycle but still
         // removed at the end of it. The idea is to have the metrics outlive the
@@ -1223,19 +1891,55 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::context::{PageContentKind, RequestContext};
+use crate::task_mgr::TaskKind;
+
+/// Maintain a per timeline gauge in addition to the global gauge.
+struct PerTimelineRemotePhysicalSizeGauge {
+    last_set: u64,
+    gauge: UIntGauge,
+}
+
+impl PerTimelineRemotePhysicalSizeGauge {
+    fn new(per_timeline_gauge: UIntGauge) -> Self {
+        Self {
+            last_set: per_timeline_gauge.get(),
+            gauge: per_timeline_gauge,
+        }
+    }
+    fn set(&mut self, sz: u64) {
+        self.gauge.set(sz);
+        if sz < self.last_set {
+            REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set - sz);
+        } else {
+            REMOTE_PHYSICAL_SIZE_GLOBAL.add(sz - self.last_set);
+        };
+        self.last_set = sz;
+    }
+    fn get(&self) -> u64 {
+        self.gauge.get()
+    }
+}
+
+impl Drop for PerTimelineRemotePhysicalSizeGauge {
+    fn drop(&mut self) {
+        REMOTE_PHYSICAL_SIZE_GLOBAL.sub(self.last_set);
+    }
+}
+
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,
     timeline_id: String,
-    remote_physical_size_gauge: Mutex<Option<UIntGauge>>,
+    remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
     calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
     bytes_started_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
     bytes_finished_counter: Mutex<HashMap<(&'static str, &'static str), IntCounter>>,
 }
 
 impl RemoteTimelineClientMetrics {
-    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+    pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         RemoteTimelineClientMetrics {
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_shard_id.tenant_id.to_string(),
             timeline_id: timeline_id.to_string(),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
@@ -1244,18 +1948,24 @@ impl RemoteTimelineClientMetrics {
         }
     }
 
-    pub fn remote_physical_size_gauge(&self) -> UIntGauge {
+    pub(crate) fn remote_physical_size_set(&self, sz: u64) {
         let mut guard = self.remote_physical_size_gauge.lock().unwrap();
-        guard
-            .get_or_insert_with(|| {
+        let gauge = guard.get_or_insert_with(|| {
+            PerTimelineRemotePhysicalSizeGauge::new(
                 REMOTE_PHYSICAL_SIZE
                     .get_metric_with_label_values(&[
                         &self.tenant_id.to_string(),
                         &self.timeline_id.to_string(),
                     ])
-                    .unwrap()
-            })
-            .clone()
+                    .unwrap(),
+            )
+        });
+        gauge.set(sz);
+    }
+
+    pub(crate) fn remote_physical_size_get(&self) -> u64 {
+        let guard = self.remote_physical_size_gauge.lock().unwrap();
+        guard.as_ref().map(|gauge| gauge.get()).unwrap_or(0)
     }
 
     pub fn remote_operation_time(
@@ -1594,6 +2304,17 @@ pub fn preinitialize_metrics() {
         Lazy::force(c);
     });
 
+    // Deletion queue stats
+    Lazy::force(&DELETION_QUEUE);
+
+    // Tenant stats
+    Lazy::force(&TENANT);
+
+    // Tenant manager stats
+    Lazy::force(&TENANT_MANAGER);
+
+    Lazy::force(&crate::tenant::storage_layer::layer::LAYER_IMPL_METRICS);
+
     // countervecs
     [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
         .into_iter()
@@ -1607,15 +2328,17 @@ pub fn preinitialize_metrics() {
     // histograms
     [
         &READ_NUM_FS_LAYERS,
-        &RECONSTRUCT_TIME,
         &WAIT_LSN_TIME,
         &WAL_REDO_TIME,
-        &WAL_REDO_WAIT_TIME,
         &WAL_REDO_RECORDS_HISTOGRAM,
         &WAL_REDO_BYTES_HISTOGRAM,
+        &WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
     ]
     .into_iter()
     .for_each(|h| {
         Lazy::force(h);
     });
+
+    // Custom
+    Lazy::force(&RECONSTRUCT_TIME);
 }

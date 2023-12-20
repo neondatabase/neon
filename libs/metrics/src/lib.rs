@@ -2,8 +2,12 @@
 //! make sure that we use the same dep version everywhere.
 //! Otherwise, we might not see all metrics registered via
 //! a default registry.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use once_cell::sync::Lazy;
-use prometheus::core::{AtomicU64, Collector, GenericGauge, GenericGaugeVec};
+use prometheus::core::{
+    Atomic, AtomicU64, Collector, GenericCounter, GenericCounterVec, GenericGauge, GenericGaugeVec,
+};
 pub use prometheus::opts;
 pub use prometheus::register;
 pub use prometheus::Error;
@@ -89,14 +93,14 @@ pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
     0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
 ];
 
-pub fn set_build_info_metric(revision: &str) {
+pub fn set_build_info_metric(revision: &str, build_tag: &str) {
     let metric = register_int_gauge_vec!(
         "libmetrics_build_info",
         "Build/version information",
-        &["revision"]
+        &["revision", "build_tag"]
     )
     .expect("Failed to register build info metric");
-    metric.with_label_values(&[revision]).set(1);
+    metric.with_label_values(&[revision, build_tag]).set(1);
 }
 
 // Records I/O stats in a "cross-platform" way.
@@ -131,3 +135,137 @@ fn get_rusage_stats() -> libc::rusage {
         rusage.assume_init()
     }
 }
+
+/// Create an [`IntCounterPairVec`] and registers to default registry.
+#[macro_export(local_inner_macros)]
+macro_rules! register_int_counter_pair_vec {
+    ($NAME1:expr, $HELP1:expr, $NAME2:expr, $HELP2:expr, $LABELS_NAMES:expr $(,)?) => {{
+        match (
+            $crate::register_int_counter_vec!($NAME1, $HELP1, $LABELS_NAMES),
+            $crate::register_int_counter_vec!($NAME2, $HELP2, $LABELS_NAMES),
+        ) {
+            (Ok(inc), Ok(dec)) => Ok($crate::IntCounterPairVec::new(inc, dec)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        }
+    }};
+}
+/// Create an [`IntCounterPair`] and registers to default registry.
+#[macro_export(local_inner_macros)]
+macro_rules! register_int_counter_pair {
+    ($NAME1:expr, $HELP1:expr, $NAME2:expr, $HELP2:expr $(,)?) => {{
+        match (
+            $crate::register_int_counter!($NAME1, $HELP1),
+            $crate::register_int_counter!($NAME2, $HELP2),
+        ) {
+            (Ok(inc), Ok(dec)) => Ok($crate::IntCounterPair::new(inc, dec)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        }
+    }};
+}
+
+/// A Pair of [`GenericCounterVec`]s. Like an [`GenericGaugeVec`] but will always observe changes
+pub struct GenericCounterPairVec<P: Atomic> {
+    inc: GenericCounterVec<P>,
+    dec: GenericCounterVec<P>,
+}
+
+/// A Pair of [`GenericCounter`]s. Like an [`GenericGauge`] but will always observe changes
+pub struct GenericCounterPair<P: Atomic> {
+    inc: GenericCounter<P>,
+    dec: GenericCounter<P>,
+}
+
+impl<P: Atomic> GenericCounterPairVec<P> {
+    pub fn new(inc: GenericCounterVec<P>, dec: GenericCounterVec<P>) -> Self {
+        Self { inc, dec }
+    }
+
+    /// `get_metric_with_label_values` returns the [`GenericCounterPair<P>`] for the given slice
+    /// of label values (same order as the VariableLabels in Desc). If that combination of
+    /// label values is accessed for the first time, a new [`GenericCounterPair<P>`] is created.
+    ///
+    /// An error is returned if the number of label values is not the same as the
+    /// number of VariableLabels in Desc.
+    pub fn get_metric_with_label_values(&self, vals: &[&str]) -> Result<GenericCounterPair<P>> {
+        Ok(GenericCounterPair {
+            inc: self.inc.get_metric_with_label_values(vals)?,
+            dec: self.dec.get_metric_with_label_values(vals)?,
+        })
+    }
+
+    /// `with_label_values` works as `get_metric_with_label_values`, but panics if an error
+    /// occurs.
+    pub fn with_label_values(&self, vals: &[&str]) -> GenericCounterPair<P> {
+        self.get_metric_with_label_values(vals).unwrap()
+    }
+}
+
+impl<P: Atomic> GenericCounterPair<P> {
+    pub fn new(inc: GenericCounter<P>, dec: GenericCounter<P>) -> Self {
+        Self { inc, dec }
+    }
+
+    /// Increment the gauge by 1, returning a guard that decrements by 1 on drop.
+    pub fn guard(&self) -> GenericCounterPairGuard<P> {
+        self.inc.inc();
+        GenericCounterPairGuard(self.dec.clone())
+    }
+
+    /// Increment the gauge by n, returning a guard that decrements by n on drop.
+    pub fn guard_by(&self, n: P::T) -> GenericCounterPairGuardBy<P> {
+        self.inc.inc_by(n);
+        GenericCounterPairGuardBy(self.dec.clone(), n)
+    }
+
+    /// Increase the gauge by 1.
+    #[inline]
+    pub fn inc(&self) {
+        self.inc.inc();
+    }
+
+    /// Decrease the gauge by 1.
+    #[inline]
+    pub fn dec(&self) {
+        self.dec.inc();
+    }
+
+    /// Add the given value to the gauge. (The value can be
+    /// negative, resulting in a decrement of the gauge.)
+    #[inline]
+    pub fn inc_by(&self, v: P::T) {
+        self.inc.inc_by(v);
+    }
+
+    /// Subtract the given value from the gauge. (The value can be
+    /// negative, resulting in an increment of the gauge.)
+    #[inline]
+    pub fn dec_by(&self, v: P::T) {
+        self.dec.inc_by(v);
+    }
+}
+
+/// Guard returned by [`GenericCounterPair::guard`]
+pub struct GenericCounterPairGuard<P: Atomic>(GenericCounter<P>);
+
+impl<P: Atomic> Drop for GenericCounterPairGuard<P> {
+    fn drop(&mut self) {
+        self.0.inc();
+    }
+}
+/// Guard returned by [`GenericCounterPair::guard_by`]
+pub struct GenericCounterPairGuardBy<P: Atomic>(GenericCounter<P>, P::T);
+
+impl<P: Atomic> Drop for GenericCounterPairGuardBy<P> {
+    fn drop(&mut self) {
+        self.0.inc_by(self.1);
+    }
+}
+
+/// A Pair of [`IntCounterVec`]s. Like an [`IntGaugeVec`] but will always observe changes
+pub type IntCounterPairVec = GenericCounterPairVec<AtomicU64>;
+
+/// A Pair of [`IntCounter`]s. Like an [`IntGauge`] but will always observe changes
+pub type IntCounterPair = GenericCounterPair<AtomicU64>;
+
+/// A guard for [`IntCounterPair`] that will decrement the gauge on drop
+pub type IntCounterPairGuard = GenericCounterPairGuard<AtomicU64>;

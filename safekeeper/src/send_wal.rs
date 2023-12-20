@@ -2,12 +2,12 @@
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::Term;
+use crate::safekeeper::{Term, TermLsn};
 use crate::timeline::Timeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
-use anyhow::Context as AnyhowContext;
+use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use postgres_backend::PostgresBackend;
@@ -16,7 +16,6 @@ use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::id::TenantTimelineId;
 use utils::lsn::AtomicLsn;
@@ -313,10 +312,8 @@ impl WalSendersShared {
 }
 
 // Serialized is used only for pretty printing in json.
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalSenderState {
-    #[serde_as(as = "DisplayFromStr")]
     ttid: TenantTimelineId,
     addr: SocketAddr,
     conn_id: ConnectionId,
@@ -390,26 +387,25 @@ impl SafekeeperPostgresHandler {
             self.appname.clone(),
         ));
 
-        let commit_lsn_watch_rx = tli.get_commit_lsn_watch_rx();
-
-        // Walproposer gets special handling: safekeeper must give proposer all
-        // local WAL till the end, whether committed or not (walproposer will
-        // hang otherwise). That's because walproposer runs the consensus and
-        // synchronizes safekeepers on the most advanced one.
+        // Walsender can operate in one of two modes which we select by
+        // application_name: give only committed WAL (used by pageserver) or all
+        // existing WAL (up to flush_lsn, used by walproposer or peer recovery).
+        // The second case is always driven by a consensus leader which term
+        // must generally be also supplied. However we're sloppy to do this in
+        // walproposer recovery which will be removed soon. So TODO is to make
+        // it not Option'al then.
         //
-        // There is a small risk of this WAL getting concurrently garbaged if
-        // another compute rises which collects majority and starts fixing log
-        // on this safekeeper itself. That's ok as (old) proposer will never be
-        // able to commit such WAL.
-        let stop_pos: Option<Lsn> = if self.is_walproposer_recovery() {
-            let wal_end = tli.get_flush_lsn().await;
-            Some(wal_end)
+        // Fetching WAL without term in recovery creates a small risk of this
+        // WAL getting concurrently garbaged if another compute rises which
+        // collects majority and starts fixing log on this safekeeper itself.
+        // That's ok as (old) proposer will never be able to commit such WAL.
+        let end_watch = if self.is_walproposer_recovery() {
+            EndWatch::Flush(tli.get_term_flush_lsn_watch_rx())
         } else {
-            None
+            EndWatch::Commit(tli.get_commit_lsn_watch_rx())
         };
-
-        // take the latest commit_lsn if don't have stop_pos
-        let end_pos = stop_pos.unwrap_or(*commit_lsn_watch_rx.borrow());
+        // we don't check term here; it will be checked on first waiting/WAL reading anyway.
+        let end_pos = end_watch.get();
 
         if end_pos < start_pos {
             warn!(
@@ -419,8 +415,11 @@ impl SafekeeperPostgresHandler {
         }
 
         info!(
-            "starting streaming from {:?} till {:?}, available WAL ends at {}",
-            start_pos, stop_pos, end_pos
+            "starting streaming from {:?}, available WAL ends at {}, recovery={}, appname={:?}",
+            start_pos,
+            end_pos,
+            matches!(end_watch, EndWatch::Flush(_)),
+            appname
         );
 
         // switch to copy
@@ -445,9 +444,8 @@ impl SafekeeperPostgresHandler {
             appname,
             start_pos,
             end_pos,
-            stop_pos,
             term,
-            commit_lsn_watch_rx,
+            end_watch,
             ws_guard: ws_guard.clone(),
             wal_reader,
             send_buf: [0; MAX_SEND_SIZE],
@@ -466,6 +464,32 @@ impl SafekeeperPostgresHandler {
     }
 }
 
+/// Walsender streams either up to commit_lsn (normally) or flush_lsn in the
+/// given term (recovery by walproposer or peer safekeeper).
+enum EndWatch {
+    Commit(Receiver<Lsn>),
+    Flush(Receiver<TermLsn>),
+}
+
+impl EndWatch {
+    /// Get current end of WAL.
+    fn get(&self) -> Lsn {
+        match self {
+            EndWatch::Commit(r) => *r.borrow(),
+            EndWatch::Flush(r) => r.borrow().lsn,
+        }
+    }
+
+    /// Wait for the update.
+    async fn changed(&mut self) -> anyhow::Result<()> {
+        match self {
+            EndWatch::Commit(r) => r.changed().await?,
+            EndWatch::Flush(r) => r.changed().await?,
+        }
+        Ok(())
+    }
+}
+
 /// A half driving sending WAL.
 struct WalSender<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
@@ -480,14 +504,12 @@ struct WalSender<'a, IO> {
     // We send this LSN to the receiver as wal_end, so that it knows how much
     // WAL this safekeeper has. This LSN should be as fresh as possible.
     end_pos: Lsn,
-    // If present, terminate after reaching this position; used by walproposer
-    // in recovery.
-    stop_pos: Option<Lsn>,
     /// When streaming uncommitted part, the term the client acts as the leader
     /// in. Streaming is stopped if local term changes to a different (higher)
     /// value.
     term: Option<Term>,
-    commit_lsn_watch_rx: Receiver<Lsn>,
+    /// Watch channel receiver to learn end of available WAL (and wait for its advancement).
+    end_watch: EndWatch,
     ws_guard: Arc<WalSenderGuard>,
     wal_reader: WalReader,
     // buffer for readling WAL into to send it
@@ -497,29 +519,20 @@ struct WalSender<'a, IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
     /// - an error occurs
-    /// - if we are streaming to walproposer, we've streamed until stop_pos
-    ///   (recovery finished)
-    /// - receiver is caughtup and there is no computes
+    /// - receiver is caughtup and there is no computes (if streaming up to commit_lsn)
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
     async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
-            // If we are streaming to walproposer, check it is time to stop.
-            if let Some(stop_pos) = self.stop_pos {
-                if self.start_pos >= stop_pos {
-                    // recovery finished
-                    return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
-                        "ending streaming to walproposer at {}, recovery finished",
-                        self.start_pos
-                    )));
-                }
-            } else {
-                // Wait for the next portion if it is not there yet, or just
-                // update our end of WAL available for sending value, we
-                // communicate it to the receiver.
-                self.wait_wal().await?;
-            }
+            // Wait for the next portion if it is not there yet, or just
+            // update our end of WAL available for sending value, we
+            // communicate it to the receiver.
+            self.wait_wal().await?;
+            assert!(
+                self.end_pos > self.start_pos,
+                "nothing to send after waiting for WAL"
+            );
 
             // try to send as much as available, capped by MAX_SEND_SIZE
             let mut send_size = self
@@ -567,7 +580,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// exit in the meanwhile
     async fn wait_wal(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
-            self.end_pos = *self.commit_lsn_watch_rx.borrow();
+            self.end_pos = self.end_watch.get();
             if self.end_pos > self.start_pos {
                 // We have something to send.
                 trace!("got end_pos {:?}, streaming", self.end_pos);
@@ -575,27 +588,31 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             }
 
             // Wait for WAL to appear, now self.end_pos == self.start_pos.
-            if let Some(lsn) = wait_for_lsn(&mut self.commit_lsn_watch_rx, self.start_pos).await? {
+            if let Some(lsn) = wait_for_lsn(&mut self.end_watch, self.term, self.start_pos).await? {
                 self.end_pos = lsn;
                 trace!("got end_pos {:?}, streaming", self.end_pos);
                 return Ok(());
             }
 
-            // Timed out waiting for WAL, check for termination and send KA
-            if let Some(remote_consistent_lsn) = self
-                .ws_guard
-                .walsenders
-                .get_ws_remote_consistent_lsn(self.ws_guard.id)
-            {
-                if self.tli.should_walsender_stop(remote_consistent_lsn).await {
-                    // Terminate if there is nothing more to send.
-                    // Note that "ending streaming" part of the string is used by
-                    // pageserver to identify WalReceiverError::SuccessfulCompletion,
-                    // do not change this string without updating pageserver.
-                    return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+            // Timed out waiting for WAL, check for termination and send KA.
+            // Check for termination only if we are streaming up to commit_lsn
+            // (to pageserver).
+            if let EndWatch::Commit(_) = self.end_watch {
+                if let Some(remote_consistent_lsn) = self
+                    .ws_guard
+                    .walsenders
+                    .get_ws_remote_consistent_lsn(self.ws_guard.id)
+                {
+                    if self.tli.should_walsender_stop(remote_consistent_lsn).await {
+                        // Terminate if there is nothing more to send.
+                        // Note that "ending streaming" part of the string is used by
+                        // pageserver to identify WalReceiverError::SuccessfulCompletion,
+                        // do not change this string without updating pageserver.
+                        return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
                         "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
                         self.appname, self.start_pos,
                     )));
+                    }
                 }
             }
 
@@ -663,22 +680,32 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
 
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Wait until we have commit_lsn > lsn or timeout expires. Returns
-/// - Ok(Some(commit_lsn)) if needed lsn is successfully observed;
+/// Wait until we have available WAL > start_pos or timeout expires. Returns
+/// - Ok(Some(end_pos)) if needed lsn is successfully observed;
 /// - Ok(None) if timeout expired;
-/// - Err in case of error (if watch channel is in trouble, shouldn't happen).
-async fn wait_for_lsn(rx: &mut Receiver<Lsn>, lsn: Lsn) -> anyhow::Result<Option<Lsn>> {
+/// - Err in case of error -- only if 1) term changed while fetching in recovery
+///   mode 2) watch channel closed, which must never happen.
+async fn wait_for_lsn(
+    rx: &mut EndWatch,
+    client_term: Option<Term>,
+    start_pos: Lsn,
+) -> anyhow::Result<Option<Lsn>> {
     let res = timeout(POLL_STATE_TIMEOUT, async move {
-        let mut commit_lsn;
         loop {
-            rx.changed().await?;
-            commit_lsn = *rx.borrow();
-            if commit_lsn > lsn {
-                break;
+            let end_pos = rx.get();
+            if end_pos > start_pos {
+                return Ok(end_pos);
             }
+            if let EndWatch::Flush(rx) = rx {
+                let curr_term = rx.borrow().term;
+                if let Some(client_term) = client_term {
+                    if curr_term != client_term {
+                        bail!("term changed: requested {}, now {}", client_term, curr_term);
+                    }
+                }
+            }
+            rx.changed().await?;
         }
-
-        Ok(commit_lsn)
     })
     .await;
 

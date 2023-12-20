@@ -5,7 +5,6 @@ on:
     branches:
       - main
       - release
-      - ci-run/pr-*
   pull_request:
 
 defaults:
@@ -24,7 +23,30 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
 jobs:
+  check-permissions:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Disallow PRs from forks
+      if: |
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository
+
+      run: |
+        if [ "${{ contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}" = "true" ]; then
+          MESSAGE="Please create a PR from a branch of ${GITHUB_REPOSITORY} instead of a fork"
+        else
+          MESSAGE="The PR should be reviewed and labelled with 'approved-for-ci-run' to trigger a CI run"
+        fi
+
+        echo >&2 "We don't run CI for PRs from forks"
+        echo >&2 "${MESSAGE}"
+
+        exit 1
+
+
   tag:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
@@ -53,6 +75,7 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -85,6 +108,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
+    needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -148,9 +172,10 @@ jobs:
       # https://github.com/EmbarkStudios/cargo-deny
       - name: Check rust licenses/bans/advisories/sources
         if: ${{ !cancelled() }}
-        run: cargo deny check
+        run: cargo deny check --hide-inclusion-graph
 
   build-neon:
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -162,6 +187,7 @@ jobs:
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
     steps:
       - name: Fix git ownership
@@ -173,6 +199,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v3
@@ -187,7 +217,7 @@ jobs:
           # Eventually it will be replaced by a regression test https://github.com/neondatabase/neon/pull/4603
 
           FAILED=false
-          for postgres in postgres-v14 postgres-v15; do
+          for postgres in postgres-v14 postgres-v15 postgres-v16; do
             expected=$(cat vendor/revisions.json | jq --raw-output '."'"${postgres}"'"')
             actual=$(git rev-parse "HEAD:vendor/${postgres}")
             if [ "${expected}" != "${actual}" ]; then
@@ -209,6 +239,10 @@ jobs:
         id: pg_v15_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
 
+      - name: Set pg 16 revision for caching
+        id: pg_v16_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
+
       # Set some environment variables used by all the steps.
       #
       # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
@@ -229,10 +263,12 @@ jobs:
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
           fi
-          echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
-          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
-          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
+          {
+            echo "cov_prefix=${cov_prefix}"
+            echo "CARGO_FEATURES=${CARGO_FEATURES}"
+            echo "CARGO_FLAGS=${CARGO_FLAGS}"
+            echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
+          } >> $GITHUB_ENV
 
       # Disabled for now
       # Don't include the ~/.cargo/registry/src directory. It contains just
@@ -267,6 +303,13 @@ jobs:
           path: pg_install/v15
           key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
+      - name: Cache postgres v16 build
+        id: cache_pg_16
+        uses: actions/cache@v3
+        with:
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
         run: mold -run make postgres-v14 -j$(nproc)
@@ -275,8 +318,15 @@ jobs:
         if: steps.cache_pg_15.outputs.cache-hit != 'true'
         run: mold -run make postgres-v15 -j$(nproc)
 
+      - name: Build postgres v16
+        if: steps.cache_pg_16.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v16 -j$(nproc)
+
       - name: Build neon extensions
         run: mold -run make neon-pg-ext -j$(nproc)
+
+      - name: Build walproposer-lib
+        run: mold -run make walproposer-lib -j$(nproc)
 
       - name: Run cargo build
         run: |
@@ -292,6 +342,16 @@ jobs:
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
+
+          # Run separate tests for real Azure Blob Storage
+          # XXX: replace region with `eu-central-1`-like region
+          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
 
       - name: Install rust binaries
         run: |
@@ -348,17 +408,17 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
+    needs: [ check-permissions, build-neon, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
-    needs: [ build-neon ]
     strategy:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-        pg_version: [ v14, v15 ]
+        pg_version: [ v14, v15, v16 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -378,20 +438,21 @@ jobs:
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
         env:
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
+          BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
+    needs: [ check-permissions, build-neon ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
-    needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
@@ -413,17 +474,18 @@ jobs:
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-          TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}"
+          TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
   create-test-report:
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks ]
+    if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
+
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests, benchmarks ]
-    if: ${{ !cancelled() }}
 
     steps:
       - uses: actions/checkout@v3
@@ -449,42 +511,40 @@ jobs:
               reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
             }
 
+            const coverage = {
+              coverageUrl: "${{ needs.coverage-report.outputs.coverage-html }}",
+              summaryJsonUrl: "${{ needs.coverage-report.outputs.coverage-json }}",
+            }
+
             const script = require("./scripts/comment-test-report.js")
             await script({
               github,
               context,
               fetch,
               report,
+              coverage,
             })
 
   coverage-report:
+    needs: [ check-permissions, regress-tests ]
+
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ regress-tests ]
     strategy:
       fail-fast: false
       matrix:
         build_type: [ debug ]
+    outputs:
+        coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
+        coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: true
-          fetch-depth: 1
-
-#      Disabled for now
-#      - name: Restore cargo deps cache
-#        id: cache_cargo
-#        uses: actions/cache@v3
-#        with:
-#          path: |
-#            ~/.cargo/registry/
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          fetch-depth: 0
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -527,13 +587,48 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
+      - name: Build coverage report NEW
+        id: upload-coverage-report-new
+        env:
+          BUCKET: neon-github-public-dev
+          # A differential coverage report is available only for PRs.
+          # (i.e. for pushes into main/release branches we have a regular coverage report)
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          CURRENT="${COMMIT_SHA}"
+          BASELINE="$(git merge-base $BASE_SHA $CURRENT)"
+
+          cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
+
+          GENHTML_ARGS="--ignore-errors path,unmapped,empty --synthesize-missing --demangle-cpp rustfilt --output-directory lcov-html ${CURRENT}.info"
+
+          # Use differential coverage if the baseline coverage exists.
+          # It can be missing if the coverage repoer wasn't uploaded yet or tests has failed on BASELINE commit.
+          if aws s3 cp --only-show-errors s3://${BUCKET}/code-coverage/${BASELINE}/lcov.info ./${BASELINE}.info; then
+            git diff ${BASELINE} ${CURRENT} -- '*.rs' > baseline-current.diff
+
+            GENHTML_ARGS="--baseline-file ${BASELINE}.info --diff-file baseline-current.diff ${GENHTML_ARGS}"
+          fi
+
+          genhtml ${GENHTML_ARGS}
+
+          aws s3 cp --only-show-errors --recursive ./lcov-html/ s3://${BUCKET}/code-coverage/${COMMIT_SHA}/lcov
+
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/index.html
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/summary.json
+          echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
+
       - uses: actions/github-script@v6
         env:
           REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
+          REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
           script: |
-            const { REPORT_URL, COMMIT_SHA } = process.env
+            const { REPORT_URL, REPORT_URL_NEW, COMMIT_SHA } = process.env
 
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
@@ -544,12 +639,21 @@ jobs:
               context: 'Code coverage report',
             })
 
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${COMMIT_SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL_NEW}`,
+              context: 'Code coverage report NEW',
+            })
+
   trigger-e2e-tests:
+    needs: [ check-permissions, promote-images, tag ]
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ promote-images, tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -590,8 +694,8 @@ jobs:
             }"
 
   neon-image:
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
@@ -628,6 +732,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+                           --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
@@ -638,7 +743,7 @@ jobs:
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag ]
+    needs: [ check-permissions, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
@@ -683,17 +788,17 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-node-image:
+    needs: [ check-permissions, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: gcr.io/kaniko-project/executor:v1.9.2-debug
       # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
       # Should be prevented by https://github.com/neondatabase/neon/issues/4281
       options: --add-host=download.osgeo.org:140.211.15.30
-    needs: [ tag ]
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15 ]
+        version: [ v14, v15, v16 ]
     defaults:
       run:
         shell: sh -eu {0}
@@ -742,17 +847,17 @@ jobs:
         run: rm -rf ~/.ecr
 
   vm-compute-node-image:
+    needs: [ check-permissions, tag, compute-node-image ]
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15 ]
+        version: [ v14, v15, v16 ]
     defaults:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.17.5
+      VM_BUILDER_VERSION: v0.21.0
 
     steps:
       - name: Checkout
@@ -774,8 +879,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -enable-file-cache \
-            -cgroup-uid=postgres \
+            -spec=vm-image-spec.yaml \
             -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
             -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
@@ -784,7 +888,7 @@ jobs:
           docker push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   test-images:
-    needs: [ tag, neon-image, compute-node-image, compute-tools-image ]
+    needs: [ check-permissions, tag, neon-image, compute-node-image, compute-tools-image ]
     runs-on: [ self-hosted, gen3, small ]
 
     steps:
@@ -827,8 +931,8 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
+    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: [ self-hosted, gen3, small ]
-    needs: [ tag, test-images, vm-compute-node-image ]
     container: golang:1.19-bullseye
     # Don't add if-condition here.
     # The job should always be run because we have dependant other jobs that shouldn't be skipped
@@ -848,6 +952,7 @@ jobs:
         run: |
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
+          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} vm-compute-node-v16
 
       - name: Add latest tag to images
         if: |
@@ -860,6 +965,8 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
         if: |
@@ -872,6 +979,8 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v16:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v16:latest
 
       - name: Configure Docker Hub login
         run: |
@@ -883,6 +992,7 @@ jobs:
         run: |
           crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
           crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
+          crane push vm-compute-node-v16 neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}}
 
       - name: Push latest tags to Docker Hub
         if: |
@@ -895,21 +1005,19 @@ jobs:
           crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v16:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v16:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  build-private-extensions:
-    runs-on: [ self-hosted, gen3, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
-    needs: [ tag ]
+  trigger-custom-extensions-build-and-wait:
+    needs: [ check-permissions, tag ]
+    runs-on: ubuntu-latest
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
+          COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
           REMOTE_REPO="${{ github.repository_owner }}/build-custom-extensions"
 
           curl -f -X POST \
@@ -939,11 +1047,50 @@ jobs:
               }
             }"
 
+      - name: Wait for extension build to finish
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          TIMEOUT=1800 # 30 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
+          INTERVAL=15 # try each N seconds
+
+          last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
+
+          for ((i=0; i <= TIMEOUT; i+=INTERVAL)); do
+            sleep $INTERVAL
+
+            # Get statuses for the latest commit in the PR / branch
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }}" > statuses.json
+
+            # Get the latest status for the "build-and-upload-extensions" context
+            last_status=$(jq --raw-output '[.[] | select(.context == "build-and-upload-extensions")] | sort_by(.created_at)[-1].state' statuses.json)
+            if [ "${last_status}" = "pending" ]; then
+              # Extension build is still in progress.
+              continue
+            elif [ "${last_status}" = "success" ]; then
+              # Extension build is successful.
+              exit 0
+            else
+              # Status is neither "pending" nor "success", exit the loop and fail the job.
+              break
+            fi
+          done
+
+          # Extension build failed, print `statuses.json` for debugging and fail the job.
+          jq '.' statuses.json
+
+          echo >&2 "Status of extension build is '${last_status}' != 'success'"
+          exit 1
+
   deploy:
+    needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
+    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
+
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ promote-images, tag, regress-tests ]
-    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
         run: |
@@ -954,6 +1101,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v3
@@ -966,7 +1117,10 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}}
+            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
+
+            # TODO: move deployPreprodRegion to release (`"$GITHUB_REF_NAME" == "release"` block), once Staging support different compute tag prefixes for different regions
+            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=true
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
           else
@@ -981,20 +1135,35 @@ jobs:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
           script: |
-            github.rest.git.createRef({
+            await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
               ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
               sha: context.sha,
             })
 
+      - name: Create GitHub release
+        if: github.ref_name == 'release'
+        uses: actions/github-script@v6
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: "${{ needs.tag.outputs.build-tag }}",
+              generate_release_notes: true,
+            })
+
   promote-compatibility-data:
+    needs: [ check-permissions, promote-images, tag, regress-tests ]
+    if: github.ref_name == 'release'
+
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ promote-images, tag, regress-tests ]
-    if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Promote compatibility snapshot for the release
         env:
@@ -1002,7 +1171,7 @@ jobs:
           PREFIX: artifacts/latest
         run: |
           # Update compatibility snapshot for the release
-          for pg_version in v14 v15; do
+          for pg_version in v14 v15 v16; do
             for build_type in debug release; do
               OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
               NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst

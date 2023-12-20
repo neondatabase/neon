@@ -13,7 +13,7 @@ use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
 use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
-use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeSpec, PgIdent, Role};
 
 // Do control plane request and return response if any. In case of error it
 // returns a bool flag indicating whether it makes sense to retry the request
@@ -24,7 +24,7 @@ fn do_control_plane_request(
 ) -> Result<ControlPlaneSpecResponse, (bool, String)> {
     let resp = reqwest::blocking::Client::new()
         .get(uri)
-        .header("Authorization", jwt)
+        .header("Authorization", format!("Bearer {}", jwt))
         .send()
         .map_err(|e| {
             (
@@ -68,7 +68,7 @@ pub fn get_spec_from_control_plane(
     base_uri: &str,
     compute_id: &str,
 ) -> Result<Option<ComputeSpec>> {
-    let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
+    let cp_uri = format!("{base_uri}/compute/api/v2/computes/{compute_id}/spec");
     let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
         Ok(v) => v,
         Err(_) => "".to_string(),
@@ -118,19 +118,6 @@ pub fn get_spec_from_control_plane(
     spec
 }
 
-/// It takes cluster specification and does the following:
-/// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.
-/// - Update `pg_hba.conf` to allow external connections.
-pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
-    // File `postgresql.conf` is no longer included into `basebackup`, so just
-    // always write all config into it creating new file.
-    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec, None)?;
-
-    update_pg_hba(pgdata_path)?;
-
-    Ok(())
-}
-
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json
@@ -158,6 +145,38 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
     } else {
         info!("reused pre-existing standby.signal");
     }
+    Ok(())
+}
+
+/// Compute could be unexpectedly shut down, for example, during the
+/// database dropping. This leaves the database in the invalid state,
+/// which prevents new db creation with the same name. This function
+/// will clean it up before proceeding with catalog updates. All
+/// possible future cleanup operations may go here too.
+#[instrument(skip_all)]
+pub fn cleanup_instance(client: &mut Client) -> Result<()> {
+    let existing_dbs = get_existing_dbs(client)?;
+
+    for (_, db) in existing_dbs {
+        if db.invalid {
+            // After recent commit in Postgres, interrupted DROP DATABASE
+            // leaves the database in the invalid state. According to the
+            // commit message, the only option for user is to drop it again.
+            // See:
+            //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
+            //
+            // Postgres Neon extension is done the way, that db is de-registered
+            // in the control plane metadata only after it is dropped. So there is
+            // a chance that it still thinks that db should exist. This means
+            // that it will be re-created by `handle_databases()`. Yet, it's fine
+            // as user can just repeat drop (in vanilla Postgres they would need
+            // to do the same, btw).
+            let query = format!("DROP DATABASE IF EXISTS {}", db.name.pg_quote());
+            info!("dropping invalid database {}", db.name);
+            client.execute(query.as_str(), &[])?;
+        }
+    }
+
     Ok(())
 }
 
@@ -264,13 +283,22 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         match action {
             RoleAction::None => {}
             RoleAction::Update => {
+                // This can be run on /every/ role! Not just ones created through the console.
+                // This means that if you add some funny ALTER here that adds a permission,
+                // this will get run even on user-created roles! This will result in different
+                // behavior before and after a spec gets reapplied. The below ALTER as it stands
+                // now only grants LOGIN and changes the password. Please do not allow this branch
+                // to do anything silly.
                 let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
             RoleAction::Create => {
+                // This branch only runs when roles are created through the console, so it is
+                // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
+                // from neon_superuser.
                 let mut query: String = format!(
-                    "CREATE ROLE {} CREATEROLE CREATEDB BYPASSRLS IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);
@@ -342,32 +370,48 @@ pub fn handle_role_deletions(spec: &ComputeSpec, connstr: &str, client: &mut Cli
     Ok(())
 }
 
+fn reassign_owned_objects_in_one_db(
+    conf: Config,
+    role_name: &PgIdent,
+    db_owner: &PgIdent,
+) -> Result<()> {
+    let mut client = conf.connect(NoTls)?;
+
+    // This will reassign all dependent objects to the db owner
+    let reassign_query = format!(
+        "REASSIGN OWNED BY {} TO {}",
+        role_name.pg_quote(),
+        db_owner.pg_quote()
+    );
+    info!(
+        "reassigning objects owned by '{}' in db '{}' to '{}'",
+        role_name,
+        conf.get_dbname().unwrap_or(""),
+        db_owner
+    );
+    client.simple_query(&reassign_query)?;
+
+    // This now will only drop privileges of the role
+    let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
+    client.simple_query(&drop_query)?;
+    Ok(())
+}
+
 // Reassign all owned objects in all databases to the owner of the database.
 fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent) -> Result<()> {
     for db in &spec.cluster.databases {
         if db.owner != *role_name {
             let mut conf = Config::from_str(connstr)?;
             conf.dbname(&db.name);
-
-            let mut client = conf.connect(NoTls)?;
-
-            // This will reassign all dependent objects to the db owner
-            let reassign_query = format!(
-                "REASSIGN OWNED BY {} TO {}",
-                role_name.pg_quote(),
-                db.owner.pg_quote()
-            );
-            info!(
-                "reassigning objects owned by '{}' in db '{}' to '{}'",
-                role_name, &db.name, &db.owner
-            );
-            client.simple_query(&reassign_query)?;
-
-            // This now will only drop privileges of the role
-            let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
-            client.simple_query(&drop_query)?;
+            reassign_owned_objects_in_one_db(conf, role_name, &db.owner)?;
         }
     }
+
+    // Also handle case when there are no databases in the spec.
+    // In this case we need to reassign objects in the default database.
+    let conf = Config::from_str(connstr)?;
+    let db_owner = PgIdent::from_str("cloud_admin")?;
+    reassign_owned_objects_in_one_db(conf, role_name, &db_owner)?;
 
     Ok(())
 }
@@ -379,13 +423,13 @@ fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent
 /// which together provide us idempotency.
 #[instrument(skip_all)]
 pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
-    let existing_dbs: Vec<Database> = get_existing_dbs(client)?;
+    let existing_dbs = get_existing_dbs(client)?;
 
     // Print a list of existing Postgres databases (only in debug mode)
     if span_enabled!(Level::INFO) {
         info!("postgres databases:");
-        for r in &existing_dbs {
-            info!("    {}:{}", r.name, r.owner);
+        for (dbname, db) in &existing_dbs {
+            info!("    {}:{}", dbname, db.owner);
         }
     }
 
@@ -439,8 +483,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 "rename_db" => {
                     let new_name = op.new_name.as_ref().unwrap();
 
-                    // XXX: with a limited number of roles it is fine, but consider making it a HashMap
-                    if existing_dbs.iter().any(|r| r.name == op.name) {
+                    if existing_dbs.get(&op.name).is_some() {
                         let query: String = format!(
                             "ALTER DATABASE {} RENAME TO {}",
                             op.name.pg_quote(),
@@ -457,14 +500,12 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     }
 
     // Refresh Postgres databases info to handle possible renames
-    let existing_dbs: Vec<Database> = get_existing_dbs(client)?;
+    let existing_dbs = get_existing_dbs(client)?;
 
     info!("cluster spec databases:");
     for db in &spec.cluster.databases {
         let name = &db.name;
-
-        // XXX: with a limited number of databases it is fine, but consider making it a HashMap
-        let pg_db = existing_dbs.iter().find(|r| r.name == *name);
+        let pg_db = existing_dbs.get(name);
 
         enum DatabaseAction {
             None,
@@ -530,13 +571,32 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 /// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
 /// to allow users creating trusted extensions and re-creating `public` schema, for example.
 #[instrument(skip_all)]
-pub fn handle_grants(spec: &ComputeSpec, connstr: &str) -> Result<()> {
-    info!("cluster spec grants:");
+pub fn handle_grants(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> Result<()> {
+    info!("modifying database permissions");
+    let existing_dbs = get_existing_dbs(client)?;
 
     // Do some per-database access adjustments. We'd better do this at db creation time,
     // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
     // atomically.
     for db in &spec.cluster.databases {
+        match existing_dbs.get(&db.name) {
+            Some(pg_db) => {
+                if pg_db.restrict_conn || pg_db.invalid {
+                    info!(
+                        "skipping grants for db {} (invalid: {}, connections not allowed: {})",
+                        db.name, pg_db.invalid, pg_db.restrict_conn
+                    );
+                    continue;
+                }
+            }
+            None => {
+                bail!(
+                    "database {} doesn't exist in Postgres after handle_databases()",
+                    db.name
+                );
+            }
+        }
+
         let mut conf = Config::from_str(connstr)?;
         conf.dbname(&db.name);
 
@@ -575,6 +635,11 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str) -> Result<()> {
 
         // Explicitly grant CREATE ON SCHEMA PUBLIC to the web_access user.
         // This is needed because since postgres 15 this privilege is removed by default.
+        // TODO: web_access isn't created for almost 1 year. It could be that we have
+        // active users of 1 year old projects, but hopefully not, so check it and
+        // remove this code if possible. The worst thing that could happen is that
+        // user won't be able to use public schema in NEW databases created in the
+        // very OLD project.
         let grant_query = "DO $$\n\
                 BEGIN\n\
                     IF EXISTS(\n\
@@ -615,6 +680,36 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             client.simple_query(query)?;
         }
     }
+
+    Ok(())
+}
+
+/// Run CREATE and ALTER EXTENSION neon UPDATE for postgres database
+#[instrument(skip_all)]
+pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
+    info!("handle extension neon");
+
+    let mut query = "CREATE SCHEMA IF NOT EXISTS neon";
+    client.simple_query(query)?;
+
+    query = "CREATE EXTENSION IF NOT EXISTS neon WITH SCHEMA neon";
+    info!("create neon extension with query: {}", query);
+    client.simple_query(query)?;
+
+    query = "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'";
+    client.simple_query(query)?;
+
+    query = "ALTER EXTENSION neon SET SCHEMA neon";
+    info!("alter neon extension schema with query: {}", query);
+    client.simple_query(query)?;
+
+    // this will be a no-op if extension is already up to date,
+    // which may happen in two cases:
+    // - extension was just installed
+    // - extension was already installed and is up to date
+    let query = "ALTER EXTENSION neon UPDATE";
+    info!("update neon extension schema with query: {}", query);
+    client.simple_query(query)?;
 
     Ok(())
 }

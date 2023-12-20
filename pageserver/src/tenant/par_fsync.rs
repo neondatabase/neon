@@ -1,17 +1,17 @@
 use std::{
     io,
-    path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::virtual_file::VirtualFile;
+use camino::{Utf8Path, Utf8PathBuf};
 
-fn fsync_path(path: &Path) -> io::Result<()> {
-    let file = VirtualFile::open(path)?;
+fn fsync_path(path: &Utf8Path) -> io::Result<()> {
+    // TODO use VirtualFile::fsync_all once we fully go async.
+    let file = std::fs::File::open(path)?;
     file.sync_all()
 }
 
-fn parallel_worker(paths: &[PathBuf], next_path_idx: &AtomicUsize) -> io::Result<()> {
+fn parallel_worker(paths: &[Utf8PathBuf], next_path_idx: &AtomicUsize) -> io::Result<()> {
     while let Some(path) = paths.get(next_path_idx.fetch_add(1, Ordering::Relaxed)) {
         fsync_path(path)?;
     }
@@ -19,7 +19,7 @@ fn parallel_worker(paths: &[PathBuf], next_path_idx: &AtomicUsize) -> io::Result
     Ok(())
 }
 
-fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
+fn fsync_in_thread_pool(paths: &[Utf8PathBuf]) -> io::Result<()> {
     // TODO: remove this function in favor of `par_fsync_async` once we asyncify everything.
 
     /// Use at most this number of threads.
@@ -48,7 +48,7 @@ fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
 }
 
 /// Parallel fsync all files. Can be used in non-async context as it is using rayon thread pool.
-pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
+pub fn par_fsync(paths: &[Utf8PathBuf]) -> io::Result<()> {
     if paths.len() == 1 {
         fsync_path(&paths[0])?;
         return Ok(());
@@ -57,9 +57,8 @@ pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
     fsync_in_thread_pool(paths)
 }
 
-/// Parallel fsync asynchronously. If number of files are less than PARALLEL_PATH_THRESHOLD, fsync is done in the current
-/// execution thread. Otherwise, we will spawn_blocking and run it in tokio.
-pub async fn par_fsync_async(paths: &[PathBuf]) -> io::Result<()> {
+/// Parallel fsync asynchronously.
+pub async fn par_fsync_async(paths: &[Utf8PathBuf]) -> io::Result<()> {
     const MAX_CONCURRENT_FSYNC: usize = 64;
     let mut next = paths.iter().peekable();
     let mut js = tokio::task::JoinSet::new();

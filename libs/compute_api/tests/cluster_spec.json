@@ -76,7 +76,7 @@
             },
             {
                 "name": "wal_level",
-                "value": "replica",
+                "value": "logical",
                 "vartype": "enum"
             },
             {

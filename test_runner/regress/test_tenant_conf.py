@@ -292,17 +292,14 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_creating_tenant_conf_after_attach",
-    )
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     # tenant is created with defaults, as in without config file
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
-    config_path = env.repo_dir / "tenants" / str(tenant_id) / "config"
+    config_path = env.pageserver.tenant_dir(tenant_id) / "config"
     assert config_path.exists(), "config file is always initially created"
 
     http_client = env.pageserver.http_client()
@@ -317,7 +314,11 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     assert not config_path.exists(), "detach did not remove config file"
 
-    http_client.tenant_attach(tenant_id)
+    # The re-attach's increment of the generation number may invalidate deletion queue
+    # updates in flight from the previous attachment.
+    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
+
+    env.pageserver.tenant_attach(tenant_id)
     wait_until(
         number_of_iterations=5,
         interval=1,
@@ -337,15 +338,17 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     neon_env_builder: NeonEnvBuilder,
 ):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
-        test_name="test_live_reconfig_get_evictions_low_residence_duration_metric_threshold",
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # disable compaction so that it will not download the layer for repartitioning
+            "compaction_period": "0s"
+        }
     )
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    env = neon_env_builder.init_start()
-    assert isinstance(env.remote_storage, LocalFsStorage)
-
-    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+    (tenant_id, timeline_id) = env.initial_tenant, env.initial_timeline
     ps_http = env.pageserver.http_client()
 
     def get_metric():

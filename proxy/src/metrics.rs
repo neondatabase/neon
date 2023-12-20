@@ -1,216 +1,232 @@
-//! Periodically collect proxy consumption metrics
-//! and push them to a HTTP endpoint.
-use crate::{config::MetricCollectionConfig, http};
-use chrono::{DateTime, Utc};
-use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use serde::Serialize;
-use std::{collections::HashMap, convert::Infallible, time::Duration};
-use tracing::{error, info, instrument, trace, warn};
+use ::metrics::{
+    exponential_buckets, register_int_counter_pair_vec, register_int_counter_vec,
+    IntCounterPairVec, IntCounterVec,
+};
+use prometheus::{
+    register_histogram, register_histogram_vec, register_int_gauge_vec, Histogram, HistogramVec,
+    IntGaugeVec,
+};
 
-const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
+use once_cell::sync::Lazy;
+use tokio::time;
 
-const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+pub static NUM_DB_CONNECTIONS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "proxy_opened_db_connections_total",
+        "Number of opened connections to a database.",
+        "proxy_closed_db_connections_total",
+        "Number of closed connections to a database.",
+        &["protocol"],
+    )
+    .unwrap()
+});
 
-/// Key that uniquely identifies the object, this metric describes.
-/// Currently, endpoint_id is enough, but this may change later,
-/// so keep it in a named struct.
-///
-/// Both the proxy and the ingestion endpoint will live in the same region (or cell)
-/// so while the project-id is unique across regions the whole pipeline will work correctly
-/// because we enrich the event with project_id in the control-plane endpoint.
-#[derive(Eq, Hash, PartialEq, Serialize, Debug, Clone)]
-pub struct Ids {
-    pub endpoint_id: String,
-    pub branch_id: String,
+pub static NUM_CLIENT_CONNECTION_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "proxy_opened_client_connections_total",
+        "Number of opened connections from a client.",
+        "proxy_closed_client_connections_total",
+        "Number of closed connections from a client.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTION_REQUESTS_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "proxy_accepted_connections_total",
+        "Number of client connections accepted.",
+        "proxy_closed_connections_total",
+        "Number of client connections closed.",
+        &["protocol"],
+    )
+    .unwrap()
+});
+
+pub static COMPUTE_CONNECTION_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "proxy_compute_connection_latency_seconds",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // http/ws/tcp, true/false, true/false, success/failure
+        // 3 * 2 * 2 * 2 = 24 counters
+        &["protocol", "cache_miss", "pool_miss", "outcome"],
+        // largest bucket = 2^16 * 0.5ms = 32s
+        exponential_buckets(0.0005, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static CONSOLE_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "proxy_console_request_latency",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // proxy_wake_compute/proxy_get_role_info
+        &["request"],
+        // largest bucket = 2^16 * 0.2ms = 13s
+        exponential_buckets(0.0002, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_BY_CACHE_OUTCOME: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_allowed_ips_cache_misses",
+        "Number of cache hits/misses for allowed ips",
+        // hit/miss
+        &["outcome"],
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_ACQUIRE_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_control_plane_token_acquire_seconds",
+        "Time it took for proxy to establish a connection to the compute endpoint",
+        // largest bucket = 3^16 * 0.05ms = 2.15s
+        exponential_buckets(0.00005, 3.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static RATE_LIMITER_LIMIT: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "semaphore_control_plane_limit",
+        "Current limit of the semaphore control plane",
+        &["limit"], // 2 counters
+    )
+    .unwrap()
+});
+
+pub static NUM_CONNECTION_ACCEPTED_BY_SNI: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_accepted_connections_by_sni",
+        "Number of connections (per sni).",
+        &["kind"],
+    )
+    .unwrap()
+});
+
+pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_allowed_ips_number",
+        "Number of allowed ips",
+        vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0],
+    )
+    .unwrap()
+});
+
+pub struct LatencyTimer {
+    // time since the stopwatch was started
+    start: Option<time::Instant>,
+    // accumulated time on the stopwatch
+    accumulated: std::time::Duration,
+    // label data
+    protocol: &'static str,
+    cache_miss: bool,
+    pool_miss: bool,
+    outcome: &'static str,
 }
 
-pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
-    info!("metrics collector config: {config:?}");
-    scopeguard::defer! {
-        info!("metrics collector has shut down");
+pub struct LatencyTimerPause<'a> {
+    timer: &'a mut LatencyTimer,
+}
+
+impl LatencyTimer {
+    pub fn new(protocol: &'static str) -> Self {
+        Self {
+            start: Some(time::Instant::now()),
+            accumulated: std::time::Duration::ZERO,
+            protocol,
+            cache_miss: false,
+            // by default we don't do pooling
+            pool_miss: true,
+            // assume failed unless otherwise specified
+            outcome: "failed",
+        }
     }
 
-    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
-    let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
-    let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
+    pub fn pause(&mut self) -> LatencyTimerPause<'_> {
+        // stop the stopwatch and record the time that we have accumulated
+        let start = self.start.take().expect("latency timer should be started");
+        self.accumulated += start.elapsed();
+        LatencyTimerPause { timer: self }
+    }
 
-    let mut ticker = tokio::time::interval(config.interval);
-    loop {
-        ticker.tick().await;
+    pub fn cache_miss(&mut self) {
+        self.cache_miss = true;
+    }
 
-        let res = collect_metrics_iteration(
-            &http_client,
-            &mut cached_metrics,
-            &config.endpoint,
-            &hostname,
-        )
-        .await;
+    pub fn pool_hit(&mut self) {
+        self.pool_miss = false;
+    }
 
-        match res {
-            Err(e) => error!("failed to send consumption metrics: {e} "),
-            Ok(_) => trace!("periodic metrics collection completed successfully"),
-        }
+    pub fn success(mut self) {
+        self.outcome = "success";
     }
 }
 
-fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
-    let mut current_metrics: Vec<(Ids, (u64, DateTime<Utc>))> = Vec::new();
-    let metrics = prometheus::default_registry().gather();
-
-    for m in metrics {
-        if m.get_name() == "proxy_io_bytes_per_client" {
-            for ms in m.get_metric() {
-                let direction = ms
-                    .get_label()
-                    .iter()
-                    .find(|l| l.get_name() == "direction")
-                    .unwrap()
-                    .get_value();
-
-                // Only collect metric for outbound traffic
-                if direction == "tx" {
-                    let endpoint_id = ms
-                        .get_label()
-                        .iter()
-                        .find(|l| l.get_name() == "endpoint_id")
-                        .unwrap()
-                        .get_value();
-                    let branch_id = ms
-                        .get_label()
-                        .iter()
-                        .find(|l| l.get_name() == "branch_id")
-                        .unwrap()
-                        .get_value();
-
-                    let value = ms.get_counter().get_value() as u64;
-
-                    // Report if the metric value is suspiciously large
-                    if value > (1u64 << 40) {
-                        warn!(
-                            "potentially abnormal counter value: branch_id {} endpoint_id {} val: {}",
-                            branch_id, endpoint_id, value
-                        );
-                    }
-
-                    current_metrics.push((
-                        Ids {
-                            endpoint_id: endpoint_id.to_string(),
-                            branch_id: branch_id.to_string(),
-                        },
-                        (value, Utc::now()),
-                    ));
-                }
-            }
-        }
+impl Drop for LatencyTimerPause<'_> {
+    fn drop(&mut self) {
+        // start the stopwatch again
+        self.timer.start = Some(time::Instant::now());
     }
-
-    current_metrics
 }
 
-#[instrument(skip_all)]
-async fn collect_metrics_iteration(
-    client: &http::ClientWithMiddleware,
-    cached_metrics: &mut HashMap<Ids, (u64, DateTime<Utc>)>,
-    metric_collection_endpoint: &reqwest::Url,
-    hostname: &str,
-) -> anyhow::Result<()> {
-    info!(
-        "starting collect_metrics_iteration. metric_collection_endpoint: {}",
-        metric_collection_endpoint
-    );
-
-    let current_metrics = gather_proxy_io_bytes_per_client();
-
-    let metrics_to_send: Vec<Event<Ids>> = current_metrics
-        .iter()
-        .filter_map(|(curr_key, (curr_val, curr_time))| {
-            let mut start_time = *curr_time;
-            let mut value = *curr_val;
-
-            if let Some((prev_val, prev_time)) = cached_metrics.get(curr_key) {
-                // Only send metrics updates if the metric has increased
-                if curr_val > prev_val {
-                    value = curr_val - prev_val;
-                    start_time = *prev_time;
-                } else {
-                    if curr_val < prev_val {
-                        error!("proxy_io_bytes_per_client metric value decreased from {} to {} for key {:?}",
-                        prev_val, curr_val, curr_key);
-                    }
-                    return None;
-                }
-            };
-
-            Some(Event {
-                kind: EventType::Incremental {
-                    start_time,
-                    stop_time: *curr_time,
-                },
-                metric: PROXY_IO_BYTES_PER_CLIENT,
-                idempotency_key: idempotency_key(hostname),
-                value,
-                extra: Ids {
-                    endpoint_id: curr_key.endpoint_id.clone(),
-                    branch_id: curr_key.branch_id.clone(),
-                },
-            })
-        })
-        .collect();
-
-    if metrics_to_send.is_empty() {
-        trace!("no new metrics to send");
-        return Ok(());
+impl Drop for LatencyTimer {
+    fn drop(&mut self) {
+        let duration =
+            self.start.map(|start| start.elapsed()).unwrap_or_default() + self.accumulated;
+        COMPUTE_CONNECTION_LATENCY
+            .with_label_values(&[
+                self.protocol,
+                bool_to_str(self.cache_miss),
+                bool_to_str(self.pool_miss),
+                self.outcome,
+            ])
+            .observe(duration.as_secs_f64())
     }
+}
 
-    // Send metrics.
-    // Split into chunks of 1000 metrics to avoid exceeding the max request size
-    for chunk in metrics_to_send.chunks(CHUNK_SIZE) {
-        let res = client
-            .post(metric_collection_endpoint.clone())
-            .json(&EventChunk {
-                events: chunk.into(),
-            })
-            .send()
-            .await;
+pub static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connection_failures_total",
+        "Number of connection failures (per kind).",
+        &["kind"],
+    )
+    .unwrap()
+});
 
-        let res = match res {
-            Ok(x) => x,
-            Err(err) => {
-                error!("failed to send metrics: {:?}", err);
-                continue;
-            }
-        };
+pub static NUM_WAKEUP_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_connection_failures_breakdown",
+        "Number of wake-up failures (per kind).",
+        &["retry", "kind"],
+    )
+    .unwrap()
+});
 
-        if !res.status().is_success() {
-            error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in chunk.iter().filter(|metric| metric.value > (1u64 << 40)) {
-                // Report if the metric value is suspiciously large
-                error!("potentially abnormal metric value: {:?}", metric);
-            }
-        }
-        // update cached metrics after they were sent
-        // (to avoid sending the same metrics twice)
-        // see the relevant discussion on why to do so even if the status is not success:
-        // https://github.com/neondatabase/neon/pull/4563#discussion_r1246710956
-        for send_metric in chunk {
-            let stop_time = match send_metric.kind {
-                EventType::Incremental { stop_time, .. } => stop_time,
-                _ => unreachable!(),
-            };
+pub static NUM_BYTES_PROXIED_PER_CLIENT_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes_per_client",
+        "Number of bytes sent/received between client and backend.",
+        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
+    )
+    .unwrap()
+});
 
-            cached_metrics
-                .entry(Ids {
-                    endpoint_id: send_metric.extra.endpoint_id.clone(),
-                    branch_id: send_metric.extra.branch_id.clone(),
-                })
-                // update cached value (add delta) and time
-                .and_modify(|e| {
-                    e.0 = e.0.saturating_add(send_metric.value);
-                    e.1 = stop_time
-                })
-                // cache new metric
-                .or_insert((send_metric.value, stop_time));
-        }
+pub static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes",
+        "Number of bytes sent/received between all clients and backends.",
+        &["direction"],
+    )
+    .unwrap()
+});
+
+pub const fn bool_to_str(x: bool) -> &'static str {
+    if x {
+        "true"
+    } else {
+        "false"
     }
-    Ok(())
 }

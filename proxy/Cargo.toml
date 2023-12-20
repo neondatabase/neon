@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+testing = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -24,6 +28,7 @@ hostname.workspace = true
 humantime.workspace = true
 hyper-tungstenite.workspace = true
 hyper.workspace = true
+ipnet.workspace = true
 itertools.workspace = true
 md5.workspace = true
 metrics.workspace = true
@@ -42,6 +47,7 @@ reqwest-middleware.workspace = true
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 routerify.workspace = true
+rustc-hash.workspace = true
 rustls-pemfile.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
@@ -50,10 +56,12 @@ serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 sync_wrapper.workspace = true
+task-local-extensions.workspace = true
 thiserror.workspace = true
 tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
+tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
@@ -66,9 +74,10 @@ webpki-roots.workspace = true
 x509-parser.workspace = true
 native-tls.workspace = true
 postgres-native-tls.workspace = true
+postgres-protocol.workspace = true
+smol_str.workspace = true
 
 workspace_hack.workspace = true
-tokio-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

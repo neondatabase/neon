@@ -33,7 +33,7 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
     workload_thread = threading.Thread(target=start_workload, args=(), daemon=True)
     workload_thread.start()
 
-    path = os.path.join(env.repo_dir, "pageserver.pid")
+    path = os.path.join(env.pageserver.workdir, "pageserver.pid")
     lsof = lsof_path()
     while workload_thread.is_alive():
         res = subprocess.run(

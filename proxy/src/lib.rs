@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::convert::Infallible;
 
 use anyhow::{bail, Context};
@@ -16,11 +18,15 @@ pub mod http;
 pub mod logging;
 pub mod metrics;
 pub mod parse;
+pub mod protocol2;
 pub mod proxy;
+pub mod rate_limiter;
 pub mod sasl;
 pub mod scram;
+pub mod serverless;
 pub mod stream;
 pub mod url;
+pub mod usage_metrics;
 pub mod waiters;
 
 /// Handle unix signals appropriately.

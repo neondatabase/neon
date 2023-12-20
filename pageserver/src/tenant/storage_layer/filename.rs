@@ -212,7 +212,7 @@ pub enum LayerFileName {
 }
 
 impl LayerFileName {
-    pub(crate) fn file_name(&self) -> String {
+    pub fn file_name(&self) -> String {
         self.to_string()
     }
 
@@ -224,6 +224,14 @@ impl LayerFileName {
             Image(file_name) if file_name.lsn > disk_consistent_lsn => true,
             Delta(file_name) if file_name.lsn_range.end > disk_consistent_lsn + 1 => true,
             _ => false,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        use LayerFileName::*;
+        match self {
+            Delta(_) => "delta",
+            Image(_) => "image",
         }
     }
 }

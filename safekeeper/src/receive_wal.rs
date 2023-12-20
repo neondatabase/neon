@@ -55,9 +55,12 @@ impl WalReceivers {
 
     /// Register new walreceiver. Returned guard provides access to the slot and
     /// automatically deregisters in Drop.
-    pub fn register(self: &Arc<WalReceivers>) -> WalReceiverGuard {
+    pub fn register(self: &Arc<WalReceivers>, conn_id: Option<ConnectionId>) -> WalReceiverGuard {
         let slots = &mut self.mutex.lock().slots;
-        let walreceiver = WalReceiverState::Voting;
+        let walreceiver = WalReceiverState {
+            conn_id,
+            status: WalReceiverStatus::Voting,
+        };
         // find empty slot or create new one
         let pos = if let Some(pos) = slots.iter().position(|s| s.is_none()) {
             slots[pos] = Some(walreceiver);
@@ -96,7 +99,19 @@ impl WalReceivers {
         self.mutex.lock().slots.iter().flatten().cloned().collect()
     }
 
-    /// Unregister walsender.
+    /// Get number of streaming walreceivers (normally 0 or 1) from compute.
+    pub fn get_num_streaming(self: &Arc<WalReceivers>) -> usize {
+        self.mutex
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            // conn_id.is_none skips recovery which also registers here
+            .filter(|s| s.conn_id.is_some() && matches!(s.status, WalReceiverStatus::Streaming))
+            .count()
+    }
+
+    /// Unregister walreceiver.
     fn unregister(self: &Arc<WalReceivers>, id: WalReceiverId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
@@ -108,16 +123,23 @@ struct WalReceiversShared {
     slots: Vec<Option<WalReceiverState>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalReceiverState {
+    /// None means it is recovery initiated by us (this safekeeper).
+    pub conn_id: Option<ConnectionId>,
+    pub status: WalReceiverStatus,
+}
+
 /// Walreceiver status. Currently only whether it passed voting stage and
 /// started receiving the stream, but it is easy to add more if needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WalReceiverState {
+pub enum WalReceiverStatus {
     Voting,
     Streaming,
 }
 
-/// Scope guard to access slot in WalSenders registry and unregister from it in
-/// Drop.
+/// Scope guard to access slot in WalReceivers registry and unregister from
+/// it in Drop.
 pub struct WalReceiverGuard {
     id: WalReceiverId,
     walreceivers: Arc<WalReceivers>,
@@ -136,8 +158,8 @@ impl Drop for WalReceiverGuard {
     }
 }
 
-const MSG_QUEUE_SIZE: usize = 256;
-const REPLY_QUEUE_SIZE: usize = 16;
+pub const MSG_QUEUE_SIZE: usize = 256;
+pub const REPLY_QUEUE_SIZE: usize = 16;
 
 impl SafekeeperPostgresHandler {
     /// Wrapper around handle_start_wal_push_guts handling result. Error is
@@ -261,7 +283,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
             tli.clone(),
             msg_rx,
             reply_tx,
-            self.conn_id,
+            Some(self.conn_id),
         ));
 
         // Forward all messages to WalAcceptor
@@ -317,31 +339,41 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
 // even when it writes a steady stream of messages.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Takes messages from msg_rx, processes and pushes replies to reply_tx.
-struct WalAcceptor {
+/// Encapsulates a task which takes messages from msg_rx, processes and pushes
+/// replies to reply_tx; reading from socket and writing to disk in parallel is
+/// beneficial for performance, this struct provides writing to disk part.
+pub struct WalAcceptor {
     tli: Arc<Timeline>,
     msg_rx: Receiver<ProposerAcceptorMessage>,
     reply_tx: Sender<AcceptorProposerMessage>,
+    conn_id: Option<ConnectionId>,
 }
 
 impl WalAcceptor {
-    /// Spawn thread with WalAcceptor running, return handle to it.
-    fn spawn(
+    /// Spawn task with WalAcceptor running, return handle to it. Task returns
+    /// Ok(()) if either of channels has closed, and Err if any error during
+    /// message processing is encountered.
+    ///
+    /// conn_id None means WalAcceptor is used by recovery initiated at this safekeeper.
+    pub fn spawn(
         tli: Arc<Timeline>,
         msg_rx: Receiver<ProposerAcceptorMessage>,
         reply_tx: Sender<AcceptorProposerMessage>,
-        conn_id: ConnectionId,
+        conn_id: Option<ConnectionId>,
     ) -> JoinHandle<anyhow::Result<()>> {
         task::spawn(async move {
             let mut wa = WalAcceptor {
                 tli,
                 msg_rx,
                 reply_tx,
+                conn_id,
             };
 
             let span_ttid = wa.tli.ttid; // satisfy borrow checker
             wa.run()
-                .instrument(info_span!("WAL acceptor", cid = %conn_id, ttid = %span_ttid))
+                .instrument(
+                    info_span!("WAL acceptor", cid = %conn_id.unwrap_or(0), ttid = %span_ttid),
+                )
                 .await
         })
     }
@@ -355,7 +387,7 @@ impl WalAcceptor {
         let _compute_conn_guard = ComputeConnectionGuard {
             timeline: Arc::clone(&self.tli),
         };
-        let walreceiver_guard = self.tli.get_walreceivers().register();
+        let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
         self.tli.update_status_notify().await?;
 
         // After this timestamp we will stop processing AppendRequests and send a response
@@ -372,7 +404,7 @@ impl WalAcceptor {
 
             // Update walreceiver state in shmem for reporting.
             if let ProposerAcceptorMessage::Elected(_) = &next_msg {
-                *walreceiver_guard.get() = WalReceiverState::Streaming;
+                walreceiver_guard.get().status = WalReceiverStatus::Streaming;
             }
 
             let reply_msg = if matches!(next_msg, ProposerAcceptorMessage::AppendRequest(_)) {

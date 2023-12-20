@@ -4,43 +4,50 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use anyhow::Context;
+use anyhow::Context as _;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
-    imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
-    provider_config::ProviderConfig, web_identity_token::WebIdentityTokenCredentialsProvider,
+    imds::credentials::ImdsCredentialsProvider,
+    meta::credentials::CredentialsProviderChain,
+    provider_config::ProviderConfig,
+    retry::{RetryConfigBuilder, RetryMode},
+    web_identity_token::WebIdentityTokenCredentialsProvider,
+    BehaviorVersion,
 };
-use aws_credential_types::cache::CredentialsCache;
+use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::{
-    config::{Config, Region},
+    config::{AsyncSleep, Builder, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
-    primitives::ByteStream,
     types::{Delete, ObjectIdentifier},
     Client,
 };
-use aws_smithy_http::body::SdkBody;
+use aws_smithy_async::rt::sleep::TokioSleep;
+
+use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::byte_stream::ByteStream;
+use bytes::Bytes;
+use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::{
-    io::{self, AsyncRead},
-    sync::Semaphore,
-};
-use tokio_util::io::ReaderStream;
-use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
-    Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
+    S3Config, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
-
-const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
 
 pub(super) mod metrics;
 
-use self::metrics::{AttemptOutcome, RequestKind};
+use self::metrics::AttemptOutcome;
+pub(super) use self::metrics::RequestKind;
 
 /// AWS S3 storage.
 pub struct S3Bucket {
@@ -48,10 +55,7 @@ pub struct S3Bucket {
     bucket_name: String,
     prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
-    // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
-    // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
-    // The helps to ensure we don't exceed the thresholds.
-    concurrency_limiter: Arc<Semaphore>,
+    concurrency_limiter: ConcurrencyLimiter,
 }
 
 #[derive(Default)]
@@ -63,7 +67,7 @@ struct GetObjectRequest {
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
-        debug!(
+        tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
@@ -80,7 +84,6 @@ impl S3Bucket {
             // needed to access remote extensions bucket
             .or_else("token", {
                 let provider_conf = ProviderConfig::without_region().with_region(region.clone());
-
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
                     .build()
@@ -89,16 +92,31 @@ impl S3Bucket {
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
-        let mut config_builder = Config::builder()
+        // AWS SDK requires us to specify how the RetryConfig should sleep when it wants to back off
+        let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
+
+        // We do our own retries (see [`backoff::retry`]).  However, for the AWS SDK to enable rate limiting in response to throttling
+        // responses (e.g. 429 on too many ListObjectsv2 requests), we must provide a retry config.  We set it to use at most one
+        // attempt, and enable 'Adaptive' mode, which causes rate limiting to be enabled.
+        let mut retry_config = RetryConfigBuilder::new();
+        retry_config
+            .set_max_attempts(Some(1))
+            .set_mode(Some(RetryMode::Adaptive));
+
+        let mut config_builder = Builder::default()
+            .behavior_version(BehaviorVersion::v2023_11_09())
             .region(region)
-            .credentials_cache(CredentialsCache::lazy())
-            .credentials_provider(credentials_provider);
+            .identity_cache(IdentityCache::lazy().build())
+            .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
+            .retry_config(retry_config.build())
+            .sleep_impl(SharedAsyncSleep::from(sleep_impl));
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
             config_builder = config_builder
                 .endpoint_url(custom_endpoint)
                 .force_path_style(true);
         }
+
         let client = Client::from_conf(config_builder.build());
 
         let prefix_in_bucket = aws_config.prefix_in_bucket.as_deref().map(|prefix| {
@@ -118,7 +136,7 @@ impl S3Bucket {
             bucket_name: aws_config.bucket_name.clone(),
             max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
-            concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
+            concurrency_limiter: ConcurrencyLimiter::new(aws_config.concurrency_limit.get()),
         })
     }
 
@@ -144,12 +162,11 @@ impl S3Bucket {
         assert_eq!(std::path::MAIN_SEPARATOR, REMOTE_STORAGE_PREFIX_SEPARATOR);
         let path_string = path
             .get_path()
-            .to_string_lossy()
-            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
-            .to_string();
+            .as_str()
+            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR);
         match &self.prefix_in_bucket {
-            Some(prefix) => prefix.clone() + "/" + &path_string,
-            None => path_string,
+            Some(prefix) => prefix.clone() + "/" + path_string,
+            None => path_string.to_string(),
         }
     }
 
@@ -157,7 +174,7 @@ impl S3Bucket {
         let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
-            .acquire()
+            .acquire(kind)
             .await
             .expect("semaphore is never closed");
 
@@ -173,8 +190,7 @@ impl S3Bucket {
         let started_at = start_counting_cancelled_wait(kind);
         let permit = self
             .concurrency_limiter
-            .clone()
-            .acquire_owned()
+            .acquire_owned(kind)
             .await
             .expect("semaphore is never closed");
 
@@ -202,58 +218,95 @@ impl S3Bucket {
 
         let started_at = ScopeGuard::into_inner(started_at);
 
-        if get_object.is_err() {
-            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                kind,
-                AttemptOutcome::Err,
-                started_at,
-            );
-        }
-
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
+
+                let body = object_output.body;
+                let body = ByteStreamAsStream::from(body);
+                let body = PermitCarrying::new(permit, body);
+                let body = TimedDownload::new(started_at, body);
+
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(TimedDownload::new(
-                        started_at,
-                        RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
-                    ))),
+                    download_stream: Box::pin(body),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
                 Err(DownloadError::NotFound)
             }
-            Err(e) => Err(DownloadError::Other(
-                anyhow::Error::new(e).context("download s3 object"),
-            )),
+            Err(e) => {
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("download s3 object"),
+                ))
+            }
         }
     }
 }
 
 pin_project_lite::pin_project! {
+    struct ByteStreamAsStream {
+        #[pin]
+        inner: aws_smithy_types::byte_stream::ByteStream
+    }
+}
+
+impl From<aws_smithy_types::byte_stream::ByteStream> for ByteStreamAsStream {
+    fn from(inner: aws_smithy_types::byte_stream::ByteStream) -> Self {
+        ByteStreamAsStream { inner }
+    }
+}
+
+impl Stream for ByteStreamAsStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // this does the std::io::ErrorKind::Other conversion
+        self.project().inner.poll_next(cx).map_err(|x| x.into())
+    }
+
+    // cannot implement size_hint because inner.size_hint is remaining size in bytes, which makes
+    // sense and Stream::size_hint does not really
+}
+
+pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct RatelimitedAsyncRead<S> {
+    struct PermitCarrying<S> {
         permit: tokio::sync::OwnedSemaphorePermit,
         #[pin]
         inner: S,
     }
 }
 
-impl<S: AsyncRead> RatelimitedAsyncRead<S> {
+impl<S> PermitCarrying<S> {
     fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        RatelimitedAsyncRead { permit, inner }
+        Self { permit, inner }
     }
 }
 
-impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_read(cx, buf)
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -273,7 +326,7 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<S: AsyncRead> TimedDownload<S> {
+impl<S> TimedDownload<S> {
     fn new(started_at: std::time::Instant, inner: S) -> Self {
         TimedDownload {
             started_at,
@@ -283,37 +336,38 @@ impl<S: AsyncRead> TimedDownload<S> {
     }
 }
 
-impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use std::task::ready;
+
         let this = self.project();
-        let before = buf.filled().len();
-        let read = std::task::ready!(this.inner.poll_read(cx, buf));
 
-        let read_eof = buf.filled().len() == before;
-
-        match read {
-            Ok(()) if read_eof => *this.outcome = AttemptOutcome::Ok,
-            Ok(()) => { /* still in progress */ }
-            Err(_) => *this.outcome = AttemptOutcome::Err,
+        let res = ready!(this.inner.poll_next(cx));
+        match &res {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => *this.outcome = metrics::AttemptOutcome::Err,
+            None => *this.outcome = metrics::AttemptOutcome::Ok,
         }
 
-        std::task::Poll::Ready(read)
+        Poll::Ready(res)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    /// See the doc for `RemoteStorage::list_prefixes`
-    /// Note: it wont include empty "directories"
-    async fn list_prefixes(
+    async fn list(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
+        mode: ListingMode,
+    ) -> Result<Listing, DownloadError> {
         let kind = RequestKind::List;
+        let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -322,13 +376,13 @@ impl RemoteStorage for S3Bucket {
             .map(|mut p| {
                 // required to end with a separator
                 // otherwise request will return only the entry of a prefix
-                if !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
                     p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
                 }
                 p
             });
-
-        let mut document_keys = Vec::new();
 
         let mut continuation_token = None;
 
@@ -336,14 +390,19 @@ impl RemoteStorage for S3Bucket {
             let _guard = self.permit(kind).await;
             let started_at = start_measuring_requests(kind);
 
-            let fetch_response = self
+            let mut request = self
                 .client
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
-                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
-                .set_max_keys(self.max_keys_per_list_response)
+                .set_max_keys(self.max_keys_per_list_response);
+
+            if let ListingMode::WithDelimiter = mode {
+                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+            }
+
+            let response = request
                 .send()
                 .await
                 .context("Failed to list S3 prefixes")
@@ -353,76 +412,40 @@ impl RemoteStorage for S3Bucket {
 
             metrics::BUCKET_METRICS
                 .req_seconds
-                .observe_elapsed(kind, &fetch_response, started_at);
+                .observe_elapsed(kind, &response, started_at);
 
-            let fetch_response = fetch_response?;
+            let response = response?;
 
-            document_keys.extend(
-                fetch_response
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
+            let keys = response.contents();
+            let empty = Vec::new();
+            let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
+
+            tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+
+            for object in keys {
+                let object_path = object.key().expect("response does not contain a key");
+                let remote_path = self.s3_object_to_relative_path(object_path);
+                result.keys.push(remote_path);
+            }
+
+            result.prefixes.extend(
+                prefixes
+                    .iter()
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            continuation_token = match fetch_response.next_continuation_token {
+            continuation_token = match response.next_continuation_token {
                 Some(new_token) => Some(new_token),
                 None => break,
             };
         }
 
-        Ok(document_keys)
-    }
-
-    /// See the doc for `RemoteStorage::list_files`
-    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let kind = RequestKind::List;
-
-        let folder_name = folder
-            .map(|p| self.relative_path_to_s3_object(p))
-            .or_else(|| self.prefix_in_bucket.clone());
-
-        // AWS may need to break the response into several parts
-        let mut continuation_token = None;
-        let mut all_files = vec![];
-        loop {
-            let _guard = self.permit(kind).await;
-            let started_at = start_measuring_requests(kind);
-
-            let response = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(folder_name.clone())
-                .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response)
-                .send()
-                .await
-                .context("Failed to list files in S3 bucket");
-
-            let started_at = ScopeGuard::into_inner(started_at);
-            metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &response, started_at);
-
-            let response = response?;
-
-            for object in response.contents().unwrap_or_default() {
-                let object_path = object.key().expect("response does not contain a key");
-                let remote_path = self.s3_object_to_relative_path(object_path);
-                all_files.push(remote_path);
-            }
-            match response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-        Ok(all_files)
+        Ok(result)
     }
 
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -432,8 +455,8 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(ReaderStream::new(from));
-        let bytes_stream = ByteStream::new(SdkBody::from(body));
+        let body = Body::wrap_stream(from);
+        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
         let res = self
             .client
@@ -496,18 +519,22 @@ impl RemoteStorage for S3Bucket {
         for path in paths {
             let obj_id = ObjectIdentifier::builder()
                 .set_key(Some(self.relative_path_to_s3_object(path)))
-                .build();
+                .build()?;
             delete_objects.push(obj_id);
         }
 
-        for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
+        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE) {
             let started_at = start_measuring_requests(kind);
 
             let resp = self
                 .client
                 .delete_objects()
                 .bucket(self.bucket_name.clone())
-                .delete(Delete::builder().set_objects(Some(chunk.to_vec())).build())
+                .delete(
+                    Delete::builder()
+                        .set_objects(Some(chunk.to_vec()))
+                        .build()?,
+                )
                 .send()
                 .await;
 
@@ -522,6 +549,20 @@ impl RemoteStorage for S3Bucket {
                         .deleted_objects_total
                         .inc_by(chunk.len() as u64);
                     if let Some(errors) = resp.errors {
+                        // Log a bounded number of the errors within the response:
+                        // these requests can carry 1000 keys so logging each one
+                        // would be too verbose, especially as errors may lead us
+                        // to retry repeatedly.
+                        const LOG_UP_TO_N_ERRORS: usize = 10;
+                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                            tracing::warn!(
+                                "DeleteObjects key {} failed: {}: {}",
+                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                            );
+                        }
+
                         return Err(anyhow::format_err!(
                             "Failed to delete {} objects",
                             errors.len()
@@ -566,17 +607,17 @@ fn start_measuring_requests(
 
 #[cfg(test)]
 mod tests {
+    use camino::Utf8Path;
     use std::num::NonZeroUsize;
-    use std::path::Path;
 
     use crate::{RemotePath, S3Bucket, S3Config};
 
     #[test]
     fn relative_path() {
-        let all_paths = vec!["", "some/path", "some/path/"];
+        let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
-            .map(|x| RemotePath::new(Path::new(x)).expect("bad path"))
+            .map(|x| RemotePath::new(Utf8Path::new(x)).expect("bad path"))
             .collect();
         let prefixes = [
             None,

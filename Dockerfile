@@ -12,6 +12,7 @@ WORKDIR /home/nonroot
 
 COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
+COPY --chown=nonroot vendor/postgres-v16 vendor/postgres-v16
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
@@ -26,6 +27,7 @@ RUN set -e \
 FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
+ARG BUILD_TAG
 
 # Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
 # Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
@@ -39,6 +41,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
 COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
@@ -65,6 +68,7 @@ RUN set -e \
     && apt install -y \
         libreadline-dev \
         libseccomp-dev \
+        libicu67 \
         openssl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
@@ -75,12 +79,13 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router  
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
+COPY --from=pg-build /home/nonroot/pg_install/v16 /usr/local/v16/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.

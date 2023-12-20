@@ -1,27 +1,40 @@
 use futures::future::Either;
 use proxy::auth;
+use proxy::config::AuthenticationConfig;
+use proxy::config::CacheOptions;
+use proxy::config::HttpConfig;
 use proxy::console;
+use proxy::console::provider::AllowedIpsCache;
+use proxy::console::provider::NodeInfoCache;
+use proxy::console::provider::RoleSecretCache;
 use proxy::http;
-use proxy::metrics;
+use proxy::rate_limiter::EndpointRateLimiter;
+use proxy::rate_limiter::RateBucketInfo;
+use proxy::rate_limiter::RateLimiterConfig;
+use proxy::usage_metrics;
 
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
+use proxy::serverless;
 use std::pin::pin;
+use std::sync::Arc;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing::warn;
-use utils::{project_git_version, sentry_init::init_sentry};
+use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackend {
     Console,
+    #[cfg(feature = "testing")]
     Postgres,
     Link,
 }
@@ -74,11 +87,55 @@ struct ProxyCliArgs {
     #[clap(long)]
     metric_collection_interval: Option<String>,
     /// cache for `wake_compute` api method (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO)]
+    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
+    /// lock for `wake_compute` api method. example: "shards=32,permits=4,epoch=10m,timeout=1s". (use `permits=0` to disable).
+    #[clap(long, default_value = config::WakeComputeLockOptions::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK)]
+    wake_compute_lock: String,
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
+    /// timeout for http connections
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    sql_over_http_timeout: tokio::time::Duration,
+    /// Whether the SQL over http pool is opt-in
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    sql_over_http_pool_opt_in: bool,
+    /// timeout for scram authentication protocol
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    scram_protocol_timeout: tokio::time::Duration,
+    /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    require_client_ip: bool,
+    /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    disable_dynamic_rate_limiter: bool,
+    /// Rate limit algorithm. Makes sense only if `disable_rate_limiter` is `false`.
+    #[clap(value_enum, long, default_value_t = proxy::rate_limiter::RateLimitAlgorithm::Aimd)]
+    rate_limit_algorithm: proxy::rate_limiter::RateLimitAlgorithm,
+    /// Timeout for rate limiter. If it didn't manage to aquire a permit in this time, it will return an error.
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    rate_limiter_timeout: tokio::time::Duration,
+    /// Endpoint rate limiter max number of requests per second.
+    ///
+    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Can be given multiple times for different bucket sizes.
+    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
+    endpoint_rps_limit: Vec<RateBucketInfo>,
+    /// Initial limit for dynamic rate limiter. Makes sense only if `rate_limit_algorithm` is *not* `None`.
+    #[clap(long, default_value_t = 100)]
+    initial_limit: usize,
+    #[clap(flatten)]
+    aimd_config: proxy::rate_limiter::AimdConfig,
+    /// cache for `allowed_ips` (use `size=0` to disable)
+    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
+    allowed_ips_cache: String,
+    /// cache for `role_secret` (use `size=0` to disable)
+    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
+    role_secret_cache: String,
+    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    disable_ip_check_for_http: bool,
 }
 
 #[tokio::main]
@@ -88,7 +145,8 @@ async fn main() -> anyhow::Result<()> {
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     info!("Version: {GIT_VERSION}");
-    ::metrics::set_build_info_metric(GIT_VERSION);
+    info!("Build_tag: {BUILD_TAG}");
+    ::metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
@@ -109,6 +167,8 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(&config.endpoint_rps_limit));
+
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
@@ -116,28 +176,32 @@ async fn main() -> anyhow::Result<()> {
         config,
         proxy_listener,
         cancellation_token.clone(),
+        endpoint_rate_limiter.clone(),
     ));
 
-    if let Some(wss_address) = args.wss {
-        let wss_address: SocketAddr = wss_address.parse()?;
-        info!("Starting wss on {wss_address}");
-        let wss_listener = TcpListener::bind(wss_address).await?;
+    // TODO: rename the argument to something like serverless.
+    // It now covers more than just websockets, it also covers SQL over HTTP.
+    if let Some(serverless_address) = args.wss {
+        let serverless_address: SocketAddr = serverless_address.parse()?;
+        info!("Starting wss on {serverless_address}");
+        let serverless_listener = TcpListener::bind(serverless_address).await?;
 
-        client_tasks.spawn(http::websocket::task_main(
+        client_tasks.spawn(serverless::task_main(
             config,
-            wss_listener,
+            serverless_listener,
             cancellation_token.clone(),
+            endpoint_rate_limiter.clone(),
         ));
     }
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
-    maintenance_tasks.spawn(http::server::task_main(http_listener));
+    maintenance_tasks.spawn(http::health_server::task_main(http_listener));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
-        maintenance_tasks.spawn(metrics::task_main(metrics_config));
+        maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
     let maintenance = loop {
@@ -194,22 +258,64 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
+    let rate_limiter_config = RateLimiterConfig {
+        disable: args.disable_dynamic_rate_limiter,
+        algorithm: args.rate_limit_algorithm,
+        timeout: args.rate_limiter_timeout,
+        initial_limit: args.initial_limit,
+        aimd_config: Some(args.aimd_config),
+    };
 
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
-            let config::CacheOptions { size, ttl } = args.wake_compute_cache.parse()?;
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let allowed_ips_cache_config: CacheOptions = args.allowed_ips_cache.parse()?;
+            let role_secret_cache_config: CacheOptions = args.role_secret_cache.parse()?;
 
-            info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!("Using AllowedIpsCache (wake_compute) with options={allowed_ips_cache_config:?}");
+            info!("Using RoleSecretCache (wake_compute) with options={role_secret_cache_config:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                node_info: console::caches::NodeInfoCache::new("node_info_cache", size, ttl),
+                node_info: NodeInfoCache::new(
+                    "node_info_cache",
+                    wake_compute_cache_config.size,
+                    wake_compute_cache_config.ttl,
+                    true,
+                ),
+                allowed_ips: AllowedIpsCache::new(
+                    "allowed_ips_cache",
+                    allowed_ips_cache_config.size,
+                    allowed_ips_cache_config.ttl,
+                    false,
+                ),
+                role_secret: RoleSecretCache::new(
+                    "role_secret_cache",
+                    role_secret_cache_config.size,
+                    role_secret_cache_config.ttl,
+                    false,
+                ),
             }));
 
-            let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client());
+            let config::WakeComputeLockOptions {
+                shards,
+                permits,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(permits, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(
+                console::locks::ApiLocks::new("wake_compute_lock", permits, shards, timeout)
+                    .unwrap(),
+            ));
+            tokio::spawn(locks.garbage_collect_worker(epoch));
 
-            let api = console::provider::neon::Api::new(endpoint, caches);
+            let url = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(url, http::new_client(rate_limiter_config));
+
+            let api = console::provider::neon::Api::new(endpoint, caches, locks);
             auth::BackendType::Console(Cow::Owned(api), ())
         }
+        #[cfg(feature = "testing")]
         AuthBackend::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);
@@ -220,13 +326,55 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             auth::BackendType::Link(Cow::Owned(url))
         }
     };
+    let http_config = HttpConfig {
+        timeout: args.sql_over_http_timeout,
+        pool_opt_in: args.sql_over_http_pool_opt_in,
+    };
+    let authentication_config = AuthenticationConfig {
+        scram_protocol_timeout: args.scram_protocol_timeout,
+    };
+
+    let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
+    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
+        http_config,
+        authentication_config,
+        require_client_ip: args.require_client_ip,
+        disable_ip_check_for_http: args.disable_ip_check_for_http,
+        endpoint_rps_limit,
     }));
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+    use proxy::rate_limiter::RateBucketInfo;
+
+    #[test]
+    fn parse_endpoint_rps_limit() {
+        let config = super::ProxyCliArgs::parse_from([
+            "proxy",
+            "--endpoint-rps-limit",
+            "100@1s",
+            "--endpoint-rps-limit",
+            "20@30s",
+        ]);
+
+        assert_eq!(
+            config.endpoint_rps_limit,
+            vec![
+                RateBucketInfo::new(100, Duration::from_secs(1)),
+                RateBucketInfo::new(20, Duration::from_secs(30)),
+            ]
+        );
+    }
 }

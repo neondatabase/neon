@@ -46,7 +46,10 @@ from fixtures.utils import query_scalar
 # Because the delta layer D covering lsn1 is corrupted, creating a branch
 # starting from lsn1 should return an error as follows:
 #     could not find data for key ... at LSN ..., for request at LSN ...
-def test_branch_and_gc(neon_simple_env: NeonEnv):
+def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
+    if build_type == "debug":
+        pytest.skip("times out in debug builds")
+
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 

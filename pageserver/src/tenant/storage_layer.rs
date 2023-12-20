@@ -2,44 +2,37 @@
 
 pub mod delta_layer;
 mod filename;
-mod image_layer;
+pub mod image_layer;
 mod inmemory_layer;
+pub(crate) mod layer;
 mod layer_desc;
-mod remote_layer;
 
-use crate::config::PageServerConf;
 use crate::context::{AccessStatsBehavior, RequestContext};
-use crate::repository::Key;
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
-use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use once_cell::sync::Lazy;
-use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{
-    HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
+    LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
 use std::ops::Range;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
 use utils::rate_limit::RateLimit;
 
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use utils::{id::TimelineId, lsn::Lsn};
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
-pub use remote_layer::RemoteLayer;
+
+pub(crate) use layer::{EvictionError, Layer, ResidentLayer};
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -74,7 +67,7 @@ pub struct ValueReconstructState {
     pub img: Option<(Lsn, Bytes)>,
 }
 
-/// Return value from Layer::get_page_reconstruct_data
+/// Return value from [`Layer::get_value_reconstruct_data`]
 #[derive(Clone, Copy, Debug)]
 pub enum ValueReconstructResult {
     /// Got all the data needed to reconstruct the requested page
@@ -176,26 +169,6 @@ impl LayerAccessStats {
     pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
-        new
-    }
-
-    /// Creates a clone of `self` and records `new_status` in the clone.
-    ///
-    /// The `new_status` is not recorded in `self`.
-    ///
-    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    ///
-    /// [`record_residence_event`]: Self::record_residence_event
-    pub(crate) fn clone_for_residence_change(
-        &self,
-        new_status: LayerResidenceStatus,
-    ) -> LayerAccessStats {
-        let clone = {
-            let inner = self.0.lock().unwrap();
-            inner.clone()
-        };
-        let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
         new
     }
 
@@ -321,102 +294,21 @@ impl LayerAccessStats {
     }
 }
 
-/// Supertrait of the [`Layer`] trait that captures the bare minimum interface
-/// required by [`LayerMap`](super::layer_map::LayerMap).
-///
-/// All layers should implement a minimal `std::fmt::Debug` without tenant or
-/// timeline names, because those are known in the context of which the layers
-/// are used in (timeline).
-#[async_trait::async_trait]
-pub trait Layer: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static {
-    ///
-    /// Return data needed to reconstruct given page at LSN.
-    ///
-    /// It is up to the caller to collect more data from previous layer and
-    /// perform WAL redo, if necessary.
-    ///
-    /// See PageReconstructResult for possible return values. The collected data
-    /// is appended to reconstruct_data; the caller should pass an empty struct
-    /// on first call, or a struct with a cached older image of the page if one
-    /// is available. If this returns ValueReconstructResult::Continue, look up
-    /// the predecessor layer and call again with the same 'reconstruct_data' to
-    /// collect more data.
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult>;
-}
-
 /// Get a layer descriptor from a layer.
 pub trait AsLayerDesc {
     /// Get the layer descriptor.
     fn layer_desc(&self) -> &PersistentLayerDesc;
 }
 
-/// A Layer contains all data in a "rectangle" consisting of a range of keys and
-/// range of LSNs.
-///
-/// There are two kinds of layers, in-memory and on-disk layers. In-memory
-/// layers are used to ingest incoming WAL, and provide fast access to the
-/// recent page versions. On-disk layers are stored as files on disk, and are
-/// immutable. This trait presents the common functionality of in-memory and
-/// on-disk layers.
-///
-/// Furthermore, there are two kinds of on-disk layers: delta and image layers.
-/// A delta layer contains all modifications within a range of LSNs and keys.
-/// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN.
-pub trait PersistentLayer: Layer + AsLayerDesc {
-    /// File name used for this layer, both in the pageserver's local filesystem
-    /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName {
-        self.layer_desc().filename()
-    }
-
-    // Path to the layer file in the local filesystem.
-    // `None` for `RemoteLayer`.
-    fn local_path(&self) -> Option<PathBuf>;
-
-    /// Permanently remove this layer from disk.
-    fn delete_resident_layer_file(&self) -> Result<()>;
-
-    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        None
-    }
-
-    fn downcast_delta_layer(self: Arc<Self>) -> Option<std::sync::Arc<DeltaLayer>> {
-        None
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        false
-    }
-
-    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
-
-    fn access_stats(&self) -> &LayerAccessStats;
-}
-
-pub fn downcast_remote_layer(
-    layer: &Arc<dyn PersistentLayer>,
-) -> Option<std::sync::Arc<RemoteLayer>> {
-    if layer.is_remote_layer() {
-        Arc::clone(layer).downcast_remote_layer()
-    } else {
-        None
-    }
-}
-
 pub mod tests {
+    use pageserver_api::shard::TenantShardId;
+
     use super::*;
 
     impl From<DeltaFileName> for PersistentLayerDesc {
         fn from(value: DeltaFileName) -> Self {
             PersistentLayerDesc::new_delta(
-                TenantId::from_array([0; 16]),
+                TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
                 value.key_range,
                 value.lsn_range,
@@ -428,7 +320,7 @@ pub mod tests {
     impl From<ImageFileName> for PersistentLayerDesc {
         fn from(value: ImageFileName) -> Self {
             PersistentLayerDesc::new_img(
-                TenantId::from_array([0; 16]),
+                TenantShardId::from([0; 18]),
                 TimelineId::from_array([0; 16]),
                 value.key_range,
                 value.lsn,
@@ -445,19 +337,6 @@ pub mod tests {
             }
         }
     }
-}
-
-/// Helper enum to hold a PageServerConf, or a path
-///
-/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
-/// global config, and paths to layer files are constructed using the tenant/timeline
-/// path from the config. But in the 'pagectl' binary, we need to construct a Layer
-/// struct for a file on disk, without having a page server running, so that we have no
-/// config. In that case, we use the Path variant to hold the full path to the file on
-/// disk.
-enum PathOrConf {
-    Path(PathBuf),
-    Conf(&'static PageServerConf),
 }
 
 /// Range wrapping newtype, which uses display to render Debug.

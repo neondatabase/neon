@@ -1,7 +1,8 @@
+import concurrent.futures
 import enum
 import os
 import shutil
-from pathlib import Path
+from threading import Thread
 
 import pytest
 from fixtures.log_helper import log
@@ -22,35 +23,28 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
     wait_until_tenant_state,
 )
-from fixtures.remote_storage import (
-    RemoteStorageKind,
-    available_remote_storages,
-    available_s3_storages,
-)
+from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
 from fixtures.types import TenantId
-from fixtures.utils import run_pg_bench_small
+from fixtures.utils import run_pg_bench_small, wait_until
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind", [RemoteStorageKind.NOOP, *available_remote_storages()]
-)
 def test_tenant_delete_smoke(
     neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
     pg_bin: PgBin,
 ):
     neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_tenant_delete_smoke",
-    )
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start()
-
-    # lucky race with stopping from flushing a layer we fail to schedule any uploads
-    env.pageserver.allowed_errors.append(
-        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
+    env.pageserver.allowed_errors.extend(
+        [
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion executor: DeleteObjects request failed.*",
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+        ]
     )
 
     ps_http = env.pageserver.http_client()
@@ -66,6 +60,9 @@ def test_tenant_delete_smoke(
         conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
     )
 
+    # Default tenant and the one we created
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
+
     # create two timelines one being the parent of another
     parent = None
     for timeline in ["first", "second"]:
@@ -76,36 +73,39 @@ def test_tenant_delete_smoke(
             run_pg_bench_small(pg_bin, endpoint.connstr())
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
 
-            if remote_storage_kind in available_s3_storages():
-                assert_prefix_not_empty(
-                    neon_env_builder,
-                    prefix="/".join(
-                        (
-                            "tenants",
-                            str(tenant_id),
-                        )
-                    ),
-                )
+            assert_prefix_not_empty(
+                neon_env_builder,
+                prefix="/".join(
+                    (
+                        "tenants",
+                        str(tenant_id),
+                    )
+                ),
+            )
 
         parent = timeline
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
 
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 2
     tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
-    tenant_path = env.tenant_dir(tenant_id=tenant_id)
+    tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
 
-    if remote_storage_kind in available_s3_storages():
-        assert_prefix_empty(
-            neon_env_builder,
-            prefix="/".join(
-                (
-                    "tenants",
-                    str(tenant_id),
-                )
-            ),
-        )
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Deletion updates the tenant count: the one default tenant remains
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
 
 
 class Check(enum.Enum):
@@ -142,18 +142,10 @@ FAILPOINTS_BEFORE_BACKGROUND = [
 def combinations():
     result = []
 
-    remotes = [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]
-    if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE"):
-        remotes.append(RemoteStorageKind.REAL_S3)
+    remotes = available_s3_storages()
 
     for remote_storage_kind in remotes:
         for delete_failpoint in FAILPOINTS:
-            if remote_storage_kind is RemoteStorageKind.NOOP and delete_failpoint in (
-                "timeline-delete-before-index-delete",
-            ):
-                # the above failpoint are not relevant for config without remote storage
-                continue
-
             # Simulate failures for only one type of remote storage
             # to avoid log pollution and make tests run faster
             if remote_storage_kind is RemoteStorageKind.MOCK_S3:
@@ -164,8 +156,8 @@ def combinations():
     return result
 
 
-@pytest.mark.parametrize("remote_storage_kind, failpoint, simulate_failures", combinations())
 @pytest.mark.parametrize("check", list(Check))
+@pytest.mark.parametrize("remote_storage_kind, failpoint, simulate_failures", combinations())
 def test_delete_tenant_exercise_crash_safety_failpoints(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
@@ -177,9 +169,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
     if simulate_failures:
         neon_env_builder.pageserver_config_override = "test_remote_failures=1"
 
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_delete_tenant_exercise_crash_safety_failpoints"
-    )
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
@@ -192,7 +182,7 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # We may leave some upload tasks in the queue. They're likely deletes.
             # For uploads we explicitly wait with `last_flush_lsn_upload` below.
             # So by ignoring these instead of waiting for empty upload queue
@@ -201,27 +191,29 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         ]
     )
 
+    if simulate_failures:
+        env.pageserver.allowed_errors.append(
+            # The deletion queue will complain when it encounters simulated S3 errors
+            ".*deletion executor: DeleteObjects request failed.*",
+        )
+
     ps_http = env.pageserver.http_client()
 
     timeline_id = env.neon_cli.create_timeline("delete", tenant_id=tenant_id)
     with env.endpoints.create_start("delete", tenant_id=tenant_id) as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())
-        if remote_storage_kind is RemoteStorageKind.NOOP:
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-        else:
-            last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+        last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
 
-            if remote_storage_kind in available_s3_storages():
-                assert_prefix_not_empty(
-                    neon_env_builder,
-                    prefix="/".join(
-                        (
-                            "tenants",
-                            str(tenant_id),
-                        )
-                    ),
+        assert_prefix_not_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(tenant_id),
                 )
+            ),
+        )
 
     ps_http.configure_failpoints((failpoint, "return"))
 
@@ -249,15 +241,9 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
         assert reason.endswith(f"failpoint: {failpoint}"), reason
 
     if check is Check.RETRY_WITH_RESTART:
-        env.pageserver.stop()
-        env.pageserver.start()
+        env.pageserver.restart()
 
-        if (
-            remote_storage_kind is RemoteStorageKind.NOOP
-            and failpoint == "tenant-delete-before-create-local-mark"
-        ):
-            tenant_delete_wait_completed(ps_http, tenant_id, iterations=iterations)
-        elif failpoint in (
+        if failpoint in (
             "tenant-delete-before-shutdown",
             "tenant-delete-before-create-remote-mark",
         ):
@@ -275,35 +261,35 @@ def test_delete_tenant_exercise_crash_safety_failpoints(
 
         tenant_delete_wait_completed(ps_http, tenant_id, iterations=iterations)
 
-    tenant_dir = env.tenant_dir(tenant_id)
+    tenant_dir = env.pageserver.tenant_dir(tenant_id)
     # Check local is empty
     assert not tenant_dir.exists()
 
     # Check remote is empty
-    if remote_storage_kind in available_s3_storages():
-        assert_prefix_empty(
-            neon_env_builder,
-            prefix="/".join(
-                (
-                    "tenants",
-                    str(tenant_id),
-                )
-            ),
-        )
-
-
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_tenant_delete_is_resumed_on_attach(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-    pg_bin: PgBin,
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_deleted_tenant_ignored_on_attach",
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+        allowed_postfix="initdb.tar.zst",
     )
 
+
+def test_tenant_delete_is_resumed_on_attach(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env.pageserver.allowed_errors.append(
+        # lucky race with stopping from flushing a layer we fail to schedule any uploads
+        ".*layer flush task.+: could not flush frozen layer: update_metadata_file"
+    )
 
     tenant_id = env.initial_tenant
 
@@ -316,16 +302,15 @@ def test_tenant_delete_is_resumed_on_attach(
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
 
     # sanity check, data should be there
-    if remote_storage_kind in available_s3_storages():
-        assert_prefix_not_empty(
-            neon_env_builder,
-            prefix="/".join(
-                (
-                    "tenants",
-                    str(tenant_id),
-                )
-            ),
-        )
+    assert_prefix_not_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
 
     # failpoint before we remove index_part from s3
     failpoint = "timeline-delete-before-index-delete"
@@ -338,7 +323,7 @@ def test_tenant_delete_is_resumed_on_attach(
             # From deletion polling
             f".*NotFound: tenant {env.initial_tenant}.*",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             '.*shutdown_pageserver{exit_code=0}: stopping left-over name="remote upload".*',
@@ -356,16 +341,15 @@ def test_tenant_delete_is_resumed_on_attach(
         iterations=iterations,
     )
 
-    if remote_storage_kind in available_s3_storages():
-        assert_prefix_not_empty(
-            neon_env_builder,
-            prefix="/".join(
-                (
-                    "tenants",
-                    str(tenant_id),
-                )
-            ),
-        )
+    assert_prefix_not_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
 
     reason = tenant_info["state"]["data"]["reason"]
     # failpoint may not be the only error in the stack
@@ -375,32 +359,197 @@ def test_tenant_delete_is_resumed_on_attach(
     env.endpoints.stop_all()
     env.pageserver.stop()
 
-    dir_to_clear = Path(env.repo_dir) / "tenants"
+    dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
     env.pageserver.start()
 
     # now we call attach
-    ps_http.tenant_attach(tenant_id=tenant_id)
+    env.pageserver.tenant_attach(tenant_id=tenant_id)
 
     # delete should be resumed
     wait_tenant_status_404(ps_http, tenant_id, iterations)
 
     # we shouldn've created tenant dir on disk
-    tenant_path = env.tenant_dir(tenant_id=tenant_id)
+    tenant_path = env.pageserver.tenant_dir(tenant_id)
     assert not tenant_path.exists()
 
-    if remote_storage_kind in available_s3_storages():
-        assert_prefix_empty(
-            neon_env_builder,
-            prefix="/".join(
-                (
-                    "tenants",
-                    str(tenant_id),
-                )
-            ),
-        )
+    ps_http.deletion_queue_flush(execute=True)
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
 
 
-# TODO test concurrent deletions with "hang" failpoint
+def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonEnvBuilder):
+    """Reproduction of 2023-11-23 stuck tenants investigation"""
+
+    # do not use default tenant/timeline creation because it would output the failpoint log message too early
+    env = neon_env_builder.init_configs()
+    env.start()
+    pageserver_http = env.pageserver.http_client()
+
+    env.pageserver.allowed_errors.extend(
+        [
+            # happens with the cancellation bailing flushing loop earlier, leaving disk_consistent_lsn at zero
+            ".*Timeline got dropped without initializing, cleaning its files",
+            # the response hit_pausable_failpoint_and_later_fail
+            f".*Error processing HTTP request: InternalServerError\\(new timeline {env.initial_tenant}/{env.initial_timeline} has invalid disk_consistent_lsn",
+        ]
+    )
+
+    env.pageserver.tenant_create(env.initial_tenant)
+
+    failpoint = "flush-layer-cancel-after-writing-layer-out-pausable"
+    pageserver_http.configure_failpoints((failpoint, "pause"))
+
+    def hit_pausable_failpoint_and_later_fail():
+        with pytest.raises(
+            PageserverApiException, match="new timeline \\S+ has invalid disk_consistent_lsn"
+        ):
+            pageserver_http.timeline_create(
+                env.pg_version, env.initial_tenant, env.initial_timeline
+            )
+
+    def start_deletion():
+        pageserver_http.tenant_delete(env.initial_tenant)
+
+    def has_hit_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {failpoint}") is not None
+
+    def deletion_has_started_waiting_for_timelines():
+        assert env.pageserver.log_contains("Waiting for timelines...") is not None
+
+    def tenant_is_deleted():
+        try:
+            pageserver_http.tenant_status(env.initial_tenant)
+        except PageserverApiException as e:
+            assert e.status_code == 404
+        else:
+            raise RuntimeError("tenant was still accessible")
+
+    creation = Thread(target=hit_pausable_failpoint_and_later_fail)
+    creation.start()
+
+    deletion = None
+
+    try:
+        wait_until(10, 1, has_hit_failpoint)
+
+        # it should start ok, sync up with the stuck creation, then fail because disk_consistent_lsn was not updated
+        # then deletion should fail and set the tenant broken
+        deletion = Thread(target=start_deletion)
+        deletion.start()
+
+        wait_until(10, 1, deletion_has_started_waiting_for_timelines)
+
+        pageserver_http.configure_failpoints((failpoint, "off"))
+
+        creation.join()
+        deletion.join()
+
+        wait_until(10, 1, tenant_is_deleted)
+    finally:
+        creation.join()
+        if deletion is not None:
+            deletion.join()
+
+
+def test_tenant_delete_concurrent(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    """
+    Validate that concurrent delete requests to the same tenant behave correctly:
+    exactly one should succeed.
+
+    This is a reproducer for https://github.com/neondatabase/neon/issues/5936
+    """
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    ps_http = env.pageserver.http_client()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # Populate some data
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+
+    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
+
+    env.pageserver.allowed_errors.extend(
+        [
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+            # Errors logged from our 4xx requests
+            f".*{CONFLICT_MESSAGE}.*",
+        ]
+    )
+
+    BEFORE_REMOVE_FAILPOINT = "tenant-delete-before-map-remove"
+    BEFORE_RUN_FAILPOINT = "tenant-delete-before-run"
+
+    # We will let the initial delete run until right before it would remove
+    # the tenant's TenantSlot.  This pauses it in a state where the tenant
+    # is visible in Stopping state, and concurrent requests should fail with 4xx.
+    ps_http.configure_failpoints((BEFORE_REMOVE_FAILPOINT, "pause"))
+
+    def delete_tenant():
+        return ps_http.tenant_delete(tenant_id)
+
+    def hit_remove_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_REMOVE_FAILPOINT}")
+
+    def hit_run_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_RUN_FAILPOINT}")
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        background_200_req = executor.submit(delete_tenant)
+        assert background_200_req.result(timeout=10).status_code == 202
+
+        # Wait until the first request completes its work and is blocked on removing
+        # the TenantSlot from tenant manager.
+        wait_until(100, 0.1, hit_remove_failpoint)
+
+        # Start another request: this should fail when it sees a tenant in Stopping state
+        with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
+            ps_http.tenant_delete(tenant_id)
+
+        # Start another background request, which will pause after acquiring a TenantSlotGuard
+        # but before completing.
+        ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "pause"))
+        background_4xx_req = executor.submit(delete_tenant)
+        wait_until(100, 0.1, hit_run_failpoint)
+
+        # The TenantSlot is still present while the original request is hung before
+        # final removal
+        assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+
+        # Permit the original request to run to success
+        ps_http.configure_failpoints((BEFORE_REMOVE_FAILPOINT, "off"))
+
+        # Permit the duplicate background request to run to completion and fail.
+        ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "off"))
+        with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
+            background_4xx_req.result(timeout=10)
+
+    # Physical deletion should have happened
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Zero tenants remain (we deleted the default tenant)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0

@@ -1,5 +1,6 @@
 //! `utils` is intended to be a place to put code that is shared
 //! between other crates in this repository.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod backoff;
 
@@ -24,8 +25,15 @@ pub mod auth;
 
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
+
+mod hex;
+pub use hex::Hex;
+
 // http endpoint utils
 pub mod http;
+
+// definition of the Generation type for pageserver attachment APIs
+pub mod generation;
 
 // common log initialisation routine
 pub mod logging;
@@ -58,6 +66,8 @@ pub mod serde_regex;
 
 pub mod pageserver_feedback;
 
+pub mod postgres_client;
+
 pub mod tracing_span_assert;
 
 pub mod rate_limit;
@@ -67,6 +77,11 @@ pub mod completion;
 
 /// Reporting utilities
 pub mod error;
+
+/// async timeout helper
+pub mod timeout;
+
+pub mod sync;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
@@ -116,6 +131,21 @@ macro_rules! project_git_version {
             const __ARG: &[&::core::primitive::str; 2] = &match ::core::option_env!("GIT_VERSION") {
                 ::core::option::Option::Some(x) => ["git-env:", x],
                 ::core::option::Option::None => ["git:", __COMMIT_FROM_GIT],
+            };
+
+            $crate::__const_format::concatcp!(__ARG[0], __ARG[1])
+        };
+    };
+}
+
+/// This is a shortcut to embed build tag into binaries and avoid copying the same build script to all packages
+#[macro_export]
+macro_rules! project_build_tag {
+    ($const_identifier:ident) => {
+        const $const_identifier: &::core::primitive::str = {
+            const __ARG: &[&::core::primitive::str; 2] = &match ::core::option_env!("BUILD_TAG") {
+                ::core::option::Option::Some(x) => ["build_tag-env:", x],
+                ::core::option::Option::None => ["build_tag:", ""],
             };
 
             $crate::__const_format::concatcp!(__ARG[0], __ARG[1])

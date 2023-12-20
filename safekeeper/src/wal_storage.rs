@@ -9,13 +9,13 @@
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use camino::{Utf8Path, Utf8PathBuf};
 use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
-use postgres_ffi::{XLogSegNo, PG_TLI};
+use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
 use std::io::{self, SeekFrom};
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::fs::{self, remove_file, File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt};
@@ -72,7 +72,7 @@ pub trait Storage {
 /// When storage is created first time, all LSNs are zeroes and there are no segments on disk.
 pub struct PhysicalStorage {
     metrics: WalStorageMetrics,
-    timeline_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
     conf: SafeKeeperConf,
 
     /// Size of WAL segment in bytes.
@@ -123,7 +123,7 @@ impl PhysicalStorage {
     /// the disk. Otherwise, all LSNs are set to zero.
     pub fn new(
         ttid: &TenantTimelineId,
-        timeline_dir: PathBuf,
+        timeline_dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
         state: &SafeKeeperState,
     ) -> Result<PhysicalStorage> {
@@ -138,19 +138,17 @@ impl PhysicalStorage {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
-            match state.server.pg_version / 10000 {
-                14 => postgres_ffi::v14::xlog_utils::find_end_of_wal(
-                    &timeline_dir,
+            let version = state.server.pg_version / 10000;
+
+            dispatch_pgversion!(
+                version,
+                pgv::xlog_utils::find_end_of_wal(
+                    timeline_dir.as_std_path(),
                     wal_seg_size,
                     state.commit_lsn,
                 )?,
-                15 => postgres_ffi::v15::xlog_utils::find_end_of_wal(
-                    &timeline_dir,
-                    wal_seg_size,
-                    state.commit_lsn,
-                )?,
-                _ => bail!("unsupported postgres version: {}", state.server.pg_version),
-            }
+                bail!("unsupported postgres version: {}", version)
+            )
         };
 
         // TODO: do we really know that write_lsn is fully flushed to disk?
@@ -190,7 +188,7 @@ impl PhysicalStorage {
     }
 
     /// Call fdatasync if config requires so.
-    async fn fdatasync_file(&mut self, file: &mut File) -> Result<()> {
+    async fn fdatasync_file(&mut self, file: &File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
                 .observe_flush_seconds(time_io_closure(file.sync_data()).await?);
@@ -199,7 +197,7 @@ impl PhysicalStorage {
     }
 
     /// Call fsync if config requires so.
-    async fn fsync_file(&mut self, file: &mut File) -> Result<()> {
+    async fn fsync_file(&mut self, file: &File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
                 .observe_flush_seconds(time_io_closure(file.sync_all()).await?);
@@ -233,7 +231,7 @@ impl PhysicalStorage {
                 .with_context(|| format!("Failed to open log file {:?}", &wal_file_path))?;
 
             write_zeroes(&mut file, self.wal_seg_size).await?;
-            self.fsync_file(&mut file).await?;
+            self.fsync_file(&file).await?;
             Ok((file, true))
         }
     }
@@ -257,7 +255,7 @@ impl PhysicalStorage {
 
         if xlogoff + buf.len() == self.wal_seg_size {
             // If we reached the end of a WAL segment, flush and close it.
-            self.fdatasync_file(&mut file).await?;
+            self.fdatasync_file(&file).await?;
 
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
@@ -279,8 +277,8 @@ impl PhysicalStorage {
     async fn write_exact(&mut self, pos: Lsn, mut buf: &[u8]) -> Result<()> {
         if self.write_lsn != pos {
             // need to flush the file before discarding it
-            if let Some(mut file) = self.file.take() {
-                self.fdatasync_file(&mut file).await?;
+            if let Some(file) = self.file.take() {
+                self.fdatasync_file(&file).await?;
             }
 
             self.write_lsn = pos;
@@ -369,8 +367,8 @@ impl Storage for PhysicalStorage {
             return Ok(());
         }
 
-        if let Some(mut unflushed_file) = self.file.take() {
-            self.fdatasync_file(&mut unflushed_file).await?;
+        if let Some(unflushed_file) = self.file.take() {
+            self.fdatasync_file(&unflushed_file).await?;
             self.file = Some(unflushed_file);
         } else {
             // We have unflushed data (write_lsn != flush_lsn), but no file.
@@ -412,8 +410,8 @@ impl Storage for PhysicalStorage {
         }
 
         // Close previously opened file, if any
-        if let Some(mut unflushed_file) = self.file.take() {
-            self.fdatasync_file(&mut unflushed_file).await?;
+        if let Some(unflushed_file) = self.file.take() {
+            self.fdatasync_file(&unflushed_file).await?;
         }
 
         let xlogoff = end_pos.segment_offset(self.wal_seg_size);
@@ -427,7 +425,7 @@ impl Storage for PhysicalStorage {
         // Fill end with zeroes
         file.seek(SeekFrom::Start(xlogoff as u64)).await?;
         write_zeroes(&mut file, self.wal_seg_size - xlogoff).await?;
-        self.fdatasync_file(&mut file).await?;
+        self.fdatasync_file(&file).await?;
 
         if !is_partial {
             // Make segment partial once again
@@ -464,7 +462,7 @@ impl Storage for PhysicalStorage {
 
 /// Remove all WAL segments in timeline_dir that match the given predicate.
 async fn remove_segments_from_disk(
-    timeline_dir: &Path,
+    timeline_dir: &Utf8Path,
     wal_seg_size: usize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
 ) -> Result<()> {
@@ -503,8 +501,8 @@ async fn remove_segments_from_disk(
 }
 
 pub struct WalReader {
-    workdir: PathBuf,
-    timeline_dir: PathBuf,
+    workdir: Utf8PathBuf,
+    timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
     wal_segment: Option<Pin<Box<dyn AsyncRead + Send + Sync>>>,
@@ -525,8 +523,8 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn new(
-        workdir: PathBuf,
-        timeline_dir: PathBuf,
+        workdir: Utf8PathBuf,
+        timeline_dir: Utf8PathBuf,
         state: &SafeKeeperState,
         start_pos: Lsn,
         enable_remote_read: bool,
@@ -693,7 +691,7 @@ impl WalReader {
     }
 
     /// Helper function for opening a wal file.
-    async fn open_wal_file(wal_file_path: &Path) -> Result<tokio::fs::File> {
+    async fn open_wal_file(wal_file_path: &Utf8Path) -> Result<tokio::fs::File> {
         // First try to open the .partial file.
         let mut partial_path = wal_file_path.to_owned();
         partial_path.set_extension("partial");
@@ -728,10 +726,10 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
 
 /// Helper returning full path to WAL segment file and its .partial brother.
 fn wal_file_paths(
-    timeline_dir: &Path,
+    timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());
     let wal_file_partial_path = timeline_dir.join(wal_file_name + ".partial");

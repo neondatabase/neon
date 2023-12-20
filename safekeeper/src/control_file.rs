@@ -2,12 +2,13 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use camino::Utf8PathBuf;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
 use std::io::Read;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use crate::control_file_upgrade::upgrade_control_file;
@@ -39,7 +40,7 @@ pub trait Storage: Deref<Target = SafeKeeperState> {
 #[derive(Debug)]
 pub struct FileStorage {
     // save timeline dir to avoid reconstructing it every time
-    timeline_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
     conf: SafeKeeperConf,
 
     /// Last state persisted to disk.
@@ -174,7 +175,7 @@ impl Storage for FileStorage {
         let mut control_partial = File::create(&control_partial_path).await.with_context(|| {
             format!(
                 "failed to create partial control file at: {}",
-                &control_partial_path.display()
+                &control_partial_path
             )
         })?;
         let mut buf: Vec<u8> = Vec::new();
@@ -189,13 +190,13 @@ impl Storage for FileStorage {
         control_partial.write_all(&buf).await.with_context(|| {
             format!(
                 "failed to write safekeeper state into control file at: {}",
-                control_partial_path.display()
+                control_partial_path
             )
         })?;
         control_partial.flush().await.with_context(|| {
             format!(
                 "failed to flush safekeeper state into control file at: {}",
-                control_partial_path.display()
+                control_partial_path
             )
         })?;
 
@@ -204,7 +205,7 @@ impl Storage for FileStorage {
             control_partial.sync_all().await.with_context(|| {
                 format!(
                     "failed to sync partial control file at {}",
-                    control_partial_path.display()
+                    control_partial_path
                 )
             })?;
         }
@@ -216,12 +217,10 @@ impl Storage for FileStorage {
         // this sync is not required by any standard but postgres does this (see durable_rename)
         if !self.conf.no_sync {
             let new_f = File::open(&control_path).await?;
-            new_f.sync_all().await.with_context(|| {
-                format!(
-                    "failed to sync control file at: {}",
-                    &control_path.display()
-                )
-            })?;
+            new_f
+                .sync_all()
+                .await
+                .with_context(|| format!("failed to sync control file at: {}", &control_path))?;
 
             // fsync the directory (linux specific)
             let tli_dir = File::open(&self.timeline_dir).await?;
@@ -250,7 +249,7 @@ mod test {
     use utils::{id::TenantTimelineId, lsn::Lsn};
 
     fn stub_conf() -> SafeKeeperConf {
-        let workdir = tempfile::tempdir().unwrap().into_path();
+        let workdir = camino_tempfile::tempdir().unwrap().into_path();
         SafeKeeperConf {
             workdir,
             ..SafeKeeperConf::dummy()

@@ -94,6 +94,18 @@ pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
     access_stats_behavior: AccessStatsBehavior,
+    page_content_kind: PageContentKind,
+}
+
+/// The kind of access to the page cache.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
+pub enum PageContentKind {
+    Unknown,
+    DeltaLayerBtreeNode,
+    DeltaLayerValue,
+    ImageLayerBtreeNode,
+    ImageLayerValue,
+    InMemoryLayer,
 }
 
 /// Desired behavior if the operation requires an on-demand download
@@ -137,6 +149,7 @@ impl RequestContextBuilder {
                 task_kind,
                 download_behavior: DownloadBehavior::Download,
                 access_stats_behavior: AccessStatsBehavior::Update,
+                page_content_kind: PageContentKind::Unknown,
             },
         }
     }
@@ -149,6 +162,7 @@ impl RequestContextBuilder {
                 task_kind: original.task_kind,
                 download_behavior: original.download_behavior,
                 access_stats_behavior: original.access_stats_behavior,
+                page_content_kind: original.page_content_kind,
             },
         }
     }
@@ -164,6 +178,11 @@ impl RequestContextBuilder {
     /// accesses should update the access time of the layer.
     pub(crate) fn access_stats_behavior(mut self, b: AccessStatsBehavior) -> Self {
         self.inner.access_stats_behavior = b;
+        self
+    }
+
+    pub(crate) fn page_content_kind(mut self, k: PageContentKind) -> Self {
+        self.inner.page_content_kind = k;
         self
     }
 
@@ -262,5 +281,9 @@ impl RequestContext {
 
     pub(crate) fn access_stats_behavior(&self) -> AccessStatsBehavior {
         self.access_stats_behavior
+    }
+
+    pub(crate) fn page_content_kind(&self) -> PageContentKind {
+        self.page_content_kind
     }
 }

@@ -2,12 +2,14 @@
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{anyhow, bail, Result};
+use camino::Utf8PathBuf;
 use postgres_ffi::XLogSegNo;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use std::cmp::max;
-use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::{
     sync::{mpsc::Sender, watch},
@@ -24,9 +26,10 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
 use crate::receive_wal::WalReceivers;
+use crate::recovery::{recovery_main, Donor, RecoveryNeededInfo};
 use crate::safekeeper::{
     AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, SafeKeeperState,
-    SafekeeperMemState, ServerInfo, Term,
+    SafekeeperMemState, ServerInfo, Term, TermLsn, INVALID_TERM,
 };
 use crate::send_wal::WalSenders;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
@@ -37,29 +40,38 @@ use crate::SafeKeeperConf;
 use crate::{debug_dump, wal_storage};
 
 /// Things safekeeper should know about timeline state on peers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub sk_id: NodeId,
+    pub term: Term,
     /// Term of the last entry.
-    _last_log_term: Term,
+    pub last_log_term: Term,
     /// LSN of the last record.
-    _flush_lsn: Lsn,
+    pub flush_lsn: Lsn,
     pub commit_lsn: Lsn,
     /// Since which LSN safekeeper has WAL. TODO: remove this once we fill new
     /// sk since backup_lsn.
     pub local_start_lsn: Lsn,
-    /// When info was received.
+    /// When info was received. Serde annotations are not very useful but make
+    /// the code compile -- we don't rely on this field externally.
+    #[serde(skip)]
+    #[serde(default = "Instant::now")]
     ts: Instant,
+    pub pg_connstr: String,
+    pub http_connstr: String,
 }
 
 impl PeerInfo {
     fn from_sk_info(sk_info: &SafekeeperTimelineInfo, ts: Instant) -> PeerInfo {
         PeerInfo {
             sk_id: NodeId(sk_info.safekeeper_id),
-            _last_log_term: sk_info.last_log_term,
-            _flush_lsn: Lsn(sk_info.flush_lsn),
+            term: sk_info.term,
+            last_log_term: sk_info.last_log_term,
+            flush_lsn: Lsn(sk_info.flush_lsn),
             commit_lsn: Lsn(sk_info.commit_lsn),
             local_start_lsn: Lsn(sk_info.local_start_lsn),
+            pg_connstr: sk_info.safekeeper_connstr.clone(),
+            http_connstr: sk_info.http_connstr.clone(),
             ts,
         }
     }
@@ -101,7 +113,6 @@ pub struct SharedState {
     /// TODO: it might be better to remove tli completely from GlobalTimelines
     /// when tli is inactive instead of having this flag.
     active: bool,
-    num_computes: u32,
     last_removed_segno: XLogSegNo,
 }
 
@@ -140,7 +151,6 @@ impl SharedState {
             peers_info: PeersInfo(vec![]),
             wal_backup_active: false,
             active: false,
-            num_computes: 0,
             last_removed_segno: 0,
         })
     }
@@ -160,7 +170,6 @@ impl SharedState {
             peers_info: PeersInfo(vec![]),
             wal_backup_active: false,
             active: false,
-            num_computes: 0,
             last_removed_segno: 0,
         })
     }
@@ -173,8 +182,9 @@ impl SharedState {
     }
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
-    /// start/stop action.
-    fn update_status(
+    /// start/stop action. If timeline is deactivated, control file is persisted
+    /// as maintenance task does that only for active timelines.
+    async fn update_status(
         &mut self,
         num_computes: usize,
         remote_consistent_lsn: Lsn,
@@ -182,7 +192,15 @@ impl SharedState {
     ) -> bool {
         let is_active = self.is_active(num_computes, remote_consistent_lsn);
         if self.active != is_active {
-            info!("timeline {} active={} now", ttid, is_active);
+            info!(
+                "timeline {} active={} now, remote_consistent_lsn={}, commit_lsn={}",
+                ttid, is_active, remote_consistent_lsn, self.sk.inmem.commit_lsn
+            );
+            if !is_active {
+                if let Err(e) = self.sk.persist_inmem(remote_consistent_lsn).await {
+                    warn!("control file save in update_status failed: {:?}", e);
+                }
+            }
         }
         self.active = is_active;
         self.is_wal_backup_action_pending(num_computes)
@@ -208,7 +226,7 @@ impl SharedState {
             };
             trace!(
                 "timeline {} s3 offloading action {} pending: num_computes={}, commit_lsn={}, backup_lsn={}",
-                self.sk.state.timeline_id, action_pending, self.num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
+                self.sk.state.timeline_id, action_pending, num_computes, self.sk.inmem.commit_lsn, self.sk.inmem.backup_lsn
             );
         }
         res
@@ -237,8 +255,9 @@ impl SharedState {
                 tenant_id: ttid.tenant_id.as_ref().to_owned(),
                 timeline_id: ttid.timeline_id.as_ref().to_owned(),
             }),
+            term: self.sk.state.acceptor_state.term,
             last_log_term: self.sk.get_epoch(),
-            flush_lsn: self.sk.wal_store.flush_lsn().0,
+            flush_lsn: self.sk.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: self.sk.inmem.commit_lsn.0,
             remote_consistent_lsn: remote_consistent_lsn.0,
@@ -247,10 +266,25 @@ impl SharedState {
                 .advertise_pg_addr
                 .to_owned()
                 .unwrap_or(conf.listen_pg_addr.clone()),
+            http_connstr: conf.listen_http_addr.to_owned(),
             backup_lsn: self.sk.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
         }
+    }
+
+    /// Get our latest view of alive peers status on the timeline.
+    /// We pass our own info through the broker as well, so when we don't have connection
+    /// to the broker returned vec is empty.
+    fn get_peers(&self, heartbeat_timeout: Duration) -> Vec<PeerInfo> {
+        let now = Instant::now();
+        self.peers_info
+            .0
+            .iter()
+            // Regard peer as absent if we haven't heard from it within heartbeat_timeout.
+            .filter(|p| now.duration_since(p.ts) <= heartbeat_timeout)
+            .cloned()
+            .collect()
     }
 }
 
@@ -296,6 +330,13 @@ pub struct Timeline {
     commit_lsn_watch_tx: watch::Sender<Lsn>,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
 
+    /// Broadcasts (current term, flush_lsn) updates, walsender is interested in
+    /// them when sending in recovery mode (to walproposer or peers). Note: this
+    /// is just a notification, WAL reading should always done with lock held as
+    /// term can change otherwise.
+    term_flush_lsn_watch_tx: watch::Sender<TermLsn>,
+    term_flush_lsn_watch_rx: watch::Receiver<TermLsn>,
+
     /// Safekeeper and other state, that should remain consistent and
     /// synchronized with the disk. This is tokio mutex as we write WAL to disk
     /// while holding it, ensuring that consensus checks are in order.
@@ -311,22 +352,26 @@ pub struct Timeline {
     cancellation_rx: watch::Receiver<bool>,
 
     /// Directory where timeline state is stored.
-    pub timeline_dir: PathBuf,
+    pub timeline_dir: Utf8PathBuf,
 }
 
 impl Timeline {
     /// Load existing timeline from disk.
     pub fn load_timeline(
-        conf: SafeKeeperConf,
+        conf: &SafeKeeperConf,
         ttid: TenantTimelineId,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
     ) -> Result<Timeline> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
-        let shared_state = SharedState::restore(&conf, &ttid)?;
+        let shared_state = SharedState::restore(conf, &ttid)?;
         let rcl = shared_state.sk.state.remote_consistent_lsn;
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state.commit_lsn);
+        let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
+            shared_state.sk.get_term(),
+            shared_state.sk.flush_lsn(),
+        )));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
         Ok(Timeline {
@@ -334,6 +379,8 @@ impl Timeline {
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
+            term_flush_lsn_watch_tx,
+            term_flush_lsn_watch_rx,
             mutex: Mutex::new(shared_state),
             walsenders: WalSenders::new(rcl),
             walreceivers: WalReceivers::new(),
@@ -345,7 +392,7 @@ impl Timeline {
 
     /// Create a new timeline, which is not yet persisted to disk.
     pub fn create_empty(
-        conf: SafeKeeperConf,
+        conf: &SafeKeeperConf,
         ttid: TenantTimelineId,
         wal_backup_launcher_tx: Sender<TenantTimelineId>,
         server_info: ServerInfo,
@@ -353,6 +400,8 @@ impl Timeline {
         local_start_lsn: Lsn,
     ) -> Result<Timeline> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) = watch::channel(Lsn::INVALID);
+        let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) =
+            watch::channel(TermLsn::from((INVALID_TERM, Lsn::INVALID)));
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
         let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
@@ -361,7 +410,9 @@ impl Timeline {
             wal_backup_launcher_tx,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
-            mutex: Mutex::new(SharedState::create_new(&conf, &ttid, state)?),
+            term_flush_lsn_watch_tx,
+            term_flush_lsn_watch_rx,
+            mutex: Mutex::new(SharedState::create_new(conf, &ttid, state)?),
             walsenders: WalSenders::new(Lsn(0)),
             walreceivers: WalReceivers::new(),
             cancellation_rx,
@@ -370,12 +421,16 @@ impl Timeline {
         })
     }
 
-    /// Initialize fresh timeline on disk and start background tasks. If bootstrap
+    /// Initialize fresh timeline on disk and start background tasks. If init
     /// fails, timeline is cancelled and cannot be used anymore.
     ///
-    /// Bootstrap is transactional, so if it fails, created files will be deleted,
+    /// Init is transactional, so if it fails, created files will be deleted,
     /// and state on disk should remain unchanged.
-    pub async fn bootstrap(&self, shared_state: &mut MutexGuard<'_, SharedState>) -> Result<()> {
+    pub async fn init_new(
+        self: &Arc<Timeline>,
+        shared_state: &mut MutexGuard<'_, SharedState>,
+        conf: &SafeKeeperConf,
+    ) -> Result<()> {
         match fs::metadata(&self.timeline_dir).await {
             Ok(_) => {
                 // Timeline directory exists on disk, we should leave state unchanged
@@ -391,8 +446,8 @@ impl Timeline {
         // Create timeline directory.
         fs::create_dir_all(&self.timeline_dir).await?;
 
-        // Write timeline to disk and TODO: start background tasks.
-        if let Err(e) = shared_state.sk.persist().await {
+        // Write timeline to disk and start background tasks.
+        if let Err(e) = shared_state.sk.persist_inmem(Lsn::INVALID).await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
             self.cancel(shared_state);
 
@@ -405,10 +460,16 @@ impl Timeline {
 
             return Err(e);
         }
-
-        // TODO: add more initialization steps here
-        self.update_status(shared_state);
+        self.bootstrap(conf);
         Ok(())
+    }
+
+    /// Bootstrap new or existing timeline starting background stasks.
+    pub fn bootstrap(self: &Arc<Timeline>, conf: &SafeKeeperConf) {
+        // Start recovery task which always runs on the timeline.
+        if conf.peer_recovery_enabled {
+            tokio::spawn(recovery_main(self.clone(), conf.clone()));
+        }
     }
 
     /// Delete timeline from disk completely, by removing timeline directory. Background
@@ -444,17 +505,29 @@ impl Timeline {
         *self.cancellation_rx.borrow()
     }
 
+    /// Returns watch channel which gets value when timeline is cancelled. It is
+    /// guaranteed to have not cancelled value observed (errors otherwise).
+    pub fn get_cancellation_rx(&self) -> Result<watch::Receiver<bool>> {
+        let rx = self.cancellation_rx.clone();
+        if *rx.borrow() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
+        Ok(rx)
+    }
+
     /// Take a writing mutual exclusive lock on timeline shared_state.
     pub async fn write_shared_state(&self) -> MutexGuard<SharedState> {
         self.mutex.lock().await
     }
 
-    fn update_status(&self, shared_state: &mut SharedState) -> bool {
-        shared_state.update_status(
-            self.walreceivers.get_num(),
-            self.get_walsenders().get_remote_consistent_lsn(),
-            self.ttid,
-        )
+    async fn update_status(&self, shared_state: &mut SharedState) -> bool {
+        shared_state
+            .update_status(
+                self.walreceivers.get_num(),
+                self.get_walsenders().get_remote_consistent_lsn(),
+                self.ttid,
+            )
+            .await
     }
 
     /// Update timeline status and kick wal backup launcher to stop/start offloading if needed.
@@ -464,7 +537,7 @@ impl Timeline {
         }
         let is_wal_backup_action_pending: bool = {
             let mut shared_state = self.write_shared_state().await;
-            self.update_status(&mut shared_state)
+            self.update_status(&mut shared_state).await
         };
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
@@ -483,7 +556,7 @@ impl Timeline {
             return true;
         }
         let shared_state = self.write_shared_state().await;
-        if shared_state.num_computes == 0 {
+        if self.walreceivers.get_num() == 0 {
             return shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
             reported_remote_consistent_lsn >= shared_state.sk.inmem.commit_lsn;
         }
@@ -520,6 +593,11 @@ impl Timeline {
         self.commit_lsn_watch_rx.clone()
     }
 
+    /// Returns term_flush_lsn watch channel.
+    pub fn get_term_flush_lsn_watch_rx(&self) -> watch::Receiver<TermLsn> {
+        self.term_flush_lsn_watch_rx.clone()
+    }
+
     /// Pass arrived message to the safekeeper.
     pub async fn process_msg(
         &self,
@@ -531,6 +609,7 @@ impl Timeline {
 
         let mut rmsg: Option<AcceptorProposerMessage>;
         let commit_lsn: Lsn;
+        let term_flush_lsn: TermLsn;
         {
             let mut shared_state = self.write_shared_state().await;
             rmsg = shared_state.sk.process_msg(msg).await?;
@@ -544,8 +623,11 @@ impl Timeline {
             }
 
             commit_lsn = shared_state.sk.inmem.commit_lsn;
+            term_flush_lsn =
+                TermLsn::from((shared_state.sk.get_term(), shared_state.sk.flush_lsn()));
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;
+        self.term_flush_lsn_watch_tx.send(term_flush_lsn)?;
         Ok(rmsg)
     }
 
@@ -612,7 +694,7 @@ impl Timeline {
             shared_state.sk.record_safekeeper_info(&sk_info).await?;
             let peer_info = PeerInfo::from_sk_info(&sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
-            is_wal_backup_action_pending = self.update_status(&mut shared_state);
+            is_wal_backup_action_pending = self.update_status(&mut shared_state).await;
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;
@@ -623,20 +705,88 @@ impl Timeline {
         Ok(())
     }
 
-    /// Get our latest view of alive peers status on the timeline.
-    /// We pass our own info through the broker as well, so when we don't have connection
-    /// to the broker returned vec is empty.
     pub async fn get_peers(&self, conf: &SafeKeeperConf) -> Vec<PeerInfo> {
         let shared_state = self.write_shared_state().await;
-        let now = Instant::now();
-        shared_state
-            .peers_info
-            .0
-            .iter()
-            // Regard peer as absent if we haven't heard from it within heartbeat_timeout.
-            .filter(|p| now.duration_since(p.ts) <= conf.heartbeat_timeout)
-            .cloned()
-            .collect()
+        shared_state.get_peers(conf.heartbeat_timeout)
+    }
+
+    /// Should we start fetching WAL from a peer safekeeper, and if yes, from
+    /// which? Answer is yes, i.e. .donors is not empty if 1) there is something
+    /// to fetch, and we can do that without running elections; 2) there is no
+    /// actively streaming compute, as we don't want to compete with it.
+    ///
+    /// If donor(s) are choosen, theirs last_log_term is guaranteed to be equal
+    /// to its last_log_term so we are sure such a leader ever had been elected.
+    ///
+    /// All possible donors are returned so that we could keep connection to the
+    /// current one if it is good even if it slightly lags behind.
+    ///
+    /// Note that term conditions above might be not met, but safekeepers are
+    /// still not aligned on last flush_lsn. Generally in this case until
+    /// elections are run it is not possible to say which safekeeper should
+    /// recover from which one -- history which would be committed is different
+    /// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
+    /// Thus we don't try to predict it here.
+    pub async fn recovery_needed(&self, heartbeat_timeout: Duration) -> RecoveryNeededInfo {
+        let ss = self.write_shared_state().await;
+        let term = ss.sk.state.acceptor_state.term;
+        let last_log_term = ss.sk.get_epoch();
+        let flush_lsn = ss.sk.flush_lsn();
+        // note that peers contain myself, but that's ok -- we are interested only in peers which are strictly ahead of us.
+        let mut peers = ss.get_peers(heartbeat_timeout);
+        // Sort by <last log term, lsn> pairs.
+        peers.sort_by(|p1, p2| {
+            let tl1 = TermLsn {
+                term: p1.last_log_term,
+                lsn: p1.flush_lsn,
+            };
+            let tl2 = TermLsn {
+                term: p2.last_log_term,
+                lsn: p2.flush_lsn,
+            };
+            tl2.cmp(&tl1) // desc
+        });
+        let num_streaming_computes = self.walreceivers.get_num_streaming();
+        let donors = if num_streaming_computes > 0 {
+            vec![] // If there is a streaming compute, don't try to recover to not intervene.
+        } else {
+            peers
+                .iter()
+                .filter_map(|candidate| {
+                    // Are we interested in this candidate?
+                    let candidate_tl = TermLsn {
+                        term: candidate.last_log_term,
+                        lsn: candidate.flush_lsn,
+                    };
+                    let my_tl = TermLsn {
+                        term: last_log_term,
+                        lsn: flush_lsn,
+                    };
+                    if my_tl < candidate_tl {
+                        // Yes, we are interested. Can we pull from it without
+                        // (re)running elections? It is possible if 1) his term
+                        // is equal to his last_log_term so we could act on
+                        // behalf of leader of this term (we must be sure he was
+                        // ever elected) and 2) our term is not higher, or we'll refuse data.
+                        if candidate.term == candidate.last_log_term && candidate.term >= term {
+                            Some(Donor::from(candidate))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        RecoveryNeededInfo {
+            term,
+            last_log_term,
+            flush_lsn,
+            peers,
+            num_streaming_computes,
+            donors,
+        }
     }
 
     pub fn get_walsenders(&self) -> &Arc<WalSenders> {
@@ -666,9 +816,9 @@ impl Timeline {
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(()); // nothing to do
             }
-            let remover = shared_state.sk.wal_store.remove_up_to(horizon_segno - 1);
+
             // release the lock before removing
-            remover
+            shared_state.sk.wal_store.remove_up_to(horizon_segno - 1)
         };
 
         // delete old WAL files
@@ -689,7 +839,7 @@ impl Timeline {
         self.write_shared_state()
             .await
             .sk
-            .maybe_persist_control_file(remote_consistent_lsn)
+            .maybe_persist_inmem_control_file(remote_consistent_lsn)
             .await
     }
 
@@ -708,7 +858,7 @@ impl Timeline {
                 ps_feedback,
                 wal_backup_active: state.wal_backup_active,
                 timeline_is_active: state.active,
-                num_computes: state.num_computes,
+                num_computes: self.walreceivers.get_num() as u32,
                 last_removed_segno: state.last_removed_segno,
                 epoch_start_lsn: state.sk.epoch_start_lsn,
                 mem_state: state.sk.inmem.clone(),
@@ -735,7 +885,7 @@ impl Timeline {
             walsenders: self.walsenders.get_all(),
             wal_backup_active: state.wal_backup_active,
             active: state.active,
-            num_computes: state.num_computes,
+            num_computes: self.walreceivers.get_num() as u32,
             last_removed_segno: state.last_removed_segno,
             epoch_start_lsn: state.sk.epoch_start_lsn,
             mem_state: state.sk.inmem.clone(),
@@ -748,7 +898,7 @@ impl Timeline {
 }
 
 /// Deletes directory and it's contents. Returns false if directory does not exist.
-async fn delete_dir(path: &PathBuf) -> Result<bool> {
+async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
     match fs::remove_dir_all(path).await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),

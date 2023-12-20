@@ -35,6 +35,11 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))
 
+    # Because this test does a rapid series of restarts of the same node, it's possible that
+    # we are restarted again before we can clean up deletion lists form the previous generation,
+    # resulting in a subsequent startup logging a warning.
+    env.pageserver.allowed_errors.append(".*Dropping stale deletions for tenant.*")
+
     for _ in range(5):
         with pytest.raises(subprocess.SubprocessError):
             pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])

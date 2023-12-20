@@ -4,7 +4,6 @@ use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
@@ -13,19 +12,25 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use utils::http::endpoint::request_span;
+
+use std::io::Write as _;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::info_span;
+use utils::http::endpoint::{request_span, ChannelWriter};
 
 use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
+use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
+use crate::timeline::PeerInfo;
 use crate::{debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 use utils::{
-    auth::JwtAuth,
+    auth::SwappableJwtAuth,
     http::{
         endpoint::{self, auth_middleware, check_permission_with},
         error::ApiError,
@@ -59,14 +64,21 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .as_ref()
 }
 
-/// Same as TermSwitchEntry, but serializes LSN using display serializer
+/// Same as TermLsn, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TermSwitchApiEntry {
     pub term: Term,
-    #[serde_as(as = "DisplayFromStr")]
     pub lsn: Lsn,
+}
+
+impl From<TermSwitchApiEntry> for TermLsn {
+    fn from(api_val: TermSwitchApiEntry) -> Self {
+        TermLsn {
+            term: api_val.term,
+            lsn: api_val.lsn,
+        }
+    }
 }
 
 /// Augment AcceptorState with epoch for convenience
@@ -78,29 +90,20 @@ pub struct AcceptorStateStatus {
 }
 
 /// Info about timeline on safekeeper ready for reporting.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineStatus {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub acceptor_state: AcceptorStateStatus,
     pub pg_info: ServerInfo,
-    #[serde_as(as = "DisplayFromStr")]
     pub flush_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_start_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub local_start_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub commit_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub backup_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub peer_horizon_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
+    pub peers: Vec<PeerInfo>,
     pub walsenders: Vec<WalSenderState>,
     pub walreceivers: Vec<WalReceiverState>,
 }
@@ -140,6 +143,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         term_history,
     };
 
+    let conf = get_conf(&request);
     // Note: we report in memory values which can be lost.
     let status = TimelineStatus {
         tenant_id: ttid.tenant_id,
@@ -153,6 +157,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
         remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
+        peers: tli.get_peers(conf).await,
         walsenders: tli.get_walsenders().get_all(),
         walreceivers: tli.get_walreceivers().get_all(),
     };
@@ -282,12 +287,14 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
             tenant_id: ttid.tenant_id.as_ref().to_owned(),
             timeline_id: ttid.timeline_id.as_ref().to_owned(),
         }),
+        term: sk_info.term.unwrap_or(0),
         last_log_term: sk_info.last_log_term.unwrap_or(0),
         flush_lsn: sk_info.flush_lsn.0,
         commit_lsn: sk_info.commit_lsn.0,
         remote_consistent_lsn: sk_info.remote_consistent_lsn.0,
         peer_horizon_lsn: sk_info.peer_horizon_lsn.0,
         safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
+        http_connstr: sk_info.http_connstr.unwrap_or_else(|| "".to_owned()),
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,
@@ -358,8 +365,52 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    // TODO: use streaming response
-    json_response(StatusCode::OK, resp)
+    let started_at = std::time::Instant::now();
+
+    let (tx, rx) = mpsc::channel(1);
+
+    let body = Body::wrap_stream(ReceiverStream::new(rx));
+
+    let mut writer = ChannelWriter::new(128 * 1024, tx);
+
+    let response = Response::builder()
+        .status(200)
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    let span = info_span!("blocking");
+    tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+
+        let res = serde_json::to_writer(&mut writer, &resp)
+            .map_err(std::io::Error::from)
+            .and_then(|_| writer.flush());
+
+        match res {
+            Ok(()) => {
+                tracing::info!(
+                    bytes = writer.flushed_bytes(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "responded /v1/debug_dump"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("failed to write out /v1/debug_dump response: {e:#}");
+                // semantics of this error are quite... unclear. we want to error the stream out to
+                // abort the response to somehow notify the client that we failed.
+                //
+                // though, most likely the reason for failure is that the receiver is already gone.
+                drop(
+                    writer
+                        .tx
+                        .blocking_send(Err(std::io::ErrorKind::BrokenPipe.into())),
+                );
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 /// Safekeeper http router.
@@ -368,13 +419,20 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     if conf.http_auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
             #[allow(clippy::mutable_key_type)]
-            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> =
-                Lazy::new(|| ["/v1/status"].iter().map(|v| v.parse().unwrap()).collect());
+            static ALLOWLIST_ROUTES: Lazy<HashSet<Uri>> = Lazy::new(|| {
+                ["/v1/status", "/metrics"]
+                    .iter()
+                    .map(|v| v.parse().unwrap())
+                    .collect()
+            });
             if ALLOWLIST_ROUTES.contains(request.uri()) {
                 None
             } else {
-                // Option<Arc<JwtAuth>> is always provided as data below, hence unwrap().
-                request.data::<Option<Arc<JwtAuth>>>().unwrap().as_deref()
+                // Option<Arc<SwappableJwtAuth>> is always provided as data below, hence unwrap().
+                request
+                    .data::<Option<Arc<SwappableJwtAuth>>>()
+                    .unwrap()
+                    .as_deref()
             }
         }))
     }

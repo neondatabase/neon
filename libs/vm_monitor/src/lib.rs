@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg(target_os = "linux")]
 
 use anyhow::Context;
@@ -168,14 +170,17 @@ pub async fn ws_handler(
 
 /// Starts the monitor. If startup fails or the monitor exits, an error will
 /// be logged and our internal state will be reset to allow for new connections.
-#[tracing::instrument(skip_all, fields(?args))]
+#[tracing::instrument(skip_all)]
 async fn start_monitor(
     ws: WebSocket,
     args: &Args,
     kill: broadcast::Receiver<()>,
     token: CancellationToken,
 ) {
-    info!("accepted new websocket connection -> starting monitor");
+    info!(
+        ?args,
+        "accepted new websocket connection -> starting monitor"
+    );
     let timeout = Duration::from_secs(4);
     let monitor = tokio::time::timeout(
         timeout,

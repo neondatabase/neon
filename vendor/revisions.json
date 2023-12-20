@@ -1,4 +1,5 @@
 {
-    "postgres-v15": "026d6b093d49e25cec44dd04598152329ceac027",
-    "postgres-v14": "5d5cfee12783f0989a9c9fe13bb40b5585812568"
+    "postgres-v16": "863b71572bc441581efb3bbee2ad18af037be1bb",
+    "postgres-v15": "24333abb81a9ecae4541019478f0bf7d0b289df7",
+    "postgres-v14": "0bb356aa0cd1582112926fbcf0b5370222c2db6d"
 }

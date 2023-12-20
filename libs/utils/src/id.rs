@@ -1,9 +1,9 @@
-use std::ffi::OsStr;
 use std::{fmt, str::FromStr};
 
 use anyhow::Context;
 use hex::FromHex;
 use rand::Rng;
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -18,11 +18,73 @@ pub enum IdError {
 ///
 /// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
 /// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
-///
-/// Use `#[serde_as(as = "DisplayFromStr")]` to (de)serialize it as hex string instead: `ad50847381e248feaac9876cc71ae418`.
-/// Check the `serde_with::serde_as` documentation for options for more complex types.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Id([u8; 16]);
+
+impl Serialize for Id {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct IdVisitor {
+            is_human_readable_deserializer: bool,
+        }
+
+        impl<'de> Visitor<'de> for IdVisitor {
+            type Value = Id;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                if self.is_human_readable_deserializer {
+                    formatter.write_str("value in form of hex string")
+                } else {
+                    formatter.write_str("value in form of integer array([u8; 16])")
+                }
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let s = serde::de::value::SeqAccessDeserializer::new(seq);
+                let id: [u8; 16] = Deserialize::deserialize(s)?;
+                Ok(Id::from(id))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Id::from_str(v).map_err(E::custom)
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(IdVisitor {
+                is_human_readable_deserializer: true,
+            })
+        } else {
+            deserializer.deserialize_tuple(
+                16,
+                IdVisitor {
+                    is_human_readable_deserializer: false,
+                },
+            )
+        }
+    }
+}
 
 impl Id {
     pub fn get_from_buf(buf: &mut impl bytes::Buf) -> Id {
@@ -58,6 +120,8 @@ impl Id {
             chunk[0] = HEX[((b >> 4) & 0xf) as usize];
             chunk[1] = HEX[(b & 0xf) as usize];
         }
+
+        // SAFETY: vec constructed out of `HEX`, it can only be ascii
         unsafe { String::from_utf8_unchecked(buf) }
     }
 }
@@ -215,12 +279,11 @@ pub struct TimelineId(Id);
 
 id_newtype!(TimelineId);
 
-impl TryFrom<Option<&OsStr>> for TimelineId {
+impl TryFrom<Option<&str>> for TimelineId {
     type Error = anyhow::Error;
 
-    fn try_from(value: Option<&OsStr>) -> Result<Self, Self::Error> {
+    fn try_from(value: Option<&str>) -> Result<Self, Self::Error> {
         value
-            .and_then(OsStr::to_str)
             .unwrap_or_default()
             .parse::<TimelineId>()
             .with_context(|| format!("Could not parse timeline id from {:?}", value))
@@ -308,5 +371,114 @@ pub struct NodeId(pub u64);
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_assert::{Deserializer, Serializer, Token, Tokens};
+
+    use crate::bin_ser::BeSer;
+
+    use super::*;
+
+    #[test]
+    fn test_id_serde_non_human_readable() {
+        let original_id = Id([
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ]);
+        let expected_tokens = Tokens(vec![
+            Token::Tuple { len: 16 },
+            Token::U8(173),
+            Token::U8(80),
+            Token::U8(132),
+            Token::U8(115),
+            Token::U8(129),
+            Token::U8(226),
+            Token::U8(72),
+            Token::U8(254),
+            Token::U8(170),
+            Token::U8(201),
+            Token::U8(135),
+            Token::U8(108),
+            Token::U8(199),
+            Token::U8(26),
+            Token::U8(228),
+            Token::U8(24),
+            Token::TupleEnd,
+        ]);
+
+        let serializer = Serializer::builder().is_human_readable(false).build();
+        let serialized_tokens = original_id.serialize(&serializer).unwrap();
+        assert_eq!(serialized_tokens, expected_tokens);
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(false)
+            .tokens(serialized_tokens)
+            .build();
+        let deserialized_id = Id::deserialize(&mut deserializer).unwrap();
+        assert_eq!(deserialized_id, original_id);
+    }
+
+    #[test]
+    fn test_id_serde_human_readable() {
+        let original_id = Id([
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ]);
+        let expected_tokens = Tokens(vec![Token::Str(String::from(
+            "ad50847381e248feaac9876cc71ae418",
+        ))]);
+
+        let serializer = Serializer::builder().is_human_readable(true).build();
+        let serialized_tokens = original_id.serialize(&serializer).unwrap();
+        assert_eq!(serialized_tokens, expected_tokens);
+
+        let mut deserializer = Deserializer::builder()
+            .is_human_readable(true)
+            .tokens(Tokens(vec![Token::Str(String::from(
+                "ad50847381e248feaac9876cc71ae418",
+            ))]))
+            .build();
+        assert_eq!(Id::deserialize(&mut deserializer).unwrap(), original_id);
+    }
+
+    macro_rules! roundtrip_type {
+        ($type:ty, $expected_bytes:expr) => {{
+            let expected_bytes: [u8; 16] = $expected_bytes;
+            let original_id = <$type>::from(expected_bytes);
+
+            let ser_bytes = original_id.ser().unwrap();
+            assert_eq!(ser_bytes, expected_bytes);
+
+            let des_id = <$type>::des(&ser_bytes).unwrap();
+            assert_eq!(des_id, original_id);
+        }};
+    }
+
+    #[test]
+    fn test_id_bincode_serde() {
+        let expected_bytes = [
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ];
+
+        roundtrip_type!(Id, expected_bytes);
+    }
+
+    #[test]
+    fn test_tenant_id_bincode_serde() {
+        let expected_bytes = [
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ];
+
+        roundtrip_type!(TenantId, expected_bytes);
+    }
+
+    #[test]
+    fn test_timeline_id_bincode_serde() {
+        let expected_bytes = [
+            173, 80, 132, 115, 129, 226, 72, 254, 170, 201, 135, 108, 199, 26, 228, 24,
+        ];
+
+        roundtrip_type!(TimelineId, expected_bytes);
     }
 }

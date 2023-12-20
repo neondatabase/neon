@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     PgProtocol,
     RemotePostgres,
     VanillaPostgres,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pg_stats import PgStatTable
 
@@ -104,6 +105,8 @@ class NeonCompare(PgCompare):
         self._pg_bin = pg_bin
         self.pageserver_http_client = self.env.pageserver.http_client()
 
+        # note that neon_simple_env now uses LOCAL_FS remote storage
+
         # Create tenant
         tenant_conf: Dict[str, str] = {}
         if False:  # TODO add pytest setting for this
@@ -129,6 +132,7 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
+        wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
         self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
         self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 

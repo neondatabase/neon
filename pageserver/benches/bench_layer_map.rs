@@ -3,6 +3,7 @@ use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::LayerFileName;
 use pageserver::tenant::storage_layer::PersistentLayerDesc;
+use pageserver_api::shard::TenantShardId;
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -211,7 +212,7 @@ fn bench_sequential(c: &mut Criterion) {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
         let layer = PersistentLayerDesc::new_img(
-            TenantId::generate(),
+            TenantShardId::unsharded(TenantId::generate()),
             TimelineId::generate(),
             zero.add(10 * i32)..zero.add(10 * i32 + 1),
             Lsn(i),

@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 pub(super) static BUCKET_METRICS: Lazy<BucketMetrics> = Lazy::new(Default::default);
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum RequestKind {
+pub(crate) enum RequestKind {
     Get = 0,
     Put = 1,
     Delete = 2,

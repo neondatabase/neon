@@ -156,17 +156,17 @@ paths:
                 description: Error text or 'OK' if download succeeded.
                 example: "OK"
         400:
-        description: Request is invalid.
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/GenericError"
+          description: Request is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
         500:
-        description: Extension download request failed.
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/GenericError"
+          description: Extension download request failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
 
 components:
   securitySchemes:

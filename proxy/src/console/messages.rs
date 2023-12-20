@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use smol_str::SmolStr;
 use std::fmt;
 
 /// Generic error response with human-readable description.
@@ -13,6 +14,7 @@ pub struct ConsoleError {
 #[derive(Deserialize)]
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
+    pub allowed_ips: Option<Vec<Box<str>>>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -87,11 +89,11 @@ impl fmt::Debug for DatabaseInfo {
 
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct MetricsAuxInfo {
-    pub endpoint_id: Box<str>,
-    pub project_id: Box<str>,
-    pub branch_id: Box<str>,
+    pub endpoint_id: SmolStr,
+    pub project_id: SmolStr,
+    pub branch_id: SmolStr,
 }
 
 impl MetricsAuxInfo {
@@ -184,6 +186,33 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_wake_compute() -> anyhow::Result<()> {
+        let json = json!({
+            "address": "0.0.0.0",
+            "aux": dummy_aux(),
+        });
+        let _: WakeCompute = serde_json::from_str(&json.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn parse_get_role_secret() -> anyhow::Result<()> {
+        // Empty `allowed_ips` field.
+        let json = json!({
+            "role_secret": "secret",
+        });
+        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        // Empty `allowed_ips` field.
+        let json = json!({
+            "role_secret": "secret",
+            "allowed_ips": ["8.8.8.8"],
+        });
+        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
 
         Ok(())
     }

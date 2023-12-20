@@ -6,12 +6,12 @@ use std::str::FromStr;
 use std::str::{self};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, info_span, Instrument};
+use tracing::{debug, info, info_span, Instrument};
 
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
-use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
+use crate::metrics::{TrafficMetrics, PG_QUERIES_GAUGE};
 use crate::safekeeper::Term;
 use crate::timeline::TimelineError;
 use crate::wal_service::ConnectionId;
@@ -140,6 +140,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 }
             }
 
+            let ttid = TenantTimelineId::new(
+                self.tenant_id.unwrap_or(TenantId::from([0u8; 16])),
+                self.timeline_id.unwrap_or(TimelineId::from([0u8; 16])),
+            );
+            tracing::Span::current().record("ttid", tracing::field::display(ttid));
+
             Ok(())
         } else {
             Err(QueryError::Other(anyhow::anyhow!(
@@ -159,26 +165,27 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
             .auth
             .as_ref()
             .expect("auth_type is configured but .auth of handler is missing");
-        let data =
-            auth.decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
+        let data = auth
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)
+            .map_err(|e| QueryError::Unauthorized(e.0))?;
 
         // The handler might be configured to allow only tenant scope tokens.
         if matches!(allowed_auth_scope, Scope::Tenant)
             && !matches!(data.claims.scope, Scope::Tenant)
         {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "passed JWT token is for full access, but only tenant scope is allowed"
-            )));
+            return Err(QueryError::Unauthorized(
+                "passed JWT token is for full access, but only tenant scope is allowed".into(),
+            ));
         }
 
         if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "jwt token scope is Tenant, but tenant id is missing"
-            )));
+            return Err(QueryError::Unauthorized(
+                "jwt token scope is Tenant, but tenant id is missing".into(),
+            ));
         }
 
-        info!(
-            "jwt auth succeeded for scope: {:#?} by tenant id: {:?}",
+        debug!(
+            "jwt scope check succeeded for scope: {:#?} by tenant id: {:?}",
             data.claims.scope, data.claims.tenant_id,
         );
 
@@ -203,31 +210,24 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         let cmd = parse_cmd(query_string)?;
         let cmd_str = cmd_to_string(&cmd);
 
-        PG_QUERIES_RECEIVED.with_label_values(&[cmd_str]).inc();
-        scopeguard::defer! {
-            PG_QUERIES_FINISHED.with_label_values(&[cmd_str]).inc();
-        }
+        let _guard = PG_QUERIES_GAUGE.with_label_values(&[cmd_str]).guard();
 
-        info!(
-            "got query {:?} in timeline {:?}",
-            query_string, self.timeline_id
-        );
+        info!("got query {:?}", query_string);
 
         let tenant_id = self.tenant_id.context("tenantid is required")?;
         let timeline_id = self.timeline_id.context("timelineid is required")?;
         self.check_permission(Some(tenant_id))?;
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
-        let span_ttid = self.ttid; // satisfy borrow checker
 
         match cmd {
             SafekeeperPostgresCommand::StartWalPush => {
                 self.handle_start_wal_push(pgb)
-                    .instrument(info_span!("WAL receiver", ttid = %span_ttid))
+                    .instrument(info_span!("WAL receiver"))
                     .await
             }
             SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
                 self.handle_start_replication(pgb, start_lsn, term)
-                    .instrument(info_span!("WAL sender", ttid = %span_ttid))
+                    .instrument(info_span!("WAL sender"))
                     .await
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
@@ -261,7 +261,7 @@ impl SafekeeperPostgresHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<(), QueryError> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -273,7 +273,7 @@ impl SafekeeperPostgresHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
     }
 
     async fn handle_timeline_status<IO: AsyncRead + AsyncWrite + Unpin>(
@@ -372,6 +372,13 @@ impl SafekeeperPostgresHandler {
     /// from a walproposer recovery function. This connection gets a special handling:
     /// safekeeper must stream all local WAL till the flush_lsn, whether committed or not.
     pub fn is_walproposer_recovery(&self) -> bool {
-        self.appname == Some("wal_proposer_recovery".to_string())
+        match &self.appname {
+            None => false,
+            Some(appname) => {
+                appname == "wal_proposer_recovery" ||
+                // set by safekeeper peer recovery
+                appname.starts_with("safekeeper")
+            }
+        }
     }
 }

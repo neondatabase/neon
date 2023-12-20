@@ -1,7 +1,7 @@
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef
+from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef, ObjectTypeDef
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -74,11 +74,14 @@ def wait_until_tenant_state(
     for _ in range(iterations):
         try:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
+        except Exception as e:
+            log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
+        else:
             log.debug(f"Tenant {tenant_id} data: {tenant}")
             if tenant["state"]["slug"] == expected_state:
                 return tenant
-        except Exception as e:
-            log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
+            if tenant["state"]["slug"] == "Broken":
+                raise RuntimeError(f"tenant became Broken, not {expected_state}")
 
         time.sleep(period)
 
@@ -154,16 +157,17 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(10):
+    for i in range(100):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
-        log.info(
-            "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
+        if i % 10 == 0:
+            log.info(
+                "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
+                    lsn, current_lsn, i + 1
+                )
             )
-        )
-        time.sleep(1)
+        time.sleep(0.1)
     raise Exception(
         "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
     )
@@ -231,21 +235,48 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def assert_prefix_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
+def assert_prefix_empty(
+    neon_env_builder: "NeonEnvBuilder",
+    prefix: Optional[str] = None,
+    allowed_postfix: Optional[str] = None,
+):
     response = list_prefix(neon_env_builder, prefix)
     keys = response["KeyCount"]
-    objects = response.get("Contents", [])
+    objects: List[ObjectTypeDef] = response.get("Contents", [])
+    common_prefixes = response.get("CommonPrefixes", [])
 
-    if keys != 0 and len(objects) == 0:
-        # this has been seen in one case with mock_s3:
-        # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-4938/6000769714/index.html#suites/3556ed71f2d69272a7014df6dcb02317/ca01e4f4d8d9a11f
-        # looking at moto impl, it might be there's a race with common prefix (sub directory) not going away with deletes
-        common_prefixes = response.get("CommonPrefixes", [])
-        log.warn(
-            f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}"
-        )
+    remote_storage = neon_env_builder.pageserver_remote_storage
+    is_mock_s3 = isinstance(remote_storage, S3Storage) and not remote_storage.cleanup
 
-    assert keys == 0, f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    if is_mock_s3:
+        if keys == 1 and len(objects) == 0 and len(common_prefixes) == 1:
+            # this has been seen in the wild by tests with the below contradicting logging
+            # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-5322/6207777020/index.html#suites/3556ed71f2d69272a7014df6dcb02317/53b5c368b5a68865
+            # this seems like a mock_s3 issue
+            log.warning(
+                f"contrading ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
+            )
+            keys = 0
+        elif keys != 0 and len(objects) == 0:
+            # this has been seen in one case with mock_s3:
+            # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-4938/6000769714/index.html#suites/3556ed71f2d69272a7014df6dcb02317/ca01e4f4d8d9a11f
+            # looking at moto impl, it might be there's a race with common prefix (sub directory) not going away with deletes
+            log.warning(
+                f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}"
+            )
+
+    filtered_count = 0
+    if allowed_postfix is None:
+        filtered_count = len(objects)
+    else:
+        for _obj in objects:
+            key: str = str(response.get("Key", []))
+            if not (allowed_postfix.endswith(key)):
+                filtered_count += 1
+
+    assert (
+        filtered_count == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None):
@@ -254,21 +285,17 @@ def assert_prefix_not_empty(neon_env_builder: "NeonEnvBuilder", prefix: Optional
 
 
 def list_prefix(
-    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None
+    neon_env_builder: "NeonEnvBuilder", prefix: Optional[str] = None, delimiter: str = "/"
 ) -> ListObjectsV2OutputTypeDef:
     """
     Note that this function takes into account prefix_in_bucket.
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
-    assert neon_env_builder.remote_storage_kind in (
-        RemoteStorageKind.MOCK_S3,
-        RemoteStorageKind.REAL_S3,
-    )
-    # For mypy
-    assert isinstance(neon_env_builder.remote_storage, S3Storage)
-    assert neon_env_builder.remote_storage_client is not None
+    remote = neon_env_builder.pageserver_remote_storage
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
+    assert remote.client is not None
 
-    prefix_in_bucket = neon_env_builder.remote_storage.prefix_in_bucket or ""
+    prefix_in_bucket = remote.prefix_in_bucket or ""
     if not prefix:
         prefix = prefix_in_bucket
     else:
@@ -277,9 +304,9 @@ def list_prefix(
         prefix = "/".join((prefix_in_bucket, prefix))
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
-    response = neon_env_builder.remote_storage_client.list_objects_v2(
-        Delimiter="/",
-        Bucket=neon_env_builder.remote_storage.bucket_name,
+    response = remote.client.list_objects_v2(
+        Delimiter=delimiter,
+        Bucket=remote.bucket_name,
         Prefix=prefix,
     )
     return response

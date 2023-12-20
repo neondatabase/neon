@@ -1,11 +1,10 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use anyhow::{bail, Context, Result};
 use tokio::io::AsyncWriteExt;
 use tracing::info;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
-
-use serde_with::{serde_as, DisplayFromStr};
 
 use crate::{
     control_file, debug_dump,
@@ -15,12 +14,9 @@ use crate::{
 };
 
 /// Info about timeline on safekeeper ready for reporting.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
 }
@@ -30,6 +26,16 @@ pub struct Response {
     // Donor safekeeper host
     pub safekeeper_host: String,
     // TODO: add more fields?
+}
+
+/// Response for debug dump request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DebugDumpResponse {
+    pub start_time: DateTime<Utc>,
+    pub finish_time: DateTime<Utc>,
+    pub timelines: Vec<debug_dump::Timeline>,
+    pub timelines_count: usize,
+    pub config: debug_dump::Config,
 }
 
 /// Find the most advanced safekeeper and pull timeline from it.
@@ -103,7 +109,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     // Implementing our own scp over HTTP.
     // At first, we need to fetch list of files from safekeeper.
-    let dump: debug_dump::Response = client
+    let dump: DebugDumpResponse = client
         .get(format!(
             "{}/v1/debug_dump?dump_all=true&tenant_id={}&timeline_id={}",
             host, status.tenant_id, status.timeline_id
@@ -167,11 +173,11 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     tokio::fs::create_dir_all(&temp_base).await?;
 
-    let tli_dir = tempfile::Builder::new()
+    let tli_dir = camino_tempfile::Builder::new()
         .suffix("_temptli")
         .prefix(&format!("{}_{}_", ttid.tenant_id, ttid.timeline_id))
         .tempdir_in(temp_base)?;
-    let tli_dir_path = tli_dir.path().to_owned();
+    let tli_dir_path = tli_dir.path().to_path_buf();
 
     // Note: some time happens between fetching list of files and fetching files themselves.
     //       It's possible that some files will be removed from safekeeper and we will fail to fetch them.
@@ -220,14 +226,14 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     info!(
         "Moving timeline {} from {} to {}",
-        ttid,
-        tli_dir_path.display(),
-        timeline_path.display()
+        ttid, tli_dir_path, timeline_path
     );
     tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
     tokio::fs::rename(tli_dir_path, &timeline_path).await?;
 
-    let tli = GlobalTimelines::load_timeline(ttid).context("Failed to load timeline after copy")?;
+    let tli = GlobalTimelines::load_timeline(ttid)
+        .await
+        .context("Failed to load timeline after copy")?;
 
     info!(
         "Loaded timeline {}, flush_lsn={}",

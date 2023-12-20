@@ -8,7 +8,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
@@ -17,13 +16,13 @@ from fixtures.utils import wait_until
 def test_pageserver_init_node_id(
     neon_simple_env: NeonEnv, neon_binpath: Path, pg_distrib_dir: Path
 ):
-    repo_dir = neon_simple_env.repo_dir
-    pageserver_config = repo_dir / "pageserver.toml"
+    workdir = neon_simple_env.pageserver.workdir
+    pageserver_config = workdir / "pageserver.toml"
     pageserver_bin = neon_binpath / "pageserver"
 
     def run_pageserver(args):
         return subprocess.run(
-            [str(pageserver_bin), "-D", str(repo_dir), *args],
+            [str(pageserver_bin), "-D", str(workdir), *args],
             check=False,
             universal_newlines=True,
             stdout=subprocess.PIPE,
@@ -62,7 +61,10 @@ def test_pageserver_init_node_id(
     assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
-def check_client(pg_version: PgVersion, client: PageserverHttpClient, initial_tenant: TenantId):
+def check_client(env: NeonEnv, client: PageserverHttpClient):
+    pg_version = env.pg_version
+    initial_tenant = env.initial_tenant
+
     client.check_status()
 
     # check initial tenant is there
@@ -70,7 +72,9 @@ def check_client(pg_version: PgVersion, client: PageserverHttpClient, initial_te
 
     # create new tenant and check it is also there
     tenant_id = TenantId.generate()
-    client.tenant_create(tenant_id)
+    client.tenant_create(
+        tenant_id, generation=env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)
+    )
     assert tenant_id in {TenantId(t["id"]) for t in client.tenant_list()}
 
     timelines = client.timeline_list(tenant_id)
@@ -157,6 +161,8 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         tenant_id, timeline_id = env.neon_cli.create_tenant()
         endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
+        # insert something to force sk -> ps message
+        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
         # Wait to make sure that we get a latest WAL receiver data.
         # We need to wait here because it's possible that we don't have access to
         # the latest WAL yet, when the `timeline_detail` API is first called.
@@ -168,7 +174,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         )
 
         # Make a DB modification then expect getting a new WAL receiver's data.
-        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
+        endpoint.safe_psql("INSERT INTO t VALUES (1, 'hey')")
         wait_until(
             number_of_iterations=5,
             interval=1,
@@ -179,7 +185,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        check_client(env.pg_version, client, env.initial_tenant)
+        check_client(env, client)
 
 
 def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
@@ -189,4 +195,4 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
     pageserver_token = env.auth_keys.generate_pageserver_token()
 
     with env.pageserver.http_client(auth_token=pageserver_token) as client:
-        check_client(env.pg_version, client, env.initial_tenant)
+        check_client(env, client)

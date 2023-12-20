@@ -16,12 +16,13 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command};
 use std::time::Duration;
 use std::{fs, io, thread};
 
 use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag};
 use nix::sys::signal::{kill, Signal};
@@ -43,15 +44,15 @@ const NOTICE_AFTER_RETRIES: u64 = 50;
 
 /// Argument to `start_process`, to indicate whether it should create pidfile or if the process creates
 /// it itself.
-pub enum InitialPidFile<'t> {
+pub enum InitialPidFile {
     /// Create a pidfile, to allow future CLI invocations to manipulate the process.
-    Create(&'t Path),
+    Create(Utf8PathBuf),
     /// The process will create the pidfile itself, need to wait for that event.
-    Expect(&'t Path),
+    Expect(Utf8PathBuf),
 }
 
 /// Start a background child process using the parameters given.
-pub fn start_process<F, AI, A, EI>(
+pub async fn start_process<F, Fut, AI, A, EI>(
     process_name: &str,
     datadir: &Path,
     command: &Path,
@@ -61,7 +62,8 @@ pub fn start_process<F, AI, A, EI>(
     process_status_check: F,
 ) -> anyhow::Result<Child>
 where
-    F: Fn() -> anyhow::Result<bool>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
     AI: IntoIterator<Item = A>,
     A: AsRef<OsStr>,
     // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
@@ -85,10 +87,10 @@ where
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
         .args(args);
-    let filled_cmd = fill_aws_secrets_vars(fill_rust_env_vars(background_command));
+    let filled_cmd = fill_remote_storage_secrets_vars(fill_rust_env_vars(background_command));
     filled_cmd.envs(envs);
 
-    let pid_file_to_check = match initial_pid_file {
+    let pid_file_to_check = match &initial_pid_file {
         InitialPidFile::Create(path) => {
             pre_exec_create_pidfile(filled_cmd, path);
             path
@@ -106,7 +108,7 @@ where
     );
 
     for retries in 0..RETRIES {
-        match process_started(pid, Some(pid_file_to_check), &process_status_check) {
+        match process_started(pid, pid_file_to_check, &process_status_check).await {
             Ok(true) => {
                 println!("\n{process_name} started, pid: {pid}");
                 return Ok(spawned_process);
@@ -137,7 +139,11 @@ where
 }
 
 /// Stops the process, using the pid file given. Returns Ok also if the process is already not running.
-pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> anyhow::Result<()> {
+pub fn stop_process(
+    immediate: bool,
+    process_name: &str,
+    pid_file: &Utf8Path,
+) -> anyhow::Result<()> {
     let pid = match pid_file::read(pid_file)
         .with_context(|| format!("read pid_file {pid_file:?}"))?
     {
@@ -233,11 +239,13 @@ fn fill_rust_env_vars(cmd: &mut Command) -> &mut Command {
     filled_cmd
 }
 
-fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
+fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
     for env_key in [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        "AZURE_STORAGE_ACCOUNT",
+        "AZURE_STORAGE_ACCESS_KEY",
     ] {
         if let Ok(value) = std::env::var(env_key) {
             cmd = cmd.env(env_key, value);
@@ -252,10 +260,10 @@ fn fill_aws_secrets_vars(mut cmd: &mut Command) -> &mut Command {
 ///    will remain held until the cmd exits.
 fn pre_exec_create_pidfile<P>(cmd: &mut Command, path: P) -> &mut Command
 where
-    P: Into<PathBuf>,
+    P: Into<Utf8PathBuf>,
 {
-    let path: PathBuf = path.into();
-    // SAFETY
+    let path: Utf8PathBuf = path.into();
+    // SAFETY:
     // pre_exec is marked unsafe because it runs between fork and exec.
     // Why is that dangerous in various ways?
     // Long answer:  https://github.com/rust-lang/rust/issues/39575
@@ -309,22 +317,20 @@ where
     cmd
 }
 
-fn process_started<F>(
+async fn process_started<F, Fut>(
     pid: Pid,
-    pid_file_to_check: Option<&Path>,
+    pid_file_to_check: &Utf8Path,
     status_check: &F,
 ) -> anyhow::Result<bool>
 where
-    F: Fn() -> anyhow::Result<bool>,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
 {
-    match status_check() {
-        Ok(true) => match pid_file_to_check {
-            Some(pid_file_path) => match pid_file::read(pid_file_path)? {
-                PidFileRead::NotExist => Ok(false),
-                PidFileRead::LockedByOtherProcess(pid_in_file) => Ok(pid_in_file == pid),
-                PidFileRead::NotHeldByAnyProcess(_) => Ok(false),
-            },
-            None => Ok(true),
+    match status_check().await {
+        Ok(true) => match pid_file::read(pid_file_to_check)? {
+            PidFileRead::NotExist => Ok(false),
+            PidFileRead::LockedByOtherProcess(pid_in_file) => Ok(pid_in_file == pid),
+            PidFileRead::NotHeldByAnyProcess(_) => Ok(false),
         },
         Ok(false) => Ok(false),
         Err(e) => anyhow::bail!("process failed to start: {e}"),

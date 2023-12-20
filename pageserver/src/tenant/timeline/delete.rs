@@ -4,31 +4,34 @@ use std::{
 };
 
 use anyhow::Context;
-use pageserver_api::models::TimelineState;
+use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
 use tracing::{debug, error, info, instrument, warn, Instrument, Span};
-use utils::{
-    crashsafe, fs_ext,
-    id::{TenantId, TimelineId},
-};
+use utils::{crashsafe, fs_ext, id::TimelineId};
 
 use crate::{
     config::PageServerConf,
+    deletion_queue::DeletionQueueClient,
     task_mgr::{self, TaskKind},
     tenant::{
+        debug_assert_current_span_has_tenant_and_timeline_id,
         metadata::TimelineMetadata,
         remote_timeline_client::{
             self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
         },
         CreateTimelineCause, DeleteTimelineError, Tenant,
     },
-    InitializationOrder,
 };
 
 use super::{Timeline, TimelineResources};
 
 /// Now that the Timeline is in Stopping state, request all the related tasks to shut down.
 async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+    // Notify any timeline work to drop out of loops/requests
+    tracing::debug!("Cancelling CancellationToken");
+    timeline.cancel.cancel();
+
     // Stop the walreceiver first.
     debug!("waiting for wal receiver to shutdown");
     let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
@@ -36,6 +39,14 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
         walreceiver.stop().await;
     }
     debug!("wal receiver shutdown confirmed");
+
+    // Shut down the layer flush task before the remote client, as one depends on the other
+    task_mgr::shutdown_tasks(
+        Some(TaskKind::LayerFlushTask),
+        Some(timeline.tenant_shard_id),
+        Some(timeline.timeline_id),
+    )
+    .await;
 
     // Prevent new uploads from starting.
     if let Some(remote_client) = timeline.remote_client.as_ref() {
@@ -58,13 +69,23 @@ async fn stop_tasks(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
     // NB: This and other delete_timeline calls do not run as a task_mgr task,
     //     so, they are not affected by this shutdown_tasks() call.
     info!("waiting for timeline tasks to shutdown");
-    task_mgr::shutdown_tasks(None, Some(timeline.tenant_id), Some(timeline.timeline_id)).await;
+    task_mgr::shutdown_tasks(
+        None,
+        Some(timeline.tenant_shard_id),
+        Some(timeline.timeline_id),
+    )
+    .await;
 
     fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
         Err(anyhow::anyhow!(
             "failpoint: timeline-delete-before-index-deleted-at"
         ))?
     });
+
+    tracing::debug!("Waiting for gate...");
+    timeline.gate.close().await;
+    tracing::debug!("Shutdown complete");
+
     Ok(())
 }
 
@@ -90,40 +111,11 @@ async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTi
     Ok(())
 }
 
-// We delete local files first, so if pageserver restarts after local files deletion then remote deletion is not continued.
-// This can be solved with inversion of these steps. But even if these steps are inverted then, when index_part.json
-// gets deleted there is no way to distinguish between "this timeline is good, we just didnt upload it to remote"
-// and "this timeline is deleted we should continue with removal of local state". So to avoid the ambiguity we use a mark file.
-// After index part is deleted presence of this mark file indentifies that it was a deletion intention.
-// So we can just remove the mark file.
-async fn create_delete_mark(
-    conf: &PageServerConf,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> Result<(), DeleteTimelineError> {
-    fail::fail_point!("timeline-delete-before-delete-mark", |_| {
-        Err(anyhow::anyhow!(
-            "failpoint: timeline-delete-before-delete-mark"
-        ))?
-    });
-    let marker_path = conf.timeline_delete_mark_file_path(tenant_id, timeline_id);
-
-    // Note: we're ok to replace existing file.
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&marker_path)
-        .with_context(|| format!("could not create delete marker file {marker_path:?}"))?;
-
-    crashsafe::fsync_file_and_parent(&marker_path).context("sync_mark")?;
-    Ok(())
-}
-
-/// Grab the layer_removal_cs lock, and actually perform the deletion.
+/// Grab the compaction and gc locks, and actually perform the deletion.
 ///
-/// This lock prevents prevents GC or compaction from running at the same time.
-/// The GC task doesn't register itself with the timeline it's operating on,
-/// so it might still be running even though we called `shutdown_tasks`.
+/// The locks prevent GC or compaction from running at the same time. The background tasks do not
+/// register themselves with the timeline it's operating on, so it might still be running even
+/// though we called `shutdown_tasks`.
 ///
 /// Note that there are still other race conditions between
 /// GC, compaction and timeline deletion. See
@@ -131,19 +123,24 @@ async fn create_delete_mark(
 ///
 /// No timeout here, GC & Compaction should be responsive to the
 /// `TimelineState::Stopping` change.
-async fn delete_local_layer_files(
+// pub(super): documentation link
+pub(super) async fn delete_local_layer_files(
     conf: &PageServerConf,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     timeline: &Timeline,
 ) -> anyhow::Result<()> {
-    info!("waiting for layer_removal_cs.lock()");
-    let layer_removal_guard = timeline.layer_removal_cs.lock().await;
-    info!("got layer_removal_cs.lock(), deleting layer files");
+    let guards = async { tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock()) };
+    let guards = crate::timed(
+        guards,
+        "acquire gc and compaction locks",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
 
     // NB: storage_sync upload tasks that reference these layers have been cancelled
     //     by the caller.
 
-    let local_timeline_directory = conf.timeline_path(&tenant_id, &timeline.timeline_id);
+    let local_timeline_directory = conf.timeline_path(&tenant_shard_id, &timeline.timeline_id);
 
     fail::fail_point!("timeline-delete-before-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
@@ -159,8 +156,8 @@ async fn delete_local_layer_files(
     // because of a previous failure/cancellation at/after
     // failpoint timeline-delete-after-rm.
     //
-    // It can also happen if we race with tenant detach, because,
-    // it doesn't grab the layer_removal_cs lock.
+    // ErrorKind::NotFound can also happen if we race with tenant detach, because,
+    // no locks are shared.
     //
     // For now, log and continue.
     // warn! level is technically not appropriate for the
@@ -179,7 +176,7 @@ async fn delete_local_layer_files(
         return Ok(());
     }
 
-    let metadata_path = conf.metadata_path(&tenant_id, &timeline.timeline_id);
+    let metadata_path = conf.metadata_path(&tenant_shard_id, &timeline.timeline_id);
 
     for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
         #[cfg(feature = "testing")]
@@ -228,8 +225,8 @@ async fn delete_local_layer_files(
         .with_context(|| format!("Failed to remove: {}", entry.path().display()))?;
     }
 
-    info!("finished deleting layer files, releasing layer_removal_cs.lock()");
-    drop(layer_removal_guard);
+    info!("finished deleting layer files, releasing locks");
+    drop(guards);
 
     fail::fail_point!("timeline-delete-after-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
@@ -254,11 +251,11 @@ async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<(
 // (nothing can fail after its deletion)
 async fn cleanup_remaining_timeline_fs_traces(
     conf: &PageServerConf,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
 ) -> anyhow::Result<()> {
     // Remove local metadata
-    tokio::fs::remove_file(conf.metadata_path(&tenant_id, &timeline_id))
+    tokio::fs::remove_file(conf.metadata_path(&tenant_shard_id, &timeline_id))
         .await
         .or_else(fs_ext::ignore_not_found)
         .context("remove metadata")?;
@@ -270,7 +267,7 @@ async fn cleanup_remaining_timeline_fs_traces(
     });
 
     // Remove timeline dir
-    tokio::fs::remove_dir(conf.timeline_path(&tenant_id, &timeline_id))
+    tokio::fs::remove_dir(conf.timeline_path(&tenant_shard_id, &timeline_id))
         .await
         .or_else(fs_ext::ignore_not_found)
         .context("timeline dir")?;
@@ -285,14 +282,17 @@ async fn cleanup_remaining_timeline_fs_traces(
     // to be reordered later and thus missed if a crash occurs.
     // Note that we dont need to sync after mark file is removed
     // because we can tolerate the case when mark file reappears on startup.
-    let timeline_path = conf.timelines_path(&tenant_id);
+    let timeline_path = conf.timelines_path(&tenant_shard_id);
     crashsafe::fsync_async(timeline_path)
         .await
         .context("fsync_pre_mark_remove")?;
 
     // Remove delete mark
-    tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_id, timeline_id))
+    // TODO: once we are confident that no more exist in the field, remove this
+    // line.  It cleans up a legacy marker file that might in rare cases be present.
+    tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_shard_id, timeline_id))
         .await
+        .or_else(fs_ext::ignore_not_found)
         .context("remove delete mark")
 }
 
@@ -356,7 +356,7 @@ impl DeleteTimelineFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    #[instrument(skip(tenant), fields(tenant_id=%tenant.tenant_id))]
+    #[instrument(skip(tenant), fields(tenant_id=%tenant.tenant_shard_id.tenant_id, shard_id=%tenant.tenant_shard_id.shard_slug()))]
     pub async fn run(
         tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
@@ -369,8 +369,6 @@ impl DeleteTimelineFlow {
         stop_tasks(&timeline).await?;
 
         set_deleted_in_remote_index(&timeline).await?;
-
-        create_delete_mark(tenant.conf, timeline.tenant_id, timeline.timeline_id).await?;
 
         fail::fail_point!("timeline-delete-before-schedule", |_| {
             Err(anyhow::anyhow!(
@@ -407,7 +405,7 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
         local_metadata: &TimelineMetadata,
         remote_client: Option<RemoteTimelineClient>,
-        init_order: Option<&InitializationOrder>,
+        deletion_queue_client: DeletionQueueClient,
     ) -> anyhow::Result<()> {
         // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
         // RemoteTimelineClient is the only functioning part.
@@ -416,8 +414,10 @@ impl DeleteTimelineFlow {
                 timeline_id,
                 local_metadata,
                 None, // Ancestor is not needed for deletion.
-                TimelineResources { remote_client },
-                init_order,
+                TimelineResources {
+                    remote_client,
+                    deletion_queue_client,
+                },
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
@@ -439,10 +439,6 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
-        // Note that delete mark can be missing on resume
-        // because we create delete mark after we set deleted_at in the index part.
-        create_delete_mark(tenant.conf, tenant.tenant_id, timeline_id).await?;
-
         Self::schedule_background(guard, tenant.conf, tenant, timeline);
 
         Ok(())
@@ -454,7 +450,8 @@ impl DeleteTimelineFlow {
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
         let r =
-            cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_id, timeline_id).await;
+            cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_shard_id, timeline_id)
+                .await;
         info!("Done");
         r
     }
@@ -525,13 +522,13 @@ impl DeleteTimelineFlow {
         tenant: Arc<Tenant>,
         timeline: Arc<Timeline>,
     ) {
-        let tenant_id = timeline.tenant_id;
+        let tenant_shard_id = timeline.tenant_shard_id;
         let timeline_id = timeline.timeline_id;
 
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
-            Some(tenant_id),
+            Some(tenant_shard_id),
             Some(timeline_id),
             "timeline_delete",
             false,
@@ -544,7 +541,7 @@ impl DeleteTimelineFlow {
             }
             .instrument({
                 let span =
-                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_id, timeline_id=%timeline_id);
+                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),timeline_id=%timeline_id);
                 span.follows_from(Span::current());
                 span
             }),
@@ -557,13 +554,14 @@ impl DeleteTimelineFlow {
         tenant: &Tenant,
         timeline: &Timeline,
     ) -> Result<(), DeleteTimelineError> {
-        delete_local_layer_files(conf, tenant.tenant_id, timeline).await?;
+        delete_local_layer_files(conf, tenant.tenant_shard_id, timeline).await?;
 
         delete_remote_layers_and_index(timeline).await?;
 
         pausable_failpoint!("in_progress_delete");
 
-        cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_id, timeline.timeline_id).await?;
+        cleanup_remaining_timeline_fs_traces(conf, tenant.tenant_shard_id, timeline.timeline_id)
+            .await?;
 
         remove_timeline_from_tenant(tenant, timeline.timeline_id, &guard).await?;
 

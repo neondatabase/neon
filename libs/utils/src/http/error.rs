@@ -1,8 +1,9 @@
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::error::Error as StdError;
 use thiserror::Error;
-use tracing::error;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -23,6 +24,12 @@ pub enum ApiError {
 
     #[error("Precondition failed: {0}")]
     PreconditionFailed(Box<str>),
+
+    #[error("Resource temporarily unavailable: {0}")]
+    ResourceUnavailable(Cow<'static, str>),
+
+    #[error("Shutting down")]
+    ShuttingDown,
 
     #[error(transparent)]
     InternalServerError(anyhow::Error),
@@ -51,6 +58,14 @@ impl ApiError {
             ApiError::PreconditionFailed(_) => HttpErrorBody::response_from_msg_and_status(
                 self.to_string(),
                 StatusCode::PRECONDITION_FAILED,
+            ),
+            ApiError::ShuttingDown => HttpErrorBody::response_from_msg_and_status(
+                "Shutting down".to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ApiError::ResourceUnavailable(err) => HttpErrorBody::response_from_msg_and_status(
+                err.to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
@@ -101,10 +116,15 @@ pub async fn route_error_handler(err: routerify::RouteError) -> Response<Body> {
 
 pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
     // Print a stack trace for Internal Server errors
-    if let ApiError::InternalServerError(_) = api_error {
-        error!("Error processing HTTP request: {api_error:?}");
-    } else {
-        error!("Error processing HTTP request: {api_error:#}");
+
+    match api_error {
+        ApiError::Forbidden(_) | ApiError::Unauthorized(_) => {
+            warn!("Error processing HTTP request: {api_error:#}")
+        }
+        ApiError::ResourceUnavailable(_) => info!("Error processing HTTP request: {api_error:#}"),
+        ApiError::NotFound(_) => info!("Error processing HTTP request: {api_error:#}"),
+        ApiError::InternalServerError(_) => error!("Error processing HTTP request: {api_error:?}"),
+        _ => error!("Error processing HTTP request: {api_error:#}"),
     }
 
     api_error.into_response()

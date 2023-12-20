@@ -1,4 +1,6 @@
 use std::convert::Infallible;
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
@@ -121,7 +123,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        // download extension files from S3 on demand
+        // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
             info!("req.uri {:?}", req.uri());
@@ -169,7 +171,12 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     }
                 };
 
-                remote_extensions.get_ext(&filename, is_library)
+                remote_extensions.get_ext(
+                    &filename,
+                    is_library,
+                    &compute.build_tag,
+                    &compute.pgversion,
+                )
             };
 
             match ext {
@@ -220,7 +227,7 @@ async fn handle_configure_request(
 
         let parsed_spec = match ParsedSpec::try_from(spec) {
             Ok(ps) => ps,
-            Err(msg) => return Err((msg, StatusCode::PRECONDITION_FAILED)),
+            Err(msg) => return Err((msg, StatusCode::BAD_REQUEST)),
         };
 
         // XXX: wrap state update under lock in code blocks. Otherwise,
@@ -293,7 +300,9 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
 #[tokio::main]
 async fn serve(port: u16, state: Arc<ComputeNode>) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // this usually binds to both IPv4 and IPv6 on linux
+    // see e.g. https://github.com/rust-lang/rust/pull/34440
+    let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), port);
 
     let make_service = make_service_fn(move |_conn| {
         let state = state.clone();

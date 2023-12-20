@@ -17,6 +17,8 @@ async-stream.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+camino.workspace = true
+camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
 close_fds.workspace = true
@@ -34,6 +36,7 @@ humantime.workspace = true
 humantime-serde.workspace = true
 hyper.workspace = true
 itertools.workspace = true
+md5.workspace = true
 nix.workspace = true
 # hack to get the number of worker threads tokio uses
 num_cpus = { version = "1.15" }
@@ -49,6 +52,7 @@ regex.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+serde_path_to_error.workspace = true
 serde_with.workspace = true
 signal-hook.workspace = true
 smallvec = { workspace = true, features = ["write"] }
@@ -59,6 +63,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
@@ -84,7 +89,6 @@ strum_macros.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 hex-literal.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
 
 [[bench]]

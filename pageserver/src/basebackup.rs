@@ -13,6 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
+use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
 use tokio::io;
@@ -25,6 +26,7 @@ use crate::context::RequestContext;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
+use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
@@ -179,6 +181,7 @@ where
             }
         }
 
+        let mut min_restart_lsn: Lsn = Lsn::MAX;
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
@@ -212,6 +215,34 @@ where
                     self.add_rel(rel, rel).await?;
                 }
             }
+
+            for (path, content) in self.timeline.list_aux_files(self.lsn, self.ctx).await? {
+                if path.starts_with("pg_replslot") {
+                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                    let restart_lsn = Lsn(u64::from_le_bytes(
+                        content[offs..offs + 8].try_into().unwrap(),
+                    ));
+                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                }
+                let header = new_tar_header(&path, content.len() as u64)?;
+                self.ar
+                    .append(&header, &*content)
+                    .await
+                    .context("could not add aux file to basebackup tarball")?;
+            }
+        }
+        if min_restart_lsn != Lsn::MAX {
+            info!(
+                "Min restart LSN for logical replication is {}",
+                min_restart_lsn
+            );
+            let data = min_restart_lsn.0.to_le_bytes();
+            let header = new_tar_header("restart.lsn", data.len() as u64)?;
+            self.ar
+                .append(&header, &data[..])
+                .await
+                .context("could not add restart.lsn file to basebackup tarball")?;
         }
         for xid in self
             .timeline
@@ -323,14 +354,25 @@ where
                 .timeline
                 .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
                 .await?;
-            ensure!(img.len() == 512);
+
+            ensure!(
+                img.len()
+                    == dispatch_pgversion!(
+                        self.timeline.pg_version,
+                        pgv::bindings::SIZEOF_RELMAPFILE
+                    )
+            );
+
             Some(img)
         } else {
             None
         };
 
         if spcnode == GLOBALTABLESPACE_OID {
-            let pg_version_str = self.timeline.pg_version.to_string();
+            let pg_version_str = match self.timeline.pg_version {
+                14 | 15 => self.timeline.pg_version.to_string(),
+                ver => format!("{ver}\x0A"),
+            };
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar.append(&header, pg_version_str.as_bytes()).await?;
 
@@ -374,7 +416,10 @@ where
             if let Some(img) = relmap_img {
                 let dst_path = format!("base/{}/PG_VERSION", dbnode);
 
-                let pg_version_str = self.timeline.pg_version.to_string();
+                let pg_version_str = match self.timeline.pg_version {
+                    14 | 15 => self.timeline.pg_version.to_string(),
+                    ver => format!("{ver}\x0A"),
+                };
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
                 self.ar.append(&header, pg_version_str.as_bytes()).await?;
 

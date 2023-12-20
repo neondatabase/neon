@@ -137,9 +137,12 @@ pub const XLOG_HEAP_INSERT: u8 = 0x00;
 pub const XLOG_HEAP_DELETE: u8 = 0x10;
 pub const XLOG_HEAP_UPDATE: u8 = 0x20;
 pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
+pub const XLOG_HEAP_LOCK: u8 = 0x60;
 pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
 pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
+pub const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
+pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 0x01;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = (1 << 5) as u8;
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
@@ -162,6 +165,20 @@ pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
 pub const RM_LOGICALMSG_ID: u8 = 21;
+
+// from neon_rmgr.h
+pub const RM_NEON_ID: u8 = 134;
+
+pub const XLOG_NEON_HEAP_INIT_PAGE: u8 = 0x80;
+
+pub const XLOG_NEON_HEAP_INSERT: u8 = 0x00;
+pub const XLOG_NEON_HEAP_DELETE: u8 = 0x10;
+pub const XLOG_NEON_HEAP_UPDATE: u8 = 0x20;
+pub const XLOG_NEON_HEAP_HOT_UPDATE: u8 = 0x30;
+pub const XLOG_NEON_HEAP_LOCK: u8 = 0x40;
+pub const XLOG_NEON_HEAP_MULTI_INSERT: u8 = 0x50;
+
+pub const XLOG_NEON_HEAP_VISIBLE: u8 = 0x40;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;
@@ -202,6 +219,10 @@ pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
+
+/* From replication/slot.h */
+pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
+   + 64 /* NameData */  + 4*4;
 
 /* From fsm_internals.h */
 const FSM_NODES_PER_PAGE: usize = BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA - 4;

@@ -1,0 +1,211 @@
+# Supplemental file for neondatabase/autoscaling's vm-builder, for producing the VM compute image.
+---
+commands:
+  - name: cgconfigparser
+    user: root
+    sysvInitAction: sysinit
+    shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
+  - name: pgbouncer
+    user: nobody
+    sysvInitAction: respawn
+    shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini'
+  - name: postgres-exporter
+    user: nobody
+    sysvInitAction: respawn
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres" /bin/postgres_exporter'
+  - name: sql-exporter
+    user: nobody
+    sysvInitAction: respawn
+    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter.yml'
+shutdownHook: |
+  su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
+files:
+  - filename: pgbouncer.ini
+    content: |
+      [databases]
+      *=host=localhost port=5432 auth_user=cloud_admin
+      [pgbouncer]
+      listen_port=6432
+      listen_addr=0.0.0.0
+      auth_type=scram-sha-256
+      auth_user=cloud_admin
+      auth_dbname=postgres
+      client_tls_sslmode=disable
+      server_tls_sslmode=disable
+      pool_mode=transaction
+      max_client_conn=10000
+      default_pool_size=64
+      max_prepared_statements=0
+  - filename: cgconfig.conf
+    content: |
+      # Configuration for cgroups in VM compute nodes
+      group neon-postgres {
+          perm {
+              admin {
+                  uid = postgres;
+              }
+              task {
+                  gid = users;
+              }
+          }
+          memory {}
+      }
+  - filename: sql_exporter.yml
+    content: |
+      # Configuration for sql_exporter
+      # Global defaults.
+      global:
+        # If scrape_timeout <= 0, no timeout is set unless Prometheus provides one. The default is 10s.
+        scrape_timeout: 10s
+        # Subtracted from Prometheus' scrape_timeout to give us some headroom and prevent Prometheus from timing out first.
+        scrape_timeout_offset: 500ms
+        # Minimum interval between collector runs: by default (0s) collectors are executed on every scrape.
+        min_interval: 0s
+        # Maximum number of open connections to any one target. Metric queries will run concurrently on multiple connections,
+        # as will concurrent scrapes.
+        max_connections: 1
+        # Maximum number of idle connections to any one target. Unless you use very long collection intervals, this should
+        # always be the same as max_connections.
+        max_idle_connections: 1
+        # Maximum number of maximum amount of time a connection may be reused. Expired connections may be closed lazily before reuse.
+        # If 0, connections are not closed due to a connection's age.
+        max_connection_lifetime: 5m
+
+      # The target to monitor and the collectors to execute on it.
+      target:
+        # Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
+        # the schema gets dropped or replaced to match the driver expected DSN format.
+        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable'
+
+        # Collectors (referenced by name) to execute on the target.
+        # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+        collectors: [neon_collector]
+
+      # Collector files specifies a list of globs. One collector definition is read from each matching file.
+      # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+      collector_files:
+        - "neon_collector.yml"
+  - filename: neon_collector.yml
+    content: |
+      collector_name: neon_collector
+      metrics:
+      - metric_name: lfc_misses
+        type: gauge
+        help: 'lfc_misses'
+        key_labels:
+        values: [lfc_misses]
+        query: |
+          select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses';
+
+      - metric_name: lfc_used
+        type: gauge
+        help: 'lfc_used'
+        key_labels:
+        values: [lfc_used]
+        query: |
+          select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used';
+
+      - metric_name: lfc_hits
+        type: gauge
+        help: 'lfc_hits'
+        key_labels:
+        values: [lfc_hits]
+        query: |
+          select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits';
+
+      - metric_name: lfc_writes
+        type: gauge
+        help: 'lfc_writes'
+        key_labels:
+        values: [lfc_writes]
+        query: |
+          select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+build: |
+  # Build cgroup-tools
+  #
+  # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
+  # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
+  # requires cgroup v2, so we'll build cgroup-tools ourselves.
+  FROM debian:bullseye-slim as libcgroup-builder
+  ENV LIBCGROUP_VERSION v2.0.3
+
+  RUN set -exu \
+      && apt update \
+      && apt install --no-install-recommends -y \
+          git \
+          ca-certificates \
+          automake \
+          cmake \
+          make \
+          gcc \
+          byacc \
+          flex \
+          libtool \
+          libpam0g-dev \
+      && git clone --depth 1 -b $LIBCGROUP_VERSION https://github.com/libcgroup/libcgroup \
+      && INSTALL_DIR="/libcgroup-install" \
+      && mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/include" \
+      && cd libcgroup \
+      # extracted from bootstrap.sh, with modified flags:
+      && (test -d m4 || mkdir m4) \
+      && autoreconf -fi \
+      && rm -rf autom4te.cache \
+      && CFLAGS="-O3" ./configure --prefix="$INSTALL_DIR" --sysconfdir=/etc --localstatedir=/var --enable-opaque-hierarchy="name=systemd" \
+      # actually build the thing...
+      && make install
+
+  FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.0 AS postgres-exporter
+
+  FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+  # Build pgbouncer
+  #
+  FROM debian:bullseye-slim AS pgbouncer
+  RUN set -e \
+      && apt-get update \
+      && apt-get install -y \
+          build-essential \
+          curl \
+          libevent-dev \
+          libssl-dev \
+          patchutils \
+          pkg-config
+
+  ENV PGBOUNCER_VERSION 1.21.0
+  ENV PGBOUNCER_GITPATH 1_21_0
+  RUN set -e \
+      && curl -sfSL https://github.com/pgbouncer/pgbouncer/releases/download/pgbouncer_${PGBOUNCER_GITPATH}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz -o pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
+      && tar xzvf pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
+      && cd pgbouncer-${PGBOUNCER_VERSION} \
+      && curl https://github.com/pgbouncer/pgbouncer/commit/a7b3c0a5f4caa9dbe92743d04cf1e28c4c05806c.patch | filterdiff --include a/src/server.c | patch -p1 \
+      && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+      && make -j $(nproc) \
+      && make install
+merge: |
+  # tweak nofile limits
+  RUN set -e \
+      && echo 'fs.file-max = 1048576' >>/etc/sysctl.conf \
+      && test ! -e /etc/security || ( \
+         echo '*    - nofile 1048576' >>/etc/security/limits.conf \
+      && echo 'root - nofile 1048576' >>/etc/security/limits.conf \
+         )
+
+  COPY cgconfig.conf /etc/cgconfig.conf
+  COPY pgbouncer.ini /etc/pgbouncer.ini
+  COPY sql_exporter.yml /etc/sql_exporter.yml
+  COPY neon_collector.yml /etc/neon_collector.yml
+
+  RUN set -e \
+      && chown postgres:postgres /etc/pgbouncer.ini \
+      && chmod 0644 /etc/pgbouncer.ini \
+      && chmod 0644 /etc/cgconfig.conf \
+      && chmod 0644 /etc/sql_exporter.yml \
+      && chmod 0644 /etc/neon_collector.yml
+
+  COPY --from=libcgroup-builder /libcgroup-install/bin/*  /usr/bin/
+  COPY --from=libcgroup-builder /libcgroup-install/lib/*  /usr/lib/
+  COPY --from=libcgroup-builder /libcgroup-install/sbin/* /usr/sbin/
+  COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
+  COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
+  COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer

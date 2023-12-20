@@ -31,7 +31,7 @@
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres \
-//!             -r {"bucket": "neon-dev-extensions-eu-central-1", "region": "eu-central-1"}
+//!             -r http://pg-ext-s3-gateway
 //! ```
 //!
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::{get_pg_version, init_remote_storage};
+use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -60,7 +60,7 @@ use compute_tools::spec::*;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
-const BUILD_TAG_DEFAULT: &str = "5670669815";
+const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -74,10 +74,18 @@ fn main() -> Result<()> {
     let pgbin_default = String::from("postgres");
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
-    let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    let ext_remote_storage = remote_ext_config.map(|x| {
-        init_remote_storage(x).expect("cannot initialize remote extension storage from config")
-    });
+    let ext_remote_storage = matches
+        .get_one::<String>("remote-ext-config")
+        // Compatibility hack: if the control plane specified any remote-ext-config
+        // use the default value for extension storage proxy gateway.
+        // Remove this once the control plane is updated to pass the gateway URL
+        .map(|conf| {
+            if conf.starts_with("http") {
+                conf.trim_end_matches('/')
+            } else {
+                "http://pg-ext-s3-gateway"
+            }
+        });
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -156,6 +164,7 @@ fn main() -> Result<()> {
                 let path = Path::new(sp);
                 let file = File::open(path)?;
                 spec = Some(serde_json::from_reader(file)?);
+                live_config_allowed = true;
             } else if let Some(id) = compute_id {
                 if let Some(cp_base) = control_plane_uri {
                     live_config_allowed = true;
@@ -197,7 +206,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        ext_remote_storage,
+        ext_remote_storage: ext_remote_storage.map(|s| s.to_string()),
         ext_download_progress: RwLock::new(HashMap::new()),
         build_tag,
     };
@@ -265,7 +274,13 @@ fn main() -> Result<()> {
             let mut state = compute.state.lock().unwrap();
             state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
-            drop(state);
+            // Notify others that Postgres failed to start. In case of configuring the
+            // empty compute, it's likely that API handler is still waiting for compute
+            // state change. With this we will notify it that compute is in Failed state,
+            // so control plane will know about it earlier and record proper error instead
+            // of timeout.
+            compute.state_changed.notify_all();
+            drop(state); // unlock
             delay_exit = true;
             None
         }
@@ -277,8 +292,9 @@ fn main() -> Result<()> {
         if #[cfg(target_os = "linux")] {
             use std::env;
             use tokio_util::sync::CancellationToken;
-            use tracing::warn;
-            let vm_monitor_addr = matches.get_one::<String>("vm-monitor-addr");
+            let vm_monitor_addr = matches
+                .get_one::<String>("vm-monitor-addr")
+                .expect("--vm-monitor-addr should always be set because it has a default arg");
             let file_cache_connstr = matches.get_one::<String>("filecache-connstr");
             let cgroup = matches.get_one::<String>("cgroup");
 
@@ -286,22 +302,16 @@ fn main() -> Result<()> {
             // Note: it seems like you can make a runtime in an inner scope and
             // if you start a task in it it won't be dropped. However, make it
             // in the outermost scope just to be safe.
-            let rt = match (env::var_os("AUTOSCALING"), vm_monitor_addr) {
-                (None, None) => None,
-                (None, Some(_)) => {
-                    warn!("--vm-monitor-addr option set but AUTOSCALING env var not present");
-                    None
-                }
-                (Some(_), None) => {
-                    panic!("AUTOSCALING env var present but --vm-monitor-addr option not set")
-                }
-                (Some(_), Some(_)) => Some(
+            let rt = if env::var_os("AUTOSCALING").is_some() {
+                Some(
                     tokio::runtime::Builder::new_multi_thread()
                         .worker_threads(4)
                         .enable_all()
                         .build()
-                        .expect("failed to create tokio runtime for monitor"),
-                ),
+                        .expect("failed to create tokio runtime for monitor")
+                )
+            } else {
+                None
             };
 
             // This token is used internally by the monitor to clean up all threads
@@ -312,7 +322,7 @@ fn main() -> Result<()> {
                     Box::leak(Box::new(vm_monitor::Args {
                         cgroup: cgroup.cloned(),
                         pgconnstr: file_cache_connstr.cloned(),
-                        addr: vm_monitor_addr.cloned().unwrap(),
+                        addr: vm_monitor_addr.clone(),
                     })),
                     token.clone(),
                 ))

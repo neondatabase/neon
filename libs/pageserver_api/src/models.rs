@@ -1,12 +1,15 @@
+pub mod partitioning;
+
 use std::{
     collections::HashMap,
+    io::Read,
     num::{NonZeroU64, NonZeroUsize},
     time::SystemTime,
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use strum_macros;
 use utils::{
     completion,
@@ -15,9 +18,9 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::reltag::RelTag;
+use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -109,7 +112,6 @@ impl TenantState {
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
             // tenant mgr startup distinguishes attaching from loading via marker file.
-            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
             Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
@@ -174,28 +176,35 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub new_timeline_id: TimelineId,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub existing_initdb_timeline_id: Option<TimelineId>,
+    #[serde(default)]
     pub ancestor_start_lsn: Option<Lsn>,
     pub pg_version: Option<u32>,
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde_as(as = "DisplayFromStr")]
-    pub new_tenant_id: TenantId,
+    pub new_tenant_id: TenantShardId,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLoadRequest {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
 }
 
 impl std::ops::Deref for TenantCreateRequest {
@@ -206,6 +215,8 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
+/// An alternative representation of `pageserver::tenant::TenantConf` with
+/// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
@@ -229,32 +240,71 @@ pub struct TenantConfig {
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
+    pub heatmap_period: Option<String>,
 }
 
-#[serde_as]
+/// A flattened analog of a `pagesever::tenant::LocationMode`, which
+/// lists out all possible states (and the virtual "Detached" state)
+/// in a flat form rather than using rust-style enums.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LocationConfigMode {
+    AttachedSingle,
+    AttachedMulti,
+    AttachedStale,
+    Secondary,
+    Detached,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfigSecondary {
+    pub warm: bool,
+}
+
+/// An alternative representation of `pageserver::tenant::LocationConf`,
+/// for use in external-facing APIs.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LocationConfig {
+    pub mode: LocationConfigMode,
+    /// If attaching, in what generation?
+    #[serde(default)]
+    pub generation: Option<u32>,
+    #[serde(default)]
+    pub secondary_conf: Option<LocationConfigSecondary>,
+
+    // Shard parameters: if shard_count is nonzero, then other shard_* fields
+    // must be set accurately.
+    #[serde(default)]
+    pub shard_number: u8,
+    #[serde(default)]
+    pub shard_count: u8,
+    #[serde(default)]
+    pub shard_stripe_size: u32,
+
+    // If requesting mode `Secondary`, configuration for that.
+    // Custom storage configuration for the tenant, if any
+    pub tenant_conf: TenantConfig,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TenantCreateResponse(#[serde_as(as = "DisplayFromStr")] pub TenantId);
+pub struct TenantCreateResponse(pub TenantId);
 
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
 }
 
-impl TenantCreateRequest {
-    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
-        TenantCreateRequest {
-            new_tenant_id,
-            config: TenantConfig::default(),
-        }
-    }
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantLocationConfigRequest {
+    pub tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
-    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
@@ -270,37 +320,22 @@ impl std::ops::Deref for TenantConfigRequest {
 
 impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
-        let config = TenantConfig {
-            checkpoint_distance: None,
-            checkpoint_timeout: None,
-            compaction_target_size: None,
-            compaction_period: None,
-            compaction_threshold: None,
-            gc_horizon: None,
-            gc_period: None,
-            image_creation_threshold: None,
-            pitr_interval: None,
-            walreceiver_connect_timeout: None,
-            lagging_wal_timeout: None,
-            max_lsn_wal_lag: None,
-            trace_read_requests: None,
-            eviction_policy: None,
-            min_resident_size_override: None,
-            evictions_low_residence_duration_metric_threshold: None,
-            gc_feedback: None,
-        };
+        let config = TenantConfig::default();
         TenantConfigRequest { tenant_id, config }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TenantAttachRequest {
+    #[serde(default)]
     pub config: TenantAttachConfig,
+    #[serde(default)]
+    pub generation: Option<u32>,
 }
 
 /// Newtype to enforce deny_unknown_fields on TenantConfig for
 /// its usage inside `TenantAttachRequest`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TenantAttachConfig {
     #[serde(flatten)]
@@ -324,11 +359,9 @@ pub enum TenantAttachmentStatus {
     Failed { reason: String },
 }
 
-#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub id: TenantId,
+    pub id: TenantShardId,
     // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
@@ -337,30 +370,39 @@ pub struct TenantInfo {
     pub attachment_status: TenantAttachmentStatus,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TenantDetails {
+    #[serde(flatten)]
+    pub tenant_info: TenantInfo,
+
+    pub timelines: Vec<TimelineId>,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
-    #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantShardId,
     pub timeline_id: TimelineId,
 
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
     pub last_record_lsn: Lsn,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub prev_record_lsn: Option<Lsn>,
-    #[serde_as(as = "DisplayFromStr")]
     pub latest_gc_cutoff_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
-    #[serde_as(as = "DisplayFromStr")]
+
+    /// The LSN that we have succesfully uploaded to remote storage
     pub remote_consistent_lsn: Lsn,
-    pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+
+    /// The LSN that we are advertizing to safekeepers
+    pub remote_consistent_lsn_visible: Lsn,
+
+    /// The LSN from the start of the root timeline (never changes)
+    pub initdb_lsn: Lsn,
+
+    pub current_logical_size: u64,
+    pub current_logical_size_is_accurate: bool,
+
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
@@ -369,13 +411,14 @@ pub struct TimelineInfo {
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub last_received_msg_lsn: Option<Lsn>,
     /// the timestamp (in microseconds) of the last received message
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
 
     pub state: TimelineState,
+
+    pub walreceiver_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -464,23 +507,13 @@ pub struct LayerAccessStats {
     pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
 }
 
-#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
-    Open {
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_start: Lsn,
-    },
-    Frozen {
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_start: Lsn,
-        #[serde_as(as = "DisplayFromStr")]
-        lsn_end: Lsn,
-    },
+    Open { lsn_start: Lsn },
+    Frozen { lsn_start: Lsn, lsn_end: Lsn },
 }
 
-#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum HistoricLayerInfo {
@@ -488,9 +521,7 @@ pub enum HistoricLayerInfo {
         layer_file_name: String,
         layer_file_size: u64,
 
-        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
-        #[serde_as(as = "DisplayFromStr")]
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
@@ -499,7 +530,6 @@ pub enum HistoricLayerInfo {
         layer_file_name: String,
         layer_file_size: u64,
 
-        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
@@ -555,12 +585,36 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
+#[derive(strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+}
+
+// Keep in sync with `pagestore_client.h`
+#[repr(u8)]
+enum PagestreamBeMessageTag {
+    Exists = 100,
+    Nblocks = 101,
+    GetPage = 102,
+    Error = 103,
+    DbSize = 104,
+}
+impl TryFrom<u8> for PagestreamBeMessageTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, u8> {
+        match value {
+            100 => Ok(PagestreamBeMessageTag::Exists),
+            101 => Ok(PagestreamBeMessageTag::Nblocks),
+            102 => Ok(PagestreamBeMessageTag::GetPage),
+            103 => Ok(PagestreamBeMessageTag::Error),
+            104 => Ok(PagestreamBeMessageTag::DbSize),
+            _ => Err(value),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -718,34 +772,90 @@ impl PagestreamBeMessage {
     pub fn serialize(&self) -> Bytes {
         let mut bytes = BytesMut::new();
 
+        use PagestreamBeMessageTag as Tag;
         match self {
             Self::Exists(resp) => {
-                bytes.put_u8(100); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Exists as u8);
                 bytes.put_u8(resp.exists as u8);
             }
 
             Self::Nblocks(resp) => {
-                bytes.put_u8(101); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Nblocks as u8);
                 bytes.put_u32(resp.n_blocks);
             }
 
             Self::GetPage(resp) => {
-                bytes.put_u8(102); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::GetPage as u8);
                 bytes.put(&resp.page[..]);
             }
 
             Self::Error(resp) => {
-                bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Error as u8);
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
             }
             Self::DbSize(resp) => {
-                bytes.put_u8(104); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::DbSize as u8);
                 bytes.put_i64(resp.db_size);
             }
         }
 
         bytes.into()
+    }
+
+    pub fn deserialize(buf: Bytes) -> anyhow::Result<Self> {
+        let mut buf = buf.reader();
+        let msg_tag = buf.read_u8()?;
+
+        use PagestreamBeMessageTag as Tag;
+        let ok =
+            match Tag::try_from(msg_tag).map_err(|tag: u8| anyhow::anyhow!("invalid tag {tag}"))? {
+                Tag::Exists => {
+                    let exists = buf.read_u8()?;
+                    Self::Exists(PagestreamExistsResponse {
+                        exists: exists != 0,
+                    })
+                }
+                Tag::Nblocks => {
+                    let n_blocks = buf.read_u32::<BigEndian>()?;
+                    Self::Nblocks(PagestreamNblocksResponse { n_blocks })
+                }
+                Tag::GetPage => {
+                    let mut page = vec![0; 8192]; // TODO: use MaybeUninit
+                    buf.read_exact(&mut page)?;
+                    PagestreamBeMessage::GetPage(PagestreamGetPageResponse { page: page.into() })
+                }
+                Tag::Error => {
+                    let buf = buf.get_ref();
+                    let cstr = std::ffi::CStr::from_bytes_until_nul(buf)?;
+                    let rust_str = cstr.to_str()?;
+                    PagestreamBeMessage::Error(PagestreamErrorResponse {
+                        message: rust_str.to_owned(),
+                    })
+                }
+                Tag::DbSize => {
+                    let db_size = buf.read_i64::<BigEndian>()?;
+                    Self::DbSize(PagestreamDbSizeResponse { db_size })
+                }
+            };
+        let remaining = buf.into_inner();
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "remaining bytes in msg with tag={msg_tag}: {}",
+                remaining.len()
+            );
+        }
+        Ok(ok)
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Exists(_) => "Exists",
+            Self::Nblocks(_) => "Nblocks",
+            Self::GetPage(_) => "GetPage",
+            Self::Error(_) => "Error",
+            Self::DbSize(_) => "DbSize",
+        }
     }
 }
 
@@ -808,7 +918,7 @@ mod tests {
     fn test_tenantinfo_serde() {
         // Test serialization/deserialization of TenantInfo
         let original_active = TenantInfo {
-            id: TenantId::generate(),
+            id: TenantShardId::unsharded(TenantId::generate()),
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
@@ -825,7 +935,7 @@ mod tests {
         });
 
         let original_broken = TenantInfo {
-            id: TenantId::generate(),
+            id: TenantShardId::unsharded(TenantId::generate()),
             state: TenantState::Broken {
                 reason: "reason".into(),
                 backtrace: "backtrace info".into(),

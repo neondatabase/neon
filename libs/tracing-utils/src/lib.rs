@@ -32,6 +32,8 @@
 //!         .init();
 //! }
 //! ```
+#![deny(unsafe_code)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 use opentelemetry::sdk::Resource;
 use opentelemetry::KeyValue;

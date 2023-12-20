@@ -12,20 +12,75 @@ use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::completion;
+use utils::{backoff, completion};
+
+static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+    once_cell::sync::Lazy::new(|| {
+        let total_threads = *task_mgr::BACKGROUND_RUNTIME_WORKER_THREADS;
+        let permits = usize::max(
+            1,
+            // while a lot of the work is done on spawn_blocking, we still do
+            // repartitioning in the async context. this should give leave us some workers
+            // unblocked to be blocked on other work, hopefully easing any outside visible
+            // effects of restarts.
+            //
+            // 6/8 is a guess; previously we ran with unlimited 8 and more from
+            // spawn_blocking.
+            (total_threads * 3).checked_div(4).unwrap_or(0),
+        );
+        assert_ne!(permits, 0, "we will not be adding in permits later");
+        assert!(
+            permits < total_threads,
+            "need threads avail for shorter work"
+        );
+        tokio::sync::Semaphore::new(permits)
+    });
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum BackgroundLoopKind {
+    Compaction,
+    Gc,
+    Eviction,
+    ConsumptionMetricsCollectMetrics,
+    ConsumptionMetricsSyntheticSizeWorker,
+    InitialLogicalSizeCalculation,
+}
+
+impl BackgroundLoopKind {
+    fn as_static_str(&self) -> &'static str {
+        let s: &'static str = self.into();
+        s
+    }
+}
+
+/// Cancellation safe.
+pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
+    loop_kind: BackgroundLoopKind,
+    _ctx: &RequestContext,
+) -> impl Drop {
+    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
+        .with_label_values(&[loop_kind.as_static_str()])
+        .guard();
+
+    match CONCURRENT_BACKGROUND_TASKS.acquire().await {
+        Ok(permit) => permit,
+        Err(_closed) => unreachable!("we never close the semaphore"),
+    }
+}
 
 /// Start per tenant background loops: compaction and gc.
 pub fn start_background_loops(
     tenant: &Arc<Tenant>,
     background_jobs_can_start: Option<&completion::Barrier>,
 ) {
-    let tenant_id = tenant.tenant_id;
+    let tenant_shard_id = tenant.tenant_shard_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
-        Some(tenant_id),
+        Some(tenant_shard_id),
         None,
-        &format!("compactor for tenant {tenant_id}"),
+        &format!("compactor for tenant {tenant_shard_id}"),
         false,
         {
             let tenant = Arc::clone(tenant);
@@ -37,7 +92,7 @@ pub fn start_background_loops(
                     _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
                 };
                 compaction_loop(tenant, cancel)
-                    .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
+                    .instrument(info_span!("compaction_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -46,9 +101,9 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
-        Some(tenant_id),
+        Some(tenant_shard_id),
         None,
-        &format!("garbage collector for tenant {tenant_id}"),
+        &format!("garbage collector for tenant {tenant_shard_id}"),
         false,
         {
             let tenant = Arc::clone(tenant);
@@ -60,7 +115,7 @@ pub fn start_background_loops(
                     _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
                 };
                 gc_loop(tenant, cancel)
-                    .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
+                    .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -72,7 +127,10 @@ pub fn start_background_loops(
 /// Compaction task's main loop
 ///
 async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    let wait_duration = Duration::from_secs(2);
+    const MAX_BACKOFF_SECS: f64 = 300.0;
+    // How many errors we have seen consequtively
+    let mut error_run_count = 0;
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
@@ -102,20 +160,35 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             let started_at = Instant::now();
 
             let sleep_duration = if period == Duration::ZERO {
+                #[cfg(not(feature = "testing"))]
                 info!("automatic compaction is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
                 Duration::from_secs(10)
             } else {
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
-                    error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
+                    let wait_duration = backoff::exponential_backoff_duration_seconds(
+                        error_run_count + 1,
+                        1.0,
+                        MAX_BACKOFF_SECS,
+                    );
+                    error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
+                    error!(
+                        "Compaction failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
+                    );
                     wait_duration
                 } else {
+                    error_run_count = 0;
                     period
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, "compaction");
+            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Compaction);
+
+            // Perhaps we did no work and the walredo process has been idle for some time:
+            // give it a chance to shut down to avoid leaving walredo process running indefinitely.
+            tenant.walredo_mgr.maybe_quiesce(period * 10);
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -134,7 +207,10 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 /// GC task's main loop
 ///
 async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
-    let wait_duration = Duration::from_secs(2);
+    const MAX_BACKOFF_SECS: f64 = 300.0;
+    // How many errors we have seen consequtively
+    let mut error_run_count = 0;
+
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         // GC might require downloading, to find the cutoff LSN that corresponds to the
@@ -166,23 +242,34 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             let gc_horizon = tenant.get_gc_horizon();
             let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
+                #[cfg(not(feature = "testing"))]
                 info!("automatic GC is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
                 Duration::from_secs(10)
             } else {
                 // Run gc
                 let res = tenant
-                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx)
+                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
                     .await;
                 if let Err(e) = res {
-                    error!("Gc failed, retrying in {:?}: {e:?}", wait_duration);
+                    let wait_duration = backoff::exponential_backoff_duration_seconds(
+                        error_run_count + 1,
+                        1.0,
+                        MAX_BACKOFF_SECS,
+                    );
+                    error_run_count += 1;
+                    let wait_duration = Duration::from_secs_f64(wait_duration);
+                    error!(
+                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
+                    );
                     wait_duration
                 } else {
+                    error_run_count = 0;
                     period
                 }
             };
 
-            warn_when_period_overrun(started_at.elapsed(), period, "gc");
+            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -256,20 +343,24 @@ pub(crate) async fn random_init_delay(
 }
 
 /// Attention: the `task` and `period` beocme labels of a pageserver-wide prometheus metric.
-pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
+pub(crate) fn warn_when_period_overrun(
+    elapsed: Duration,
+    period: Duration,
+    task: BackgroundLoopKind,
+) {
     // Duration::ZERO will happen because it's the "disable [bgtask]" value.
     if elapsed >= period && period != Duration::ZERO {
         // humantime does no significant digits clamping whereas Duration's debug is a bit more
         // intelligent. however it makes sense to keep the "configuration format" for period, even
         // though there's no way to output the actual config value.
-        warn!(
+        info!(
             ?elapsed,
             period = %humantime::format_duration(period),
-            task,
+            ?task,
             "task iteration took longer than the configured period"
         );
         crate::metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
-            .with_label_values(&[task, &format!("{}", period.as_secs())])
+            .with_label_values(&[task.as_static_str(), &format!("{}", period.as_secs())])
             .inc();
     }
 }

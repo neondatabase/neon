@@ -4,7 +4,7 @@ pub mod backend;
 pub use backend::BackendType;
 
 mod credentials;
-pub use credentials::ClientCredentials;
+pub use credentials::{check_peer_addr_is_in_list, ClientCredentials};
 
 mod password_hack;
 pub use password_hack::parse_endpoint_param;
@@ -56,6 +56,15 @@ pub enum AuthErrorImpl {
     /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    #[error(
+        "This IP address is not allowed to connect to this endpoint. \
+        Please add it to the allowed list in the Neon console."
+    )]
+    IpAddressNotAllowed,
+
+    #[error("Too many connections to this endpoint. Please try again later.")]
+    TooManyConnections,
 }
 
 #[derive(Debug, Error)]
@@ -69,6 +78,18 @@ impl AuthError {
 
     pub fn auth_failed(user: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::AuthFailed(user.into()).into()
+    }
+
+    pub fn ip_address_not_allowed() -> Self {
+        AuthErrorImpl::IpAddressNotAllowed.into()
+    }
+
+    pub fn too_many_connections() -> Self {
+        AuthErrorImpl::TooManyConnections.into()
+    }
+
+    pub fn is_auth_failed(&self) -> bool {
+        matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
     }
 }
 
@@ -91,6 +112,8 @@ impl UserFacingError for AuthError {
             MalformedPassword(_) => self.to_string(),
             MissingEndpointName => self.to_string(),
             Io(_) => "Internal error".to_string(),
+            IpAddressNotAllowed => self.to_string(),
+            TooManyConnections => self.to_string(),
         }
     }
 }

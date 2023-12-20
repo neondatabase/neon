@@ -11,8 +11,11 @@ from fixtures.neon_fixtures import (
     wait_for_wal_insert_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.utils import timeline_delete_wait_completed
-from fixtures.pg_version import PgVersion, xfail_on_postgres
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_until_tenant_active,
+)
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
@@ -517,6 +520,8 @@ def test_single_branch_get_tenant_size_grows(
     env.pageserver.stop()
     env.pageserver.start()
 
+    wait_until_tenant_active(http_client, tenant_id)
+
     size_after = http_client.tenant_size(tenant_id)
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
@@ -527,7 +532,24 @@ def test_single_branch_get_tenant_size_grows(
     assert size_after == prev, "size after restarting pageserver should not have changed"
 
 
-@xfail_on_postgres(PgVersion.V15, reason="Test significantly more flaky on Postgres 15")
+def assert_size_approx_equal(size_a, size_b):
+    """
+    Tests that evaluate sizes are checking the pageserver space consumption
+    that sits many layers below the user input.  The exact space needed
+    varies slightly depending on postgres behavior.
+
+    Rather than expecting postgres to be determinstic and occasionally
+    failing the test, we permit sizes for the same data to vary by a few pages.
+    """
+
+    # Determined empirically from examples of equality failures: they differ
+    # by page multiples of 8272, and usually by 1-3 pages.  Tolerate 4 to avoid
+    # failing on outliers from that observed range.
+    threshold = 4 * 8272
+
+    assert size_a == pytest.approx(size_b, abs=threshold)
+
+
 def test_get_tenant_size_with_multiple_branches(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path
 ):
@@ -568,7 +590,7 @@ def test_get_tenant_size_with_multiple_branches(
     )
 
     size_after_first_branch = http_client.tenant_size(tenant_id)
-    assert size_after_first_branch == size_at_branch
+    assert_size_approx_equal(size_after_first_branch, size_at_branch)
 
     first_branch_endpoint = env.endpoints.create_start("first-branch", tenant_id=tenant_id)
 
@@ -594,7 +616,7 @@ def test_get_tenant_size_with_multiple_branches(
         "second-branch", main_branch_name, tenant_id
     )
     size_after_second_branch = http_client.tenant_size(tenant_id)
-    assert size_after_second_branch == size_after_continuing_on_main
+    assert_size_approx_equal(size_after_second_branch, size_after_continuing_on_main)
 
     second_branch_endpoint = env.endpoints.create_start("second-branch", tenant_id=tenant_id)
 
@@ -624,11 +646,13 @@ def test_get_tenant_size_with_multiple_branches(
     env.pageserver.stop()
     env.pageserver.start()
 
+    wait_until_tenant_active(http_client, tenant_id)
+
     # chance of compaction and gc on startup might have an effect on the
     # tenant_size but so far this has been reliable, even though at least gc
     # and tenant_size race for the same locks
     size_after = http_client.tenant_size(tenant_id)
-    assert size_after == size_after_thinning_branch
+    assert_size_approx_equal(size_after, size_after_thinning_branch)
 
     size_debug_file_before = open(test_output_dir / "size_debug_before.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)

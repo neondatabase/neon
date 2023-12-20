@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use tokio::task::JoinHandle;
@@ -7,7 +8,6 @@ use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +34,9 @@ use once_cell::sync::OnceCell;
 
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
+
+/// Default buffer size when interfacing with [`tokio::fs::File`].
+const BUFFER_SIZE: usize = 32 * 1024;
 
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
@@ -136,7 +139,7 @@ async fn update_task(
 
     if elected_me != (entry.handle.is_some()) {
         if elected_me {
-            info!("elected for backup {}: {}", ttid, election_dbg_str);
+            info!("elected for backup: {}", election_dbg_str);
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
             let timeline_dir = conf.timeline_dir(&ttid);
@@ -149,7 +152,7 @@ async fn update_task(
                     conf.backup_parallel_jobs,
                     shutdown_rx,
                 )
-                .instrument(info_span!("WAL backup task", ttid = %ttid)),
+                .in_current_span(),
             );
 
             entry.handle = Some(WalBackupTaskHandle {
@@ -157,7 +160,7 @@ async fn update_task(
                 handle,
             });
         } else {
-            info!("stepping down from backup {}: {}", ttid, election_dbg_str);
+            info!("stepping down from backup: {}", election_dbg_str);
             shut_down_task(ttid, entry).await;
         }
     }
@@ -199,29 +202,33 @@ pub async fn wal_backup_launcher_task_main(
                 if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
                     continue; /* just drain the channel and do nothing */
                 }
-                let timeline = is_wal_backup_required(ttid).await;
-                // do we need to do anything at all?
-                if timeline.is_some() != tasks.contains_key(&ttid) {
-                    if let Some(timeline) = timeline {
-                        // need to start the task
-                        let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
-                            timeline,
-                            handle: None,
-                        });
-                        update_task(&conf, ttid, entry).await;
-                    } else {
-                        // need to stop the task
-                        info!("stopping WAL backup task for {}", ttid);
-                        let mut entry = tasks.remove(&ttid).unwrap();
-                        shut_down_task(ttid, &mut entry).await;
+                async {
+                    let timeline = is_wal_backup_required(ttid).await;
+                    // do we need to do anything at all?
+                    if timeline.is_some() != tasks.contains_key(&ttid) {
+                        if let Some(timeline) = timeline {
+                            // need to start the task
+                            let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
+                                timeline,
+                                handle: None,
+                            });
+                            update_task(&conf, ttid, entry).await;
+                        } else {
+                            // need to stop the task
+                            info!("stopping WAL backup task");
+                            let mut entry = tasks.remove(&ttid).unwrap();
+                            shut_down_task(ttid, &mut entry).await;
+                        }
                     }
-                }
+                }.instrument(info_span!("WAL backup", ttid = %ttid)).await;
             }
             // For each timeline needing offloading, check if this safekeeper
             // should do the job and start/stop the task accordingly.
             _ = ticker.tick() => {
                 for (ttid, entry) in tasks.iter_mut() {
-                    update_task(&conf, *ttid, entry).await;
+                    update_task(&conf, *ttid, entry)
+                        .instrument(info_span!("WAL backup", ttid = %ttid))
+                        .await;
                 }
             }
         }
@@ -230,8 +237,8 @@ pub async fn wal_backup_launcher_task_main(
 
 struct WalBackupTask {
     timeline: Arc<Timeline>,
-    timeline_dir: PathBuf,
-    workspace_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
+    workspace_dir: Utf8PathBuf,
     wal_seg_size: usize,
     parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
@@ -240,15 +247,15 @@ struct WalBackupTask {
 /// Offload single timeline.
 async fn backup_task_main(
     ttid: TenantTimelineId,
-    timeline_dir: PathBuf,
-    workspace_dir: PathBuf,
+    timeline_dir: Utf8PathBuf,
+    workspace_dir: Utf8PathBuf,
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
     info!("started");
     let res = GlobalTimelines::get(ttid);
     if let Err(e) = res {
-        error!("backup error for timeline {}: {}", ttid, e);
+        error!("backup error: {}", e);
         return;
     }
     let tli = res.unwrap();
@@ -346,13 +353,13 @@ impl WalBackupTask {
     }
 }
 
-pub async fn backup_lsn_range(
+async fn backup_lsn_range(
     timeline: &Arc<Timeline>,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
-    timeline_dir: &Path,
-    workspace_dir: &Path,
+    timeline_dir: &Utf8Path,
+    workspace_dir: &Utf8Path,
     parallel_jobs: usize,
 ) -> Result<()> {
     if parallel_jobs < 1 {
@@ -408,8 +415,8 @@ pub async fn backup_lsn_range(
 
 async fn backup_single_segment(
     seg: &Segment,
-    timeline_dir: &Path,
-    workspace_dir: &Path,
+    timeline_dir: &Utf8Path,
+    workspace_dir: &Utf8Path,
 ) -> Result<Segment> {
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
@@ -429,7 +436,7 @@ async fn backup_single_segment(
         BACKUP_ERRORS.inc();
     }
     res?;
-    debug!("Backup of {} done", segment_file_path.display());
+    debug!("Backup of {} done", segment_file_path);
 
     Ok(*seg)
 }
@@ -454,7 +461,7 @@ impl Segment {
         XLogFileName(PG_TLI, self.seg_no, self.size())
     }
 
-    pub fn file_path(self, timeline_dir: &Path) -> Result<PathBuf> {
+    pub fn file_path(self, timeline_dir: &Utf8Path) -> Result<Utf8PathBuf> {
         Ok(timeline_dir.join(self.object_name()))
     }
 
@@ -479,23 +486,24 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
-async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize) -> Result<()> {
+async fn backup_object(
+    source_file: &Utf8Path,
+    target_file: &RemotePath,
+    size: usize,
+) -> Result<()> {
     let storage = REMOTE_STORAGE
         .get()
         .expect("failed to get remote storage")
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
-        format!(
-            "Failed to open file {} for wal backup",
-            source_file.display()
-        )
-    })?);
-
-    storage
-        .upload_storage_object(Box::new(file), size, target_file)
+    let file = File::open(&source_file)
         .await
+        .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
+
+    let file = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
+
+    storage.upload_storage_object(file, size, target_file).await
 }
 
 pub async fn read_object(
@@ -517,5 +525,9 @@ pub async fn read_object(
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")
         })?;
 
-    Ok(download.download_stream)
+    let reader = tokio_util::io::StreamReader::new(download.download_stream);
+
+    let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
+
+    Ok(Box::pin(reader))
 }

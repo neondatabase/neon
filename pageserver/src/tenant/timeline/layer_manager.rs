@@ -1,8 +1,9 @@
 use anyhow::{bail, ensure, Context, Result};
+use pageserver_api::shard::TenantShardId;
 use std::{collections::HashMap, sync::Arc};
 use tracing::trace;
 use utils::{
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{AtomicLsn, Lsn},
 };
 
@@ -12,27 +13,16 @@ use crate::{
     tenant::{
         layer_map::{BatchedUpdates, LayerMap},
         storage_layer::{
-            AsLayerDesc, DeltaLayer, ImageLayer, InMemoryLayer, PersistentLayer,
-            PersistentLayerDesc, PersistentLayerKey,
+            AsLayerDesc, InMemoryLayer, Layer, PersistentLayerDesc, PersistentLayerKey,
+            ResidentLayer,
         },
-        timeline::compare_arced_layers,
     },
 };
 
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
-    layer_fmgr: LayerFileManager,
-}
-
-/// After GC, the layer map changes will not be applied immediately. Users should manually apply the changes after
-/// scheduling deletes in remote client.
-pub(crate) struct ApplyGcResultGuard<'a>(BatchedUpdates<'a>);
-
-impl ApplyGcResultGuard<'_> {
-    pub(crate) fn flush(self) {
-        self.0.flush();
-    }
+    layer_fmgr: LayerFileManager<Layer>,
 }
 
 impl LayerManager {
@@ -43,7 +33,7 @@ impl LayerManager {
         }
     }
 
-    pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+    pub(crate) fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Layer {
         self.layer_fmgr.get_from_desc(desc)
     }
 
@@ -55,21 +45,12 @@ impl LayerManager {
         &self.layer_map
     }
 
-    /// Replace layers in the layer file manager, used in evictions and layer downloads.
-    pub(crate) fn replace_and_verify(
-        &mut self,
-        expected: Arc<dyn PersistentLayer>,
-        new: Arc<dyn PersistentLayer>,
-    ) -> Result<()> {
-        self.layer_fmgr.replace_and_verify(expected, new)
-    }
-
     /// Called from `load_layer_map`. Initialize the layer manager with:
     /// 1. all on-disk layers
     /// 2. next open layer (with disk disk_consistent_lsn LSN)
     pub(crate) fn initialize_local_layers(
         &mut self,
-        on_disk_layers: Vec<Arc<dyn PersistentLayer>>,
+        on_disk_layers: Vec<Layer>,
         next_open_layer_at: Lsn,
     ) {
         let mut updates = self.layer_map.batch_update();
@@ -87,13 +68,13 @@ impl LayerManager {
 
     /// Open a new writable layer to append data if there is no open layer, otherwise return the current open layer,
     /// called within `get_layer_for_write`.
-    pub(crate) fn get_layer_for_write(
+    pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
         last_record_lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
 
@@ -129,7 +110,8 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer = InMemoryLayer::create(conf, timeline_id, tenant_id, start_lsn)?;
+            let new_layer =
+                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn).await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
@@ -164,10 +146,19 @@ impl LayerManager {
     }
 
     /// Add image layers to the layer map, called from `create_image_layers`.
-    pub(crate) fn track_new_image_layers(&mut self, image_layers: Vec<ImageLayer>) {
+    pub(crate) fn track_new_image_layers(
+        &mut self,
+        image_layers: &[ResidentLayer],
+        metrics: &TimelineMetrics,
+    ) {
         let mut updates = self.layer_map.batch_update();
         for layer in image_layers {
-            Self::insert_historic_layer(Arc::new(layer), &mut updates, &mut self.layer_fmgr);
+            Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+
+            // record these here instead of Layer::finish_creating because otherwise partial
+            // failure with create_image_layers would balloon up the physical size gauge. downside
+            // is that all layers need to be created before metrics are updated.
+            metrics.record_new_file_metrics(layer.layer_desc().file_size);
         }
         updates.flush();
     }
@@ -175,76 +166,61 @@ impl LayerManager {
     /// Flush a frozen layer and add the written delta layer to the layer map.
     pub(crate) fn finish_flush_l0_layer(
         &mut self,
-        delta_layer: Option<DeltaLayer>,
+        delta_layer: Option<&ResidentLayer>,
         frozen_layer_for_check: &Arc<InMemoryLayer>,
+        metrics: &TimelineMetrics,
     ) {
-        let l = self.layer_map.frozen_layers.pop_front();
-        let mut updates = self.layer_map.batch_update();
+        let inmem = self
+            .layer_map
+            .frozen_layers
+            .pop_front()
+            .expect("there must be a inmem layer to flush");
 
-        // Only one thread may call this function at a time (for this
-        // timeline). If two threads tried to flush the same frozen
+        // Only one task may call this function at a time (for this
+        // timeline). If two tasks tried to flush the same frozen
         // layer to disk at the same time, that would not work.
-        assert!(compare_arced_layers(&l.unwrap(), frozen_layer_for_check));
+        assert_eq!(Arc::as_ptr(&inmem), Arc::as_ptr(frozen_layer_for_check));
 
-        if let Some(delta_layer) = delta_layer {
-            Self::insert_historic_layer(Arc::new(delta_layer), &mut updates, &mut self.layer_fmgr);
+        if let Some(l) = delta_layer {
+            let mut updates = self.layer_map.batch_update();
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
+            updates.flush();
         }
-        updates.flush();
     }
 
     /// Called when compaction is completed.
     pub(crate) fn finish_compact_l0(
         &mut self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        compact_from: Vec<Arc<dyn PersistentLayer>>,
-        compact_to: Vec<Arc<dyn PersistentLayer>>,
+        compact_from: &[Layer],
+        compact_to: &[ResidentLayer],
         metrics: &TimelineMetrics,
-    ) -> Result<()> {
+    ) {
         let mut updates = self.layer_map.batch_update();
         for l in compact_to {
-            Self::insert_historic_layer(l, &mut updates, &mut self.layer_fmgr);
+            Self::insert_historic_layer(l.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+            metrics.record_new_file_metrics(l.layer_desc().file_size);
         }
         for l in compact_from {
-            // NB: the layer file identified by descriptor `l` is guaranteed to be present
-            // in the LayerFileManager because compaction kept holding `layer_removal_cs` the entire
-            // time, even though we dropped `Timeline::layers` inbetween.
-            Self::delete_historic_layer(
-                layer_removal_cs.clone(),
-                l,
-                &mut updates,
-                metrics,
-                &mut self.layer_fmgr,
-            )?;
+            Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
-        Ok(())
     }
 
-    /// Called when garbage collect the timeline. Returns a guard that will apply the updates to the layer map.
-    pub(crate) fn finish_gc_timeline(
-        &mut self,
-        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        gc_layers: Vec<Arc<dyn PersistentLayer>>,
-        metrics: &TimelineMetrics,
-    ) -> Result<ApplyGcResultGuard> {
+    /// Called when garbage collect has selected the layers to be removed.
+    pub(crate) fn finish_gc_timeline(&mut self, gc_layers: &[Layer]) {
         let mut updates = self.layer_map.batch_update();
         for doomed_layer in gc_layers {
-            Self::delete_historic_layer(
-                layer_removal_cs.clone(),
-                doomed_layer,
-                &mut updates,
-                metrics,
-                &mut self.layer_fmgr,
-            )?; // FIXME: schedule succeeded deletions in timeline.rs `gc_timeline` instead of in batch?
+            Self::delete_historic_layer(doomed_layer, &mut updates, &mut self.layer_fmgr);
         }
-        Ok(ApplyGcResultGuard(updates))
+        updates.flush()
     }
 
     /// Helper function to insert a layer into the layer map and file manager.
     fn insert_historic_layer(
-        layer: Arc<dyn PersistentLayer>,
+        layer: Layer,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerFileManager,
+        mapping: &mut LayerFileManager<Layer>,
     ) {
         updates.insert_historic(layer.layer_desc().clone());
         mapping.insert(layer);
@@ -254,17 +230,11 @@ impl LayerManager {
     /// Remote storage is not affected by this operation.
     fn delete_historic_layer(
         // we cannot remove layers otherwise, since gc and compaction will race
-        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        layer: Arc<dyn PersistentLayer>,
+        layer: &Layer,
         updates: &mut BatchedUpdates<'_>,
-        metrics: &TimelineMetrics,
-        mapping: &mut LayerFileManager,
-    ) -> anyhow::Result<()> {
+        mapping: &mut LayerFileManager<Layer>,
+    ) {
         let desc = layer.layer_desc();
-        if !layer.is_remote_layer() {
-            layer.delete_resident_layer_file()?;
-            metrics.resident_physical_size_gauge.sub(desc.file_size);
-        }
 
         // TODO Removing from the bottom of the layer map is expensive.
         //      Maybe instead discard all layer map historic versions that
@@ -273,21 +243,18 @@ impl LayerManager {
         //      map index without actually rebuilding the index.
         updates.remove_historic(desc);
         mapping.remove(layer);
-
-        Ok(())
+        layer.delete_on_drop();
     }
 
-    pub(crate) fn contains(&self, layer: &Arc<dyn PersistentLayer>) -> bool {
+    pub(crate) fn contains(&self, layer: &Layer) -> bool {
         self.layer_fmgr.contains(layer)
     }
 }
 
-pub(crate) struct LayerFileManager<T: AsLayerDesc + ?Sized = dyn PersistentLayer>(
-    HashMap<PersistentLayerKey, Arc<T>>,
-);
+pub(crate) struct LayerFileManager<T>(HashMap<PersistentLayerKey, T>);
 
-impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<T> {
+impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
@@ -297,14 +264,14 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
             .clone()
     }
 
-    pub(crate) fn insert(&mut self, layer: Arc<T>) {
+    pub(crate) fn insert(&mut self, layer: T) {
         let present = self.0.insert(layer.layer_desc().key(), layer.clone());
         if present.is_some() && cfg!(debug_assertions) {
             panic!("overwriting a layer: {:?}", layer.layer_desc())
         }
     }
 
-    pub(crate) fn contains(&self, layer: &Arc<T>) -> bool {
+    pub(crate) fn contains(&self, layer: &T) -> bool {
         self.0.contains_key(&layer.layer_desc().key())
     }
 
@@ -312,48 +279,13 @@ impl<T: AsLayerDesc + ?Sized> LayerFileManager<T> {
         Self(HashMap::new())
     }
 
-    pub(crate) fn remove(&mut self, layer: Arc<T>) {
+    pub(crate) fn remove(&mut self, layer: &T) {
         let present = self.0.remove(&layer.layer_desc().key());
         if present.is_none() && cfg!(debug_assertions) {
             panic!(
                 "removing layer that is not present in layer mapping: {:?}",
                 layer.layer_desc()
             )
-        }
-    }
-
-    pub(crate) fn replace_and_verify(&mut self, expected: Arc<T>, new: Arc<T>) -> Result<()> {
-        let key = expected.layer_desc().key();
-        let other = new.layer_desc().key();
-
-        let expected_l0 = LayerMap::is_l0(expected.layer_desc());
-        let new_l0 = LayerMap::is_l0(new.layer_desc());
-
-        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
-            "layermap-replace-notfound"
-        ));
-
-        anyhow::ensure!(
-            key == other,
-            "expected and new layer have different keys: {key:?} != {other:?}"
-        );
-
-        anyhow::ensure!(
-            expected_l0 == new_l0,
-            "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
-        );
-
-        if let Some(layer) = self.0.get_mut(&key) {
-            anyhow::ensure!(
-                compare_arced_layers(&expected, layer),
-                "another layer was found instead of expected, expected={expected:?}, new={new:?}",
-                expected = Arc::as_ptr(&expected),
-                new = Arc::as_ptr(layer),
-            );
-            *layer = new;
-            Ok(())
-        } else {
-            anyhow::bail!("layer was not found");
         }
     }
 }

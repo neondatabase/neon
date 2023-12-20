@@ -122,7 +122,7 @@ pub(super) async fn handle_walreceiver_connection(
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
 
-    let (mut replication_client, connection) = {
+    let (replication_client, connection) = {
         let mut config = wal_source_connconf.to_tokio_postgres_config();
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
@@ -163,7 +163,7 @@ pub(super) async fn handle_walreceiver_connection(
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnectionPoller,
-        Some(timeline.tenant_id),
+        Some(timeline.tenant_shard_id),
         Some(timeline.timeline_id),
         "walreceiver connection",
         false,
@@ -205,7 +205,7 @@ pub(super) async fn handle_walreceiver_connection(
         gauge.dec();
     }
 
-    let identify = identify_system(&mut replication_client).await?;
+    let identify = identify_system(&replication_client).await?;
     info!("{identify:?}");
 
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
@@ -370,8 +370,9 @@ pub(super) async fn handle_walreceiver_connection(
             })?;
 
         if let Some(last_lsn) = status_update {
-            let timeline_remote_consistent_lsn =
-                timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
+            let timeline_remote_consistent_lsn = timeline
+                .get_remote_consistent_lsn_visible()
+                .unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
             let last_received_lsn = last_lsn;
@@ -395,11 +396,15 @@ pub(super) async fn handle_walreceiver_connection(
 
             // Send the replication feedback message.
             // Regular standby_status_update fields are put into this message.
-            let (timeline_logical_size, _) = timeline
-                .get_current_logical_size(&ctx)
-                .context("Status update creation failed to get current logical size")?;
+            let current_timeline_size = timeline
+                .get_current_logical_size(
+                    crate::tenant::timeline::GetLogicalSizePriority::User,
+                    &ctx,
+                )
+                // FIXME: https://github.com/neondatabase/neon/issues/5963
+                .size_dont_care_about_accuracy();
             let status_update = PageserverFeedback {
-                current_timeline_size: timeline_logical_size,
+                current_timeline_size,
                 last_received_lsn,
                 disk_consistent_lsn,
                 remote_consistent_lsn,
@@ -443,7 +448,7 @@ struct IdentifySystem {
 struct IdentifyError;
 
 /// Run the postgres `IDENTIFY_SYSTEM` command
-async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> {
+async fn identify_system(client: &Client) -> anyhow::Result<IdentifySystem> {
     let query_str = "IDENTIFY_SYSTEM";
     let response = client.simple_query(query_str).await?;
 
@@ -458,7 +463,7 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
 
     // extract the row contents into an IdentifySystem struct.
     // written as a closure so I can use ? for Option here.
-    if let Some(SimpleQueryMessage::Row(first_row)) = response.get(0) {
+    if let Some(SimpleQueryMessage::Row(first_row)) = response.first() {
         Ok(IdentifySystem {
             systemid: get_parse(first_row, 0)?,
             timeline: get_parse(first_row, 1)?,

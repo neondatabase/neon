@@ -26,15 +26,15 @@ use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::BrokerClientChannel;
-use storage_broker::Streaming;
+use storage_broker::{BrokerClientChannel, Code, Streaming};
 use tokio::select;
 use tracing::*;
 
-use postgres_connection::{parse_host_port, PgConnectionConfig};
+use postgres_connection::PgConnectionConfig;
 use utils::backoff::{
     exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
+use utils::postgres_client::wal_stream_connection_config;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
@@ -75,7 +75,7 @@ pub(super) async fn connection_manager_loop_step(
     }
 
     let id = TenantTimelineId {
-        tenant_id: connection_manager_state.timeline.tenant_id,
+        tenant_id: connection_manager_state.timeline.tenant_shard_id.tenant_id,
         timeline_id: connection_manager_state.timeline.timeline_id,
     };
 
@@ -136,8 +136,17 @@ pub(super) async fn connection_manager_loop_step(
             broker_update = broker_subscription.message() => {
                 match broker_update {
                     Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
-                    Err(e) => {
-                        error!("broker subscription failed: {e}");
+                    Err(status) => {
+                        match status.code() {
+                            Code::Unknown if status.message().contains("stream closed because of a broken pipe") || status.message().contains("connection reset") => {
+                                // tonic's error handling doesn't provide a clear code for disconnections: we get
+                                // "h2 protocol error: error reading a body from connection: stream closed because of a broken pipe"
+                                info!("broker disconnected: {status}");
+                            },
+                            _ => {
+                                warn!("broker subscription failed: {status}");
+                            }
+                        }
                         return ControlFlow::Continue(());
                     }
                     Ok(None) => {
@@ -379,7 +388,7 @@ struct BrokerSkTimeline {
 impl ConnectionManagerState {
     pub(super) fn new(timeline: Arc<Timeline>, conf: WalReceiverConf) -> Self {
         let id = TenantTimelineId {
-            tenant_id: timeline.tenant_id,
+            tenant_id: timeline.tenant_shard_id.tenant_id,
             timeline_id: timeline.timeline_id,
         };
         Self {
@@ -417,7 +426,7 @@ impl ConnectionManagerState {
                     timeline,
                     new_sk.wal_source_connconf,
                     events_sender,
-                    cancellation,
+                    cancellation.clone(),
                     connect_timeout,
                     ctx,
                     node_id,
@@ -438,7 +447,14 @@ impl ConnectionManagerState {
                             }
                             WalReceiverError::Other(e) => {
                                 // give out an error to have task_mgr give it a really verbose logging
-                                Err(e).context("walreceiver connection handling failure")
+                                if cancellation.is_cancelled() {
+                                    // Ideally we would learn about this via some path other than Other, but
+                                    // that requires refactoring all the intermediate layers of ingest code
+                                    // that only emit anyhow::Error
+                                    Ok(())
+                                } else {
+                                    Err(e).context("walreceiver connection handling failure")
+                                }
                             }
                         }
                     }
@@ -879,33 +895,6 @@ impl ReconnectReason {
     }
 }
 
-fn wal_stream_connection_config(
-    TenantTimelineId {
-        tenant_id,
-        timeline_id,
-    }: TenantTimelineId,
-    listen_pg_addr_str: &str,
-    auth_token: Option<&str>,
-    availability_zone: Option<&str>,
-) -> anyhow::Result<PgConnectionConfig> {
-    let (host, port) =
-        parse_host_port(listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
-    let port = port.unwrap_or(5432);
-    let mut connstr = PgConnectionConfig::new_host_port(host, port)
-        .extend_options([
-            "-c".to_owned(),
-            format!("timeline_id={}", timeline_id),
-            format!("tenant_id={}", tenant_id),
-        ])
-        .set_password(auth_token.map(|s| s.to_owned()));
-
-    if let Some(availability_zone) = availability_zone {
-        connstr = connstr.extend_options([format!("availability_zone={}", availability_zone)]);
-    }
-
-    Ok(connstr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,6 +910,7 @@ mod tests {
             timeline: SafekeeperTimelineInfo {
                 safekeeper_id: 0,
                 tenant_timeline_id: None,
+                term: 0,
                 last_log_term: 0,
                 flush_lsn: 0,
                 commit_lsn,
@@ -929,6 +919,7 @@ mod tests {
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
+                http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
             },
             latest_update,

@@ -9,28 +9,15 @@ from typing import DefaultDict, Dict
 import psycopg2
 import psycopg2.extras
 
-# We call the test "flaky" if it failed at least once on the main branch in the last N=10 days.
 FLAKY_TESTS_QUERY = """
     SELECT
-        DISTINCT parent_suite, suite, REGEXP_REPLACE(test, '(release|debug)-pg(\\d+)-?', '') as deparametrized_test
-    FROM
-        (
-            SELECT
-                reference,
-                jsonb_array_elements(data -> 'children') ->> 'name' as parent_suite,
-                jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') ->> 'name' as suite,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') ->> 'name' as test,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') ->> 'status' as status,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') ->> 'retriesStatusChange' as retries_status_change,
-                to_timestamp((jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'time' ->> 'start')::bigint / 1000)::date as timestamp
-            FROM
-                regress_test_results
-        ) data
+        DISTINCT parent_suite, suite, name
+    FROM results
     WHERE
-        timestamp > CURRENT_DATE - INTERVAL '%s' day
+        started_at > CURRENT_DATE - INTERVAL '%s' day
         AND (
             (status IN ('failed', 'broken') AND reference = 'refs/heads/main')
-            OR retries_status_change::boolean
+            OR flaky
         )
     ;
 """
@@ -63,12 +50,14 @@ def main(args: argparse.Namespace):
         if row["parent_suite"] != "test_runner.regress":
             continue
 
-        deparametrized_test = row["deparametrized_test"]
-        dash_if_needed = "" if deparametrized_test.endswith("[]") else "-"
-        parametrized_test = deparametrized_test.replace(
-            "[",
-            f"[{build_type}-pg{pg_version}{dash_if_needed}",
-        )
+        if row["name"].endswith("]"):
+            parametrized_test = row["name"].replace(
+                "[",
+                f"[{build_type}-pg{pg_version}-",
+            )
+        else:
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}]"
+
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 
         logging.info(
