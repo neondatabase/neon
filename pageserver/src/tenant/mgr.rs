@@ -45,7 +45,6 @@ use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
 use super::secondary::SecondaryTenant;
-use super::storage_layer::Layer;
 use super::TenantSharedResources;
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -1189,56 +1188,6 @@ impl TenantManager {
                 }
             }
         }
-    }
-
-    /// Having planned some evictions for a tenant, attempt to execute them.
-    ///
-    /// Execution will not occur if the TenantSlot for this tenant is not in
-    /// a state suitable to execute.
-    // TODO: is Layer really needed here?  Maybe we should have reduced to a LayerFileName by this point.
-    pub(crate) async fn evict_tenant_layers(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_layers: Vec<(TimelineId, Layer)>,
-    ) {
-        // TODO: unify with how we evict for attached tenants.  They should also
-        // pass through here, to avoid attached tenant evictions racing with
-        // the lifetime of secondary locations for the same tenant ID.
-
-        let state = {
-            let locked = self.tenants.read().unwrap();
-            let map = match &*locked {
-                TenantsMap::Initializing | TenantsMap::ShuttingDown(_) => return,
-                TenantsMap::Open(m) => m,
-            };
-
-            match map.get(tenant_shard_id) {
-                Some(TenantSlot::Secondary(secondary_state)) => {
-                    // Found a secondary as expected
-                    secondary_state.clone()
-                }
-                _ => {
-                    // A location configuration change raced with this eviction
-                    tracing::info!(
-                        "Dropping {} layer evictions, tenant not in suitable state",
-                        timeline_layers.len()
-                    );
-                    return;
-                }
-            }
-        };
-
-        // Concurrency: downloads might have been going on while we deleted layers.  However,
-        // we are only deleting layers that the SecondaryTenant already thought were on disk,
-        // so we won't be deleting anything that it is _currently_ downloading.  All deletions
-        // of SecondaryTenant layers flow through this function, so there is no risk that the
-        // layer we're evicting is no longer present in-memory.
-        state
-            .evict_layers(self.conf, tenant_shard_id, timeline_layers)
-            .instrument(tracing::info_span!("evict_layers",
-                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()
-            ))
-            .await;
     }
 }
 

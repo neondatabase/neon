@@ -3,13 +3,9 @@ pub mod heatmap;
 mod heatmap_uploader;
 mod scheduler;
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 
-use crate::{
-    config::PageServerConf,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::span::debug_assert_current_span_has_tenant_id,
-};
+use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 
 use self::{
     downloader::{downloader_task, SecondaryDetail},
@@ -17,18 +13,13 @@ use self::{
     scheduler::TenantScoped,
 };
 
-use super::{
-    config::SecondaryLocationConfig,
-    mgr::TenantManager,
-    storage_layer::{AsLayerDesc, Layer},
-    timeline::DiskUsageEvictionInfo,
-};
+use super::{config::SecondaryLocationConfig, mgr::TenantManager};
 
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 
 use tokio_util::sync::CancellationToken;
-use utils::{completion::Barrier, fs_ext, id::TimelineId, sync::gate::Gate};
+use utils::{completion::Barrier, sync::gate::Gate};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -115,78 +106,6 @@ impl SecondaryTenant {
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
         self.detail.lock().unwrap().config = config.clone();
-    }
-
-    pub(crate) async fn get_layers_for_eviction(
-        &self,
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
-    ) -> Vec<(TimelineId, DiskUsageEvictionInfo)> {
-        debug_assert_current_span_has_tenant_id();
-        {
-            let detail = self.detail.lock().unwrap();
-            if !detail.is_uninit() {
-                return detail.get_layers_for_eviction();
-            } else {
-                // In case we didn't freshen yet in this process lifetime, we will need to scan local storage
-                // to find all our layers.
-            }
-        }
-
-        tracing::debug!("Scanning local layers for secondary tenant to service eviction",);
-
-        // Fall through: we need to initialize Detail
-        let timelines = SecondaryDetail::init_detail(conf, tenant_shard_id).await;
-        let mut detail = self.detail.lock().unwrap();
-        if detail.is_uninit() {
-            detail.timelines = timelines;
-        }
-        detail.get_layers_for_eviction()
-    }
-
-    pub(crate) async fn evict_layers(
-        &self,
-        conf: &PageServerConf,
-        tenant_shard_id: &TenantShardId,
-        layers: Vec<(TimelineId, Layer)>,
-    ) {
-        debug_assert_current_span_has_tenant_id();
-        let _guard = match self.gate.enter() {
-            Ok(g) => g,
-            Err(_) => {
-                tracing::info!(
-                    "Dropping {} layer evictions, secondary tenant shutting down",
-                    layers.len()
-                );
-                return;
-            }
-        };
-
-        let now = SystemTime::now();
-
-        for (timeline_id, layer) in layers {
-            let layer_name = layer.layer_desc().filename();
-            let path = conf
-                .timeline_path(tenant_shard_id, &timeline_id)
-                .join(&layer_name.file_name());
-
-            // We tolerate ENOENT, because between planning eviction and executing
-            // it, the secondary downloader could have seen an updated heatmap that
-            // resulted in a layer being deleted.
-            tokio::fs::remove_file(path)
-                .await
-                .or_else(fs_ext::ignore_not_found)
-                .expect("TODO: terminate process on local I/O errors");
-
-            // TODO: batch up updates instead of acquiring lock in inner loop
-            let mut detail = self.detail.lock().unwrap();
-            // If there is no timeline detail for what we just deleted, that indicates that
-            // the secondary downloader did some work (perhaps removing all)
-            if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-                timeline_detail.on_disk_layers.remove(&layer_name);
-                timeline_detail.evicted_at.insert(layer_name, now);
-            }
-        }
     }
 
     fn get_tenant_shard_id(&self) -> &TenantShardId {

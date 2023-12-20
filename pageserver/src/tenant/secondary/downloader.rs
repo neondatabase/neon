@@ -14,9 +14,8 @@ use crate::{
         debug_assert_current_span_has_tenant_and_timeline_id,
         remote_timeline_client::index::LayerFileMetadata,
         span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{Layer, LayerFileName},
+        storage_layer::LayerFileName,
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
-        timeline::{DiskUsageEvictionInfo, LocalLayerInfoForDiskUsageEviction},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
     METADATA_FILE_NAME, TEMP_FILE_SUFFIX,
@@ -56,26 +55,23 @@ use super::{
 /// `<ttps://github.com/neondatabase/neon/issues/6200>`
 const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
 
-const DEFAULT_SCHEDULING_INTERVAL: Duration = Duration::from_millis(60000);
-const _MIN_SCHEDULING_INTERVAL: Duration = Duration::from_millis(1000);
-
 #[derive(Debug, Clone)]
 pub(super) struct OnDiskState {
-    layer: Layer,
+    metadata: LayerFileMetadata,
     access_time: SystemTime,
 }
 
 impl OnDiskState {
     fn new(
-        conf: &'static PageServerConf,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-        name: LayerFileName,
+        _conf: &'static PageServerConf,
+        _tenant_shard_id: &TenantShardId,
+        _imeline_id: &TimelineId,
+        _ame: LayerFileName,
         metadata: LayerFileMetadata,
         access_time: SystemTime,
     ) -> Self {
         Self {
-            layer: Layer::for_secondary(conf, tenant_shard_id, timeline_id, name, metadata),
+            metadata,
             access_time,
         }
     }
@@ -114,72 +110,6 @@ impl SecondaryDetail {
             next_download: None,
             timelines: HashMap::new(),
         }
-    }
-
-    pub(super) fn is_uninit(&self) -> bool {
-        // FIXME: empty timelines is not synonymous with not initialized, as it is legal for
-        // a tenant to exist with no timelines.
-        self.timelines.is_empty()
-    }
-
-    pub(super) async fn init_detail(
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
-    ) -> HashMap<TimelineId, SecondaryDetailTimeline> {
-        tracing::info!("init_detail");
-        // Load heatmap from local storage
-        let heatmap_path = conf.tenant_heatmap_path(&tenant_shard_id);
-        let heatmap = match tokio::fs::read(&heatmap_path).await {
-            Ok(bytes) => serde_json::from_slice::<HeatMapTenant>(&bytes).unwrap(),
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return HashMap::new();
-                } else {
-                    on_fatal_io_error(&e, &format!("Reading heatmap file from {heatmap_path}"))
-                }
-            }
-        };
-
-        let mut timelines = HashMap::new();
-
-        for heatmap_timeline in heatmap.timelines {
-            let detail = init_timeline_state(conf, &tenant_shard_id, &heatmap_timeline).await;
-            timelines.insert(heatmap_timeline.timeline_id, detail);
-        }
-
-        timelines
-    }
-
-    pub(super) fn get_layers_for_eviction(&self) -> Vec<(TimelineId, DiskUsageEvictionInfo)> {
-        let mut result = Vec::new();
-        for (timeline_id, timeline_detail) in &self.timelines {
-            let layers: Vec<_> = timeline_detail
-                .on_disk_layers
-                .values()
-                .map(|ods| LocalLayerInfoForDiskUsageEviction {
-                    layer: ods.layer.clone(),
-                    last_activity_ts: ods.access_time,
-                })
-                .collect();
-
-            let max_layer_size = layers.iter().map(|l| l.layer.metadata().file_size()).max();
-
-            result.push((
-                *timeline_id,
-                DiskUsageEvictionInfo {
-                    resident_layers: layers,
-                    max_layer_size,
-                },
-            ))
-        }
-
-        tracing::debug!(
-            "Found {} timelines, {} layers",
-            self.timelines.len(),
-            result.len()
-        );
-
-        result
     }
 }
 
@@ -681,7 +611,7 @@ impl<'a> TenantDownloader<'a> {
             // Existing on-disk layers: just update their access time.
             if let Some(on_disk) = timeline_state.on_disk_layers.get(&layer.name) {
                 tracing::debug!("Layer {} is already on disk", layer.name);
-                if on_disk.layer.metadata() != LayerFileMetadata::from(&layer.metadata)
+                if on_disk.metadata != LayerFileMetadata::from(&layer.metadata)
                     || on_disk.access_time != layer.access_time
                 {
                     // We already have this layer on disk.  Update its access time.
