@@ -52,7 +52,7 @@ use super::{
 ///
 /// TODO: this should just be a default, and the actual period should be controlled
 /// via the heatmap itself
-/// (https://github.com/neondatabase/neon/issues/6200)
+/// `<ttps://github.com/neondatabase/neon/issues/6200>`
 const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
 
 #[derive(Debug, Clone)]
