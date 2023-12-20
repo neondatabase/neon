@@ -800,6 +800,7 @@ impl std::ops::Deref for TimelineKey {
 /// A totally ordered f32 subset we can use with sorting functions.
 mod finite_f32 {
 
+    /// A totally ordered f32 subset we can use with sorting functions.
     #[derive(Clone, Copy, PartialEq)]
     pub struct FiniteF32(f32);
 
