@@ -24,20 +24,16 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    proxy::{
-        neon_options, LatencyTimer, NUM_DB_CONNECTIONS_CLOSED_COUNTER,
-        NUM_DB_CONNECTIONS_OPENED_COUNTER,
-    },
+    metrics::{LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    proxy::{connect_compute::ConnectMechanism, neon_options},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
 
-use crate::proxy::ConnectMechanism;
-
 use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
-pub const APP_NAME: &str = "sql_over_http";
+pub const APP_NAME: &str = "/sql_over_http";
 const MAX_CONNS_PER_ENDPOINT: usize = 20;
 
 #[derive(Debug, Clone)]
@@ -432,10 +428,9 @@ async fn connect_to_compute(
 
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
-        application_name: Some(APP_NAME),
+        application_name: APP_NAME.to_string(),
         options: console_options,
     };
-    // TODO(anna): this is a bit hacky way, consider using console notification listener.
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(&extra).await?;
         if !check_peer_addr_is_in_list(&peer_addr, &allowed_ips) {
@@ -447,7 +442,7 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
-    crate::proxy::connect_to_compute(
+    crate::proxy::connect_compute::connect_to_compute(
         &TokioMechanism {
             conn_id,
             conn_info,
@@ -477,6 +472,11 @@ async fn connect_to_compute_once(
         .connect_timeout(timeout)
         .connect(tokio_postgres::NoTls)
         .await?;
+
+    let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
+        .with_label_values(&["http"])
+        .guard();
+
     tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
 
     let (tx, mut rx) = tokio::sync::watch::channel(session);
@@ -492,10 +492,7 @@ async fn connect_to_compute_once(
 
     tokio::spawn(
         async move {
-            NUM_DB_CONNECTIONS_OPENED_COUNTER.with_label_values(&["http"]).inc();
-            scopeguard::defer! {
-                NUM_DB_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
-            }
+            let _conn_gauge = conn_gauge;
             poll_fn(move |cx| {
                 if matches!(rx.has_changed(), Ok(true)) {
                     session = *rx.borrow_and_update();

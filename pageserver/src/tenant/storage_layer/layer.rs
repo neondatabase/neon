@@ -259,8 +259,9 @@ impl Layer {
 
         layer
             .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
-            .instrument(tracing::info_span!("get_value_reconstruct_data", layer=%self))
+            .instrument(tracing::debug_span!("get_value_reconstruct_data", layer=%self))
             .await
+            .with_context(|| format!("get_value_reconstruct_data for layer {self}"))
     }
 
     /// Download the layer if evicted.
@@ -457,6 +458,8 @@ struct LayerInner {
     /// For loaded layers, this may be some other value if the tenant has undergone
     /// a shard split since the layer was originally written.
     shard: ShardIndex,
+
+    last_evicted_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl std::fmt::Display for LayerInner {
@@ -587,6 +590,7 @@ impl LayerInner {
             consecutive_failures: AtomicUsize::new(0),
             generation,
             shard,
+            last_evicted_at: std::sync::Mutex::default(),
         }
     }
 
@@ -651,7 +655,6 @@ impl LayerInner {
     }
 
     /// Cancellation safe.
-    #[tracing::instrument(skip_all, fields(layer=%self))]
     async fn get_or_maybe_download(
         self: &Arc<Self>,
         allow_download: bool,
@@ -660,87 +663,101 @@ impl LayerInner {
         let mut init_permit = None;
 
         loop {
-            let download = move |permit| async move {
-                // disable any scheduled but not yet running eviction deletions for this
-                let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
+            let download = move |permit| {
+                async move {
+                    // disable any scheduled but not yet running eviction deletions for this
+                    let next_version = 1 + self.version.fetch_add(1, Ordering::Relaxed);
 
-                // count cancellations, which currently remain largely unexpected
-                let init_cancelled =
-                    scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
+                    // count cancellations, which currently remain largely unexpected
+                    let init_cancelled =
+                        scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());
 
-                // no need to make the evict_and_wait wait for the actual download to complete
-                drop(self.status.send(Status::Downloaded));
+                    // no need to make the evict_and_wait wait for the actual download to complete
+                    drop(self.status.send(Status::Downloaded));
 
-                let timeline = self
-                    .timeline
-                    .upgrade()
-                    .ok_or_else(|| DownloadError::TimelineShutdown)?;
+                    let timeline = self
+                        .timeline
+                        .upgrade()
+                        .ok_or_else(|| DownloadError::TimelineShutdown)?;
 
-                // FIXME: grab a gate
+                    // FIXME: grab a gate
 
-                let can_ever_evict = timeline.remote_client.as_ref().is_some();
+                    let can_ever_evict = timeline.remote_client.as_ref().is_some();
 
-                // check if we really need to be downloaded; could have been already downloaded by a
-                // cancelled previous attempt.
-                let needs_download = self
-                    .needs_download()
-                    .await
-                    .map_err(DownloadError::PreStatFailed)?;
+                    // check if we really need to be downloaded; could have been already downloaded by a
+                    // cancelled previous attempt.
+                    let needs_download = self
+                        .needs_download()
+                        .await
+                        .map_err(DownloadError::PreStatFailed)?;
 
-                let permit = if let Some(reason) = needs_download {
-                    if let NeedsDownload::NotFile(ft) = reason {
-                        return Err(DownloadError::NotFile(ft));
+                    let permit = if let Some(reason) = needs_download {
+                        if let NeedsDownload::NotFile(ft) = reason {
+                            return Err(DownloadError::NotFile(ft));
+                        }
+
+                        // only reset this after we've decided we really need to download. otherwise it'd
+                        // be impossible to mark cancelled downloads for eviction, like one could imagine
+                        // we would like to do for prefetching which was not needed.
+                        self.wanted_evicted.store(false, Ordering::Release);
+
+                        if !can_ever_evict {
+                            return Err(DownloadError::NoRemoteStorage);
+                        }
+
+                        if let Some(ctx) = ctx {
+                            self.check_expected_download(ctx)?;
+                        }
+
+                        if !allow_download {
+                            // this does look weird, but for LayerInner the "downloading" means also changing
+                            // internal once related state ...
+                            return Err(DownloadError::DownloadRequired);
+                        }
+
+                        tracing::info!(%reason, "downloading on-demand");
+
+                        self.spawn_download_and_wait(timeline, permit).await?
+                    } else {
+                        // the file is present locally, probably by a previous but cancelled call to
+                        // get_or_maybe_download. alternatively we might be running without remote storage.
+                        LAYER_IMPL_METRICS.inc_init_needed_no_download();
+
+                        permit
+                    };
+
+                    let since_last_eviction =
+                        self.last_evicted_at.lock().unwrap().map(|ts| ts.elapsed());
+                    if let Some(since_last_eviction) = since_last_eviction {
+                        // FIXME: this will not always be recorded correctly until #6028 (the no
+                        // download needed branch above)
+                        LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
                     }
 
-                    // only reset this after we've decided we really need to download. otherwise it'd
-                    // be impossible to mark cancelled downloads for eviction, like one could imagine
-                    // we would like to do for prefetching which was not needed.
-                    self.wanted_evicted.store(false, Ordering::Release);
+                    let res = Arc::new(DownloadedLayer {
+                        owner: Arc::downgrade(self),
+                        kind: tokio::sync::OnceCell::default(),
+                        version: next_version,
+                    });
 
-                    if !can_ever_evict {
-                        return Err(DownloadError::NoRemoteStorage);
+                    self.access_stats.record_residence_event(
+                        LayerResidenceStatus::Resident,
+                        LayerResidenceEventReason::ResidenceChange,
+                    );
+
+                    let waiters = self.inner.initializer_count();
+                    if waiters > 0 {
+                        tracing::info!(
+                            waiters,
+                            "completing the on-demand download for other tasks"
+                        );
                     }
 
-                    if let Some(ctx) = ctx {
-                        self.check_expected_download(ctx)?;
-                    }
+                    scopeguard::ScopeGuard::into_inner(init_cancelled);
 
-                    if !allow_download {
-                        // this does look weird, but for LayerInner the "downloading" means also changing
-                        // internal once related state ...
-                        return Err(DownloadError::DownloadRequired);
-                    }
-
-                    tracing::info!(%reason, "downloading on-demand");
-
-                    self.spawn_download_and_wait(timeline, permit).await?
-                } else {
-                    // the file is present locally, probably by a previous but cancelled call to
-                    // get_or_maybe_download. alternatively we might be running without remote storage.
-                    LAYER_IMPL_METRICS.inc_init_needed_no_download();
-
-                    permit
-                };
-
-                let res = Arc::new(DownloadedLayer {
-                    owner: Arc::downgrade(self),
-                    kind: tokio::sync::OnceCell::default(),
-                    version: next_version,
-                });
-
-                self.access_stats.record_residence_event(
-                    LayerResidenceStatus::Resident,
-                    LayerResidenceEventReason::ResidenceChange,
-                );
-
-                let waiters = self.inner.initializer_count();
-                if waiters > 0 {
-                    tracing::info!(waiters, "completing the on-demand download for other tasks");
+                    Ok((ResidentOrWantedEvicted::Resident(res), permit))
                 }
-
-                scopeguard::ScopeGuard::into_inner(init_cancelled);
-
-                Ok((ResidentOrWantedEvicted::Resident(res), permit))
+                .instrument(tracing::info_span!("get_or_maybe_download", layer=%self))
             };
 
             if let Some(init_permit) = init_permit.take() {
@@ -837,7 +854,7 @@ impl LayerInner {
         crate::task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             crate::task_mgr::TaskKind::RemoteDownloadTask,
-            Some(self.desc.tenant_shard_id.tenant_id),
+            Some(self.desc.tenant_shard_id),
             Some(self.desc.timeline_id),
             &task_name,
             false,
@@ -851,6 +868,7 @@ impl LayerInner {
                 let result = client.download_layer_file(
                     &this.desc.filename(),
                     &this.metadata(),
+                    &crate::task_mgr::shutdown_token()
                 )
                 .await;
 
@@ -860,6 +878,23 @@ impl LayerInner {
                         Ok(())
                     }
                     Err(e) => {
+                        let consecutive_failures =
+                            this.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+
+                        let backoff = utils::backoff::exponential_backoff_duration_seconds(
+                            consecutive_failures.min(u32::MAX as usize) as u32,
+                            1.5,
+                            60.0,
+                        );
+
+                        let backoff = std::time::Duration::from_secs_f64(backoff);
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {},
+                            _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
+                            _ = timeline.cancel.cancelled() => {},
+                        };
+
                         Err(e)
                     }
                 };
@@ -908,21 +943,9 @@ impl LayerInner {
                 Ok(permit)
             }
             Ok((Err(e), _permit)) => {
-                // FIXME: this should be with the spawned task and be cancellation sensitive
-                //
-                // while we should not need this, this backoff has turned out to be useful with
-                // a bug of unexpectedly deleted remote layer file (#5787).
-                let consecutive_failures =
-                    self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                // sleep already happened in the spawned task, if it was not cancelled
+                let consecutive_failures = self.consecutive_failures.load(Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
-                let backoff = utils::backoff::exponential_backoff_duration_seconds(
-                    consecutive_failures.min(u32::MAX as usize) as u32,
-                    1.5,
-                    60.0,
-                );
-                let backoff = std::time::Duration::from_secs_f64(backoff);
-
-                tokio::time::sleep(backoff).await;
                 Err(DownloadError::DownloadFailed)
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
@@ -1116,6 +1139,8 @@ impl LayerInner {
 
         // we are still holding the permit, so no new spawn_download_and_wait can happen
         drop(self.status.send(Status::Evicted));
+
+        *self.last_evicted_at.lock().unwrap() = Some(std::time::Instant::now());
 
         res
     }
@@ -1421,6 +1446,7 @@ pub(crate) struct LayerImplMetrics {
 
     rare_counters: enum_map::EnumMap<RareEvent, IntCounter>,
     inits_cancelled: metrics::core::GenericCounter<metrics::core::AtomicU64>,
+    redownload_after: metrics::Histogram,
 }
 
 impl Default for LayerImplMetrics {
@@ -1496,6 +1522,26 @@ impl Default for LayerImplMetrics {
         )
         .unwrap();
 
+        let redownload_after = {
+            let minute = 60.0;
+            let hour = 60.0 * minute;
+            metrics::register_histogram!(
+                "pageserver_layer_redownloaded_after",
+                "Time between evicting and re-downloading.",
+                vec![
+                    10.0,
+                    30.0,
+                    minute,
+                    5.0 * minute,
+                    15.0 * minute,
+                    30.0 * minute,
+                    hour,
+                    12.0 * hour,
+                ]
+            )
+            .unwrap()
+        };
+
         Self {
             started_evictions,
             completed_evictions,
@@ -1507,6 +1553,7 @@ impl Default for LayerImplMetrics {
 
             rare_counters,
             inits_cancelled,
+            redownload_after,
         }
     }
 }
@@ -1573,6 +1620,10 @@ impl LayerImplMetrics {
 
     fn inc_init_cancelled(&self) {
         self.inits_cancelled.inc()
+    }
+
+    fn record_redownloaded_after(&self, duration: std::time::Duration) {
+        self.redownload_after.observe(duration.as_secs_f64())
     }
 }
 

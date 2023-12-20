@@ -39,10 +39,14 @@ from urllib3.util.retry import Retry
 def test_timeline_delete(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    env.pageserver.allowed_errors.append(".*Timeline .* was not found.*")
-    env.pageserver.allowed_errors.append(".*timeline not found.*")
-    env.pageserver.allowed_errors.append(".*Cannot delete timeline which has child timelines.*")
-    env.pageserver.allowed_errors.append(".*Precondition failed: Requested tenant is missing.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Timeline .* was not found.*",
+            ".*timeline not found.*",
+            ".*Cannot delete timeline which has child timelines.*",
+            ".*Precondition failed: Requested tenant is missing.*",
+        ]
+    )
 
     ps_http = env.pageserver.http_client()
 
@@ -198,22 +202,22 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             ),
         )
 
-    env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
-    # It appears when we stopped flush loop during deletion and then pageserver is stopped
-    env.pageserver.allowed_errors.append(
-        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+    env.pageserver.allowed_errors.extend(
+        [
+            f".*{timeline_id}.*failpoint: {failpoint}",
+            # It appears when we stopped flush loop during deletion and then pageserver is stopped
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            # This happens when we fail before scheduling background operation.
+            # Timeline is left in stopping state and retry tries to stop it again.
+            ".*Ignoring new state, equal to the existing one: Stopping",
+            # This happens when we retry delete requests for broken timelines
+            ".*Ignoring state update Stopping for broken timeline",
+            # This happens when timeline remains are cleaned up during loading
+            ".*Timeline dir entry become invalid.*",
+            # In one of the branches we poll for tenant to become active. Polls can generate this log message:
+            f".*Tenant {env.initial_tenant} is not active*",
+        ]
     )
-    # This happens when we fail before scheduling background operation.
-    # Timeline is left in stopping state and retry tries to stop it again.
-    env.pageserver.allowed_errors.append(
-        ".*Ignoring new state, equal to the existing one: Stopping"
-    )
-    # This happens when we retry delete requests for broken timelines
-    env.pageserver.allowed_errors.append(".*Ignoring state update Stopping for broken timeline")
-    # This happens when timeline remains are cleaned up during loading
-    env.pageserver.allowed_errors.append(".*Timeline dir entry become invalid.*")
-    # In one of the branches we poll for tenant to become active. Polls can generate this log message:
-    env.pageserver.allowed_errors.append(f".*Tenant {env.initial_tenant} is not active*")
 
     ps_http.configure_failpoints((failpoint, "return"))
 
@@ -259,15 +263,6 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
                 ps_http, env.initial_tenant, timeline_id, iterations=iterations
             )
 
-            if failpoint == "timeline-delete-after-index-delete":
-                m = ps_http.get_metrics()
-                assert (
-                    m.query_one(
-                        "remote_storage_s3_request_seconds_count",
-                        filter={"request_type": "get_object", "result": "ok"},
-                    ).value
-                    == 1  # index part for initial timeline
-                )
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
         # this also checks that delete can be retried even when timeline is in Broken state
@@ -398,13 +393,13 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(".*failpoint: timeline-delete-before-rm")
-    env.pageserver.allowed_errors.append(
-        ".*Ignoring new state, equal to the existing one: Stopping"
-    )
-    # this happens, because the stuck timeline is visible to shutdown
-    env.pageserver.allowed_errors.append(
-        ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*failpoint: timeline-delete-before-rm",
+            ".*Ignoring new state, equal to the existing one: Stopping",
+            # this happens, because the stuck timeline is visible to shutdown
+            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+        ]
     )
 
     ps_http = env.pageserver.http_client()
@@ -551,10 +546,12 @@ def test_concurrent_timeline_delete_stuck_on(
         with pytest.raises(PageserverApiException, match=error_msg_re) as second_call_err:
             ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
         assert second_call_err.value.status_code == 409
-        env.pageserver.allowed_errors.append(f".*{child_timeline_id}.*{error_msg_re}.*")
-        # the second call will try to transition the timeline into Stopping state as well
-        env.pageserver.allowed_errors.append(
-            f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+        env.pageserver.allowed_errors.extend(
+            [
+                f".*{child_timeline_id}.*{error_msg_re}.*",
+                # the second call will try to transition the timeline into Stopping state as well
+                f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping",
+            ]
         )
         log.info("second call failed as expected")
 

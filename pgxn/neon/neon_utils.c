@@ -1,32 +1,10 @@
+
+#include <sys/resource.h>
+
 #include "postgres.h"
 
-#include "access/timeline.h"
-#include "access/xlogutils.h"
-#include "common/logging.h"
-#include "common/ip.h"
-#include "funcapi.h"
-#include "libpq/libpq.h"
+#include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
-#include "miscadmin.h"
-#include "postmaster/interrupt.h"
-#include "replication/slot.h"
-#include "replication/walsender_private.h"
-
-#include "storage/ipc.h"
-#include "utils/builtins.h"
-#include "utils/ps_status.h"
-
-#include "libpq-fe.h"
-#include <netinet/tcp.h>
-#include <unistd.h>
-
-#if PG_VERSION_NUM >= 150000
-#include "access/xlogutils.h"
-#include "access/xlogrecovery.h"
-#endif
-#if PG_MAJORVERSION_NUM >= 16
-#include "utils/guc.h"
-#endif
 
 /*
  * Convert a character which represents a hexadecimal digit to an integer.
@@ -113,4 +91,26 @@ pq_sendint64_le(StringInfo buf, uint64 i)
 	enlargeStringInfo(buf, sizeof(uint64));
 	memcpy(buf->data + buf->len, &i, sizeof(uint64));
 	buf->len += sizeof(uint64);
+}
+
+/*
+ * Disables core dump for the current process.
+ */
+void
+disable_core_dump()
+{
+	struct rlimit rlim;
+
+#ifdef WALPROPOSER_LIB			/* skip in simulation mode */
+	return;
+#endif
+
+	rlim.rlim_cur = 0;
+	rlim.rlim_max = 0;
+	if (setrlimit(RLIMIT_CORE, &rlim))
+	{
+		int			save_errno = errno;
+
+		fprintf(stderr, "WARNING: disable cores setrlimit failed: %s", strerror(save_errno));
+	}
 }

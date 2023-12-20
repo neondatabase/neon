@@ -71,6 +71,7 @@ async fn create_remote_delete_mark(
     conf: &PageServerConf,
     remote_storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
+    cancel: &CancellationToken,
 ) -> Result<(), DeleteTenantError> {
     let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
 
@@ -87,8 +88,7 @@ async fn create_remote_delete_mark(
         FAILED_UPLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         "mark_upload",
-        // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-        backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+        backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
     )
     .await
     .context("mark_upload")?;
@@ -170,6 +170,7 @@ async fn remove_tenant_remote_delete_mark(
     conf: &PageServerConf,
     remote_storage: Option<&GenericRemoteStorage>,
     tenant_shard_id: &TenantShardId,
+    cancel: &CancellationToken,
 ) -> Result<(), DeleteTenantError> {
     if let Some(remote_storage) = remote_storage {
         let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
@@ -179,8 +180,7 @@ async fn remove_tenant_remote_delete_mark(
             FAILED_UPLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "remove_tenant_remote_delete_mark",
-            // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled")),
         )
         .await
         .context("remove_tenant_remote_delete_mark")?;
@@ -322,9 +322,15 @@ impl DeleteTenantFlow {
         // Though sounds scary, different mark name?
         // Detach currently uses remove_dir_all so in case of a crash we can end up in a weird state.
         if let Some(remote_storage) = &remote_storage {
-            create_remote_delete_mark(conf, remote_storage, &tenant.tenant_shard_id)
-                .await
-                .context("remote_mark")?
+            create_remote_delete_mark(
+                conf,
+                remote_storage,
+                &tenant.tenant_shard_id,
+                // Can't use tenant.cancel, it's already shut down.  TODO: wire in an appropriate token
+                &CancellationToken::new(),
+            )
+            .await
+            .context("remote_mark")?
         }
 
         fail::fail_point!("tenant-delete-before-create-local-mark", |_| {
@@ -463,7 +469,7 @@ impl DeleteTenantFlow {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
-            Some(tenant_shard_id.tenant_id),
+            Some(tenant_shard_id),
             None,
             "tenant_delete",
             false,
@@ -524,8 +530,14 @@ impl DeleteTenantFlow {
                 .context("timelines dir not empty")?;
         }
 
-        remove_tenant_remote_delete_mark(conf, remote_storage.as_ref(), &tenant.tenant_shard_id)
-            .await?;
+        remove_tenant_remote_delete_mark(
+            conf,
+            remote_storage.as_ref(),
+            &tenant.tenant_shard_id,
+            // Can't use tenant.cancel, it's already shut down.  TODO: wire in an appropriate token
+            &CancellationToken::new(),
+        )
+        .await?;
 
         fail::fail_point!("tenant-delete-before-cleanup-remaining-fs-traces", |_| {
             Err(anyhow::anyhow!(
@@ -550,7 +562,7 @@ impl DeleteTenantFlow {
                 // we encounter an InProgress marker, yield the barrier it contains and wait on it.
                 let barrier = {
                     let mut locked = tenants.write().unwrap();
-                    let removed = locked.remove(&tenant.tenant_shard_id.tenant_id);
+                    let removed = locked.remove(tenant.tenant_shard_id);
 
                     // FIXME: we should not be modifying this from outside of mgr.rs.
                     // This will go away when we simplify deletion (https://github.com/neondatabase/neon/issues/5080)

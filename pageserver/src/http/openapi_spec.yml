@@ -84,7 +84,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     get:
       description: Get tenant status
       responses:
@@ -181,7 +180,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     get:
       description: Get timelines for tenant
       responses:
@@ -232,7 +230,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: timeline_id
         in: path
         required: true
@@ -338,7 +335,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: timeline_id
         in: path
         required: true
@@ -401,7 +397,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: timeline_id
         in: path
         required: true
@@ -469,7 +464,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: timeline_id
         in: path
         required: true
@@ -523,7 +517,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     post:
       description: |
         Schedules attach operation to happen in the background for the given tenant.
@@ -631,7 +624,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: flush_ms
         in: query
         required: false
@@ -724,7 +716,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: detach_ignored
         in: query
         required: false
@@ -784,7 +775,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     post:
       description: |
         Remove tenant data (including all corresponding timelines) from pageserver's memory.
@@ -833,7 +823,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     post:
       description: |
         Schedules an operation that attempts to load a tenant from the local disk and
@@ -890,7 +879,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     get:
       description: |
         Calculate tenant's synthetic size
@@ -933,7 +921,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
       - name: inputs_only
         in: query
         required: false
@@ -1003,11 +990,10 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     post:
       description: |
-        Create a timeline. Returns new timeline id on success.\
-        If no new timeline id is specified in parameters, it would be generated. It's an error to recreate the same timeline.
+        Create a timeline. Returns new timeline id on success.
+        Recreating the same timeline will succeed if the parameters match the existing timeline.
         If no pg_version is specified, assume DEFAULT_PG_VERSION hardcoded in the pageserver.
       requestBody:
         content:
@@ -1137,7 +1123,6 @@ paths:
             application/json:
               schema:
                 type: string
-                format: hex
         "400":
           description: Malformed tenant create request
           content:
@@ -1234,7 +1219,6 @@ paths:
         required: true
         schema:
           type: string
-          format: hex
     get:
       description: |
         Returns tenant's config description: specific config overrides a tenant has
@@ -1340,7 +1324,6 @@ components:
           properties:
             new_tenant_id:
               type: string
-              format: hex
             generation:
               type: integer
               description: Attachment generation number.
@@ -1369,7 +1352,6 @@ components:
           properties:
             tenant_id:
               type: string
-              format: hex
     TenantLocationConfigRequest:
       type: object
       required:
@@ -1377,7 +1359,6 @@ components:
       properties:
         tenant_id:
           type: string
-          format: hex
         mode:
           type: string
           enum: ["AttachedSingle", "AttachedMulti", "AttachedStale", "Secondary", "Detached"]
@@ -1424,6 +1405,8 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
+        heatmap_period:
+          type: integer
     TenantConfigResponse:
       type: object
       properties:
@@ -1446,7 +1429,6 @@ components:
           format: hex
         tenant_id:
           type: string
-          format: hex
         last_record_lsn:
           type: string
           format: hex

@@ -307,10 +307,14 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         bogus_timeline_id = TimelineId.generate()
         pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
 
-    # the error will be printed to the log too
-    env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
-    # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
-    env.pageserver.allowed_errors.append(".*InternalServerError\\(timeline is Stopping.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            # the error will be printed to the log too
+            ".*gc target timeline does not exist.*",
+            # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
+            ".*InternalServerError\\(timeline is Stopping.*",
+        ]
+    )
 
     # Detach while running manual GC.
     # It should wait for manual GC to finish because it runs in a task associated with the tenant.

@@ -19,20 +19,21 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+
+#include <curl/curl.h>
+
+#include "access/xact.h"
+#include "commands/defrem.h"
+#include "fmgr.h"
+#include "libpq/crypt.h"
+#include "miscadmin.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
-#include "access/xact.h"
+#include "utils/acl.h"
+#include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
-#include "commands/defrem.h"
-#include "miscadmin.h"
-#include "utils/acl.h"
-#include "fmgr.h"
-#include "utils/guc.h"
-#include "port.h"
-#include <curl/curl.h>
 #include "utils/jsonb.h"
-#include "libpq/crypt.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 

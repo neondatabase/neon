@@ -117,10 +117,12 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    # FIXME: Are these expected?
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            # FIXME: Are these expected?
+            ".*No timelines to attach received.*",
+            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
+        ]
     )
 
     pageserver_http = env.pageserver.http_client()
@@ -218,13 +220,14 @@ def test_tenant_redownloads_truncated_file_on_startup(
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    env.pageserver.allowed_errors.append(".*removing local file .* because .*")
-
-    # FIXME: Are these expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*removing local file .* because .*",
+            # FIXME: Are these expected?
+            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
+            ".*No timelines to attach received.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
 
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")

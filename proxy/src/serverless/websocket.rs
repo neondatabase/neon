@@ -3,6 +3,7 @@ use crate::{
     config::ProxyConfig,
     error::io_error,
     proxy::{handle_client, ClientMode},
+    rate_limiter::EndpointRateLimiter,
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream};
@@ -13,6 +14,7 @@ use pin_project_lite::pin_project;
 use std::{
     net::IpAddr,
     pin::Pin,
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
@@ -25,15 +27,15 @@ use sync_wrapper::SyncWrapper;
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
     /// implements [`AsyncRead`] and [`AsyncWrite`].
-    pub struct WebSocketRw {
+    pub struct WebSocketRw<S = Upgraded> {
         #[pin]
-        stream: SyncWrapper<WebSocketStream<Upgraded>>,
+        stream: SyncWrapper<WebSocketStream<S>>,
         bytes: Bytes,
     }
 }
 
-impl WebSocketRw {
-    pub fn new(stream: WebSocketStream<Upgraded>) -> Self {
+impl<S> WebSocketRw<S> {
+    pub fn new(stream: WebSocketStream<S>) -> Self {
         Self {
             stream: stream.into(),
             bytes: Bytes::new(),
@@ -41,7 +43,7 @@ impl WebSocketRw {
     }
 }
 
-impl AsyncWrite for WebSocketRw {
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -67,7 +69,7 @@ impl AsyncWrite for WebSocketRw {
     }
 }
 
-impl AsyncRead for WebSocketRw {
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WebSocketRw<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -84,7 +86,7 @@ impl AsyncRead for WebSocketRw {
     }
 }
 
-impl AsyncBufRead for WebSocketRw {
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         // Please refer to poll_fill_buf's documentation.
         const EOF: Poll<io::Result<&[u8]>> = Poll::Ready(Ok(&[]));
@@ -134,6 +136,7 @@ pub async fn serve_websocket(
     session_id: uuid::Uuid,
     hostname: Option<String>,
     peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     let websocket = websocket.await?;
     handle_client(
@@ -143,7 +146,65 @@ pub async fn serve_websocket(
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
         peer_addr,
+        endpoint_rate_limiter,
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::pin;
+
+    use futures::{SinkExt, StreamExt};
+    use hyper_tungstenite::{
+        tungstenite::{protocol::Role, Message},
+        WebSocketStream,
+    };
+    use tokio::{
+        io::{duplex, AsyncReadExt, AsyncWriteExt},
+        task::JoinSet,
+    };
+
+    use super::WebSocketRw;
+
+    #[tokio::test]
+    async fn websocket_stream_wrapper_happy_path() {
+        let (stream1, stream2) = duplex(1024);
+
+        let mut js = JoinSet::new();
+
+        js.spawn(async move {
+            let mut client = WebSocketStream::from_raw_socket(stream1, Role::Client, None).await;
+
+            client
+                .send(Message::Binary(b"hello world".to_vec()))
+                .await
+                .unwrap();
+
+            let message = client.next().await.unwrap().unwrap();
+            assert_eq!(message, Message::Binary(b"websockets are cool".to_vec()));
+
+            client.close(None).await.unwrap();
+        });
+
+        js.spawn(async move {
+            let mut rw = pin!(WebSocketRw::new(
+                WebSocketStream::from_raw_socket(stream2, Role::Server, None).await
+            ));
+
+            let mut buf = vec![0; 1024];
+            let n = rw.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"hello world");
+
+            rw.write_all(b"websockets are cool").await.unwrap();
+            rw.flush().await.unwrap();
+
+            let n = rw.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(n, 0);
+        });
+
+        js.join_next().await.unwrap().unwrap();
+        js.join_next().await.unwrap().unwrap();
+    }
 }

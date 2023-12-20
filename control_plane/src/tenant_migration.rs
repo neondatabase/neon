@@ -19,11 +19,11 @@ use utils::{
 };
 
 /// Given an attached pageserver, retrieve the LSN for all timelines
-fn get_lsns(
+async fn get_lsns(
     tenant_id: TenantId,
     pageserver: &PageServerNode,
 ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
-    let timelines = pageserver.timeline_list(&tenant_id)?;
+    let timelines = pageserver.timeline_list(&tenant_id).await?;
     Ok(timelines
         .into_iter()
         .map(|t| (t.timeline_id, t.last_record_lsn))
@@ -32,13 +32,13 @@ fn get_lsns(
 
 /// Wait for the timeline LSNs on `pageserver` to catch up with or overtake
 /// `baseline`.
-fn await_lsn(
+async fn await_lsn(
     tenant_id: TenantId,
     pageserver: &PageServerNode,
     baseline: HashMap<TimelineId, Lsn>,
 ) -> anyhow::Result<()> {
     loop {
-        let latest = match get_lsns(tenant_id, pageserver) {
+        let latest = match get_lsns(tenant_id, pageserver).await {
             Ok(l) => l,
             Err(e) => {
                 println!(
@@ -84,7 +84,7 @@ fn await_lsn(
 ///  - Coordinate attach/secondary/detach on pageservers
 ///  - call into attachment_service for generations
 ///  - reconfigure compute endpoints to point to new attached pageserver
-pub fn migrate_tenant(
+pub async fn migrate_tenant(
     env: &LocalEnv,
     tenant_id: TenantId,
     dest_ps: PageServerNode,
@@ -108,16 +108,18 @@ pub fn migrate_tenant(
         }
     }
 
-    let previous = attachment_service.inspect(tenant_id)?;
+    let previous = attachment_service.inspect(tenant_id).await?;
     let mut baseline_lsns = None;
     if let Some((generation, origin_ps_id)) = &previous {
         let origin_ps = PageServerNode::from_env(env, env.get_pageserver_conf(*origin_ps_id)?);
 
         if origin_ps_id == &dest_ps.conf.id {
             println!("🔁 Already attached to {origin_ps_id}, freshening...");
-            let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
+            let gen = attachment_service
+                .attach_hook(tenant_id, dest_ps.conf.id)
+                .await?;
             let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-            dest_ps.location_config(tenant_id, dest_conf, None)?;
+            dest_ps.location_config(tenant_id, dest_conf, None).await?;
             println!("✅ Migration complete");
             return Ok(());
         }
@@ -126,20 +128,24 @@ pub fn migrate_tenant(
 
         let stale_conf =
             build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
-        origin_ps.location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))?;
+        origin_ps
+            .location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))
+            .await?;
 
-        baseline_lsns = Some(get_lsns(tenant_id, &origin_ps)?);
+        baseline_lsns = Some(get_lsns(tenant_id, &origin_ps).await?);
     }
 
-    let gen = attachment_service.attach_hook(tenant_id, dest_ps.conf.id)?;
+    let gen = attachment_service
+        .attach_hook(tenant_id, dest_ps.conf.id)
+        .await?;
     let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
-    dest_ps.location_config(tenant_id, dest_conf, None)?;
+    dest_ps.location_config(tenant_id, dest_conf, None).await?;
 
     if let Some(baseline) = baseline_lsns {
         println!("🕑 Waiting for LSN to catch up...");
-        await_lsn(tenant_id, &dest_ps, baseline)?;
+        await_lsn(tenant_id, &dest_ps, baseline).await?;
     }
 
     let cplane = ComputeControlPlane::load(env.clone())?;
@@ -149,7 +155,7 @@ pub fn migrate_tenant(
                 "🔁 Reconfiguring endpoint {} to use pageserver {}",
                 endpoint_name, dest_ps.conf.id
             );
-            endpoint.reconfigure(Some(dest_ps.conf.id))?;
+            endpoint.reconfigure(Some(dest_ps.conf.id)).await?;
         }
     }
 
@@ -159,13 +165,13 @@ pub fn migrate_tenant(
         }
 
         let other_ps = PageServerNode::from_env(env, other_ps_conf);
-        let other_ps_tenants = other_ps.tenant_list()?;
+        let other_ps_tenants = other_ps.tenant_list().await?;
 
         // Check if this tenant is attached
         let found = other_ps_tenants
             .into_iter()
             .map(|t| t.id)
-            .any(|i| i == tenant_id);
+            .any(|i| i.tenant_id == tenant_id);
         if !found {
             continue;
         }
@@ -181,7 +187,9 @@ pub fn migrate_tenant(
             "💤 Switching to secondary mode on pageserver {}",
             other_ps.conf.id
         );
-        other_ps.location_config(tenant_id, secondary_conf, None)?;
+        other_ps
+            .location_config(tenant_id, secondary_conf, None)
+            .await?;
     }
 
     println!(
@@ -189,7 +197,7 @@ pub fn migrate_tenant(
         dest_ps.conf.id
     );
     let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-    dest_ps.location_config(tenant_id, dest_conf, None)?;
+    dest_ps.location_config(tenant_id, dest_conf, None).await?;
 
     println!("✅ Migration complete");
 

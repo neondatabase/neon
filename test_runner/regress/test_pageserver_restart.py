@@ -9,9 +9,7 @@ from fixtures.utils import wait_until
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-@pytest.mark.parametrize("generations", [True, False])
-def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool):
-    neon_env_builder.enable_generations = generations
+def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 

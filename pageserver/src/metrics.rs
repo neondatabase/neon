@@ -2,9 +2,10 @@ use enum_map::EnumMap;
 use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_gauge_vec, register_histogram, register_histogram_vec,
-    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    register_uint_gauge, register_uint_gauge_vec, Counter, CounterVec, GaugeVec, Histogram,
-    HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec,
+    register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
+    Counter, CounterVec, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterPairVec,
+    IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
@@ -521,14 +522,18 @@ pub(crate) mod initial_logical_size {
     impl StartCalculation {
         pub(crate) fn first(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
             let circumstances_label: &'static str = circumstances.into();
-            self.0.with_label_values(&["first", circumstances_label]);
+            self.0
+                .with_label_values(&["first", circumstances_label])
+                .inc();
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.first.clone()),
             }
         }
         pub(crate) fn retry(&self, circumstances: StartCircumstances) -> OngoingCalculationGuard {
             let circumstances_label: &'static str = circumstances.into();
-            self.0.with_label_values(&["retry", circumstances_label]);
+            self.0
+                .with_label_values(&["retry", circumstances_label])
+                .inc();
             OngoingCalculationGuard {
                 inc_drop_calculation: Some(DROP_CALCULATION.retry.clone()),
             }
@@ -650,7 +655,7 @@ static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(||
         "pageserver_evictions_with_low_residence_duration",
         "If a layer is evicted that was resident for less than `low_threshold`, it is counted to this counter. \
          Residence duration is determined using the `residence_duration_data_source`.",
-        &["tenant_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
+        &["tenant_id", "shard_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
     )
     .expect("failed to define a metric")
 });
@@ -683,14 +688,54 @@ pub static STARTUP_IS_LOADING: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("Failed to register pageserver_startup_is_loading")
 });
 
-/// How long did tenants take to go from construction to active state?
-pub(crate) static TENANT_ACTIVATION: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+/// Metrics related to the lifecycle of a [`crate::tenant::Tenant`] object: things
+/// like how long it took to load.
+///
+/// Note that these are process-global metrics, _not_ per-tenant metrics.  Per-tenant
+/// metrics are rather expensive, and usually fine grained stuff makes more sense
+/// at a timeline level than tenant level.
+pub(crate) struct TenantMetrics {
+    /// How long did tenants take to go from construction to active state?
+    pub(crate) activation: Histogram,
+    pub(crate) preload: Histogram,
+    pub(crate) attach: Histogram,
+
+    /// How many tenants are included in the initial startup of the pagesrever?
+    pub(crate) startup_scheduled: IntCounter,
+    pub(crate) startup_complete: IntCounter,
+}
+
+pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| {
+    TenantMetrics {
+    activation: register_histogram!(
         "pageserver_tenant_activation_seconds",
         "Time taken by tenants to activate, in seconds",
         CRITICAL_OP_BUCKETS.into()
     )
-    .expect("Failed to register pageserver_tenant_activation_seconds metric")
+    .expect("Failed to register metric"),
+    preload: register_histogram!(
+        "pageserver_tenant_preload_seconds",
+        "Time taken by tenants to load remote metadata on startup/attach, in seconds",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    attach: register_histogram!(
+        "pageserver_tenant_attach_seconds",
+        "Time taken by tenants to intialize, after remote metadata is already loaded",
+        CRITICAL_OP_BUCKETS.into()
+    )
+    .expect("Failed to register metric"),
+    startup_scheduled: register_int_counter!(
+        "pageserver_tenant_startup_scheduled",
+        "Number of tenants included in pageserver startup (doesn't count tenants attached later)"
+    ).expect("Failed to register metric"),
+    startup_complete: register_int_counter!(
+        "pageserver_tenant_startup_complete",
+        "Number of tenants that have completed warm-up, or activated on-demand during initial startup: \
+         should eventually reach `pageserver_tenant_startup_scheduled_total`.  Does not include broken \
+         tenants: such cases will lead to this metric never reaching the scheduled count."
+    ).expect("Failed to register metric"),
+}
 });
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
@@ -714,10 +759,16 @@ impl EvictionsWithLowResidenceDurationBuilder {
         }
     }
 
-    fn build(&self, tenant_id: &str, timeline_id: &str) -> EvictionsWithLowResidenceDuration {
+    fn build(
+        &self,
+        tenant_id: &str,
+        shard_id: &str,
+        timeline_id: &str,
+    ) -> EvictionsWithLowResidenceDuration {
         let counter = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
             .get_metric_with_label_values(&[
                 tenant_id,
+                shard_id,
                 timeline_id,
                 self.data_source,
                 &EvictionsWithLowResidenceDuration::threshold_label_value(self.threshold),
@@ -748,21 +799,24 @@ impl EvictionsWithLowResidenceDuration {
     pub fn change_threshold(
         &mut self,
         tenant_id: &str,
+        shard_id: &str,
         timeline_id: &str,
         new_threshold: Duration,
     ) {
         if new_threshold == self.threshold {
             return;
         }
-        let mut with_new =
-            EvictionsWithLowResidenceDurationBuilder::new(self.data_source, new_threshold)
-                .build(tenant_id, timeline_id);
+        let mut with_new = EvictionsWithLowResidenceDurationBuilder::new(
+            self.data_source,
+            new_threshold,
+        )
+        .build(tenant_id, shard_id, timeline_id);
         std::mem::swap(self, &mut with_new);
-        with_new.remove(tenant_id, timeline_id);
+        with_new.remove(tenant_id, shard_id, timeline_id);
     }
 
     // This could be a `Drop` impl, but, we need the `tenant_id` and `timeline_id`.
-    fn remove(&mut self, tenant_id: &str, timeline_id: &str) {
+    fn remove(&mut self, tenant_id: &str, shard_id: &str, timeline_id: &str) {
         let Some(_counter) = self.counter.take() else {
             return;
         };
@@ -771,6 +825,7 @@ impl EvictionsWithLowResidenceDuration {
 
         let removed = EVICTIONS_WITH_LOW_RESIDENCE_DURATION.remove_label_values(&[
             tenant_id,
+            shard_id,
             timeline_id,
             self.data_source,
             &threshold,
@@ -969,12 +1024,62 @@ static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static SMGR_QUERY_TIME_GLOBAL_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {
+    [
+        1,
+        10,
+        20,
+        40,
+        60,
+        80,
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800,
+        900,
+        1_000, // 1ms
+        2_000,
+        4_000,
+        6_000,
+        8_000,
+        10_000, // 10ms
+        20_000,
+        40_000,
+        60_000,
+        80_000,
+        100_000,
+        200_000,
+        400_000,
+        600_000,
+        800_000,
+        1_000_000, // 1s
+        2_000_000,
+        4_000_000,
+        6_000_000,
+        8_000_000,
+        10_000_000, // 10s
+        20_000_000,
+        50_000_000,
+        100_000_000,
+        200_000_000,
+        1_000_000_000, // 1000s
+    ]
+    .into_iter()
+    .map(Duration::from_micros)
+    .map(|d| d.as_secs_f64())
+    .collect()
+});
+
 static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds_global",
         "Time spent on smgr query handling, aggregated by query type.",
         &["smgr_query_type"],
-        CRITICAL_OP_BUCKETS.into(),
+        SMGR_QUERY_TIME_GLOBAL_BUCKETS.clone(),
     )
     .expect("failed to define a metric")
 });
@@ -1261,6 +1366,28 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     )
     .expect("failed to define a metric"),
 });
+pub(crate) struct SecondaryModeMetrics {
+    pub(crate) upload_heatmap: IntCounter,
+    pub(crate) upload_heatmap_errors: IntCounter,
+    pub(crate) upload_heatmap_duration: Histogram,
+}
+pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| SecondaryModeMetrics {
+    upload_heatmap: register_int_counter!(
+        "pageserver_secondary_upload_heatmap",
+        "Number of heatmaps written to remote storage by attached tenants"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_errors: register_int_counter!(
+        "pageserver_secondary_upload_heatmap_errors",
+        "Failures writing heatmap to remote storage"
+    )
+    .expect("failed to define a metric"),
+    upload_heatmap_duration: register_histogram!(
+        "pageserver_secondary_upload_heatmap_duration",
+        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+    )
+    .expect("failed to define a metric"),
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
@@ -1312,25 +1439,16 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_start_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls started",
-            &["task"],
-        )
-        .unwrap()
-    });
-
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT: Lazy<IntCounterVec> =
-    Lazy::new(|| {
-        register_int_counter_vec!(
-            "pageserver_background_loop_semaphore_wait_finish_count",
-            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
-            &["task"],
-        )
-        .unwrap()
-    });
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_background_loop_semaphore_wait_start_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls started",
+        "pageserver_background_loop_semaphore_wait_finish_count",
+        "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+        &["task"],
+    )
+    .unwrap()
+});
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -1604,6 +1722,7 @@ impl StorageTimeMetrics {
 #[derive(Debug)]
 pub struct TimelineMetrics {
     tenant_id: String,
+    shard_id: String,
     timeline_id: String,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
@@ -1624,11 +1743,12 @@ pub struct TimelineMetrics {
 
 impl TimelineMetrics {
     pub fn new(
-        tenant_id: &TenantId,
+        tenant_shard_id: &TenantShardId,
         timeline_id: &TimelineId,
         evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
     ) -> Self {
-        let tenant_id = tenant_id.to_string();
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
         let flush_time_histo =
             StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
@@ -1665,11 +1785,12 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let evictions_with_low_residence_duration =
-            evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
+        let evictions_with_low_residence_duration = evictions_with_low_residence_duration_builder
+            .build(&tenant_id, &shard_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
+            shard_id,
             timeline_id,
             flush_time_histo,
             compact_time_histo,
@@ -1715,6 +1836,7 @@ impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
+        let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
@@ -1728,7 +1850,7 @@ impl Drop for TimelineMetrics {
         self.evictions_with_low_residence_duration
             .write()
             .unwrap()
-            .remove(tenant_id, timeline_id);
+            .remove(tenant_id, shard_id, timeline_id);
 
         // The following metrics are born outside of the TimelineMetrics lifecycle but still
         // removed at the end of it. The idea is to have the metrics outlive the
@@ -2185,6 +2307,9 @@ pub fn preinitialize_metrics() {
 
     // Deletion queue stats
     Lazy::force(&DELETION_QUEUE);
+
+    // Tenant stats
+    Lazy::force(&TENANT);
 
     // Tenant manager stats
     Lazy::force(&TENANT_MANAGER);

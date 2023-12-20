@@ -6,6 +6,7 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
+use crate::console::provider::CachedRoleSecret;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -142,17 +143,19 @@ async fn get_execute_postgres_query(
 #[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
+        _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
-        self.do_get_auth_info(creds).await
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        Ok(CachedRoleSecret::new_uncached(
+            self.do_get_auth_info(creds).await?.secret,
+        ))
     }
 
     async fn get_allowed_ips(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
+        _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
@@ -161,7 +164,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
+        _extra: &ConsoleReqExtra,
         _creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute()

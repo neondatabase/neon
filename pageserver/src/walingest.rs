@@ -458,8 +458,10 @@ impl<'a> WalIngest<'a> {
             && decoded.xl_rmid == pg_constants::RM_XLOG_ID
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
-        // compression of WAL is not yet supported: fall back to storing the original WAL record
+            // compression of WAL is not yet supported: fall back to storing the original WAL record
             && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, self.timeline.pg_version)?
+            // do not materialize null pages because them most likely be soon replaced with real data
+            && blk.bimg_len != 0
         {
             // Extract page image from FPI record
             let img_len = blk.bimg_len as usize;
@@ -2189,7 +2191,7 @@ mod tests {
             .load()
             .await;
         let tline = tenant
-            .bootstrap_timeline(TIMELINE_ID, pg_version, None, &ctx)
+            .bootstrap_timeline_test(TIMELINE_ID, pg_version, None, &ctx)
             .await
             .unwrap();
 

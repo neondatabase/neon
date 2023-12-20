@@ -1,5 +1,8 @@
+pub mod partitioning;
+
 use std::{
     collections::HashMap,
+    io::Read,
     num::{NonZeroU64, NonZeroUsize},
     time::SystemTime,
 };
@@ -17,7 +20,7 @@ use utils::{
 
 use crate::{reltag::RelTag, shard::TenantShardId};
 use anyhow::bail;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -237,6 +240,7 @@ pub struct TenantConfig {
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
+    pub heatmap_period: Option<String>,
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which
@@ -357,7 +361,7 @@ pub enum TenantAttachmentStatus {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
-    pub id: TenantId,
+    pub id: TenantShardId,
     // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
@@ -366,10 +370,18 @@ pub struct TenantInfo {
     pub attachment_status: TenantAttachmentStatus,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TenantDetails {
+    #[serde(flatten)]
+    pub tenant_info: TenantInfo,
+
+    pub timelines: Vec<TimelineId>,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
-    pub tenant_id: TenantId,
+    pub tenant_id: TenantShardId,
     pub timeline_id: TimelineId,
 
     pub ancestor_timeline_id: Option<TimelineId>,
@@ -384,6 +396,9 @@ pub struct TimelineInfo {
 
     /// The LSN that we are advertizing to safekeepers
     pub remote_consistent_lsn_visible: Lsn,
+
+    /// The LSN from the start of the root timeline (never changes)
+    pub initdb_lsn: Lsn,
 
     pub current_logical_size: u64,
     pub current_logical_size_is_accurate: bool,
@@ -570,12 +585,36 @@ pub enum PagestreamFeMessage {
 }
 
 // Wrapped in libpq CopyData
+#[derive(strum_macros::EnumProperty)]
 pub enum PagestreamBeMessage {
     Exists(PagestreamExistsResponse),
     Nblocks(PagestreamNblocksResponse),
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+}
+
+// Keep in sync with `pagestore_client.h`
+#[repr(u8)]
+enum PagestreamBeMessageTag {
+    Exists = 100,
+    Nblocks = 101,
+    GetPage = 102,
+    Error = 103,
+    DbSize = 104,
+}
+impl TryFrom<u8> for PagestreamBeMessageTag {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, u8> {
+        match value {
+            100 => Ok(PagestreamBeMessageTag::Exists),
+            101 => Ok(PagestreamBeMessageTag::Nblocks),
+            102 => Ok(PagestreamBeMessageTag::GetPage),
+            103 => Ok(PagestreamBeMessageTag::Error),
+            104 => Ok(PagestreamBeMessageTag::DbSize),
+            _ => Err(value),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -733,34 +772,90 @@ impl PagestreamBeMessage {
     pub fn serialize(&self) -> Bytes {
         let mut bytes = BytesMut::new();
 
+        use PagestreamBeMessageTag as Tag;
         match self {
             Self::Exists(resp) => {
-                bytes.put_u8(100); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Exists as u8);
                 bytes.put_u8(resp.exists as u8);
             }
 
             Self::Nblocks(resp) => {
-                bytes.put_u8(101); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Nblocks as u8);
                 bytes.put_u32(resp.n_blocks);
             }
 
             Self::GetPage(resp) => {
-                bytes.put_u8(102); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::GetPage as u8);
                 bytes.put(&resp.page[..]);
             }
 
             Self::Error(resp) => {
-                bytes.put_u8(103); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::Error as u8);
                 bytes.put(resp.message.as_bytes());
                 bytes.put_u8(0); // null terminator
             }
             Self::DbSize(resp) => {
-                bytes.put_u8(104); /* tag from pagestore_client.h */
+                bytes.put_u8(Tag::DbSize as u8);
                 bytes.put_i64(resp.db_size);
             }
         }
 
         bytes.into()
+    }
+
+    pub fn deserialize(buf: Bytes) -> anyhow::Result<Self> {
+        let mut buf = buf.reader();
+        let msg_tag = buf.read_u8()?;
+
+        use PagestreamBeMessageTag as Tag;
+        let ok =
+            match Tag::try_from(msg_tag).map_err(|tag: u8| anyhow::anyhow!("invalid tag {tag}"))? {
+                Tag::Exists => {
+                    let exists = buf.read_u8()?;
+                    Self::Exists(PagestreamExistsResponse {
+                        exists: exists != 0,
+                    })
+                }
+                Tag::Nblocks => {
+                    let n_blocks = buf.read_u32::<BigEndian>()?;
+                    Self::Nblocks(PagestreamNblocksResponse { n_blocks })
+                }
+                Tag::GetPage => {
+                    let mut page = vec![0; 8192]; // TODO: use MaybeUninit
+                    buf.read_exact(&mut page)?;
+                    PagestreamBeMessage::GetPage(PagestreamGetPageResponse { page: page.into() })
+                }
+                Tag::Error => {
+                    let buf = buf.get_ref();
+                    let cstr = std::ffi::CStr::from_bytes_until_nul(buf)?;
+                    let rust_str = cstr.to_str()?;
+                    PagestreamBeMessage::Error(PagestreamErrorResponse {
+                        message: rust_str.to_owned(),
+                    })
+                }
+                Tag::DbSize => {
+                    let db_size = buf.read_i64::<BigEndian>()?;
+                    Self::DbSize(PagestreamDbSizeResponse { db_size })
+                }
+            };
+        let remaining = buf.into_inner();
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "remaining bytes in msg with tag={msg_tag}: {}",
+                remaining.len()
+            );
+        }
+        Ok(ok)
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Exists(_) => "Exists",
+            Self::Nblocks(_) => "Nblocks",
+            Self::GetPage(_) => "GetPage",
+            Self::Error(_) => "Error",
+            Self::DbSize(_) => "DbSize",
+        }
     }
 }
 
@@ -823,7 +918,7 @@ mod tests {
     fn test_tenantinfo_serde() {
         // Test serialization/deserialization of TenantInfo
         let original_active = TenantInfo {
-            id: TenantId::generate(),
+            id: TenantShardId::unsharded(TenantId::generate()),
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
@@ -840,7 +935,7 @@ mod tests {
         });
 
         let original_broken = TenantInfo {
-            id: TenantId::generate(),
+            id: TenantShardId::unsharded(TenantId::generate()),
             state: TenantState::Broken {
                 reason: "reason".into(),
                 backtrace: "backtrace info".into(),

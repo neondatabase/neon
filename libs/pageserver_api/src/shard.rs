@@ -76,6 +76,11 @@ impl TenantShardId {
     pub fn shard_slug(&self) -> impl std::fmt::Display + '_ {
         ShardSlug(self)
     }
+
+    /// Convenience for code that has special behavior on the 0th shard.
+    pub fn is_zero(&self) -> bool {
+        self.shard_number == ShardNumber(0)
+    }
 }
 
 /// Formatting helper
@@ -154,7 +159,7 @@ impl From<[u8; 18]> for TenantShardId {
 /// shard we're dealing with, but do not need to know the full ShardIdentity (because
 /// we won't be doing any page->shard mapping), and do not need to know the fully qualified
 /// TenantShardId.
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
 pub struct ShardIndex {
     pub shard_number: ShardNumber,
     pub shard_count: ShardCount,

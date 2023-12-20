@@ -62,6 +62,9 @@ pub enum AuthErrorImpl {
         Please add it to the allowed list in the Neon console."
     )]
     IpAddressNotAllowed,
+
+    #[error("Too many connections to this endpoint. Please try again later.")]
+    TooManyConnections,
 }
 
 #[derive(Debug, Error)]
@@ -79,6 +82,14 @@ impl AuthError {
 
     pub fn ip_address_not_allowed() -> Self {
         AuthErrorImpl::IpAddressNotAllowed.into()
+    }
+
+    pub fn too_many_connections() -> Self {
+        AuthErrorImpl::TooManyConnections.into()
+    }
+
+    pub fn is_auth_failed(&self) -> bool {
+        matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
     }
 }
 
@@ -102,6 +113,7 @@ impl UserFacingError for AuthError {
             MissingEndpointName => self.to_string(),
             Io(_) => "Internal error".to_string(),
             IpAddressNotAllowed => self.to_string(),
+            TooManyConnections => self.to_string(),
         }
     }
 }

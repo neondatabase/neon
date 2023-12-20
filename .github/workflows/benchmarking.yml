@@ -11,7 +11,7 @@ on:
     #          │ │ ┌───────────── day of the month (1 - 31)
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
-    - cron:  '0 3 * * *' # run once a day, timezone is utc
+    - cron:   '0 3 * * *' # run once a day, timezone is utc
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
@@ -23,6 +23,21 @@ on:
         type: boolean
         description: 'Publish perf report. If not set, the report will be published only for the main branch'
         required: false
+      collect_olap_explain:
+        type: boolean
+        description: 'Collect EXPLAIN ANALYZE for OLAP queries. If not set, EXPLAIN ANALYZE will not be collected'
+        required: false
+        default: false
+      collect_pg_stat_statements:
+        type: boolean
+        description: 'Collect pg_stat_statements for OLAP queries. If not set, pg_stat_statements will not be collected'
+        required: false
+        default: false
+      run_AWS_RDS_AND_AURORA:
+        type: boolean
+        description: 'AWS-RDS and AWS-AURORA normally only run on Saturday. Set this to true to run them on every workflow_dispatch'
+        required: false
+        default: false
 
 defaults:
   run:
@@ -113,6 +128,8 @@ jobs:
     # - neon-captest-reuse: Reusing existing project
     # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
+    env:
+      RUN_AWS_RDS_AND_AURORA: ${{ github.event.inputs.run_AWS_RDS_AND_AURORA || 'false' }}
     runs-on: ubuntu-latest
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
@@ -152,7 +169,7 @@ jobs:
           ]
         }'
 
-        if [ "$(date +%A)" = "Saturday" ]; then
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres" },
                                                    { "platform": "rds-aurora"   }]')
         fi
@@ -171,9 +188,9 @@ jobs:
           ]
         }'
 
-        if [ "$(date +%A)" = "Saturday" ]; then
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
           matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "scale": "10" },
-                                                   { "platform": "rds-aurora",   "scale": "10" }]')
+                                                    { "platform": "rds-aurora",   "scale": "10" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -337,6 +354,8 @@ jobs:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
+      TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
+      TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
@@ -399,6 +418,8 @@ jobs:
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain || 'false' }}
+        TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements || 'false' }}
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         TEST_OLAP_SCALE: 10
 

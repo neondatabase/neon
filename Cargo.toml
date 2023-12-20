@@ -5,6 +5,7 @@ members = [
     "control_plane",
     "pageserver",
     "pageserver/ctl",
+    "pageserver/client",
     "proxy",
     "safekeeper",
     "storage_broker",
@@ -38,10 +39,10 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
-azure_core = "0.17"
-azure_identity = "0.17"
-azure_storage = "0.17"
-azure_storage_blobs = "0.17"
+azure_core = "0.18"
+azure_identity = "0.18"
+azure_storage = "0.18"
+azure_storage_blobs = "0.18"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
@@ -90,7 +91,7 @@ hyper-tungstenite = "0.11"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
-jsonwebtoken = "8"
+jsonwebtoken = "9"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
@@ -184,6 +185,7 @@ compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
+pageserver_client = { path = "./pageserver/client" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }

@@ -298,7 +298,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
                 // from neon_superuser.
                 let mut query: String = format!(
-                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);
@@ -370,32 +370,48 @@ pub fn handle_role_deletions(spec: &ComputeSpec, connstr: &str, client: &mut Cli
     Ok(())
 }
 
+fn reassign_owned_objects_in_one_db(
+    conf: Config,
+    role_name: &PgIdent,
+    db_owner: &PgIdent,
+) -> Result<()> {
+    let mut client = conf.connect(NoTls)?;
+
+    // This will reassign all dependent objects to the db owner
+    let reassign_query = format!(
+        "REASSIGN OWNED BY {} TO {}",
+        role_name.pg_quote(),
+        db_owner.pg_quote()
+    );
+    info!(
+        "reassigning objects owned by '{}' in db '{}' to '{}'",
+        role_name,
+        conf.get_dbname().unwrap_or(""),
+        db_owner
+    );
+    client.simple_query(&reassign_query)?;
+
+    // This now will only drop privileges of the role
+    let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
+    client.simple_query(&drop_query)?;
+    Ok(())
+}
+
 // Reassign all owned objects in all databases to the owner of the database.
 fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent) -> Result<()> {
     for db in &spec.cluster.databases {
         if db.owner != *role_name {
             let mut conf = Config::from_str(connstr)?;
             conf.dbname(&db.name);
-
-            let mut client = conf.connect(NoTls)?;
-
-            // This will reassign all dependent objects to the db owner
-            let reassign_query = format!(
-                "REASSIGN OWNED BY {} TO {}",
-                role_name.pg_quote(),
-                db.owner.pg_quote()
-            );
-            info!(
-                "reassigning objects owned by '{}' in db '{}' to '{}'",
-                role_name, &db.name, &db.owner
-            );
-            client.simple_query(&reassign_query)?;
-
-            // This now will only drop privileges of the role
-            let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
-            client.simple_query(&drop_query)?;
+            reassign_owned_objects_in_one_db(conf, role_name, &db.owner)?;
         }
     }
+
+    // Also handle case when there are no databases in the spec.
+    // In this case we need to reassign objects in the default database.
+    let conf = Config::from_str(connstr)?;
+    let db_owner = PgIdent::from_str("cloud_admin")?;
+    reassign_owned_objects_in_one_db(conf, role_name, &db_owner)?;
 
     Ok(())
 }

@@ -4,14 +4,17 @@ use anyhow::{bail, Context};
 use camino::Utf8Path;
 use fail::fail_point;
 use pageserver_api::shard::TenantShardId;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, SeekFrom};
 use tokio::fs::{self, File};
+use tokio::io::AsyncSeekExt;
+use tokio_util::sync::CancellationToken;
 
 use super::Generation;
 use crate::{
     config::PageServerConf,
     tenant::remote_timeline_client::{
         index::IndexPart, remote_index_path, remote_initdb_archive_path, remote_path,
+        upload_cancellable,
     },
 };
 use remote_storage::GenericRemoteStorage;
@@ -28,6 +31,7 @@ pub(super) async fn upload_index_part<'a>(
     timeline_id: &TimelineId,
     generation: Generation,
     index_part: &'a IndexPart,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading new index part");
 
@@ -43,14 +47,16 @@ pub(super) async fn upload_index_part<'a>(
     let index_part_bytes = bytes::Bytes::from(index_part_bytes);
 
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, generation);
-    storage
-        .upload_storage_object(
+    upload_cancellable(
+        cancel,
+        storage.upload_storage_object(
             futures::stream::once(futures::future::ready(Ok(index_part_bytes))),
             index_part_size,
             &remote_path,
-        )
-        .await
-        .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
+        ),
+    )
+    .await
+    .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
 }
 
 /// Attempts to upload given layer files.
@@ -63,6 +69,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     source_path: &'a Utf8Path,
     known_metadata: &'a LayerFileMetadata,
     generation: Generation,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     fail_point!("before-upload-layer", |_| {
         bail!("failpoint before-upload-layer")
@@ -106,8 +113,7 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
-    storage
-        .upload(reader, fs_size, &storage_path, None)
+    upload_cancellable(cancel, storage.upload(reader, fs_size, &storage_path, None))
         .await
         .with_context(|| format!("upload layer from local path '{source_path}'"))?;
 
@@ -119,16 +125,22 @@ pub(crate) async fn upload_initdb_dir(
     storage: &GenericRemoteStorage,
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
-    initdb_tar_zst: File,
+    mut initdb_tar_zst: File,
     size: u64,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::trace!("uploading initdb dir");
+
+    // We might have read somewhat into the file already in the prior retry attempt
+    initdb_tar_zst.seek(SeekFrom::Start(0)).await?;
 
     let file = tokio_util::io::ReaderStream::with_capacity(initdb_tar_zst, super::BUFFER_SIZE);
 
     let remote_path = remote_initdb_archive_path(tenant_id, timeline_id);
-    storage
-        .upload_storage_object(file, size as usize, &remote_path)
-        .await
-        .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
+    upload_cancellable(
+        cancel,
+        storage.upload_storage_object(file, size as usize, &remote_path),
+    )
+    .await
+    .with_context(|| format!("upload initdb dir for '{tenant_id} / {timeline_id}'"))
 }

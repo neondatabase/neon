@@ -60,8 +60,6 @@ def test_remote_storage_backup_and_restore(
 
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    neon_env_builder.enable_generations = generations
-
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
@@ -73,19 +71,20 @@ def test_remote_storage_backup_and_restore(
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            # FIXME: Is this expected?
+            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
+            ".*No timelines to attach received.*",
+            ".*Failed to get local tenant state.*",
+            # FIXME retry downloads without throwing errors
+            ".*failed to load remote timeline.*",
+            # we have a bunch of pytest.raises for these below
+            ".*tenant .*? already exists, state:.*",
+            ".*tenant directory already exists.*",
+            ".*simulated failure of remote operation.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-
-    env.pageserver.allowed_errors.append(".*Failed to get local tenant state.*")
-    # FIXME retry downloads without throwing errors
-    env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
-    # we have a bunch of pytest.raises for these below
-    env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")

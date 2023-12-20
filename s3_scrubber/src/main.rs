@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     match cli.command {
-        Command::ScanMetadata { json } => match scan_metadata(bucket_config).await {
+        Command::ScanMetadata { json } => match scan_metadata(bucket_config.clone()).await {
             Err(e) => {
                 tracing::error!("Failed: {e}");
                 Err(e)
@@ -70,6 +70,17 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if summary.is_fatal() {
                     Err(anyhow::anyhow!("Fatal scrub errors detected"))
+                } else if summary.is_empty() {
+                    // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
+                    // scrubber they were likely expecting to scan something, and if we see no timelines
+                    // at all then it's likely due to some configuration issues like a bad prefix
+                    Err(anyhow::anyhow!(
+                        "No timelines found in bucket {} prefix {}",
+                        bucket_config.bucket,
+                        bucket_config
+                            .prefix_in_bucket
+                            .unwrap_or("<none>".to_string())
+                    ))
                 } else {
                     Ok(())
                 }

@@ -3,9 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
-use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use storage_broker::proto::{SafekeeperTimelineInfo, SubscribeSafekeeperInfoRequest};
+
+use storage_broker::proto::SafekeeperTimelineInfo;
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SubscribeByFilterRequest,
+    TenantTimelineId as ProtoTenantTimelineId, TypeSubscription, TypedMessage,
+};
 
 use storage_broker::{BrokerClientChannel, DEFAULT_ENDPOINT};
 use tokio::time;
@@ -91,15 +94,23 @@ async fn subscribe(client: Option<BrokerClientChannel>, counter: Arc<AtomicU64>,
         None => storage_broker::connect(DEFAULT_ENDPOINT, Duration::from_secs(5)).unwrap(),
     };
 
-    let key = SubscriptionKey::TenantTimelineId(ProtoTenantTimelineId {
+    let ttid = ProtoTenantTimelineId {
         tenant_id: vec![0xFF; 16],
         timeline_id: tli_from_u64(i),
-    });
-    let request = SubscribeSafekeeperInfoRequest {
-        subscription_key: Some(key),
     };
-    let mut stream = client
-        .subscribe_safekeeper_info(request)
+
+    let request = SubscribeByFilterRequest {
+        types: vec![TypeSubscription {
+            r#type: MessageType::SafekeeperTimelineInfo.into(),
+        }],
+        tenant_timeline_id: Some(FilterTenantTimelineId {
+            enabled: true,
+            tenant_timeline_id: Some(ttid),
+        }),
+    };
+
+    let mut stream: tonic::Streaming<TypedMessage> = client
+        .subscribe_by_filter(request)
         .await
         .unwrap()
         .into_inner();

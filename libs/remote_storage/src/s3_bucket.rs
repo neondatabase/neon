@@ -218,14 +218,6 @@ impl S3Bucket {
 
         let started_at = ScopeGuard::into_inner(started_at);
 
-        if get_object.is_err() {
-            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                kind,
-                AttemptOutcome::Err,
-                started_at,
-            );
-        }
-
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
@@ -241,11 +233,27 @@ impl S3Bucket {
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
                 Err(DownloadError::NotFound)
             }
-            Err(e) => Err(DownloadError::Other(
-                anyhow::Error::new(e).context("download s3 object"),
-            )),
+            Err(e) => {
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("download s3 object"),
+                ))
+            }
         }
     }
 }
