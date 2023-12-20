@@ -728,14 +728,16 @@ async fn collect_eviction_candidates(
 
         for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
             let file_size = layer_info.file_size();
+
+            let relative_last_activity =
+                finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
+                    .expect("value out of range");
+
             let candidate = EvictionCandidate {
                 timeline,
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
-                relative_last_activity: finite_f32::FiniteF32::try_from_normalized(
-                    (total - i) as f32 / divider,
-                )
-                .expect("value out of range"),
+                relative_last_activity,
             };
             let partition = if cumsum > min_resident_size as i128 {
                 MinResidentSizePartition::Above
