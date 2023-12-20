@@ -849,7 +849,7 @@ mod finite_f32 {
 
     impl std::cmp::Ord for FiniteF32 {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            self.0.partial_cmp(&other.0).expect("both are finite")
+            self.0.total_cmp(&other.0)
         }
     }
 
