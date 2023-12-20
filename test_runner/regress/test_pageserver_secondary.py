@@ -59,13 +59,11 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     states are valid, so that we may test it in this way: the API should always
     work as long as the tenant exists.
     """
-    neon_env_builder.enable_generations = True
     neon_env_builder.num_pageservers = 3
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    assert env.attachment_service is not None
 
     pageservers = env.pageservers
     list([p.http_client() for p in pageservers])
@@ -212,13 +210,11 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     """
     Test the sequence of location states that are used in a live migration.
     """
-    neon_env_builder.enable_generations = True
     neon_env_builder.num_pageservers = 2
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
     )
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
-    assert env.attachment_service is not None
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline

@@ -1,2 +1,4 @@
 result
 *.json
+hosts
+poetry.lock
