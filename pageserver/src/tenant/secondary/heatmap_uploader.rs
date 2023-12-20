@@ -293,7 +293,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
                     next_upload,
                 })
                 .ok();
-        }.instrument(info_span!("secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
+        }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
         WriteInProgress { barrier }
     }
 
