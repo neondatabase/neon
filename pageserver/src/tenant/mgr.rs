@@ -514,10 +514,7 @@ pub async fn init_tenant_mgr(
             &ctx,
         ) {
             Ok(tenant) => {
-                tenants.insert(
-                    TenantShardId::unsharded(tenant.tenant_id()),
-                    TenantSlot::Attached(tenant),
-                );
+                tenants.insert(tenant_shard_id, TenantSlot::Attached(tenant));
             }
             Err(e) => {
                 error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to start tenant: {e:#}");
@@ -962,35 +959,27 @@ impl TenantManager {
         }
 
         let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+        let timelines_path = self.conf.timelines_path(&tenant_shard_id);
+
+        // Directory structure is the same for attached and secondary modes:
+        // create it if it doesn't exist.  Timeline load/creation expects the
+        // timelines/ subdir to already exist.
+        //
+        // Does not need to be fsync'd because local storage is just a cache.
+        tokio::fs::create_dir_all(&timelines_path)
+            .await
+            .with_context(|| format!("Creating {timelines_path}"))?;
+
+        // Before activating either secondary or attached mode, persist the
+        // configuration, so that on restart we will re-attach (or re-start
+        // secondary) on the tenant.
+        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+            .await
+            .map_err(SetNewTenantConfigError::Persist)?;
 
         let new_slot = match &new_location_config.mode {
-            LocationMode::Secondary(_) => {
-                // Directory doesn't need to be fsync'd because if we crash it can
-                // safely be recreated next time this tenant location is configured.
-                tokio::fs::create_dir_all(&tenant_path)
-                    .await
-                    .with_context(|| format!("Creating {tenant_path}"))?;
-
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .map_err(SetNewTenantConfigError::Persist)?;
-
-                TenantSlot::Secondary
-            }
+            LocationMode::Secondary(_) => TenantSlot::Secondary,
             LocationMode::Attached(_attach_config) => {
-                let timelines_path = self.conf.timelines_path(&tenant_shard_id);
-
-                // Directory doesn't need to be fsync'd because we do not depend on
-                // it to exist after crashes: it may be recreated when tenant is
-                // re-attached, see https://github.com/neondatabase/neon/issues/5550
-                tokio::fs::create_dir_all(&tenant_path)
-                    .await
-                    .with_context(|| format!("Creating {timelines_path}"))?;
-
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .map_err(SetNewTenantConfigError::Persist)?;
-
                 let shard_identity = new_location_config.shard;
                 let tenant = tenant_spawn(
                     self.conf,

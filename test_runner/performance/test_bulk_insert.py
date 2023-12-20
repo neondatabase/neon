@@ -61,7 +61,6 @@ def measure_recovery_time(env: NeonCompare):
     # of view, but the same as far as the safekeeper/WAL is concerned.  To work around that,
     # we will explicitly create the tenant in the same generation that it was previously
     # attached in.
-    assert env.env.attachment_service is not None
     attach_status = env.env.attachment_service.inspect(tenant_id=env.tenant)
     assert attach_status is not None
     (attach_gen, _) = attach_status
