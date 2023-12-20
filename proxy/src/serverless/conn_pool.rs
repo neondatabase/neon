@@ -2,12 +2,16 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::poll_fn;
+use metrics::{register_int_counter_pair, IntCounterPair, IntCounterPairGuard};
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use pbkdf2::{
     password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
     Params, Pbkdf2,
 };
 use pq_proto::StartupMessageParams;
+use prometheus::{exponential_buckets, register_histogram, Histogram};
+use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use std::{collections::HashMap, net::IpAddr, sync::Arc, sync::Weak, time::Duration};
 use std::{
@@ -70,6 +74,7 @@ pub struct EndpointConnPool {
     pools: HashMap<(SmolStr, SmolStr), DbUserConnPool>,
     total_conns: usize,
     max_conns: usize,
+    _guard: IntCounterPairGuard,
 }
 
 impl EndpointConnPool {
@@ -155,16 +160,22 @@ pub struct DbUserConnPool {
 }
 
 impl DbUserConnPool {
-    fn get_conn_entry(&mut self, conns: &mut usize) -> Option<ConnPoolEntry> {
+    fn clear_closed_clients(&mut self, conns: &mut usize) {
         let old_len = self.conns.len();
 
         self.conns.retain(|conn| !conn.conn.inner.is_closed());
-        let conn = self.conns.pop();
 
         let new_len = self.conns.len();
         let removed = old_len - new_len;
         *conns -= removed;
+    }
 
+    fn get_conn_entry(&mut self, conns: &mut usize) -> Option<ConnPoolEntry> {
+        self.clear_closed_clients(conns);
+        let conn = self.conns.pop();
+        if conn.is_some() {
+            *conns -= 1;
+        }
         conn
     }
 }
@@ -176,6 +187,8 @@ pub struct GlobalConnPool {
     // pool as early as possible and release the lock.
     global_pool: DashMap<SmolStr, Arc<RwLock<EndpointConnPool>>>,
 
+    /// Number of endpoint-connection pools
+    ///
     /// [`DashMap::len`] iterates over all inner pools and acquires a read lock on each.
     /// That seems like far too much effort, so we're using a relaxed increment counter instead.
     /// It's only used for diagnostics.
@@ -190,10 +203,30 @@ pub struct GlobalConnPool {
     proxy_config: &'static crate::config::ProxyConfig,
 }
 
+pub static GC_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "proxy_http_pool_reclaimation_lag_seconds",
+        "Time it takes to reclaim unused connection pools",
+        // 1us -> 65ms
+        exponential_buckets(1e-6, 2.0, 16).unwrap(),
+    )
+    .unwrap()
+});
+
+pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
+    register_int_counter_pair!(
+        "proxy_http_pool_endpoints_registered_total",
+        "Number of endpoints we have registered pools for",
+        "proxy_http_pool_endpoints_unregistered_total",
+        "Number of endpoints we have unregistered pools for",
+    )
+    .unwrap()
+});
+
 impl GlobalConnPool {
     pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
         Arc::new(Self {
-            global_pool: DashMap::new(),
+            global_pool: DashMap::with_shard_amount(128),
             global_pool_size: AtomicUsize::new(0),
             max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
             proxy_config: config,
@@ -201,15 +234,63 @@ impl GlobalConnPool {
     }
 
     pub fn shutdown(&self) {
-        self.global_pool.retain(|_, endpoint_pool| {
-            let mut pool = endpoint_pool.write();
-            // by clearing this hashmap, we remove the slots that a connection can be returned to.
-            // when returning, it drops the connection if the slot doesn't exist
-            pool.pools.clear();
-            pool.total_conns = 0;
+        // drops all strong references to endpoint-pools
+        self.global_pool.clear();
+    }
 
-            false
+    pub async fn gc_worker(&self) {
+        let epoch = Duration::from_secs(600);
+        let mut interval = tokio::time::interval(epoch / (self.global_pool.shards().len()) as u32);
+        loop {
+            interval.tick().await;
+            self.gc();
+        }
+    }
+
+    fn gc(&self) {
+        let shard = thread_rng().gen_range(0..self.global_pool.shards().len());
+        info!(shard, "pool: performing epoch reclamation");
+
+        // acquire a random shard lock
+        let mut shard = self.global_pool.shards()[shard].write();
+
+        let timer = GC_LATENCY.start_timer();
+        let current_len = shard.len();
+        shard.retain(|endpoint, x| {
+            // if the current endpoint pool is unique (no other strong or weak references)
+            // then it is currently not in use by any connections.
+            if let Some(pool) = Arc::get_mut(x.get_mut()) {
+                let EndpointConnPool {
+                    pools, total_conns, ..
+                } = pool.get_mut();
+
+                // ensure that closed clients are removed
+                pools
+                    .iter_mut()
+                    .for_each(|(_, db_pool)| db_pool.clear_closed_clients(total_conns));
+
+                // we only remove this pool if it has no active connections
+                if *total_conns == 0 {
+                    info!("pool: discarding pool for endpoint {endpoint}");
+                    return false;
+                }
+            }
+
+            true
         });
+        let new_len = shard.len();
+        drop(shard);
+        timer.observe_duration();
+
+        let removed = current_len - new_len;
+
+        if removed > 0 {
+            let global_pool_size = self
+                .global_pool_size
+                .fetch_sub(removed, atomic::Ordering::Relaxed)
+                - removed;
+            info!("pool: performed global pool gc. size now {global_pool_size}");
+        }
     }
 
     pub async fn get(
@@ -352,6 +433,7 @@ impl GlobalConnPool {
             pools: HashMap::new(),
             total_conns: 0,
             max_conns: self.max_conns_per_endpoint,
+            _guard: ENDPOINT_POOLS.guard(),
         }));
 
         // find or create a pool for this endpoint
@@ -525,10 +607,12 @@ async fn connect_to_compute_once(
                     idle_since = Instant::now();
                 }
 
+                // 5 minute idle connection timeout
                 if idle_since.elapsed() > Duration::from_secs(300) {
                     idle_since = Instant::now();
                     if let Some(pool) = pool.clone().upgrade() {
-                        // remove client from pool - should close the connection if it's idle
+                        // remove client from pool - should close the connection if it's idle.
+                        // does nothing if the client is currently checked-out and in-use
                         pool.write().remove_client(db_user.clone(), conn_id);
                     }
                 }

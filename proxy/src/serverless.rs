@@ -47,6 +47,11 @@ pub async fn task_main(
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
 
+    let conn_pool2 = Arc::clone(&conn_pool);
+    tokio::spawn(async move {
+        conn_pool2.gc_worker().await;
+    });
+
     // shutdown the connection pool
     tokio::spawn({
         let cancellation_token = cancellation_token.clone();
