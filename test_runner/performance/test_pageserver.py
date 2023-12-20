@@ -49,10 +49,6 @@ def snapshotting_env(
         env = neon_env_builder.from_repo_dir(snapshot_dir)
         ps_http = env.pageserver.http_client()
         tenants = list({TenantId(t.name) for t in (snapshot_dir.glob("pageserver_*/tenants/*"))})
-        with (snapshot_dir / "attachments.json").open("r") as f:
-            content = json.load(f)
-            template_tenant_gen = list(content["tenants"].values())[0]["generation"]
-
         template_timeline = env.initial_timeline
 
         env.broker.try_start()
@@ -64,7 +60,7 @@ def snapshotting_env(
         time.sleep(5)
 
         for tenant in tenants:
-            env.attachment_service.attach_hook(tenant, 1)
+            env.attachment_service.attach_hook_issue(tenant, 1)
 
         env.pageserver.start()
     else:
@@ -169,7 +165,7 @@ def test_getpage_throughput(
         *[f"{tenant}/{template_timeline}" for tenant in tenants],
     ]
     log.info(f"command: {' '.join(cmd)}")
-    basepath = pg_bin.run_capture(cmd)
+    basepath = pg_bin.run_capture(cmd, with_command_header=False)
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
