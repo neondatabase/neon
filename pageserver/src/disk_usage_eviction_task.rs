@@ -750,6 +750,8 @@ async fn collect_eviction_candidates(
                 eviction_order,
                 EvictionOrder::RelativeAccessed { .. }
             ) {
+                // another possibility: use buckets, like (256.0 * relative_last_activity) as u8 or
+                // similarly for u16. unsure how it would help.
                 finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
                     .unwrap_or_else(|val| {
                         tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={i}, total={total}: {val}");
