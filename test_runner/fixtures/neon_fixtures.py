@@ -1125,15 +1125,29 @@ class AbstractNeonCli(abc.ABC):
             env_vars[var] = val
 
         # Intercept CalledProcessError and print more info
-        res = subprocess.run(
-            args,
-            env=env_vars,
-            check=False,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
+        try:
+            res = subprocess.run(
+                args,
+                env=env_vars,
+                check=False,
+                universal_newlines=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            if e.stderr:
+                stderr = e.stderr.decode(errors="replace")
+            else:
+                stderr = ""
+
+            if e.stdout:
+                stdout = e.stdout.decode(errors="replace")
+            else:
+                stdout = ""
+
+            log.warn(f"CLI timeout: stderr={stderr}, stdout={stdout}")
+            raise
 
         indent = "  "
         if not res.returncode:
