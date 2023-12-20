@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use futures::future::poll_fn;
+use futures::{future::poll_fn, Future};
 use metrics::{register_int_counter_pair, IntCounterPair, IntCounterPairGuard};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -13,7 +13,7 @@ use pq_proto::StartupMessageParams;
 use prometheus::{exponential_buckets, register_histogram, Histogram};
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
-use std::{collections::HashMap, net::IpAddr, sync::Arc, sync::Weak, time::Duration};
+use std::{collections::HashMap, net::IpAddr, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -602,18 +602,18 @@ async fn connect_to_compute_once(
     tokio::spawn(
         async move {
             let _conn_gauge = conn_gauge;
-            let mut idle_since = Instant::now();
+            let mut idle_timeout = pin!(tokio::time::sleep(Duration::from_secs(300)));
             poll_fn(move |cx| {
                 if matches!(rx.has_changed(), Ok(true)) {
                     session = *rx.borrow_and_update();
                     info!(%session, "changed session");
-                    idle_since = Instant::now();
+                    idle_timeout.as_mut().reset(Instant::now() + Duration::from_secs(300));
                 }
 
                 // 5 minute idle connection timeout
-                if idle_since.elapsed() > Duration::from_secs(300) {
+                if idle_timeout.as_mut().poll(cx).is_ready() {
+                    idle_timeout.as_mut().reset(Instant::now() + Duration::from_secs(300));
                     info!("connection idle");
-                    idle_since = Instant::now();
                     if let Some(pool) = pool.clone().upgrade() {
                         // remove client from pool - should close the connection if it's idle.
                         // does nothing if the client is currently checked-out and in-use
