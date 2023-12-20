@@ -34,7 +34,7 @@ use crate::{
 };
 use crate::{compute, config};
 
-use tracing::{error, warn, Span};
+use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 pub const APP_NAME: &str = "/sql_over_http";
@@ -87,7 +87,7 @@ impl EndpointConnPool {
             .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
     }
 
-    fn remove_client(&mut self, db_user: (SmolStr, SmolStr), conn_id: uuid::Uuid) {
+    fn remove_client(&mut self, db_user: (SmolStr, SmolStr), conn_id: uuid::Uuid) -> bool {
         let Self {
             pools, total_conns, ..
         } = self;
@@ -97,6 +97,9 @@ impl EndpointConnPool {
             let new_len = pool.conns.len();
             let removed = old_len - new_len;
             *total_conns -= removed;
+            removed > 0
+        } else {
+            false
         }
     }
 
@@ -249,7 +252,7 @@ impl GlobalConnPool {
 
     fn gc(&self) {
         let shard = thread_rng().gen_range(0..self.global_pool.shards().len());
-        info!(shard, "pool: performing epoch reclamation");
+        debug!(shard, "pool: performing epoch reclamation");
 
         // acquire a random shard lock
         let mut shard = self.global_pool.shards()[shard].write();
@@ -609,11 +612,14 @@ async fn connect_to_compute_once(
 
                 // 5 minute idle connection timeout
                 if idle_since.elapsed() > Duration::from_secs(300) {
+                    info!("connection idle");
                     idle_since = Instant::now();
                     if let Some(pool) = pool.clone().upgrade() {
                         // remove client from pool - should close the connection if it's idle.
                         // does nothing if the client is currently checked-out and in-use
-                        pool.write().remove_client(db_user.clone(), conn_id);
+                        if pool.write().remove_client(db_user.clone(), conn_id) {
+                            info!("idle connection removed");
+                        }
                     }
                 }
 
@@ -643,7 +649,9 @@ async fn connect_to_compute_once(
 
                 // remove from connection pool
                 if let Some(pool) = pool.clone().upgrade() {
-                    pool.write().remove_client(db_user.clone(), conn_id);
+                    if pool.write().remove_client(db_user.clone(), conn_id) {
+                        info!("closed connection removed");
+                    }
                 }
 
                 Poll::Ready(())
