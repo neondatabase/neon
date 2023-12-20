@@ -723,8 +723,12 @@ async fn collect_eviction_candidates(
             1
         };
 
-        // max(1, ...) for the case of tenant having just one resident layer
-        let total = std::cmp::max(1, tenant_candidates.len() - fudge);
+        let total = tenant_candidates
+            .len()
+            .checked_sub(fudge)
+            .filter(|&x| x > 0)
+            // support 0 or 1 resident layer tenants as well
+            .unwrap_or(1);
         let divider = total as f32;
 
         for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
