@@ -173,14 +173,25 @@ impl Timeline {
             ));
         }
 
-        let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
-        if blknum >= nblocks {
-            debug!(
-                "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                tag, blknum, lsn, nblocks
-            );
-            return Ok(ZERO_PAGE.clone());
-        }
+        // let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
+        // if blknum >= nblocks {
+        //     tracing::info!(
+        //         "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+        //         tag,
+        //         blknum,
+        //         lsn,
+        //         nblocks
+        //     );
+        //     return Ok(ZERO_PAGE.clone());
+        // } else {
+        //     tracing::info!(
+        //         "read within bounds at {} blk {} at {}, size is {}",
+        //         tag,
+        //         blknum,
+        //         lsn,
+        //         nblocks
+        //     );
+        // }
 
         let key = rel_block_to_key(tag, blknum);
         self.get(key, lsn, ctx).await
@@ -235,6 +246,7 @@ impl Timeline {
         }
 
         let key = rel_size_to_key(tag);
+        tracing::info!("rel size cache miss {tag} {lsn} {latest}");
         let mut buf = self.get(key, lsn, ctx).await?;
         let nblocks = buf.get_u32_le();
 
