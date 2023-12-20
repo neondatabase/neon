@@ -1,7 +1,7 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import pytest
 import toml
@@ -71,7 +71,7 @@ class EvictionOrder(str, enum.Enum):
     RELATIVE_ORDER_EQUAL = "relative_equal"
     RELATIVE_ORDER_SPARE = "relative_spare"
 
-    def as_toml(self):
+    def as_toml(self) -> Dict[str, Any]:
         if self == EvictionOrder.ABSOLUTE_ORDER:
             return {"type": "AbsoluteAccessed"}
         elif self == EvictionOrder.RELATIVE_ORDER_EQUAL:
@@ -81,7 +81,7 @@ class EvictionOrder(str, enum.Enum):
         else:
             raise RuntimeError(f"not implemented: {self}")
 
-    def as_json(self):
+    def as_json(self) -> Dict[str, Any]:
         return self.as_toml()
 
 
