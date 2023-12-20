@@ -154,7 +154,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     // run in. Therefore, wait a little bit before and after. The alternative would be
     // to take the time from S3 response headers.
     async fn time_point() -> SystemTime {
-        const WAIT_TIME: u64 = 2_000;
+        const WAIT_TIME: u64 = 15_000;
         tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
         let ret = SystemTime::now();
         tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
@@ -184,6 +184,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
 
     let t0_files = list_files(&ctx.client).await?;
     let t0 = time_point().await;
+    println!("at t0: {t0_files:?}");
 
     let old_data = "remote blob data2";
     let (data, len) = upload_stream(old_data.as_bytes().into());
@@ -191,6 +192,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
 
     let t1_files = list_files(&ctx.client).await?;
     let t1 = time_point().await;
+    println!("at t1: {t1_files:?}");
 
     let (data, len) = upload_stream("remote blob data3".as_bytes().into());
     ctx.client.upload(data, len, &path3, None).await?;
