@@ -900,7 +900,7 @@ impl TenantManager {
             Secondary(Arc<SecondaryTenant>),
         }
 
-        // Special case fast-path for updates to Tenant: if our upsert is only updating configuration,
+        // Special case fast-path for updates to existing slots: if our upsert is only updating configuration,
         // then we do not need to set the slot to InProgress, we can just call into the
         // existng tenant.
         let fast_path_taken = {
@@ -975,8 +975,13 @@ impl TenantManager {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
                     .await
                     .map_err(SetNewTenantConfigError::Persist)?;
+
+                return Ok(());
             }
-            None => {}
+            None => {
+                // Proceed with the general case procedure, where we will shutdown & remove any existing
+                // slot contents and replace with a fresh one
+            }
         };
 
         // General case for upserts to TenantsMap, excluding the case above: we will substitute an
