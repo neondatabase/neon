@@ -11,7 +11,7 @@ use crate::{
     tenant::{
         config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
-        remote_timeline_client::{index::LayerFileMetadata, HEATMAP_BASENAME},
+        remote_timeline_client::index::LayerFileMetadata,
         span::debug_assert_current_span_has_tenant_id,
         storage_layer::{Layer, LayerFileName},
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
@@ -124,7 +124,7 @@ impl SecondaryDetail {
     ) -> HashMap<TimelineId, SecondaryDetailTimeline> {
         tracing::info!("init_detail");
         // Load heatmap from local storage
-        let heatmap_path = conf.tenant_path(&tenant_shard_id).join(HEATMAP_BASENAME);
+        let heatmap_path = conf.tenant_heatmap_path(&tenant_shard_id);
         let heatmap = match tokio::fs::read(&heatmap_path).await {
             Ok(bytes) => serde_json::from_slice::<HeatMapTenant>(&bytes).unwrap(),
             Err(e) => {
@@ -555,10 +555,7 @@ impl<'a> TenantDownloader<'a> {
 
         // Save the heatmap: this will be useful on restart, allowing us to reconstruct
         // layer metadata without having to re-download it.
-        let heatmap_path = self
-            .conf
-            .tenant_path(tenant_shard_id)
-            .join(HEATMAP_BASENAME);
+        let heatmap_path = self.conf.tenant_heatmap_path(tenant_shard_id);
 
         let temp_path = path_with_suffix_extension(&heatmap_path, TEMP_FILE_SUFFIX);
         let context_msg = format!("write tenant {tenant_shard_id} heatmap to {heatmap_path}");
