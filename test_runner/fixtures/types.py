@@ -172,4 +172,4 @@ class TenantShardId:
         return self._tuple() == other._tuple()
 
     def __hash__(self) -> int:
-        return hash(self._tuple)
+        return hash(self._tuple())
