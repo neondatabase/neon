@@ -1,6 +1,6 @@
-use std::{thread::JoinHandle, cell::{OnceCell, RefCell}, sync::{mpsc, Arc, atomic::{AtomicU8, Ordering}}};
+use std::{thread::JoinHandle, cell::{OnceCell, RefCell}, sync::{mpsc, Arc, atomic::{AtomicU8, Ordering, AtomicU32}, OnceLock}};
 
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::time::Timing;
 
@@ -11,14 +11,17 @@ pub struct Runtime {
     threads: Vec<ThreadHandle>,
     // stores current time and pending wakeups
     clock: Arc<Timing>,
+    // thread counter
+    thread_counter: AtomicU32,
 }
 
 impl Runtime {
     /// Init new runtime. Virtual time is 0ms, no running threads.
-    pub fn new() -> Self {
+    pub fn new(clock: Arc<Timing>) -> Self {
         Self {
             threads: Vec::new(),
-            clock: Arc::new(Timing::new()),
+            clock,
+            thread_counter: AtomicU32::new(0),
         }
     }
 
@@ -30,14 +33,23 @@ impl Runtime {
         let (tx, rx) = mpsc::channel();
 
         let clock = self.clock.clone();
+        let tid = self.thread_counter.fetch_add(1, Ordering::SeqCst);
+        debug!("spawning thread-{}", tid);
+
         let join = std::thread::spawn(move || {
             with_thread_context(|ctx| {
-                ctx.clock.set(clock);
+                assert!(ctx.clock.set(clock).is_ok());
+                ctx.id.store(tid, Ordering::SeqCst);
                 tx.send(ctx.clone()).expect("failed to send thread context");
                 // suspend thread to put it to `threads` in sleeping state
                 ctx.yield_me(0);
             });
-            f()
+            let _guard = tracing::info_span!("", tid).entered();
+            f();
+            debug!("thread-{} finished", tid);
+            with_thread_context(|ctx| {
+                ctx.finish_me();
+            });
         });
 
         let ctx = rx.recv().expect("failed to receive thread context");
@@ -47,6 +59,8 @@ impl Runtime {
     }
 
     pub fn step(&mut self) -> bool {
+        trace!("runtime step");
+
         let mut ran = false;
         self.threads.retain(|thread: &ThreadHandle| {
             let res = thread.ctx.wakeup.compare_exchange(PENDING_WAKEUP, NO_WAKEUP, Ordering::SeqCst, Ordering::SeqCst);
@@ -55,17 +69,21 @@ impl Runtime {
             }
             ran = true;
 
+            trace!("entering thread-{}", thread.ctx.tid());
             let status = thread.step();
+            trace!("out of thread-{} with status {:?}", thread.ctx.tid(), status);
             if status == Status::Sleep {
                 true
             } else {
-                debug!("thread {} has finished", thread);
+                trace!("thread has finished");
                 false
             }
         });
 
         if !ran {
+            trace!("no pending threads, stepping clock");
             if let Some(ctx_to_wake) = self.clock.step() {
+                trace!("waking up thread-{}", ctx_to_wake.tid());
                 ctx_to_wake.inc_wake();
             } else {
                 return false;
@@ -126,6 +144,7 @@ const NO_WAKEUP: u8 = 0;
 const PENDING_WAKEUP: u8 = 1;
 
 pub struct ThreadContext {
+    id: AtomicU32,
     // used to block thread until it is woken up
     mutex: parking_lot::Mutex<Status>,
     condvar: parking_lot::Condvar,
@@ -133,16 +152,17 @@ pub struct ThreadContext {
     // used as a flag to indicate runtime that thread is ready to be woken up
     wakeup: AtomicU8,
 
-    clock: OnceCell<Arc<Timing>>,
+    clock: OnceLock<Arc<Timing>>,
 }
 
 impl ThreadContext {
     fn new() -> Self {
         Self {
+            id: AtomicU32::new(0),
             mutex: parking_lot::Mutex::new(Status::Running),
             condvar: parking_lot::Condvar::new(),
             wakeup: AtomicU8::new(NO_WAKEUP),
-            clock: OnceCell::new(),
+            clock: OnceLock::new(),
         }
     }
 }
@@ -155,8 +175,12 @@ impl ThreadContext {
     }
 
     /// Internal function used for event queues.
-    pub(crate) fn schedule_wakeup(&self, after_ms: u64) {
+    pub(crate) fn schedule_wakeup(self: &Arc<Self>, after_ms: u64) {
         self.clock.get().unwrap().schedule_wakeup(after_ms as u64, self.clone());
+    }
+
+    fn tid(&self) -> u32 {
+        self.id.load(Ordering::SeqCst)
     }
 }
 
@@ -199,7 +223,6 @@ impl ThreadContext {
 #[inline(always)]
 fn with_thread_context<T>(f: impl FnOnce(&Arc<ThreadContext>) -> T) -> T {
     thread_local!(static THREAD_DATA: Arc<ThreadContext> = Arc::new(ThreadContext::new()));
-    THREAD_DATA.
     THREAD_DATA.with(f)
 }
 
@@ -249,6 +272,12 @@ pub fn now() -> u64 {
     })
 }
 
+pub(crate) fn get_thread_ctx() -> Arc<ThreadContext> {
+    with_thread_context(|ctx| {
+        ctx.clone()
+    })
+}
+
 /// Trait for polling channels until they have something.
 pub trait PollSome {
     /// Schedule wakeup for message arrival.
@@ -259,8 +288,12 @@ pub trait PollSome {
 }
 
 /// Blocks current thread until one of the channels has a ready message.
-pub fn epoll_chans(chans: &[dyn PollSome], timeout: i64) -> Option<usize> {
-    let deadline = now() + timeout as u64;
+pub fn epoll_chans(chans: &[Box<dyn PollSome>], timeout: i64) -> Option<usize> {
+    let deadline = if timeout < 0 {
+        0
+    } else {
+        now() + timeout as u64
+    };
 
     loop {
         for chan in chans {
@@ -282,7 +315,7 @@ pub fn epoll_chans(chans: &[dyn PollSome], timeout: i64) -> Option<usize> {
                 return None;
             }
 
-            yield_me(deadline - current_time);
+            yield_me((deadline - current_time) as i64);
         }
     }
 }

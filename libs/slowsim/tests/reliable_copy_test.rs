@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod reliable_copy_test {
     use anyhow::Result;
-    use slowsim::executor;
+    use parking_lot::Mutex;
+    use slowsim::executor::{self, PollSome};
     use slowsim::network::{Delay, NetworkOptions};
     use slowsim::proto::ReplCell;
-    use slowsim::sync::{Mutex, Park};
     use slowsim::world::{NodeId, World, NetEvent};
     use slowsim::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
     use std::sync::Arc;
@@ -74,7 +74,7 @@ mod reliable_copy_test {
         info!("started server");
 
         let node_events = os.node_events();
-        let mut epoll_vec = vec![node_events.clone()];
+        let mut epoll_vec: Vec<Box<dyn PollSome>> = vec![Box::new(node_events.clone())];
         let mut sockets = vec![];
 
         loop {
@@ -82,11 +82,11 @@ mod reliable_copy_test {
 
             if index == 0 {
                 let node_event = node_events.must_recv();
-                info!("got node event: {:?}", event);
+                info!("got node event: {:?}", node_event);
                 match node_event {
                     NodeEvent::Accept(tcp) => {
                         tcp.send(AnyMessage::Just32(storage.flush_pos()));
-                        epoll_vec.push(tcp.recv_chan());
+                        epoll_vec.push(Box::new(tcp.recv_chan()));
                         sockets.push(tcp);
                     }
                     _ => {},
@@ -132,7 +132,7 @@ mod reliable_copy_test {
             // loop {
             let event = recv_chan.recv();
             match event {
-                NetEvent::Message((AnyMessage::Just32(flush_pos), _)) => {
+                NetEvent::Message(AnyMessage::Just32(flush_pos)) => {
                     if flush_pos == 1 + delivered as u32 {
                         delivered += 1;
                     }
@@ -202,7 +202,6 @@ mod reliable_copy_test {
 
     pub fn start_simulation(options: Options) {
         let world = options.world;
-        world.register_world();
 
         let client_node = world.new_node();
         let server_node = world.new_node();
@@ -218,8 +217,6 @@ mod reliable_copy_test {
         let shared_storage = SharedStorage::new();
         let server_storage = shared_storage.clone();
         server_node.launch(move |os| run_server(os, Box::new(server_storage)));
-
-        world.await_all();
 
         while world.step() && world.now() < options.time_limit {}
 

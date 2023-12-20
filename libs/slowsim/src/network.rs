@@ -2,19 +2,19 @@ use std::{
     collections::{VecDeque, BinaryHeap},
     fmt::{self, Debug},
     ops::DerefMut,
-    sync::{Arc, atomic::AtomicU64}, cmp::Ordering,
+    sync::{Arc, atomic::AtomicU64, mpsc}, cmp::Ordering,
 };
 
 use parking_lot::{Mutex, lock_api::{MutexGuard, MappedMutexGuard}, RawMutex};
 use rand::{rngs::StdRng, Rng};
 use tracing::debug;
 
-use crate::{chan::Chan2, world::NetEvent, executor::{self, ThreadContext}};
+use crate::{world::NetEvent, executor::{self, ThreadContext}};
 
 use super::{
     chan::Chan,
     proto::AnyMessage,
-    world::{Node, NodeEvent, World},
+    world::NodeEvent,
 };
 
 #[derive(Clone, Debug)]
@@ -63,22 +63,31 @@ pub struct NetworkOptions {
 
 pub struct NetworkTask {
     options: Arc<NetworkOptions>,
-    connection_counter: AtomicU64,
     connections: Mutex<Vec<VirtualConnection>>,
     events: Mutex<BinaryHeap<Event>>,
     task_context: Arc<ThreadContext>,
 }
 
 impl NetworkTask {
-    pub fn start_new() {
-        // TODO: 
+    pub fn start_new(options: Arc<NetworkOptions>, tx: mpsc::Sender<Arc<NetworkTask>>) {
+        let ctx = executor::get_thread_ctx();
+        let task = Arc::new(Self {
+            options,
+            connections: Mutex::new(Vec::new()),
+            events: Mutex::new(BinaryHeap::new()),
+            task_context: ctx,
+        });
+
+        // send the task upstream
+        tx.send(task.clone()).unwrap();
+
+        // start the task
+        task.start();
     }
 
     pub fn start_new_connection(self: &Arc<Self>, rng: StdRng, dst_accept: Chan<NodeEvent>) -> TCP {
         let now = executor::now();
-        
-        let events = self.events.lock();
-        let connection_id = events.len();
+        let connection_id = self.connections.lock().len();
 
         let vc = VirtualConnection {
             connection_id,
@@ -92,14 +101,14 @@ impl NetworkTask {
         vc.schedule_timeout(&self);
         vc.send_connect(&self);
 
-        let dst_sockets = vc.dst_sockets.clone();
-        events.push(vc);
+        let recv_chan = vc.dst_sockets[0].clone();
+        self.connections.lock().push(vc);
 
         TCP {
             net: self.clone(),
             conn_id: connection_id,
             dir: 0,
-            recv_chan: dst_sockets[0],
+            recv_chan,
         }
     }
 }
@@ -118,6 +127,36 @@ impl NetworkTask {
         MutexGuard::map(self.connections.lock(), |connections| {
             connections.get_mut(id).unwrap()
         })
+    }
+
+    fn collect_pending_events(&self, now: u64, vec: &mut Vec<Event>) {
+        vec.clear();
+        let mut events = self.events.lock();
+        while let Some(event) = events.peek() {
+            if event.time > now {
+                break;
+            }
+            let event = events.pop().unwrap();
+            vec.push(event);
+        }
+    }
+
+    fn start(self: &Arc<Self>) {
+        debug!("started network task");
+
+        let mut events = Vec::new();
+        loop {
+            let now = executor::now();
+            self.collect_pending_events(now, &mut events);
+
+            for event in events.drain(..) {
+                let conn = self.get(event.conn_id);
+                conn.process(self);
+            }
+
+            // block until wakeup
+            executor::yield_me(-1);
+        }
     }
 }
 
@@ -221,7 +260,7 @@ impl VirtualConnection {
                     if now - last_recv >= timeout {
                         debug!(
                             "NET: connection {} timed out at {}",
-                            self.connection_id, receiver_str(direction)
+                            self.connection_id, receiver_str(direction as MessageDirection)
                         );
                         let node_idx = direction ^ 1;
                         to_close[node_idx] = true;
@@ -273,7 +312,7 @@ impl VirtualConnection {
                 // special case, we need to deliver new connection to a separate channel
                 self.dst_accept.send(NodeEvent::Accept(server_to_client));
             } else {
-                to_socket.send(NodeEvent::Message(msg));
+                to_socket.send(NetEvent::Message(msg));
             }
         }
     }
@@ -412,7 +451,7 @@ impl TCP {
 
     /// Get a channel to receive incoming messages.
     pub fn recv_chan(&self) -> Chan<NetEvent> {
-        self.recv_chan
+        self.recv_chan.clone()
     }
 
     pub fn connection_id(&self) -> usize {

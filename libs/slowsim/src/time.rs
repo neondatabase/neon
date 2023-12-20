@@ -1,12 +1,11 @@
 use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, sync::{Arc, atomic::{AtomicU64, AtomicU32}}, ops::DerefMut};
 
 use parking_lot::Mutex;
+use tracing::{debug, trace};
 
 use crate::executor::ThreadContext;
 
-use super::{chan::Chan, network::VirtualConnection};
-
-pub(crate) struct Timing {
+pub struct Timing {
     /// Current world's time.
     current_time: AtomicU64,
     /// Pending timers.
@@ -22,7 +21,7 @@ impl Default for Timing {
 }
 
 impl Timing {
-    pub(crate) fn new() -> Timing {
+    pub fn new() -> Timing {
         Timing {
             current_time: AtomicU64::new(0),
             queue: Mutex::new(BinaryHeap::new()),
@@ -32,7 +31,7 @@ impl Timing {
 
     /// Return the current world's time.
     pub(crate) fn now(&self) -> u64 {
-        self.current_time
+        self.current_time.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Tick-tock the global clock. Return the event ready to be processed
@@ -48,17 +47,18 @@ impl Timing {
         if !self.is_event_ready(queue.deref_mut()) {
             let next_time = queue.peek().unwrap().time;
             self.current_time.store(next_time, std::sync::atomic::Ordering::SeqCst);
+            trace!("rewind time to {}", next_time);
             assert!(self.is_event_ready(queue.deref_mut()));
         }
 
-        self.queue.pop()
+        Some(queue.pop().unwrap().wake_context)
     }
 
-    pub(crate) fn schedule_wakeup(&mut self, ms: u64, wake_context: Arc<ThreadContext>) {
-        self.nonce += 1;
+    pub(crate) fn schedule_wakeup(&self, ms: u64, wake_context: Arc<ThreadContext>) {
+        self.nonce.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let nonce = self.nonce.load(std::sync::atomic::Ordering::SeqCst);
         self.queue.lock().push(Pending {
-            time: self.current_time + ms,
+            time: self.now() + ms,
             nonce,
             wake_context,
         })
@@ -68,11 +68,11 @@ impl Timing {
     fn is_event_ready(&self, queue: &mut BinaryHeap<Pending>) -> bool {
         queue
             .peek()
-            .map_or(false, |x| x.time <= self.current_time)
+            .map_or(false, |x| x.time <= self.now())
     }
 
     pub(crate) fn clear(&mut self) {
-        self.queue.clear();
+        self.queue.lock().clear();
     }
 }
 

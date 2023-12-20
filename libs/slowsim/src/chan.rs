@@ -1,16 +1,23 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::executor::{Waker, self, PollSome};
 
 // use super::sync::{Condvar, Mutex, Park};
 
 /// FIFO channel with blocking send and receive. Can be cloned and shared between threads.
-#[derive(Clone)]
-pub struct Chan<T: Clone> {
+pub struct Chan<T> {
     // shared: Arc<ChanState<T>>,
     shared: Arc<Chan2State<T>>,
+}
+
+impl<T> Clone for Chan<T> {
+    fn clone(&self) -> Self {
+        Chan {
+            shared: self.shared.clone(),
+        }
+    }
 }
 
 // struct ChanState<T> {
@@ -73,7 +80,7 @@ pub struct Chan<T: Clone> {
 //     }
 // }
 
-impl<T: Clone> Chan<T> {
+impl<T> Chan<T> {
     pub fn new() -> Chan<T> {
         Chan {
             shared: Arc::new(Chan2State {
@@ -90,6 +97,10 @@ impl<T: Clone> Chan<T> {
     pub fn must_recv(&self) -> T {
         self.shared.try_recv().expect("message should've been ready")
     }
+
+    pub fn send(&self, t: T) {
+        self.shared.send(t);
+    }
 }
 
 pub struct Chan2State<T> {
@@ -97,7 +108,7 @@ pub struct Chan2State<T> {
     waker: Waker,
 }
 
-impl<T: Clone> Chan2State<T> {
+impl<T> Chan2State<T> {
     pub fn send(&self, t: T) {
         self.queue.lock().push_back(t);
         self.waker.wake_all();
@@ -123,19 +134,21 @@ impl<T: Clone> Chan2State<T> {
             if let Some(t) = queue.pop_front() {
                 return t;
             }
-            executor::yield_me(-1);
+            MutexGuard::unlocked(&mut queue, || {
+                executor::yield_me(-1);
+            });
         }
     }
 }
 
-impl<T> PollSome for Chan2State<T> {
+impl<T> PollSome for Chan<T> {
     /// Schedules a wakeup for the current thread.
     fn wake_me(&self) {
-        self.waker.wake_me_later();
+        self.shared.waker.wake_me_later();
     }
 
     /// Checks if chan has any pending messages.
     fn has_some(&self) -> bool {
-        !self.queue.lock().is_empty()
+        !self.shared.queue.lock().is_empty()
     }
 }

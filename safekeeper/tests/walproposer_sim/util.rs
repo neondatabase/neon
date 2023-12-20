@@ -7,7 +7,7 @@ use slowsim::{
     proto::AnyMessage,
     time::EmptyEvent,
     world::World,
-    world::{Node, NodeEvent, SEvent},
+    world::{Node, NodeEvent, SEvent}, executor,
 };
 use tracing::{debug, info_span, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
@@ -126,7 +126,7 @@ impl Test {
         let ttid = self.ttid;
         let disk = DiskWalProposer::new();
         client_node.launch(move |os| {
-            let _enter = info_span!("sync", started = os.now()).entered();
+            let _enter = info_span!("sync", started = executor::now()).entered();
 
             os.log_event("started;walproposer;1".to_owned());
             let config = Config {
@@ -189,7 +189,7 @@ impl Test {
         let ttid = self.ttid;
         let wp_disk = disk.clone();
         client_node.launch(move |os| {
-            let _enter = info_span!("walproposer", started = os.now()).entered();
+            let _enter = info_span!("walproposer", started = executor::now()).entered();
 
             os.log_event("started;walproposer;0".to_owned());
             let config = Config {
