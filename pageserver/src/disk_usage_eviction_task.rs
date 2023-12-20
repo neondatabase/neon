@@ -746,9 +746,18 @@ async fn collect_eviction_candidates(
 
             // as we iterate this reverse sorted list, the most recently accessed layer will always
             // be 1.0; this is for us to evict it last.
-            let relative_last_activity =
+            let relative_last_activity = if matches!(
+                eviction_order,
+                EvictionOrder::RelativeAccessed { .. }
+            ) {
                 finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
-                    .expect("value out of range");
+                    .unwrap_or_else(|val| {
+                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={i}, total={total}: {val}");
+                        finite_f32::FiniteF32::ZERO
+                    })
+            } else {
+                finite_f32::FiniteF32::ZERO
+            };
 
             let candidate = EvictionCandidate {
                 timeline,
@@ -855,6 +864,8 @@ mod finite_f32 {
     }
 
     impl FiniteF32 {
+        pub const ZERO: FiniteF32 = FiniteF32(0.0);
+
         pub fn try_from_normalized(value: f32) -> Result<Self, f32> {
             if (0.0..=1.0).contains(&value) {
                 // -0.0 is within the range, make sure it is assumed 0.0..=1.0
