@@ -380,7 +380,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                     completed_at: Instant::now(),
                 })
                 .ok();
-        }.instrument(info_span!("secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
+        }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
         RunningDownload { barrier }
     }
 }
