@@ -104,7 +104,7 @@ pub enum EvictionOrder {
 
 impl EvictionOrder {
     /// Return true, if with [`Self::RelativeAccessed`] order the tenants with the highest layer
-    /// counts should lose their layers first.
+    /// counts should be the first ones to have their layers evicted.
     fn highest_layer_count_loses_first(&self) -> bool {
         match self {
             EvictionOrder::AbsoluteAccessed => false,
@@ -712,14 +712,24 @@ async fn collect_eviction_candidates(
 
         // keeping the -1 or not decides if every tenant should lose their least recently accessed
         // layer OR if this should happen in the order of having highest layer count:
-        //
-        // relative_age vs. tenant layer count without - 1:
-        // - 0.1..=1.0 (10 layers)
-        // - 0.01..=1.0 (100 layers)
-        // - 0.001..=1.0 (1000 layers)
         let fudge = if eviction_order.highest_layer_count_loses_first() {
+            // relative_age vs. tenant layer count:
+            // - 0.1..=1.0 (10 layers)
+            // - 0.01..=1.0 (100 layers)
+            // - 0.001..=1.0 (1000 layers)
+            //
+            // leading to evicting less of the smallest tenants.
             0
         } else {
+            // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
+            // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
+            // be that less than 10k layer evictions is enough, so we would not need to evict from
+            // all tenants.
+            //
+            // as the tenant ordering is now deterministic this could hit the same tenants
+            // disproportionetly on multiple invocations. alternative could be to remember how many
+            // layers did we evict last time from this tenant, and inject that as an additional
+            // fudge here.
             1
         };
 
@@ -734,6 +744,8 @@ async fn collect_eviction_candidates(
         for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
             let file_size = layer_info.file_size();
 
+            // as we iterate this reverse sorted list, the most recently accessed layer will always
+            // be 1.0; this is for us to evict it last.
             let relative_last_activity =
                 finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
                     .expect("value out of range");
