@@ -550,7 +550,6 @@ impl PageCache {
     // not require changes.
 
     async fn try_get_pinned_slot_permit(&self) -> anyhow::Result<PinnedSlotsPermit> {
-        let timer = crate::metrics::PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME.start_timer();
         match tokio::time::timeout(
             // Choose small timeout, neon_smgr does its own retries.
             // https://neondb.slack.com/archives/C04DGM6SMTM/p1694786876476869
@@ -563,7 +562,6 @@ impl PageCache {
                 res.expect("this semaphore is never closed"),
             )),
             Err(_timeout) => {
-                timer.stop_and_discard();
                 crate::metrics::page_cache_errors_inc(
                     crate::metrics::PageCacheErrorKind::AcquirePinnedSlotTimeout,
                 );
