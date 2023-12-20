@@ -4501,7 +4501,7 @@ impl<'a> TimelineWriter<'a> {
         self.tl.put_value(key, lsn, value, ctx).await
     }
 
-    pub async fn put_batch(
+    pub(crate) async fn put_batch(
         &self,
         batch: &HashMap<Key, Vec<(Lsn, Value)>>,
         ctx: &RequestContext,
@@ -4509,11 +4509,11 @@ impl<'a> TimelineWriter<'a> {
         self.tl.put_values(batch, ctx).await
     }
 
-    pub async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
+    pub(crate) async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
         self.tl.put_tombstone(key_range, lsn).await
     }
 
-    pub async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+    pub(crate) async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
         self.tl.put_tombstones(batch).await
     }
 
@@ -4525,11 +4525,11 @@ impl<'a> TimelineWriter<'a> {
     /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
-    pub fn finish_write(&self, new_lsn: Lsn) {
+    pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         self.tl.finish_write(new_lsn);
     }
 
-    pub fn update_current_logical_size(&self, delta: i64) {
+    pub(crate) fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
     }
 }

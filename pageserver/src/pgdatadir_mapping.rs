@@ -820,12 +820,12 @@ pub struct DatadirModification<'a> {
 
 impl<'a> DatadirModification<'a> {
     /// Get the current lsn
-    pub fn get_lsn(&self) -> Lsn {
+    pub(crate) fn get_lsn(&self) -> Lsn {
         self.lsn
     }
 
     /// Set the current lsn
-    pub fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
+    pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
         ensure!(
             lsn >= self.lsn,
             "setting an older lsn {} than {} is not allowed",

@@ -246,7 +246,7 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub async fn put_value(
+    pub(crate) async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
@@ -258,7 +258,7 @@ impl InMemoryLayer {
         self.put_value_locked(&mut inner, key, lsn, val, ctx).await
     }
 
-    pub async fn put_values(
+    pub(crate) async fn put_values(
         &self,
         values: &HashMap<Key, Vec<(Lsn, Value)>>,
         ctx: &RequestContext,
@@ -312,13 +312,13 @@ impl InMemoryLayer {
         Ok(())
     }
 
-    pub async fn put_tombstone(&self, _key_range: Range<Key>, _lsn: Lsn) -> Result<()> {
+    pub(crate) async fn put_tombstone(&self, _key_range: Range<Key>, _lsn: Lsn) -> Result<()> {
         // TODO: Currently, we just leak the storage for any deleted keys
 
         Ok(())
     }
 
-    pub async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
+    pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
         Ok(())
     }
 
