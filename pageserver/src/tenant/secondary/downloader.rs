@@ -268,9 +268,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let now = Instant::now();
         result.jobs = tenants
             .into_iter()
-            .filter_map(|c| {
+            .filter_map(|secondary_tenant| {
                 let (last_download, next_download) = {
-                    let mut detail = c.detail.lock().unwrap();
+                    let mut detail = secondary_tenant.detail.lock().unwrap();
 
                     if !detail.config.warm {
                         // Downloads are disabled for this tenant
@@ -292,7 +292,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
 
                 if now < next_download {
                     Some(PendingDownload {
-                        secondary_state: c,
+                        secondary_state: secondary_tenant,
                         last_download,
                         target_time: Some(next_download),
                         period: Some(DOWNLOAD_FRESHEN_INTERVAL),
