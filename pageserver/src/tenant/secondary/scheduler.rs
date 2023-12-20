@@ -18,6 +18,114 @@ use super::{CommandRequest, CommandResponse};
 const MAX_SCHEDULING_INTERVAL: Duration = Duration::from_secs(10);
 const MIN_SCHEDULING_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Scheduling helper for background work across many tenants.
+///
+/// Systems that need to run background work across many tenants may use this type
+/// to schedule jobs within a concurrency limit, along with their own [`JobGenerator`]
+/// implementation to provide the work to execute.  This is a simple scheduler that just
+/// polls the generator for outstanding work, replacing its queue of pending work with
+/// what the generator yields on each call: the job generator can change its mind about
+/// the order of jobs between calls.  The job generator is notified when jobs complete,
+/// and additionally may expose a command hook to generate jobs on-demand (e.g. to implement
+/// admin APIs).
+///
+/// For an example see [`crate::tenant::secondary::heatmap_uploader::HeatmapUploader`]
+///
+/// G: A JobGenerator that this scheduler will poll to find pending jobs
+/// PJ: 'Pending Job': type for job descriptors that are ready to run
+/// RJ: 'Running Job' type' for jobs that have been spawned
+/// C : 'Completion' type that spawned jobs will send when they finish
+/// CMD: 'Command' type that the job generator will accept to create jobs on-demand
+pub(super) struct TenantBackgroundJobs<G, PJ, RJ, C, CMD>
+where
+    C: TenantScoped,
+    PJ: TenantScoped,
+    RJ: HasBarrier,
+    G: JobGenerator<PJ, RJ, C, CMD>,
+{
+    generator: G,
+
+    /// Ready to run.  Will progress to `running` once concurrent limit is satisfied, or
+    /// be removed on next scheduling pass.
+    pending: std::collections::VecDeque<PJ>,
+
+    /// Tasks currently running in Self::tasks for these tenants.  Check this map
+    /// before pushing more work into pending for the same tenant.
+    running: HashMap<TenantShardId, RJ>,
+
+    tasks: JoinSet<()>,
+
+    /// Channel for our child tasks to send results to: we use a channel for results rather than
+    /// just getting task results via JoinSet because we need the channel's recv() "sleep until something
+    /// is available" semantic, rather than JoinSet::join_next()'s "sleep until next thing is available _or_ I'm empty"
+    /// behavior.
+    task_result_tx: tokio::sync::mpsc::UnboundedSender<C>,
+    task_result_rx: tokio::sync::mpsc::UnboundedReceiver<C>,
+
+    concurrency: usize,
+
+    /// How often we would like schedule_interval to be called.
+    pub(super) scheduling_interval: Duration,
+
+    _phantom: PhantomData<(PJ, RJ, C, CMD)>,
+}
+
+/// For types that logically belong to a particular tenant shard, and can
+/// provide its ID on demand.
+pub(super) trait TenantScoped {
+    fn get_tenant_shard_id(&self) -> &TenantShardId;
+}
+
+/// For types that contain a Barrier that may be waited on
+pub(super) trait HasBarrier {
+    fn get_barrier(&self) -> Barrier;
+}
+
+/// [`JobGenerator`] returns this to provide pending jobs, and hints about scheduling
+pub(super) struct SchedulingResult<PJ> {
+    pub(super) jobs: Vec<PJ>,
+    /// The job generator would like to be called again this soon
+    pub(super) want_interval: Option<Duration>,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait JobGenerator<PJ, RJ, C, CMD>
+where
+    C: TenantScoped,
+    PJ: TenantScoped,
+    RJ: HasBarrier,
+{
+    /// Called at each scheduling interval.  Return a list of jobs to run, most urgent first.
+    ///
+    /// This function may be expensive (e.g. walk all tenants), but should not do any I/O.
+    /// Implementations should take care to yield the executor periodically if running
+    /// very long loops.
+    ///
+    /// Yielding a job here does _not_ guarantee that it will run: if the queue of pending
+    /// jobs is not drained by the next scheduling interval, pending jobs will be cleared
+    /// and re-generated.
+    async fn schedule(&mut self) -> SchedulingResult<PJ>;
+
+    /// Called when a pending job is ready to be run.
+    /// //
+    /// The spawn operation _must_ spawn a task.  The task spawned _must_ send
+    /// its result to the provided result channel (including in error cases).
+    /// TODO: refactor so that implemeter can't violate these invariants.
+    fn spawn(
+        &mut self,
+        join_set: &mut JoinSet<()>,
+        result_tx: tokio::sync::mpsc::UnboundedSender<C>,
+        pending_job: PJ,
+    ) -> RJ;
+
+    /// Called when a job previously spawned with spawn() transmits its completion
+    fn on_completion(&mut self, completion: C);
+
+    /// Called when a command is received.  A job will be spawned immediately if the return
+    /// value is Some, ignoring concurrency limits and the pending queue.
+    fn on_command(&mut self, cmd: CMD) -> anyhow::Result<PJ>;
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(super) enum YieldingLoopError {
     #[error("Cancelled")]
@@ -51,106 +159,12 @@ where
     Ok(())
 }
 
-/// Scheduling helper for background work across many tenants.
-///
-/// PE: a 'PEnding' type for job descriptors that are ready to run
-/// PR: a 'Running' type for jobs that have been spawned
-/// C : a 'Completion' type that spawned jobs will send when they finish
-pub(super) struct TenantBackgroundJobs<G, PE, PR, C, CMD>
+impl<G, PJ, RJ, C, CMD> TenantBackgroundJobs<G, PJ, RJ, C, CMD>
 where
     C: TenantScoped,
-    PE: TenantScoped,
-    PR: HasBarrier,
-    G: JobGenerator<PE, PR, C, CMD>,
-{
-    generator: G,
-
-    /// Ready to run.  Will progress to `running` once concurrent limit is satisfied, or
-    /// be removed on next scheduling pass.
-    pending: std::collections::VecDeque<PE>,
-
-    /// Tasks currently running in Self::tasks for these tenants.  Check this map
-    /// before pushing more work into pending for the same tenant.
-    running: HashMap<TenantShardId, PR>,
-
-    tasks: JoinSet<()>,
-
-    /// Channel for our child tasks to send results to: we use a channel for results rather than
-    /// just getting task results via JoinSet because we need the channel's recv() "sleep until something
-    /// is available" semantic, rather than JoinSet::join_next()'s "sleep until next thing is available _or_ I'm empty"
-    /// behavior.
-    task_result_tx: tokio::sync::mpsc::UnboundedSender<C>,
-    task_result_rx: tokio::sync::mpsc::UnboundedReceiver<C>,
-
-    concurrency: usize,
-
-    /// How often we would like schedule_interval to be called.
-    pub(super) scheduling_interval: Duration,
-
-    _phantom: PhantomData<(PE, PR, C, CMD)>,
-}
-
-/// For types that logically belong to a particular tenant shard, and can
-/// provide its ID on demand.
-pub(super) trait TenantScoped {
-    fn get_tenant_shard_id(&self) -> &TenantShardId;
-}
-
-/// For types that contain a Barrier that may be waited on
-pub(super) trait HasBarrier {
-    fn get_barrier(&self) -> Barrier;
-}
-
-pub(super) struct SchedulingResult<PE> {
-    pub(super) jobs: Vec<PE>,
-    /// The job generator would like to be called again this soon
-    pub(super) want_interval: Option<Duration>,
-}
-
-#[async_trait::async_trait]
-pub(crate) trait JobGenerator<PE, PR, C, CMD>
-where
-    C: TenantScoped,
-    PE: TenantScoped,
-    PR: HasBarrier,
-{
-    /// Called at each scheduling interval.  Return a list of jobs to run, most urgent first.
-    ///
-    /// This function may be expensive (e.g. walk all tenants), but should not do any I/O.
-    /// Implementations should take care to yield the executor periodically if running
-    /// very long loops.
-    ///
-    /// Yielding a job here does _not_ guarantee that it will run: if the queue of pending
-    /// jobs is not drained by the next scheduling interval, pending jobs will be cleared
-    /// and re-generated.
-    async fn schedule(&mut self) -> SchedulingResult<PE>;
-
-    /// Called when a pending job is ready to be run.
-    /// //
-    /// The spawn operation _must_ spawn a task.  The task spawned _must_ send
-    /// its result to the provided result channel (including in error cases).
-    /// TODO: refactor so that implemeter can't violate these invariants.
-    fn spawn(
-        &mut self,
-        join_set: &mut JoinSet<()>,
-        result_tx: tokio::sync::mpsc::UnboundedSender<C>,
-        pending_job: PE,
-    ) -> PR;
-
-    /// Called when a job previously spawned with spawn() transmits its completion
-    fn on_completion(&mut self, completion: C);
-
-    /// Called when a command is received.  A job will be spawned immediately if the return
-    /// value is Some, ignoring concurrency limits and the pending queue.
-    fn on_command(&mut self, cmd: CMD) -> anyhow::Result<PE>;
-}
-
-impl<G, PE, PR, C, CMD> TenantBackgroundJobs<G, PE, PR, C, CMD>
-where
-    C: TenantScoped,
-    PE: TenantScoped,
-    PR: HasBarrier,
-    G: JobGenerator<PE, PR, C, CMD>,
+    PJ: TenantScoped,
+    RJ: HasBarrier,
+    G: JobGenerator<PJ, RJ, C, CMD>,
 {
     pub(super) fn new(generator: G, concurrency: usize) -> Self {
         let (task_result_tx, task_result_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -270,7 +284,7 @@ where
     }
 
     /// For administrative commands: skip the pending queue, ignore concurrency limits
-    fn spawn_now(&mut self, job: PE) -> &PR {
+    fn spawn_now(&mut self, job: PJ) -> &RJ {
         let tenant_shard_id = *job.get_tenant_shard_id();
         let in_progress = self
             .generator
