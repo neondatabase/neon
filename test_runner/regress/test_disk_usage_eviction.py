@@ -295,7 +295,6 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
 @pytest.mark.parametrize(
     "order",
     [EvictionOrder.ABSOLUTE_ORDER, EvictionOrder.RELATIVE_ORDER_EQUAL],
-    ids=["absolute", "relative"],
 )
 def test_pageserver_evicts_until_pressure_is_relieved(
     eviction_env: EvictionEnv, order: EvictionOrder
@@ -330,7 +329,6 @@ def test_pageserver_evicts_until_pressure_is_relieved(
 @pytest.mark.parametrize(
     "order",
     [EvictionOrder.ABSOLUTE_ORDER, EvictionOrder.RELATIVE_ORDER_EQUAL],
-    ids=["absolute", "relative"],
 )
 def test_pageserver_respects_overridden_resident_size(
     eviction_env: EvictionEnv, order: EvictionOrder
@@ -408,7 +406,6 @@ def test_pageserver_respects_overridden_resident_size(
 @pytest.mark.parametrize(
     "order",
     [EvictionOrder.ABSOLUTE_ORDER, EvictionOrder.RELATIVE_ORDER_EQUAL],
-    ids=["absolute", "relative"],
 )
 def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: EvictionOrder):
     """
@@ -443,7 +440,6 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: E
         EvictionOrder.RELATIVE_ORDER_EQUAL,
         EvictionOrder.RELATIVE_ORDER_SPARE,
     ],
-    ids=["absolute", "relative", "relative_spare"],
 )
 def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
     """
