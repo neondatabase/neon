@@ -770,7 +770,7 @@ impl DeltaLayerInner {
             .build();
 
         // Ok, 'offsets' now contains the offsets of all the entries we need to read
-        let cursor = file.block_cursor();
+        let cursor = file.block_cursor_direct();
         let mut buf = Vec::new();
         for (entry_lsn, pos) in offsets {
             cursor

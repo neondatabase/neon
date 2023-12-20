@@ -427,7 +427,7 @@ impl ImageLayerInner {
             .await?
         {
             let blob = file
-                .block_cursor()
+                .block_cursor_direct()
                 .read_blob(
                     offset,
                     &RequestContextBuilder::extend(ctx)

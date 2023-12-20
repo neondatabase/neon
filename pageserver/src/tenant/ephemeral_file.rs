@@ -266,6 +266,10 @@ impl BlockReader for EphemeralFile {
     fn block_cursor(&self) -> super::block_io::BlockCursor<'_> {
         BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
     }
+
+    fn block_cursor_direct(&self) -> super::block_io::BlockCursor<'_> {
+        BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
+    }
 }
 
 #[cfg(test)]
