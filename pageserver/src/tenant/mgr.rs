@@ -466,14 +466,17 @@ pub async fn init_tenant_mgr(
                 *gen
             } else {
                 match &location_conf.mode {
-                    LocationMode::Secondary(_) => {
+                    LocationMode::Secondary(secondary_config) => {
                         // We do not require the control plane's permission for secondary mode
                         // tenants, because they do no remote writes and hence require no
                         // generation number
                         info!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Loaded tenant in secondary mode");
                         tenants.insert(
                             tenant_shard_id,
-                            TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id)),
+                            TenantSlot::Secondary(SecondaryTenant::new(
+                                tenant_shard_id,
+                                secondary_config,
+                            )),
                         );
                     }
                     LocationMode::Attached(_) => {
@@ -892,10 +895,15 @@ impl TenantManager {
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
 
+        enum FastPathModified {
+            Attached(Arc<Tenant>),
+            Secondary(Arc<SecondaryTenant>),
+        }
+
         // Special case fast-path for updates to Tenant: if our upsert is only updating configuration,
         // then we do not need to set the slot to InProgress, we can just call into the
         // existng tenant.
-        let modify_tenant = {
+        let fast_path_taken = {
             let locked = self.tenants.read().unwrap();
             let peek_slot =
                 tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Write)?;
@@ -909,11 +917,18 @@ impl TenantManager {
                             new_location_config.clone(),
                         )?);
 
-                        Some(tenant.clone())
+                        Some(FastPathModified::Attached(tenant.clone()))
                     } else {
                         // Different generations, fall through to general case
                         None
                     }
+                }
+                (
+                    LocationMode::Secondary(secondary_conf),
+                    Some(TenantSlot::Secondary(secondary_tenant)),
+                ) => {
+                    secondary_tenant.set_config(secondary_conf);
+                    Some(FastPathModified::Secondary(secondary_tenant.clone()))
                 }
                 _ => {
                     // Not an Attached->Attached transition, fall through to general case
@@ -923,34 +938,46 @@ impl TenantManager {
         };
 
         // Fast-path continued: having dropped out of the self.tenants lock, do the async
-        // phase of waiting for flush, before returning.
-        if let Some(tenant) = modify_tenant {
-            // Transition to AttachedStale means we may well hold a valid generation
-            // still, and have been requested to go stale as part of a migration.  If
-            // the caller set `flush`, then flush to remote storage.
-            if let LocationMode::Attached(AttachedLocationConfig {
-                generation: _,
-                attach_mode: AttachmentMode::Stale,
-            }) = &new_location_config.mode
-            {
-                if let Some(flush_timeout) = flush {
-                    match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
-                        Ok(Err(e)) => {
-                            return Err(e);
-                        }
-                        Ok(Ok(_)) => return Ok(()),
-                        Err(_) => {
-                            tracing::warn!(
+        // phase of writing config and/or waiting for flush, before returning.
+        match fast_path_taken {
+            Some(FastPathModified::Attached(tenant)) => {
+                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+                    .await
+                    .map_err(SetNewTenantConfigError::Persist)?;
+
+                // Transition to AttachedStale means we may well hold a valid generation
+                // still, and have been requested to go stale as part of a migration.  If
+                // the caller set `flush`, then flush to remote storage.
+                if let LocationMode::Attached(AttachedLocationConfig {
+                    generation: _,
+                    attach_mode: AttachmentMode::Stale,
+                }) = &new_location_config.mode
+                {
+                    if let Some(flush_timeout) = flush {
+                        match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
+                            Ok(Err(e)) => {
+                                return Err(e);
+                            }
+                            Ok(Ok(_)) => return Ok(()),
+                            Err(_) => {
+                                tracing::warn!(
                                 timeout_ms = flush_timeout.as_millis(),
                                 "Timed out waiting for flush to remote storage, proceeding anyway."
                             )
+                            }
                         }
                     }
                 }
-            }
 
-            return Ok(());
-        }
+                return Ok(());
+            }
+            Some(FastPathModified::Secondary(_secondary_tenant)) => {
+                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+                    .await
+                    .map_err(SetNewTenantConfigError::Persist)?;
+            }
+            None => {}
+        };
 
         // General case for upserts to TenantsMap, excluding the case above: we will substitute an
         // InProgress value to the slot while we make whatever changes are required.  The state for
@@ -1006,7 +1033,7 @@ impl TenantManager {
         let timelines_path = self.conf.timelines_path(&tenant_shard_id);
 
         let new_slot = match &new_location_config.mode {
-            LocationMode::Secondary(_) => {
+            LocationMode::Secondary(secondary_config) => {
                 // Directory doesn't need to be fsync'd because if we crash it can
                 // safely be recreated next time this tenant location is configured.
                 tokio::fs::create_dir_all(&timelines_path)
@@ -1017,7 +1044,7 @@ impl TenantManager {
                     .await
                     .map_err(SetNewTenantConfigError::Persist)?;
 
-                TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id))
+                TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id, secondary_config))
             }
             LocationMode::Attached(_attach_config) => {
                 // Directory doesn't need to be fsync'd because we do not depend on

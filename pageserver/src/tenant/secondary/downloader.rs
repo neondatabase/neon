@@ -9,6 +9,7 @@ use crate::{
     config::PageServerConf,
     metrics::SECONDARY_MODE,
     tenant::{
+        config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
         remote_timeline_client::{index::LayerFileMetadata, HEATMAP_BASENAME},
         span::debug_assert_current_span_has_tenant_id,
@@ -49,9 +50,9 @@ use super::{
 /// calling it again.  This is approximately the time by which local data is allowed
 /// to fall behind remote data.
 ///
-/// TODO: this should be an upper bound, and tenants that are uploading regularly
-/// should adaptively freshen more often (e.g. a tenant writing 1 layer per second
-/// should not wait a minute between freshens)
+/// TODO: this should just be a default, and the actual period should be controlled
+/// via the heatmap itself
+/// (https://github.com/neondatabase/neon/issues/6200)
 const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
 
 #[derive(Debug, Clone)]
@@ -86,8 +87,10 @@ pub(super) struct SecondaryDetailTimeline {
 
 /// This state is written by the secondary downloader, it is opaque
 /// to TenantManager
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub(super) struct SecondaryDetail {
+    pub(super) config: SecondaryLocationConfig,
+
     last_download: Option<Instant>,
     next_download: Option<Instant>,
     pub(super) timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
@@ -100,6 +103,15 @@ fn strftime(t: &'_ SystemTime) -> DelayedFormat<StrftimeItems<'_>> {
 }
 
 impl SecondaryDetail {
+    pub(super) fn new(config: SecondaryLocationConfig) -> Self {
+        Self {
+            config,
+            last_download: None,
+            next_download: None,
+            timelines: HashMap::new(),
+        }
+    }
+
     pub(super) fn is_uninit(&self) -> bool {
         // FIXME: empty timelines is not synonymous with not initialized, as it is legal for
         // a tenant to exist with no timelines.
@@ -259,6 +271,13 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             .filter_map(|c| {
                 let (last_download, next_download) = {
                     let mut detail = c.detail.lock().unwrap();
+
+                    if !detail.config.warm {
+                        // Downloads are disabled for this tenant
+                        detail.next_download = None;
+                        return None;
+                    }
+
                     if detail.next_download.is_none() {
                         // Initialize with a jitter: this spreads initial downloads on startup
                         // or mass-attach across our freshen interval.
@@ -579,6 +598,7 @@ impl<'a> TenantDownloader<'a> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         // TODO: make download conditional on ETag having changed since last download
+        // (https://github.com/neondatabase/neon/issues/6199)
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);

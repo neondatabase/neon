@@ -18,6 +18,7 @@ use self::{
 };
 
 use super::{
+    config::SecondaryLocationConfig,
     mgr::TenantManager,
     storage_layer::{AsLayerDesc, Layer},
     timeline::DiskUsageEvictionInfo,
@@ -85,12 +86,13 @@ pub(crate) struct SecondaryTenant {
     pub(crate) gate: Gate,
 
     detail: std::sync::Mutex<SecondaryDetail>,
-    // TODO: propagate the `warm` from LocationConf into here, and respect it when doing downloads
 }
 
 impl SecondaryTenant {
-    pub(crate) fn new(tenant_shard_id: TenantShardId) -> Arc<Self> {
-        // TODO; consider whether we really need to Arc this
+    pub(crate) fn new(
+        tenant_shard_id: TenantShardId,
+        config: &SecondaryLocationConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             tenant_shard_id,
             // todo: shall we make this a descendent of the
@@ -100,7 +102,7 @@ impl SecondaryTenant {
             cancel: CancellationToken::new(),
             gate: Gate::new(format!("SecondaryTenant {tenant_shard_id}")),
 
-            detail: std::sync::Mutex::default(),
+            detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
         })
     }
 
@@ -109,6 +111,10 @@ impl SecondaryTenant {
 
         // Wait for any secondary downloader work to complete
         self.gate.close().await;
+    }
+
+    pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
+        self.detail.lock().unwrap().config = config.clone();
     }
 
     pub(crate) async fn get_layers_for_eviction(
