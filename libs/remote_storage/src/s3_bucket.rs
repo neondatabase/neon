@@ -633,18 +633,46 @@ impl RemoteStorage for S3Bucket {
         for version in list.versions() {
             let Some(last_modified) = version.last_modified else {
                 tracing::info!(
-                    "ignoring key {:?} version {:?} for S3 time travel recovery: no last_modified",
+                    "ignoring for S3 time travel recovery: no last modified. key={:?} version id={:?} ",
                     version.key,
                     version.version_id
                 );
                 continue;
             };
-            if last_modified >= timestamp {
+            if last_modified <= timestamp {
                 continue;
             }
             let (Some(version_id), Some(key)) = (&version.version_id, &version.key) else {
                 tracing::warn!(
                     "ListObjects for prefix {prefix:?} did not yield key or version_id: {version:?}"
+                );
+                continue;
+            };
+
+            oids.push(
+                ObjectIdentifier::builder()
+                    .set_key(Some(key.to_owned()))
+                    .set_version_id(Some(version_id.to_owned()))
+                    .build()?,
+            );
+        }
+
+        for delete_marker in list.delete_markers() {
+            let Some(last_modified) = delete_marker.last_modified else {
+                tracing::info!(
+                    "ignoring for S3 time travel recovery: no last modified. key={:?} version id={:?} ",
+                    delete_marker.key,
+                    delete_marker.version_id
+                );
+                continue;
+            };
+            if last_modified <= timestamp {
+                continue;
+            }
+            let (Some(version_id), Some(key)) = (&delete_marker.version_id, &delete_marker.key)
+            else {
+                tracing::warn!(
+                    "ListObjects for prefix {prefix:?} did not yield key or version_id: {delete_marker:?}"
                 );
                 continue;
             };
