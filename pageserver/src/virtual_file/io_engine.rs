@@ -78,7 +78,7 @@ impl IoEngineKind {
     {
         match self {
             IoEngineKind::StdFs => {
-                // SAFETY: `buf` doesn't get dropped until after the `std_file.read_at()` returns.
+                // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
                 let dst = unsafe {
                     std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
                 };
