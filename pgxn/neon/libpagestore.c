@@ -639,7 +639,6 @@ AssignPageserverConnstring(const char *newval, void *extra)
 			i += 1;
 		} while (sep != NULL);
 
-		Assert(i > 0);
 		if (shard_map_changed)
 		{
 			shard_map->n_shards = i;
