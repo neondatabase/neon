@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::{
+    heatmap::HeatMapLayer,
     scheduler::{HasBarrier, JobGenerator, SchedulingResult, TenantBackgroundJobs, TenantScoped},
     SecondaryTenant,
 };
@@ -357,111 +358,6 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                 }
         }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
-}
-
-/// Scan local storage and build up Layer objects based on the metadata in a HeatMapTimeline
-async fn init_timeline_state(
-    conf: &'static PageServerConf,
-    tenant_shard_id: &TenantShardId,
-    heatmap: &HeatMapTimeline,
-) -> SecondaryDetailTimeline {
-    let timeline_path = conf.timeline_path(tenant_shard_id, &heatmap.timeline_id);
-    let mut detail = SecondaryDetailTimeline::default();
-
-    let mut dir = match tokio::fs::read_dir(&timeline_path).await {
-        Ok(d) => d,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                let context = format!("Creating timeline directory {timeline_path}");
-                tracing::info!("{}", context);
-                tokio::fs::create_dir_all(&timeline_path)
-                    .await
-                    .fatal_err(&context);
-
-                // No entries to report: drop out.
-                return detail;
-            } else {
-                on_fatal_io_error(&e, &format!("Reading timeline dir {timeline_path}"));
-            }
-        }
-    };
-
-    let heatmap_metadata: HashMap<_, _> = heatmap.layers.iter().map(|l| (&l.name, l)).collect();
-
-    while let Some(dentry) = dir
-        .next_entry()
-        .await
-        .fatal_err(&format!("Listing {timeline_path}"))
-    {
-        let dentry_file_name = dentry.file_name();
-        let file_name = dentry_file_name.to_string_lossy();
-        let local_meta = dentry.metadata().await.fatal_err(&format!(
-            "Read metadata on {}",
-            dentry.path().to_string_lossy()
-        ));
-
-        // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
-        if file_name == METADATA_FILE_NAME {
-            continue;
-        }
-
-        match LayerFileName::from_str(&file_name) {
-            Ok(name) => {
-                let remote_meta = heatmap_metadata.get(&name);
-                match remote_meta {
-                    Some(remote_meta) => {
-                        // TODO: checksums for layers (https://github.com/neondatabase/neon/issues/2784)
-                        if local_meta.len() != remote_meta.metadata.file_size {
-                            // This should not happen, because we do crashsafe write-then-rename when downloading
-                            // layers, and layers in remote storage are immutable.  Remove the local file because
-                            // we cannot trust it.
-                            tracing::warn!(
-                                "Removing local layer {name} with unexpected local size {} != {}",
-                                local_meta.len(),
-                                remote_meta.metadata.file_size
-                            );
-                        } else {
-                            // We expect the access time to be initialized immediately afterwards, when
-                            // the latest heatmap is applied to the state.
-                            detail.on_disk_layers.insert(
-                                name.clone(),
-                                OnDiskState::new(
-                                    conf,
-                                    tenant_shard_id,
-                                    &heatmap.timeline_id,
-                                    name,
-                                    LayerFileMetadata::from(&remote_meta.metadata),
-                                    remote_meta.access_time,
-                                ),
-                            );
-                        }
-                    }
-                    None => {
-                        // FIXME: consider some optimization when transitioning from attached to secondary: maybe
-                        // wait until we have seen a heatmap that is more recent than the most recent on-disk state?  Otherwise
-                        // we will end up deleting any layers which were created+uploaded more recently than the heatmap.
-                        tracing::info!(
-                            "Removing secondary local layer {} because it's absent in heatmap",
-                            name
-                        );
-                        tokio::fs::remove_file(&dentry.path())
-                            .await
-                            .or_else(fs_ext::ignore_not_found)
-                            .fatal_err(&format!(
-                                "Removing layer {}",
-                                dentry.path().to_string_lossy()
-                            ));
-                    }
-                }
-            }
-            Err(_) => {
-                // Ignore it.
-                tracing::warn!("Unexpected file in timeline directory: {file_name}");
-            }
-        }
-    }
-
-    detail
 }
 
 /// This type is a convenience to group together the various functions involved in
@@ -803,4 +699,112 @@ impl<'a> TenantDownloader<'a> {
 
         Ok(())
     }
+}
+
+/// Scan local storage and build up Layer objects based on the metadata in a HeatMapTimeline
+async fn init_timeline_state(
+    conf: &'static PageServerConf,
+    tenant_shard_id: &TenantShardId,
+    heatmap: &HeatMapTimeline,
+) -> SecondaryDetailTimeline {
+    let timeline_path = conf.timeline_path(tenant_shard_id, &heatmap.timeline_id);
+    let mut detail = SecondaryDetailTimeline::default();
+
+    let mut dir = match tokio::fs::read_dir(&timeline_path).await {
+        Ok(d) => d,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                let context = format!("Creating timeline directory {timeline_path}");
+                tracing::info!("{}", context);
+                tokio::fs::create_dir_all(&timeline_path)
+                    .await
+                    .fatal_err(&context);
+
+                // No entries to report: drop out.
+                return detail;
+            } else {
+                on_fatal_io_error(&e, &format!("Reading timeline dir {timeline_path}"));
+            }
+        }
+    };
+
+    // As we iterate through layers found on disk, we will look up their metadata from this map.
+    // Layers not present in metadata will be discarded.
+    let heatmap_metadata: HashMap<&LayerFileName, &HeatMapLayer> =
+        heatmap.layers.iter().map(|l| (&l.name, l)).collect();
+
+    while let Some(dentry) = dir
+        .next_entry()
+        .await
+        .fatal_err(&format!("Listing {timeline_path}"))
+    {
+        let dentry_file_name = dentry.file_name();
+        let file_name = dentry_file_name.to_string_lossy();
+        let local_meta = dentry.metadata().await.fatal_err(&format!(
+            "Read metadata on {}",
+            dentry.path().to_string_lossy()
+        ));
+
+        // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
+        if file_name == METADATA_FILE_NAME {
+            continue;
+        }
+
+        match LayerFileName::from_str(&file_name) {
+            Ok(name) => {
+                let remote_meta = heatmap_metadata.get(&name);
+                match remote_meta {
+                    Some(remote_meta) => {
+                        // TODO: checksums for layers (https://github.com/neondatabase/neon/issues/2784)
+                        if local_meta.len() != remote_meta.metadata.file_size {
+                            // This should not happen, because we do crashsafe write-then-rename when downloading
+                            // layers, and layers in remote storage are immutable.  Remove the local file because
+                            // we cannot trust it.
+                            tracing::warn!(
+                                "Removing local layer {name} with unexpected local size {} != {}",
+                                local_meta.len(),
+                                remote_meta.metadata.file_size
+                            );
+                        } else {
+                            // We expect the access time to be initialized immediately afterwards, when
+                            // the latest heatmap is applied to the state.
+                            detail.on_disk_layers.insert(
+                                name.clone(),
+                                OnDiskState::new(
+                                    conf,
+                                    tenant_shard_id,
+                                    &heatmap.timeline_id,
+                                    name,
+                                    LayerFileMetadata::from(&remote_meta.metadata),
+                                    remote_meta.access_time,
+                                ),
+                            );
+                        }
+                    }
+                    None => {
+                        // FIXME: consider some optimization when transitioning from attached to secondary: maybe
+                        // wait until we have seen a heatmap that is more recent than the most recent on-disk state?  Otherwise
+                        // we will end up deleting any layers which were created+uploaded more recently than the heatmap.
+                        tracing::info!(
+                            "Removing secondary local layer {} because it's absent in heatmap",
+                            name
+                        );
+                        tokio::fs::remove_file(&dentry.path())
+                            .await
+                            .or_else(fs_ext::ignore_not_found)
+                            .fatal_err(&format!(
+                                "Removing layer {}",
+                                dentry.path().to_string_lossy()
+                            ));
+                    }
+                }
+            }
+            Err(_) => {
+                // Ignore it.
+                tracing::warn!("Unexpected file in timeline directory: {file_name}");
+            }
+        }
+    }
+
+    detail
 }
