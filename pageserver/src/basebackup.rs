@@ -229,7 +229,7 @@ where
                         "Replication slot {} restart LSN={}, invalidated={}",
                         path, restart_lsn, invalidated
                     );
-                    if invalidated != pg_constants::RS_INVAL_NONE {
+                    if invalidated == pg_constants::RS_INVAL_NONE {
                         min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
                     }
                 }
