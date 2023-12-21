@@ -366,6 +366,49 @@ impl MonotonicCounter<Lsn> for RecordLsn {
     }
 }
 
+/// Implements  [`rand::distributions::uniform::UniformSampler`] so we can sample [`Lsn`]s.
+///
+/// This is used by the `pagebench` pageserver benchmarking tool.
+pub struct LsnSampler(<u64 as rand::distributions::uniform::SampleUniform>::Sampler);
+
+impl rand::distributions::uniform::SampleUniform for Lsn {
+    type Sampler = LsnSampler;
+}
+
+impl rand::distributions::uniform::UniformSampler for LsnSampler {
+    type X = Lsn;
+
+    fn new<B1, B2>(low: B1, high: B2) -> Self
+    where
+        B1: rand::distributions::uniform::SampleBorrow<Self::X> + Sized,
+        B2: rand::distributions::uniform::SampleBorrow<Self::X> + Sized,
+    {
+        Self(
+            <u64 as rand::distributions::uniform::SampleUniform>::Sampler::new(
+                low.borrow().0,
+                high.borrow().0,
+            ),
+        )
+    }
+
+    fn new_inclusive<B1, B2>(low: B1, high: B2) -> Self
+    where
+        B1: rand::distributions::uniform::SampleBorrow<Self::X> + Sized,
+        B2: rand::distributions::uniform::SampleBorrow<Self::X> + Sized,
+    {
+        Self(
+            <u64 as rand::distributions::uniform::SampleUniform>::Sampler::new_inclusive(
+                low.borrow().0,
+                high.borrow().0,
+            ),
+        )
+    }
+
+    fn sample<R: rand::prelude::Rng + ?Sized>(&self, rng: &mut R) -> Self::X {
+        Lsn(self.0.sample(rng))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::bin_ser::BeSer;

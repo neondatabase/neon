@@ -1776,6 +1776,7 @@ pub fn is_inherited_key(key: Key) -> bool {
     key != AUX_FILES_KEY
 }
 
+/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
 pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
     Ok(match key.field1 {
         0x00 => (
@@ -1790,7 +1791,6 @@ pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
         _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
     })
 }
-
 pub fn is_rel_fsm_block_key(key: Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
 }
