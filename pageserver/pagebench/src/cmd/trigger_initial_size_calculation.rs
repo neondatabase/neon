@@ -4,8 +4,6 @@ use humantime::Duration;
 use tokio::task::JoinSet;
 use utils::id::TenantTimelineId;
 
-use crate::cli;
-
 #[derive(clap::Parser)]
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
@@ -43,9 +41,9 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     ));
 
     // discover targets
-    let timelines: Vec<TenantTimelineId> = cli::targets::discover(
+    let timelines: Vec<TenantTimelineId> = crate::util::cli::targets::discover(
         &mgmt_api_client,
-        cli::targets::Spec {
+        crate::util::cli::targets::Spec {
             limit_to_first_n_targets: args.limit_to_first_n_targets,
             targets: args.targets.clone(),
         },

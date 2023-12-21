@@ -21,8 +21,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::cli;
-
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
@@ -96,9 +94,9 @@ async fn main_impl(
     ));
 
     // discover targets
-    let timelines: Vec<TenantTimelineId> = cli::targets::discover(
+    let timelines: Vec<TenantTimelineId> = crate::util::cli::targets::discover(
         &mgmt_api_client,
-        cli::targets::Spec {
+        crate::util::cli::targets::Spec {
             limit_to_first_n_targets: args.limit_to_first_n_targets,
             targets: args.targets.clone(),
         },
