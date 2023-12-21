@@ -2184,11 +2184,6 @@ mod tests {
 
         let harness = TenantHarness::create("test_ingest_real_wal").unwrap();
         let (tenant, ctx) = harness.load().await;
-        let tenant_shard_id = tenant.tenant_shard_id();
-
-        // This instrumentation is needed to bootstrap the timeline
-        let span = tracing::info_span!(parent: None, "test_ingest_real_wal", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%TIMELINE_ID);
-        let _enter = span.enter();
 
         let remote_initdb_path = remote_initdb_archive_path(&tenant.tenant_id(), &TIMELINE_ID);
         let initdb_path = harness.remote_fs_dir.join(remote_initdb_path.get_path());
