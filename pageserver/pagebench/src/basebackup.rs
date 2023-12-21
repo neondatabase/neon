@@ -1,6 +1,7 @@
 use anyhow::Context;
 use pageserver_client::page_service::BasebackupRequest;
 
+use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
@@ -16,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::cli;
-use crate::util::tenant_timeline_id::TenantTimelineId;
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 

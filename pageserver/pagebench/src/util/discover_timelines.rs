@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use pageserver_client::mgmt_api;
 use tokio::task::JoinSet;
-use utils::id::TenantId;
-
-use super::tenant_timeline_id::TenantTimelineId;
+use utils::id::{TenantId, TenantTimelineId};
 
 pub(crate) async fn get_pageserver_tenant_timelines(
     api_client: &Arc<mgmt_api::Client>,

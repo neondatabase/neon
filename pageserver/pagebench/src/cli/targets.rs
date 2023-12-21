@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use pageserver_client::mgmt_api;
 use tracing::info;
+use utils::id::TenantTimelineId;
 
-use crate::util::{
-    discover_timelines::get_pageserver_tenant_timelines, tenant_timeline_id::TenantTimelineId,
-};
+use crate::util::discover_timelines::get_pageserver_tenant_timelines;
 
 pub(crate) struct Spec {
     pub(crate) limit_to_first_n_targets: Option<usize>,

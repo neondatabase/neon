@@ -5,6 +5,7 @@ use pageserver::repository;
 use pageserver_api::key::is_rel_block_key;
 use pageserver_client::page_service::RelTagBlockNo;
 
+use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use rand::prelude::*;
@@ -22,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use crate::cli;
 
-use crate::util::tenant_timeline_id::TenantTimelineId;
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
