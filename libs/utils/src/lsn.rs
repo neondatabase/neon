@@ -367,6 +367,8 @@ impl MonotonicCounter<Lsn> for RecordLsn {
 }
 
 /// Implements  [`rand::distributions::uniform::UniformSampler`] so we can sample [`Lsn`]s.
+///
+/// This is used by the `pagebench` pageserver benchmarking tool.
 pub struct LsnSampler(<u64 as rand::distributions::uniform::SampleUniform>::Sampler);
 
 impl rand::distributions::uniform::SampleUniform for Lsn {
