@@ -497,10 +497,7 @@ impl<'a> TenantDownloader<'a> {
                 let _size = tokio::io::copy(&mut body, &mut heatmap_bytes).await?;
                 Ok(heatmap_bytes)
             },
-            |e| match e {
-                UpdateError::NoData | UpdateError::Cancelled => true,
-                _ => false,
-            },
+            |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
             "download heatmap",
