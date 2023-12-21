@@ -475,7 +475,6 @@ impl<'a> TenantDownloader<'a> {
             return Ok(());
         };
 
-        debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         // Download the tenant's heatmap
         let heatmap_bytes = tokio::select!(
