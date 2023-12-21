@@ -51,7 +51,7 @@ RUN set -e \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
-ENV PROTOC_VERSION 22.2
+ENV PROTOC_VERSION 25.1
 RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
     && unzip -q protoc.zip -d protoc \
     && mv protoc/bin/protoc /usr/local/bin/protoc \
@@ -81,7 +81,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION v2.1.0
+ENV MOLD_VERSION v2.4.0
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
