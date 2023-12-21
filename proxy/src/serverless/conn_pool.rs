@@ -39,23 +39,6 @@ use tracing::{info, info_span, Instrument};
 
 pub const APP_NAME: &str = "/sql_over_http";
 
-impl Default for GlobalConnPoolOptions {
-    fn default() -> Self {
-        Self {
-            max_conns_per_endpoint: 20,
-            // every shard gets cleaned on average every 10 minutes.
-            // the gc sweep should be very short, but it reduces the times
-            // that the sweep can interfere with connecting users
-            gc_epoch: Duration::from_secs(600),
-            // more shards = less lock contention but potentially more memory usage
-            pool_shards: 128,
-            // 5 minutes matches how long most endpoints will stay idle for before shutting down.
-            // The difference here is that the endpoint might still be active, but has excess connections
-            idle_timeout: Duration::from_secs(300),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub username: SmolStr,
@@ -214,22 +197,23 @@ pub struct GlobalConnPool {
     global_pool_size: AtomicUsize,
 
     proxy_config: &'static crate::config::ProxyConfig,
-
-    options: GlobalConnPoolOptions,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct GlobalConnPoolOptions {
     // Maximum number of connections per one endpoint.
     // Can mix different (dbname, username) connections.
     // When running out of free slots for a particular endpoint,
     // falls back to opening a new connection for each request.
-    max_conns_per_endpoint: usize,
+    pub max_conns_per_endpoint: usize,
 
-    gc_epoch: Duration,
+    pub gc_epoch: Duration,
 
-    pool_shards: usize,
+    pub pool_shards: usize,
 
-    idle_timeout: Duration,
+    pub idle_timeout: Duration,
+
+    pub opt_in: bool,
 }
 
 pub static GC_LATENCY: Lazy<Histogram> = Lazy::new(|| {
@@ -253,14 +237,11 @@ pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
 });
 
 impl GlobalConnPool {
-    pub fn new(
-        config: &'static crate::config::ProxyConfig,
-        options: GlobalConnPoolOptions,
-    ) -> Arc<Self> {
+    pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
+        let shards = config.http_config.pool_options.pool_shards;
         Arc::new(Self {
-            global_pool: DashMap::with_shard_amount(options.pool_shards),
+            global_pool: DashMap::with_shard_amount(shards),
             global_pool_size: AtomicUsize::new(0),
-            options,
             proxy_config: config,
         })
     }
@@ -271,8 +252,8 @@ impl GlobalConnPool {
     }
 
     pub async fn gc_worker(&self, mut rng: impl Rng) {
-        let mut interval =
-            tokio::time::interval(self.options.gc_epoch / (self.global_pool.shards().len()) as u32);
+        let epoch = self.proxy_config.http_config.pool_options.gc_epoch;
+        let mut interval = tokio::time::interval(epoch / (self.global_pool.shards().len()) as u32);
         loop {
             interval.tick().await;
 
@@ -385,7 +366,6 @@ impl GlobalConnPool {
                     latency_timer,
                     peer_addr,
                     endpoint_pool.clone(),
-                    self.options.idle_timeout,
                 )
                 .await
             } else {
@@ -410,7 +390,6 @@ impl GlobalConnPool {
                 latency_timer,
                 peer_addr,
                 endpoint_pool.clone(),
-                self.options.idle_timeout,
             )
             .await
         };
@@ -467,7 +446,11 @@ impl GlobalConnPool {
         let new_pool = Arc::new(RwLock::new(EndpointConnPool {
             pools: HashMap::new(),
             total_conns: 0,
-            max_conns: self.options.max_conns_per_endpoint,
+            max_conns: self
+                .proxy_config
+                .http_config
+                .pool_options
+                .max_conns_per_endpoint,
             _guard: ENDPOINT_POOLS.guard(),
         }));
 
@@ -535,7 +518,6 @@ impl ConnectMechanism for TokioMechanism<'_> {
 // we reuse the code from the usual proxy and we need to prepare few structures
 // that this code expects.
 #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
-#[allow(clippy::too_many_arguments)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
@@ -544,7 +526,6 @@ async fn connect_to_compute(
     latency_timer: LatencyTimer,
     peer_addr: IpAddr,
     pool: Weak<RwLock<EndpointConnPool>>,
-    idle: Duration,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -590,7 +571,7 @@ async fn connect_to_compute(
             conn_info,
             session_id,
             pool,
-            idle,
+            idle: config.http_config.pool_options.idle_timeout,
         },
         node_info,
         &extra,

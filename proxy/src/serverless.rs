@@ -6,6 +6,8 @@ mod conn_pool;
 mod sql_over_http;
 mod websocket;
 
+pub use conn_pool::GlobalConnPoolOptions;
+
 use anyhow::bail;
 use hyper::StatusCode;
 use metrics::IntCounterPairGuard;
@@ -47,8 +49,7 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
-    let conn_pool_options = conn_pool::GlobalConnPoolOptions::default();
-    let conn_pool = conn_pool::GlobalConnPool::new(config, conn_pool_options);
+    let conn_pool = conn_pool::GlobalConnPool::new(config);
 
     let conn_pool2 = Arc::clone(&conn_pool);
     tokio::spawn(async move {
