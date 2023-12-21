@@ -36,8 +36,6 @@ use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
-const MAX_SLOT_WAL_KEEP_SIZE: u64 = 1 * 1024 * 1024 * 1024; // 1GB
-
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
@@ -225,9 +223,7 @@ where
                         content[offs..offs + 8].try_into().unwrap(),
                     ));
                     info!("Replication slot {} restart LSN={}", path, restart_lsn);
-                    if restart_lsn + MAX_SLOT_WAL_KEEP_SIZE > self.lsn {
-                        min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
-                    }
+                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
                 }
                 let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar
