@@ -482,6 +482,7 @@ class NeonEnvBuilder:
         initial_tenant_conf: Optional[Dict[str, str]] = None,
         default_remote_storage_if_missing: bool = True,
         initial_tenant_shard_count: Optional[int] = None,
+        initial_tenant_shard_stripe_size: Optional[int] = None,
     ) -> NeonEnv:
         """
         Default way to create and start NeonEnv. Also creates the initial_tenant with root initial_timeline.
@@ -503,6 +504,7 @@ class NeonEnvBuilder:
             conf=initial_tenant_conf,
             timeline_id=env.initial_timeline,
             shard_count=initial_tenant_shard_count,
+            shard_stripe_size=initial_tenant_shard_stripe_size,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1199,6 +1201,7 @@ class NeonCli(AbstractNeonCli):
         timeline_id: Optional[TimelineId] = None,
         conf: Optional[Dict[str, str]] = None,
         shard_count: Optional[int] = None,
+        shard_stripe_size: Optional[int] = None,
         set_default: bool = False,
     ) -> Tuple[TenantId, TimelineId]:
         """
@@ -1228,6 +1231,9 @@ class NeonCli(AbstractNeonCli):
 
         if shard_count is not None:
             args.extend(["--shard-count", str(shard_count)])
+
+        if shard_stripe_size is not None:
+            args.extend(["--shard-stripe-size", str(shard_stripe_size)])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -1548,6 +1554,19 @@ class NeonCli(AbstractNeonCli):
         ]
 
         return self.raw_cli(args, check_return_code=True)
+
+    def tenant_migrate(
+        self, tenant_shard_id: TenantShardId, new_pageserver: int, timeout_secs: Optional[int]
+    ):
+        args = [
+            "tenant",
+            "migrate",
+            "--tenant-id",
+            str(tenant_shard_id),
+            "--id",
+            str(new_pageserver),
+        ]
+        return self.raw_cli(args, check_return_code=True, timeout=timeout_secs)
 
     def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
         return self.raw_cli(["start"], check_return_code=check_return_code)
@@ -3229,7 +3248,7 @@ def pytest_addoption(parser: Parser):
 
 
 SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"config|config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql)"
+    r"config|config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
 

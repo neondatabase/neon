@@ -469,7 +469,7 @@ class PageserverHttpClient(requests.Session):
         assert res_json is None
 
     def timeline_gc(
-        self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
+        self, tenant_id: TenantShardId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
         """
         Unlike most handlers, this will wait for the layers to be actually
