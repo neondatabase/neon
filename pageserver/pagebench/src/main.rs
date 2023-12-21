@@ -1,9 +1,19 @@
 use clap::Parser;
 use utils::logging;
 
-pub(crate) mod cli;
-pub(crate) mod util;
+// libraries
+mod cli {
+    pub(crate) mod targets;
+}
+mod util {
+    pub(crate) mod connstring;
+    pub(crate) mod discover_timelines;
+    pub(crate) mod request_stats;
+    #[macro_use]
+    pub(crate) mod tokio_thread_local_stats;
+}
 
+// sub commands
 mod basebackup;
 mod getpage_latest_lsn;
 mod trigger_initial_size_calculation;
