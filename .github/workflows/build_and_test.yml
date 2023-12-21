@@ -345,7 +345,7 @@ jobs:
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
