@@ -4,8 +4,6 @@ use pageserver_client::mgmt_api;
 use tracing::info;
 use utils::id::TenantTimelineId;
 
-use crate::util::discover_timelines::get_pageserver_tenant_timelines;
-
 pub(crate) struct Spec {
     pub(crate) limit_to_first_n_targets: Option<usize>,
     pub(crate) targets: Option<Vec<TenantTimelineId>>,
@@ -18,7 +16,7 @@ pub(crate) async fn discover(
     let mut timelines = if let Some(targets) = spec.targets {
         targets
     } else {
-        get_pageserver_tenant_timelines(api_client).await?
+        mgmt_api::util::get_pageserver_tenant_timelines_unsharded(api_client).await?
     };
 
     if let Some(limit) = spec.limit_to_first_n_targets {

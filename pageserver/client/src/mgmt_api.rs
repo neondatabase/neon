@@ -5,6 +5,8 @@ use utils::{
     id::{TenantId, TimelineId},
 };
 
+pub mod util;
+
 #[derive(Debug)]
 pub struct Client {
     mgmt_api_endpoint: String,

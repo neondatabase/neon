@@ -1,11 +1,17 @@
+//! Helpers to do common higher-level tasks with the [`Client`].
+
 use std::sync::Arc;
 
-use pageserver_client::mgmt_api;
 use tokio::task::JoinSet;
 use utils::id::{TenantId, TenantTimelineId};
 
-pub(crate) async fn get_pageserver_tenant_timelines(
-    api_client: &Arc<mgmt_api::Client>,
+use super::Client;
+
+/// Retrieve a list of all of the pageserver's timelines.
+///
+/// Fails if there are sharded tenants present on the pageserver.
+pub async fn get_pageserver_tenant_timelines_unsharded(
+    api_client: &Arc<Client>,
 ) -> anyhow::Result<Vec<TenantTimelineId>> {
     let mut timelines: Vec<TenantTimelineId> = Vec::new();
     let mut tenants: Vec<TenantId> = Vec::new();
