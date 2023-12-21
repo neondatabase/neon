@@ -5,7 +5,7 @@ pub mod neon;
 use super::messages::MetricsAuxInfo;
 use crate::{
     auth::backend::ComputeUserInfo,
-    cache::{project_info::ProjectInfoCache, Cached, TimedLru},
+    cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
     scram,
@@ -254,8 +254,8 @@ pub struct NodeInfo {
 
 pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
-pub type CachedRoleSecret = Cached<&'static ProjectInfoCache, AuthSecret>;
-pub type CachedAllowedIps = Cached<&'static ProjectInfoCache, Arc<Vec<SmolStr>>>;
+pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, AuthSecret>;
+pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolStr>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
@@ -287,7 +287,7 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
-    pub project_info: Arc<ProjectInfoCache>,
+    pub project_info: Arc<ProjectInfoCacheImpl>,
 }
 
 impl ApiCaches {
@@ -302,7 +302,7 @@ impl ApiCaches {
                 wake_compute_cache_config.ttl,
                 true,
             ),
-            project_info: Arc::new(ProjectInfoCache::new(project_info_cache_config)),
+            project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
         }
     }
 }

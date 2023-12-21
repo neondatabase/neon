@@ -16,10 +16,6 @@ pub trait Cache {
     /// Invalidate an entry using a lookup info.
     /// We don't have an empty default impl because it's error-prone.
     fn invalidate(&self, _: &Self::LookupInfo<Self::Key>);
-    /// Expire  TTL for this cache.
-    fn enable_ttl(&self);
-    /// Disable TTL for this cache.
-    fn disable_ttl(&self);
 }
 
 impl<C: Cache> Cache for &C {
@@ -29,14 +25,6 @@ impl<C: Cache> Cache for &C {
 
     fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
         C::invalidate(self, info)
-    }
-
-    fn enable_ttl(&self) {
-        C::enable_ttl(self)
-    }
-
-    fn disable_ttl(&self) {
-        C::enable_ttl(self)
     }
 }
 

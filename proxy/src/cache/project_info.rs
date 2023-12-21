@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
@@ -13,6 +13,13 @@ use tracing::{debug, info};
 use crate::{config::ProjectInfoCacheOptions, console::AuthSecret};
 
 use super::{Cache, Cached};
+
+pub trait ProjectInfoCache {
+    fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr);
+    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, user: &SmolStr);
+    fn enable_ttl(&self);
+    fn disable_ttl(&self);
+}
 
 struct Entry<T> {
     created_at: Instant,
@@ -78,6 +85,12 @@ impl EndpointInfo {
         }
         None
     }
+    pub fn invalidate_allowed_ips(&mut self) {
+        self.allowed_ips = None;
+    }
+    pub fn invalidate_role_secret(&mut self, user: &SmolStr) {
+        self.secret.remove(user);
+    }
 }
 
 /// Cache for project info.
@@ -87,19 +100,49 @@ impl EndpointInfo {
 /// We also store endpoint-to-project mapping in the cache, to be able to access per-endpoint data.
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
-pub struct ProjectInfoCache {
-    cache: DashMap<SmolStr, HashMap<SmolStr, EndpointInfo>>,
+pub struct ProjectInfoCacheImpl {
+    cache: DashMap<SmolStr, EndpointInfo>,
 
-    ep2project: DashMap<SmolStr, SmolStr>,
+    project2ep: DashMap<SmolStr, HashSet<SmolStr>>,
     config: ProjectInfoCacheOptions,
     ttl_enabled: AtomicBool,
 }
 
-impl ProjectInfoCache {
+impl ProjectInfoCache for ProjectInfoCacheImpl {
+    fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr) {
+        if let Some(endpoints) = self.project2ep.get(project_id) {
+            for endpoint_id in endpoints.value() {
+                if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
+                    endpoint_info.invalidate_allowed_ips();
+                }
+            }
+        }
+    }
+    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, user: &SmolStr) {
+        if let Some(endpoints) = self.project2ep.get(project_id) {
+            for endpoint_id in endpoints.value() {
+                if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
+                    endpoint_info.invalidate_role_secret(user);
+                }
+            }
+        }
+    }
+    fn enable_ttl(&self) {
+        self.ttl_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn disable_ttl(&self) {
+        self.ttl_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl ProjectInfoCacheImpl {
     pub fn new(config: ProjectInfoCacheOptions) -> Self {
         Self {
             cache: DashMap::new(),
-            ep2project: DashMap::new(),
+            project2ep: DashMap::new(),
             config,
             ttl_enabled: true.into(),
         }
@@ -107,137 +150,102 @@ impl ProjectInfoCache {
 
     pub fn get_role_secret(
         &self,
-        endpoint: &SmolStr,
-        user: &SmolStr,
-    ) -> Option<Cached<&Self, AuthSecret>> {
-        if let Some(project) = self.ep2project.get(endpoint) {
-            self.get_role_secret_internal(&project, endpoint, user)
-        } else {
-            None
-        }
-    }
-    pub fn get_allowed_ips(&self, endpoint: &str) -> Option<Cached<&Self, Arc<Vec<SmolStr>>>> {
-        if let Some(project) = self.ep2project.get(endpoint) {
-            self.get_allowed_ips_internal(&project, &endpoint.into())
-        } else {
-            None
-        }
-    }
-
-    fn invalidate_role_secret(&self, project: &SmolStr, user: &SmolStr) {
-        if let Some(mut endpoints) = self.cache.get_mut(project) {
-            for (_, endpoint_info) in endpoints.iter_mut() {
-                endpoint_info.secret.remove(user);
-            }
-        }
-    }
-    fn get_role_secret_internal(
-        &self,
-        project: &SmolStr,
-        endpoint: &SmolStr,
+        endpoint_id: &SmolStr,
         user: &SmolStr,
     ) -> Option<Cached<&Self, AuthSecret>> {
         let ttl = self.get_ttl();
-        if let Some(endpoints) = self.cache.get(project) {
-            if let Some(endpoint_info) = endpoints.get(endpoint) {
-                let value = endpoint_info.get_role_secret(user, ttl);
-                if let Some(value) = value {
-                    if ttl.is_some() {
-                        let cached = Cached {
-                            token: Some((
-                                self,
-                                LookupInfo::new_role_secret(project.clone(), user.clone()),
-                            )),
-                            value,
-                        };
-                        return Some(cached);
-                    }
-                    return Some(Cached::new_uncached(value));
+        if let Some(endpoint_info) = self.cache.get(endpoint_id) {
+            let value = endpoint_info.get_role_secret(user, ttl);
+            if let Some(value) = value {
+                if ttl.is_some() {
+                    let cached = Cached {
+                        token: Some((
+                            self,
+                            CachedLookupInfo::new_role_secret(endpoint_id.clone(), user.clone()),
+                        )),
+                        value,
+                    };
+                    return Some(cached);
                 }
-                return None;
+                return Some(Cached::new_uncached(value));
             }
+            None
+        } else {
+            None
         }
-        None
+    }
+    pub fn get_allowed_ips(
+        &self,
+        endpoint_id: &SmolStr,
+    ) -> Option<Cached<&Self, Arc<Vec<SmolStr>>>> {
+        let ttl = self.get_ttl();
+        if let Some(endpoint_info) = self.cache.get(endpoint_id) {
+            let value = endpoint_info.get_allowed_ips(ttl);
+            if let Some(value) = value {
+                if ttl.is_some() {
+                    let cached = Cached {
+                        token: Some((self, CachedLookupInfo::new_allowed_ips(endpoint_id.clone()))),
+                        value,
+                    };
+                    return Some(cached);
+                }
+                return Some(Cached::new_uncached(value));
+            }
+            None
+        } else {
+            None
+        }
     }
     pub fn insert_role_secret(
         &self,
-        project: &SmolStr,
-        endpoint: &SmolStr,
+        project_id: &SmolStr,
+        endpoint_id: &SmolStr,
         user: &SmolStr,
         secret: AuthSecret,
     ) {
-        if self.ep2project.len() >= self.config.size {
+        if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
-        self.ep2project.insert(endpoint.clone(), project.clone());
-        if let Some(mut endpoints) = self.cache.get_mut(project) {
-            if let Some(endpoint_info) = endpoints.get_mut(endpoint) {
-                if endpoint_info.secret.len() < self.config.max_roles {
-                    endpoint_info.secret.insert(user.clone(), secret.into());
-                }
+        self.inser_project2endpoint(project_id, endpoint_id);
+        if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
+            if endpoint_info.secret.len() < self.config.max_roles {
+                endpoint_info.secret.insert(user.clone(), secret.into());
             }
         } else {
             let mut endpoints = HashMap::new();
             endpoints.insert(
-                endpoint.clone(),
+                endpoint_id.clone(),
                 EndpointInfo::new_with_secret(user.clone(), secret),
             );
-            self.cache.insert(project.clone(), endpoints);
         }
-    }
-    fn invalidate_allowed_ips(&self, project: &SmolStr) {
-        if let Some(mut endpoints) = self.cache.get_mut(project) {
-            for (_, endpoint_info) in endpoints.iter_mut() {
-                endpoint_info.allowed_ips = None;
-            }
-        }
-    }
-    fn get_allowed_ips_internal(
-        &self,
-        project: &SmolStr,
-        endpoint: &SmolStr,
-    ) -> Option<Cached<&Self, Arc<Vec<SmolStr>>>> {
-        let ttl = self.get_ttl();
-        if let Some(endpoints) = self.cache.get(project) {
-            if let Some(endpoint_info) = endpoints.get(endpoint) {
-                let val = endpoint_info.get_allowed_ips(ttl);
-                if let Some(value) = val {
-                    if ttl.is_some() {
-                        let cached = Cached {
-                            token: Some((self, LookupInfo::new_allowed_ips(project.clone()))),
-                            value,
-                        };
-                        return Some(cached);
-                    }
-                    return Some(Cached::new_uncached(value));
-                }
-            }
-        }
-        None
     }
     pub fn insert_allowed_ips(
         &self,
-        project: &SmolStr,
-        endpoint: &str,
+        project_id: &SmolStr,
+        endpoint_id: &SmolStr,
         allowed_ips: Arc<Vec<SmolStr>>,
     ) {
-        if self.ep2project.len() >= self.config.size {
+        if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
-        self.ep2project.insert(endpoint.into(), project.clone());
-        if let Some(mut endpoints) = self.cache.get_mut(project) {
-            if let Some(endpoint_info) = endpoints.get_mut(endpoint) {
-                endpoint_info.allowed_ips = Some(allowed_ips.into());
-            }
+        self.inser_project2endpoint(project_id, endpoint_id);
+        if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
+            endpoint_info.allowed_ips = Some(allowed_ips.into());
         } else {
-            let mut endpoints = HashMap::new();
-            endpoints.insert(
-                endpoint.into(),
+            self.cache.insert(
+                endpoint_id.clone(),
                 EndpointInfo::new_with_allowed_ips(allowed_ips),
             );
-            self.cache.insert(project.clone(), endpoints);
+        }
+    }
+    fn inser_project2endpoint(&self, project_id: &SmolStr, endpoint_id: &SmolStr) {
+        if let Some(mut endpoints) = self.project2ep.get_mut(project_id) {
+            endpoints.insert(endpoint_id.clone());
+        } else {
+            self.project2ep
+                .insert(project_id.clone(), HashSet::from([endpoint_id.clone()]));
         }
     }
     fn get_ttl(&self) -> Option<Duration> {
@@ -258,45 +266,46 @@ impl ProjectInfoCache {
     }
 
     fn gc(&self) {
-        if self.ep2project.len() < self.config.size {
+        if self.cache.len() >= self.config.size {
+            // If there are too many entries, wait until the next gc cycle.
             return;
         }
-        let shard = thread_rng().gen_range(0..self.cache.shards().len());
+        let shard = thread_rng().gen_range(0..self.project2ep.shards().len());
         debug!(shard, "project_info_cache: performing epoch reclamation");
 
         // acquire a random shard lock
-        let mut all_endpoints = vec![];
-        let shard = self.cache.shards()[shard].write();
+        let mut removed = 0;
+        let shard = self.project2ep.shards()[shard].write();
         for (_, endpoints) in shard.iter() {
-            all_endpoints.extend(endpoints.get().keys().cloned());
+            for endpoint in endpoints.get().iter() {
+                self.cache.remove(endpoint);
+                removed += 1;
+            }
         }
+        // We can drop this shard only after making sure that all endpoints are removed.
         drop(shard);
-        let removed = all_endpoints.len();
-        for endpoint in all_endpoints {
-            self.ep2project.remove(&endpoint);
-        }
         info!("project_info_cache: removed {removed} endpoints");
     }
 }
 
 /// Lookup info for project info cache.
 /// This is used to invalidate cache entries.
-pub struct LookupInfo {
+pub struct CachedLookupInfo {
     /// Search by this key.
-    project: SmolStr,
+    endpoint_id: SmolStr,
     lookup_type: LookupType,
 }
 
-impl LookupInfo {
-    pub fn new_role_secret(project: SmolStr, user: SmolStr) -> Self {
+impl CachedLookupInfo {
+    pub(self) fn new_role_secret(endpoint_id: SmolStr, user: SmolStr) -> Self {
         Self {
-            project,
+            endpoint_id,
             lookup_type: LookupType::RoleSecret(user),
         }
     }
-    pub fn new_allowed_ips(project: SmolStr) -> Self {
+    pub(self) fn new_allowed_ips(endpoint_id: SmolStr) -> Self {
         Self {
-            project,
+            endpoint_id,
             lookup_type: LookupType::AllowedIps,
         }
     }
@@ -307,32 +316,26 @@ enum LookupType {
     AllowedIps,
 }
 
-impl Cache for ProjectInfoCache {
+impl Cache for ProjectInfoCacheImpl {
     type Key = SmolStr;
     // Value is not really used here, but we need to specify it.
     type Value = SmolStr;
 
-    type LookupInfo<Key> = LookupInfo;
+    type LookupInfo<Key> = CachedLookupInfo;
 
     fn invalidate(&self, key: &Self::LookupInfo<SmolStr>) {
         match &key.lookup_type {
             LookupType::RoleSecret(user) => {
-                self.invalidate_role_secret(&key.project, user);
+                if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
+                    endpoint_info.invalidate_role_secret(user);
+                }
             }
             LookupType::AllowedIps => {
-                self.invalidate_allowed_ips(&key.project);
+                if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
+                    endpoint_info.invalidate_allowed_ips();
+                }
             }
         }
-    }
-
-    fn enable_ttl(&self) {
-        self.ttl_enabled
-            .store(true, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn disable_ttl(&self) {
-        self.ttl_enabled
-            .store(false, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -345,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_project_info_cache_settings() {
-        let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
+        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_secs(1),
@@ -389,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_project_info_cache_invalidations() {
-        let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
+        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_secs(1),
@@ -423,7 +426,10 @@ mod tests {
         assert_eq!(cached.value, secret2);
 
         // The only way to invalidate this value is to invalidate via the api.
-        cache.invalidate(&LookupInfo::new_role_secret(project.clone(), user2.clone()));
+        cache.invalidate(&CachedLookupInfo::new_role_secret(
+            project.clone(),
+            user2.clone(),
+        ));
         assert!(cache.get_role_secret(&endpoint, &user2).is_none());
 
         let cached = cache.get_allowed_ips(&endpoint).unwrap();

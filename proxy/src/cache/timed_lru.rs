@@ -60,12 +60,6 @@ impl<K: Hash + Eq, V> Cache for TimedLru<K, V> {
     fn invalidate(&self, info: &Self::LookupInfo<K>) {
         self.invalidate_raw(info)
     }
-    /// This cache always has TTL enabled.
-    fn enable_ttl(&self) {}
-    /// This cache always has TTL enabled.
-    fn disable_ttl(&self) {
-        panic!("TTL cannot be disabled for this cache")
-    }
 }
 
 struct Entry<T> {
