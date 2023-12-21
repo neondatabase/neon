@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     convert::Infallible,
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
@@ -213,8 +213,7 @@ impl ProjectInfoCacheImpl {
                 endpoint_info.secret.insert(user.clone(), secret.into());
             }
         } else {
-            let mut endpoints = HashMap::new();
-            endpoints.insert(
+            self.cache.insert(
                 endpoint_id.clone(),
                 EndpointInfo::new_with_secret(user.clone(), secret),
             );
@@ -353,40 +352,40 @@ mod tests {
             max_roles: 2,
             ttl: Duration::from_secs(1),
         });
-        let project = "project".into();
-        let endpoint = "endpoint".into();
+        let project_id = "project".into();
+        let endpoint_id = "endpoint".into();
         let user1: SmolStr = "user1".into();
         let user2: SmolStr = "user2".into();
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
         let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
-        cache.insert_role_secret(&project, &endpoint, &user1, secret1.clone());
-        cache.insert_role_secret(&project, &endpoint, &user2, secret2.clone());
-        cache.insert_allowed_ips(&project, &endpoint, allowed_ips.clone());
+        cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
+        cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
+        cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
 
-        let cached = cache.get_role_secret(&endpoint, &user1).unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         assert!(cached.cached());
         assert_eq!(cached.value, secret1);
-        let cached = cache.get_role_secret(&endpoint, &user2).unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
         assert!(cached.cached());
         assert_eq!(cached.value, secret2);
 
         // Shouldn't add more than 2 roles.
         let user3: SmolStr = "user3".into();
         let secret3 = AuthSecret::Scram(ServerSecret::mock(user3.as_str(), [3; 32]));
-        cache.insert_role_secret(&project, &endpoint, &user3, secret3.clone());
-        assert!(cache.get_role_secret(&endpoint, &user3).is_none());
+        cache.insert_role_secret(&project_id, &endpoint_id, &user3, secret3.clone());
+        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
 
-        let cached = cache.get_allowed_ips(&endpoint).unwrap();
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
         assert!(cached.cached());
         assert_eq!(cached.value, allowed_ips);
 
         std::thread::sleep(Duration::from_secs(2));
-        let cached = cache.get_role_secret(&endpoint, &user1);
+        let cached = cache.get_role_secret(&endpoint_id, &user1);
         assert!(cached.is_none());
-        let cached = cache.get_role_secret(&endpoint, &user2);
+        let cached = cache.get_role_secret(&endpoint_id, &user2);
         assert!(cached.is_none());
-        let cached = cache.get_allowed_ips(&endpoint);
+        let cached = cache.get_allowed_ips(&endpoint_id);
         assert!(cached.is_none());
     }
 
@@ -397,42 +396,39 @@ mod tests {
             max_roles: 2,
             ttl: Duration::from_secs(1),
         });
-        let project = "project".into();
-        let endpoint = "endpoint".into();
+        let project_id = "project".into();
+        let endpoint_id = "endpoint".into();
         let user1: SmolStr = "user1".into();
         let user2: SmolStr = "user2".into();
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
         let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
-        cache.insert_role_secret(&project, &endpoint, &user1, secret1.clone());
-        cache.insert_role_secret(&project, &endpoint, &user2, secret2.clone());
-        cache.insert_allowed_ips(&project, &endpoint, allowed_ips.clone());
+        cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
+        cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
+        cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
 
         cache.disable_ttl();
         std::thread::sleep(Duration::from_secs(2));
         // Nothing should be invalidated.
 
-        let cached = cache.get_role_secret(&endpoint, &user1).unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         // TTL is disabled, so it should be impossible to invalidate this value.
         assert!(!cached.cached());
         assert_eq!(cached.value, secret1);
 
         cached.invalidate(); // Shouldn't do anything.
-        let cached = cache.get_role_secret(&endpoint, &user1).unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         assert_eq!(cached.value, secret1);
 
-        let cached = cache.get_role_secret(&endpoint, &user2).unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
         assert!(!cached.cached());
         assert_eq!(cached.value, secret2);
 
         // The only way to invalidate this value is to invalidate via the api.
-        cache.invalidate(&CachedLookupInfo::new_role_secret(
-            project.clone(),
-            user2.clone(),
-        ));
-        assert!(cache.get_role_secret(&endpoint, &user2).is_none());
+        cache.invalidate_role_secret_for_project(&project_id, &user2);
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
-        let cached = cache.get_allowed_ips(&endpoint).unwrap();
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
         assert!(!cached.cached());
         assert_eq!(cached.value, allowed_ips);
     }
