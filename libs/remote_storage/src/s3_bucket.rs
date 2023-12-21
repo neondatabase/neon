@@ -639,7 +639,9 @@ impl RemoteStorage for S3Bucket {
                 );
                 continue;
             };
+            tracing::info!("Considering version for deletion, last_modified={last_modified}, timestamp={timestamp}, key={:?}, version_id={:?}", version.key, version.version_id);
             if last_modified <= timestamp {
+                tracing::info!("    -> not deleting as {last_modified} <= {timestamp}");
                 continue;
             }
             let (Some(version_id), Some(key)) = (&version.version_id, &version.key) else {
@@ -648,6 +650,7 @@ impl RemoteStorage for S3Bucket {
                 );
                 continue;
             };
+            tracing::info!("    -> deleting");
 
             oids.push(
                 ObjectIdentifier::builder()
@@ -666,7 +669,9 @@ impl RemoteStorage for S3Bucket {
                 );
                 continue;
             };
+            tracing::info!("Considering delete marker for deletion, last_modified={last_modified}, timestamp={timestamp}, key={:?}, version_id={:?}", delete_marker.key, delete_marker.version_id);
             if last_modified <= timestamp {
+                tracing::info!("    -> not deleting as {last_modified} <= {timestamp}");
                 continue;
             }
             let (Some(version_id), Some(key)) = (&delete_marker.version_id, &delete_marker.key)
@@ -676,6 +681,7 @@ impl RemoteStorage for S3Bucket {
                 );
                 continue;
             };
+            tracing::info!("    -> deleting");
 
             oids.push(
                 ObjectIdentifier::builder()
