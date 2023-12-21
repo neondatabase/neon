@@ -11,6 +11,7 @@ use proxy::http;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
+use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
 use anyhow::bail;
@@ -95,12 +96,8 @@ struct ProxyCliArgs {
     /// Allow self-signed certificates for compute nodes (for testing)
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     allow_self_signed_compute: bool,
-    /// timeout for http connections
-    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
-    sql_over_http_timeout: tokio::time::Duration,
-    /// Whether the SQL over http pool is opt-in
-    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    sql_over_http_pool_opt_in: bool,
+    #[clap(flatten)]
+    sql_over_http: SqlOverHttpArgs,
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
@@ -136,6 +133,36 @@ struct ProxyCliArgs {
     /// disable ip check for http requests. If it is too time consuming, it could be turned off.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_ip_check_for_http: bool,
+}
+
+#[derive(clap::Args, Clone, Copy, Debug)]
+struct SqlOverHttpArgs {
+    /// timeout for http connection requests
+    #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
+    sql_over_http_timeout: tokio::time::Duration,
+
+    /// Whether the SQL over http pool is opt-in
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    sql_over_http_pool_opt_in: bool,
+
+    /// How many connections to pool for each endpoint. Excess connections are discarded
+    #[clap(long, default_value_t = 20)]
+    sql_over_http_pool_max_conns_per_endpoint: usize,
+
+    /// How long pooled connections should remain idle for before closing
+    #[clap(long, default_value = "5m", value_parser = humantime::parse_duration)]
+    sql_over_http_idle_timeout: tokio::time::Duration,
+
+    /// Duration each shard will wait on average before a GC sweep.
+    /// A longer time will causes sweeps to take longer but will interfere less frequently.
+    #[clap(long, default_value = "10m", value_parser = humantime::parse_duration)]
+    sql_over_http_pool_gc_epoch: tokio::time::Duration,
+
+    /// How many shards should the global pool have. Must be a power of two.
+    /// More shards will introduce less contention for pool operations, but can
+    /// increase memory used by the pool
+    #[clap(long, default_value_t = 128)]
+    sql_over_http_pool_shards: usize,
 }
 
 #[tokio::main]
@@ -327,8 +354,14 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
     let http_config = HttpConfig {
-        timeout: args.sql_over_http_timeout,
-        pool_opt_in: args.sql_over_http_pool_opt_in,
+        request_timeout: args.sql_over_http.sql_over_http_timeout,
+        pool_options: GlobalConnPoolOptions {
+            max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
+            gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
+            pool_shards: args.sql_over_http.sql_over_http_pool_shards,
+            idle_timeout: args.sql_over_http.sql_over_http_idle_timeout,
+            opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
+        },
     };
     let authentication_config = AuthenticationConfig {
         scram_protocol_timeout: args.scram_protocol_timeout,
