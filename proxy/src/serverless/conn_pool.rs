@@ -11,7 +11,7 @@ use pbkdf2::{
 };
 use pq_proto::StartupMessageParams;
 use prometheus::{exponential_buckets, register_histogram, Histogram};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use smol_str::SmolStr;
 use std::{collections::HashMap, net::IpAddr, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
@@ -38,7 +38,23 @@ use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 pub const APP_NAME: &str = "/sql_over_http";
-const MAX_CONNS_PER_ENDPOINT: usize = 20;
+
+impl Default for GlobalConnPoolOptions {
+    fn default() -> Self {
+        Self {
+            max_conns_per_endpoint: 20,
+            // every shard gets cleaned on average every 10 minutes.
+            // the gc sweep should be very short, but it reduces the times
+            // that the sweep can interfere with connecting users
+            gc_epoch: Duration::from_secs(600),
+            // more shards = less lock contention but potentially more memory usage
+            pool_shards: 128,
+            // 5 minutes matches how long most endpoints will stay idle for before shutting down.
+            // The difference here is that the endpoint might still be active, but has excess connections
+            idle_timeout: Duration::from_secs(300),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
@@ -197,13 +213,23 @@ pub struct GlobalConnPool {
     /// It's only used for diagnostics.
     global_pool_size: AtomicUsize,
 
+    proxy_config: &'static crate::config::ProxyConfig,
+
+    options: GlobalConnPoolOptions,
+}
+
+pub struct GlobalConnPoolOptions {
     // Maximum number of connections per one endpoint.
     // Can mix different (dbname, username) connections.
     // When running out of free slots for a particular endpoint,
     // falls back to opening a new connection for each request.
     max_conns_per_endpoint: usize,
 
-    proxy_config: &'static crate::config::ProxyConfig,
+    gc_epoch: Duration,
+
+    pool_shards: usize,
+
+    idle_timeout: Duration,
 }
 
 pub static GC_LATENCY: Lazy<Histogram> = Lazy::new(|| {
@@ -227,11 +253,14 @@ pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
 });
 
 impl GlobalConnPool {
-    pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
+    pub fn new(
+        config: &'static crate::config::ProxyConfig,
+        options: GlobalConnPoolOptions,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            global_pool: DashMap::with_shard_amount(128),
+            global_pool: DashMap::with_shard_amount(options.pool_shards),
             global_pool_size: AtomicUsize::new(0),
-            max_conns_per_endpoint: MAX_CONNS_PER_ENDPOINT,
+            options,
             proxy_config: config,
         })
     }
@@ -241,17 +270,18 @@ impl GlobalConnPool {
         self.global_pool.clear();
     }
 
-    pub async fn gc_worker(&self) {
-        let epoch = Duration::from_secs(600);
-        let mut interval = tokio::time::interval(epoch / (self.global_pool.shards().len()) as u32);
+    pub async fn gc_worker(&self, mut rng: impl Rng) {
+        let mut interval =
+            tokio::time::interval(self.options.gc_epoch / (self.global_pool.shards().len()) as u32);
         loop {
             interval.tick().await;
-            self.gc();
+
+            let shard = rng.gen_range(0..self.global_pool.shards().len());
+            self.gc(shard);
         }
     }
 
-    fn gc(&self) {
-        let shard = thread_rng().gen_range(0..self.global_pool.shards().len());
+    fn gc(&self, shard: usize) {
         debug!(shard, "pool: performing epoch reclamation");
 
         // acquire a random shard lock
@@ -355,6 +385,7 @@ impl GlobalConnPool {
                     latency_timer,
                     peer_addr,
                     endpoint_pool.clone(),
+                    self.options.idle_timeout,
                 )
                 .await
             } else {
@@ -379,6 +410,7 @@ impl GlobalConnPool {
                 latency_timer,
                 peer_addr,
                 endpoint_pool.clone(),
+                self.options.idle_timeout,
             )
             .await
         };
@@ -435,7 +467,7 @@ impl GlobalConnPool {
         let new_pool = Arc::new(RwLock::new(EndpointConnPool {
             pools: HashMap::new(),
             total_conns: 0,
-            max_conns: self.max_conns_per_endpoint,
+            max_conns: self.options.max_conns_per_endpoint,
             _guard: ENDPOINT_POOLS.guard(),
         }));
 
@@ -470,6 +502,7 @@ struct TokioMechanism<'a> {
     conn_info: &'a ConnInfo,
     session_id: uuid::Uuid,
     conn_id: uuid::Uuid,
+    idle: Duration,
 }
 
 #[async_trait]
@@ -490,6 +523,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
             self.conn_id,
             self.session_id,
             self.pool.clone(),
+            self.idle,
         )
         .await
     }
@@ -501,6 +535,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
 // we reuse the code from the usual proxy and we need to prepare few structures
 // that this code expects.
 #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
     conn_info: &ConnInfo,
@@ -509,6 +544,7 @@ async fn connect_to_compute(
     latency_timer: LatencyTimer,
     peer_addr: IpAddr,
     pool: Weak<RwLock<EndpointConnPool>>,
+    idle: Duration,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
@@ -554,6 +590,7 @@ async fn connect_to_compute(
             conn_info,
             session_id,
             pool,
+            idle,
         },
         node_info,
         &extra,
@@ -570,6 +607,7 @@ async fn connect_to_compute_once(
     conn_id: uuid::Uuid,
     mut session: uuid::Uuid,
     pool: Weak<RwLock<EndpointConnPool>>,
+    idle: Duration,
 ) -> Result<ClientInner, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
 
@@ -602,17 +640,17 @@ async fn connect_to_compute_once(
     tokio::spawn(
         async move {
             let _conn_gauge = conn_gauge;
-            let mut idle_timeout = pin!(tokio::time::sleep(Duration::from_secs(300)));
+            let mut idle_timeout = pin!(tokio::time::sleep(idle));
             poll_fn(move |cx| {
                 if matches!(rx.has_changed(), Ok(true)) {
                     session = *rx.borrow_and_update();
                     info!(%session, "changed session");
-                    idle_timeout.as_mut().reset(Instant::now() + Duration::from_secs(300));
+                    idle_timeout.as_mut().reset(Instant::now() + idle);
                 }
 
                 // 5 minute idle connection timeout
                 if idle_timeout.as_mut().poll(cx).is_ready() {
-                    idle_timeout.as_mut().reset(Instant::now() + Duration::from_secs(300));
+                    idle_timeout.as_mut().reset(Instant::now() + idle);
                     info!("connection idle");
                     if let Some(pool) = pool.clone().upgrade() {
                         // remove client from pool - should close the connection if it's idle.
