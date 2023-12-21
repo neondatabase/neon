@@ -55,6 +55,33 @@ use super::{
 /// `<ttps://github.com/neondatabase/neon/issues/6200>`
 const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
 
+pub(super) async fn downloader_task(
+    tenant_manager: Arc<TenantManager>,
+    remote_storage: GenericRemoteStorage,
+    command_queue: tokio::sync::mpsc::Receiver<CommandRequest<DownloadCommand>>,
+    background_jobs_can_start: Barrier,
+    cancel: CancellationToken,
+) {
+    // TODO: separate config for downloads
+    let concurrency = tenant_manager.get_conf().heatmap_upload_concurrency;
+
+    let generator = SecondaryDownloader {
+        tenant_manager,
+        remote_storage,
+    };
+    let mut scheduler = Scheduler::new(generator, concurrency);
+
+    scheduler
+        .run(command_queue, background_jobs_can_start, cancel)
+        .instrument(info_span!("secondary_downloads"))
+        .await
+}
+
+struct SecondaryDownloader {
+    tenant_manager: Arc<TenantManager>,
+    remote_storage: GenericRemoteStorage,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct OnDiskState {
     metadata: LayerFileMetadata,
@@ -111,11 +138,6 @@ impl SecondaryDetail {
             timelines: HashMap::new(),
         }
     }
-}
-
-struct SecondaryDownloader {
-    tenant_manager: Arc<TenantManager>,
-    remote_storage: GenericRemoteStorage,
 }
 
 struct PendingDownload {
@@ -315,28 +337,6 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                 }
         }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
-}
-
-pub(super) async fn downloader_task(
-    tenant_manager: Arc<TenantManager>,
-    remote_storage: GenericRemoteStorage,
-    command_queue: tokio::sync::mpsc::Receiver<CommandRequest<DownloadCommand>>,
-    background_jobs_can_start: Barrier,
-    cancel: CancellationToken,
-) {
-    // TODO: separate config for downloads
-    let concurrency = tenant_manager.get_conf().heatmap_upload_concurrency;
-
-    let generator = SecondaryDownloader {
-        tenant_manager,
-        remote_storage,
-    };
-    let mut scheduler = Scheduler::new(generator, concurrency);
-
-    scheduler
-        .run(command_queue, background_jobs_can_start, cancel)
-        .instrument(info_span!("secondary_downloads"))
-        .await
 }
 
 /// Scan local storage and build up Layer objects based on the metadata in a HeatMapTimeline

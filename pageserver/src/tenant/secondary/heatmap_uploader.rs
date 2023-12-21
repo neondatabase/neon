@@ -36,6 +36,40 @@ use utils::{backoff, completion::Barrier};
 
 use super::{heatmap::HeatMapTenant, UploadCommand};
 
+pub(super) async fn heatmap_uploader_task(
+    tenant_manager: Arc<TenantManager>,
+    remote_storage: GenericRemoteStorage,
+    command_queue: tokio::sync::mpsc::Receiver<CommandRequest<UploadCommand>>,
+    background_jobs_can_start: Barrier,
+    cancel: CancellationToken,
+) {
+    let concurrency = tenant_manager.get_conf().heatmap_upload_concurrency;
+
+    let generator = HeatmapUploader {
+        tenant_manager,
+        remote_storage,
+        cancel: cancel.clone(),
+        tenants: HashMap::new(),
+    };
+    let mut scheduler = Scheduler::new(generator, concurrency);
+
+    scheduler
+        .run(command_queue, background_jobs_can_start, cancel)
+        .instrument(info_span!("heatmap_uploader"))
+        .await
+}
+
+/// This type is owned by a single task ([`heatmap_uploader_task`]) which runs an event
+/// handling loop and mutates it as needed: there are no locks here, because that event loop
+/// can hold &mut references to this type throughout.
+struct HeatmapUploader {
+    tenant_manager: Arc<TenantManager>,
+    remote_storage: GenericRemoteStorage,
+    cancel: CancellationToken,
+
+    tenants: HashMap<TenantShardId, UploaderTenantState>,
+}
+
 struct WriteInProgress {
     barrier: Barrier,
 }
@@ -99,40 +133,6 @@ struct UploaderTenantState {
 
     /// When should we next do an upload?  None means never.
     next_upload: Option<Instant>,
-}
-
-/// This type is owned by a single task ([`heatmap_uploader_task`]) which runs an event
-/// handling loop and mutates it as needed: there are no locks here, because that event loop
-/// can hold &mut references to this type throughout.
-struct HeatmapUploader {
-    tenant_manager: Arc<TenantManager>,
-    remote_storage: GenericRemoteStorage,
-    cancel: CancellationToken,
-
-    tenants: HashMap<TenantShardId, UploaderTenantState>,
-}
-
-pub(super) async fn heatmap_uploader_task(
-    tenant_manager: Arc<TenantManager>,
-    remote_storage: GenericRemoteStorage,
-    command_queue: tokio::sync::mpsc::Receiver<CommandRequest<UploadCommand>>,
-    background_jobs_can_start: Barrier,
-    cancel: CancellationToken,
-) {
-    let concurrency = tenant_manager.get_conf().heatmap_upload_concurrency;
-
-    let generator = HeatmapUploader {
-        tenant_manager,
-        remote_storage,
-        cancel: cancel.clone(),
-        tenants: HashMap::new(),
-    };
-    let mut scheduler = Scheduler::new(generator, concurrency);
-
-    scheduler
-        .run(command_queue, background_jobs_can_start, cancel)
-        .instrument(info_span!("heatmap_uploader"))
-        .await
 }
 
 type Scheduler = TenantBackgroundJobs<
