@@ -59,6 +59,7 @@ where
             return Ok(());
         }
     };
+    tracing::trace!(?msg, "received a message");
     invalidate_cache(cache.clone(), msg.clone());
     // It might happen that the invalid entry is on the way to be cached.
     // To make sure that the entry is invalidated, let's repeat the invalidation in 20 seconds.
