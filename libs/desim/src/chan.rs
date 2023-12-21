@@ -98,6 +98,10 @@ impl<T> Chan<T> {
         self.shared.try_recv().expect("message should've been ready")
     }
 
+    pub fn try_recv(&self) -> Option<T> {
+        self.shared.try_recv()
+    }
+
     pub fn send(&self, t: T) {
         self.shared.send(t);
     }

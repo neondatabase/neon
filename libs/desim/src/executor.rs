@@ -1,6 +1,6 @@
-use std::{thread::JoinHandle, cell::{OnceCell, RefCell}, sync::{mpsc, Arc, atomic::{AtomicU8, Ordering, AtomicU32}, OnceLock}};
+use std::{thread::JoinHandle, cell::{OnceCell, RefCell}, sync::{mpsc, Arc, atomic::{AtomicU8, Ordering, AtomicU32, AtomicBool}, OnceLock}, panic::AssertUnwindSafe};
 
-use tracing::{debug, trace};
+use tracing::{debug, trace, error};
 
 use crate::time::Timing;
 
@@ -26,7 +26,7 @@ impl Runtime {
     }
 
     /// Spawn a new thread and register it in the runtime.
-    pub fn spawn<F>(&mut self, f: F)
+    pub fn spawn<F>(&mut self, f: F) -> ExternalHandle
     where
         F: FnOnce() + Send + 'static,
     {
@@ -45,17 +45,44 @@ impl Runtime {
                 ctx.yield_me(0);
             });
             let _guard = tracing::info_span!("", tid).entered();
-            f();
-            debug!("thread-{} finished", tid);
+            
+            // start user-provided function
+            let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                f();
+            }));
+            debug!("thread finished");
+
+            match res {
+                Ok(_) => {},
+                Err(e) => {
+                    with_thread_context(|ctx| {
+                        if !ctx.allow_panic.load(std::sync::atomic::Ordering::SeqCst) {
+                            error!("thread panicked, terminating the process: {:?}", e);
+                            std::process::exit(1);
+                        }
+
+                        debug!("thread panicked: {:?}", e);
+                        let mut result = ctx.result.lock();
+                        if result.0 == -1 {
+                            *result = (256, format!("thread panicked: {:?}", e));
+                        }
+                    });
+                }
+            }
+
             with_thread_context(|ctx| {
                 ctx.finish_me();
             });
         });
 
         let ctx = rx.recv().expect("failed to receive thread context");
-        let handle = ThreadHandle::new(ctx, join);
+        let handle = ThreadHandle::new(ctx.clone(), join);
 
         self.threads.push(handle);
+
+        ExternalHandle {
+            ctx,
+        }
     }
 
     pub fn step(&mut self) -> bool {
@@ -94,10 +121,21 @@ impl Runtime {
     }
 }
 
+pub struct ExternalHandle {
+    ctx: Arc<ThreadContext>,
+}
+
+impl ExternalHandle {
+    pub fn is_finished(&self) -> bool {
+        let status = self.ctx.mutex.lock();
+        *status == Status::Finished
+    }
+}
+
 /// [`Runtime`] stores [`ThreadHandle`] for each thread which is currently running.
 struct ThreadHandle {
     ctx: Arc<ThreadContext>,
-    join: JoinHandle<()>,
+    _join: JoinHandle<()>,
 }
 
 impl ThreadHandle {
@@ -110,7 +148,7 @@ impl ThreadHandle {
         }
         drop(status);
 
-        Self { ctx, join }
+        Self { ctx, _join: join }
     }
 
     /// Allows thread to execute one step of its execution.
@@ -148,11 +186,13 @@ pub struct ThreadContext {
     // used to block thread until it is woken up
     mutex: parking_lot::Mutex<Status>,
     condvar: parking_lot::Condvar,
-
     // used as a flag to indicate runtime that thread is ready to be woken up
     wakeup: AtomicU8,
-
     clock: OnceLock<Arc<Timing>>,
+    // execution result, set by exit() call
+    result: parking_lot::Mutex<(i32, String)>,
+    // determines if process should be killed on receiving panic
+    allow_panic: AtomicBool,
 }
 
 impl ThreadContext {
@@ -163,6 +203,8 @@ impl ThreadContext {
             condvar: parking_lot::Condvar::new(),
             wakeup: AtomicU8::new(NO_WAKEUP),
             clock: OnceLock::new(),
+            result: parking_lot::Mutex::new((-1, String::new())),
+            allow_panic: AtomicBool::new(false),
         }
     }
 }
@@ -210,11 +252,18 @@ impl ThreadContext {
         }
     }
 
+    /// Called only once, exactly before thread finishes execution.
     fn finish_me(&self) {
         let mut status = self.mutex.lock();
         assert!(matches!(*status, Status::Running));
 
         *status = Status::Finished;
+        {
+            let mut result = self.result.lock();
+            if result.0 == -1 {
+                *result = (0, "finished normally".to_owned());
+            }
+        }
         self.condvar.notify_all();
     }
 }
@@ -270,6 +319,15 @@ pub fn now() -> u64 {
     with_thread_context(|ctx| {
         ctx.clock.get().unwrap().now()
     })
+}
+
+pub fn exit(code: i32, msg: String) {
+    with_thread_context(|ctx| {
+        ctx.allow_panic.store(true, Ordering::SeqCst);
+        let mut result = ctx.result.lock();
+        *result = (code, msg);
+        panic!("exit");
+    });
 }
 
 pub(crate) fn get_thread_ctx() -> Arc<ThreadContext> {

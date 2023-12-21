@@ -16,7 +16,7 @@ use safekeeper::{
     wal_storage::Storage,
     SafeKeeperConf,
 };
-use desim::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+use desim::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::{NodeEvent, NetEvent}, executor::{PollSome, self}};
 use tracing::{debug, info_span};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -177,7 +177,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;
-    let mut conns: HashMap<i64, ConnState> = HashMap::new();
+    let mut conns: HashMap<usize, ConnState> = HashMap::new();
 
     for (&_ttid, shared_state) in global.timelines.iter_mut() {
         let flush_lsn = shared_state.sk.wal_store.flush_lsn();
@@ -185,18 +185,27 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
         os.log_event(format!("tli_loaded;{};{}", flush_lsn.0, commit_lsn.0));
     }
 
-    let epoll = os.epoll();
+    let node_events = os.node_events();
+    let mut epoll_vec: Vec<Box<dyn PollSome>> = vec![];
+    let mut epoll_idx: Vec<usize> = vec![];
+
+    // TODO: batch events processing (multiple events per tick)
     loop {
         // waiting for the next message
-        let mut next_event = Some(epoll.recv());
+        epoll_vec.clear();
+        epoll_idx.clear();
+        epoll_vec.push(Box::new(node_events.clone()));
+        epoll_idx.push(0);
+        for conn in conns.values() {
+            epoll_vec.push(Box::new(conn.tcp.recv_chan()));
+            epoll_idx.push(conn.tcp.connection_id());
+        }
 
-        loop {
-            let event = match next_event {
-                Some(event) => event,
-                None => break,
-            };
+        let index = executor::epoll_chans(&epoll_vec, -1).unwrap();
 
-            match event {
+        if index == 0 {
+            // got a new connection
+            match node_events.must_recv() {
                 NodeEvent::Accept(tcp) => {
                     conns.insert(
                         tcp.connection_id(),
@@ -208,26 +217,36 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
                             runtime: tokio::runtime::Builder::new_current_thread().build()?,
                         },
                     );
-                }
-                NodeEvent::Message((msg, tcp)) => {
-                    let conn = conns.get_mut(&tcp.connection_id());
-                    if let Some(conn) = conn {
-                        let res = conn.process_any(msg, &mut global);
-                        if res.is_err() {
-                            debug!("conn {:?} error: {:#}", tcp, res.unwrap_err());
-                            conns.remove(&tcp.id());
-                        }
-                    } else {
-                        debug!("conn {:?} was closed, dropping msg {:?}", tcp, msg);
+                },
+                NodeEvent::Internal(_) => unreachable!(),
+            }
+            continue;
+        }
+
+        let connection_id = epoll_idx[index];
+        let conn = conns.get_mut(&connection_id).unwrap();
+        let mut next_event = Some(conn.tcp.recv_chan().must_recv());
+
+        loop {
+            let event = match next_event {
+                Some(event) => event,
+                None => break,
+            };
+
+            match event {
+                NetEvent::Message(msg) => {
+                    let res = conn.process_any(msg, &mut global);
+                    if res.is_err() {
+                        debug!("conn {:?} error: {:#}", connection_id, res.unwrap_err());
+                        conns.remove(&connection_id);
                     }
                 }
-                NodeEvent::Internal(_) => {}
-                NodeEvent::Closed(_) => {}
-                NodeEvent::WakeTimeout(_) => {}
+                NetEvent::Closed => {
+                    // TODO: remove from conns?
+                }
             }
 
-            // TODO: make simulator support multiple events per tick
-            next_event = epoll.try_recv();
+            next_event = conn.tcp.recv_chan().try_recv();
         }
 
         conns.retain(|_, conn| {

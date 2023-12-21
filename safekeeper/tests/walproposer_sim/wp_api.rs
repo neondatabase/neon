@@ -9,7 +9,7 @@ use desim::{
     network::TCP,
     node_os::NodeOs,
     proto::AnyMessage,
-    world::{NodeEvent, NodeId},
+    world::{NodeEvent, NodeId}, executor,
 };
 use tracing::debug;
 use utils::lsn::Lsn;
@@ -369,9 +369,7 @@ impl ApiImpl for SimulationApi {
 
     fn finish_sync_safekeepers(&self, lsn: u64) {
         debug!("finish_sync_safekeepers, lsn={}", lsn);
-        self.os.set_result(0, Lsn(lsn).to_string());
-        self.os
-            .exit(format!("sync safekeepers finished at lsn={}", lsn));
+        executor::exit(0, Lsn(lsn).to_string());
     }
 
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
@@ -379,16 +377,16 @@ impl ApiImpl for SimulationApi {
         if level == Level::Fatal || level == Level::Panic {
             if msg == "Failed to recover state" {
                 // Recovery connection broken in the middle of recovery
-                self.os.exit(msg.to_owned());
+                executor::exit(1, msg.to_owned());
             }
             if msg.contains("rejects our connection request with term") {
                 // collected quorum with lower term, then got rejected by next connected safekeeper
-                self.os.exit(msg.to_owned());
+                executor::exit(1, msg.to_owned());
             }
             if msg.contains("collected propEpochStartLsn") && msg.contains(", but basebackup LSN ")
             {
                 // sync-safekeepers collected wrong quorum, walproposer collected another quorum
-                self.os.exit(msg.to_owned());
+                executor::exit(1, msg.to_owned());
             }
             panic!("unknown FATAL error from walproposer: {}", msg);
         }

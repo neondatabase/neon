@@ -11,7 +11,7 @@ use std::{
 };
 use tracing::{debug, error, trace};
 
-use crate::{executor::Runtime, network::NetworkTask, time::Timing};
+use crate::{executor::{Runtime, ExternalHandle}, network::NetworkTask, time::Timing};
 
 use super::{
     chan::Chan,
@@ -119,6 +119,11 @@ impl World {
         self.timing.now()
     }
 
+    /// Get a copy of the internal clock.
+    pub fn clock(&self) -> Arc<Timing> {
+        self.timing.clone()
+    }
+
     pub fn add_event(&self, node: NodeId, data: String) {
         let time = self.now();
         self.events.lock().push(SEvent { time, node, data });
@@ -194,29 +199,12 @@ impl Node {
     }
 
     /// Set a code to run in this node thread.
-    pub fn launch(self: &Arc<Self>, f: impl FnOnce(NodeOs) + Send + 'static) {
+    pub fn launch(self: &Arc<Self>, f: impl FnOnce(NodeOs) + Send + 'static) -> ExternalHandle {
         let node = self.clone();
         let world = self.world.clone();
         self.world.runtime.lock().spawn(move || {
-            let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                f(NodeOs::new(world, node.clone()));
-            }));
-            match res {
-                Ok(_) => {
-                    debug!("Node {} finished successfully", node.id);
-                }
-                Err(e) => {
-                    if !node.crash_token.load(std::sync::atomic::Ordering::SeqCst) {
-                        error!("Node {} finished with panic: {:?}", node.id, e);
-                        std::process::exit(1);
-                    } else {
-                        node.crash_token
-                            .store(false, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    debug!("Node {} finished with panic: {:?}", node.id, e);
-                }
-            }
-        });
+            f(NodeOs::new(world, node.clone()));
+        })
     }
 
     /// Returns a channel to receive events from the network.
@@ -225,6 +213,8 @@ impl Node {
     }
 
     pub fn crash_stop(self: &Arc<Self>) {
+        todo!()
+
         // TODO: !!!
 
         // self.world.await_all();
@@ -264,6 +254,8 @@ impl Node {
     }
 
     pub fn deallocate(&self) {
+        todo!()
+
         // TODO: !!!!
 
         // self.network.lock().clear();

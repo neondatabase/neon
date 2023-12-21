@@ -40,17 +40,7 @@ impl NodeOs {
         self.internal.rng.lock().gen_range(0..max)
     }
 
-    /// Set the result for the current node.
-    pub fn set_result(&self, code: i32, result: String) {
-        *self.internal.result.lock() = (code, result);
-    }
-
     pub fn log_event(&self, data: String) {
         self.world.add_event(self.id(), data)
-    }
-
-    pub fn exit(&self, reason: String) {
-        self.internal.set_crash_token();
-        panic!("exit: {}", reason);
     }
 }

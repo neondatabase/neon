@@ -1,34 +1,35 @@
 use std::{fmt, sync::Arc};
 
 use once_cell::sync::OnceCell;
-use desim::{sync::Mutex, world::World};
+use desim::{world::World, time::Timing};
+use parking_lot::Mutex;
 use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
 
 #[derive(Clone)]
 pub struct SimClock {
-    world_ptr: Arc<Mutex<Option<Arc<World>>>>,
+    clock_ptr: Arc<Mutex<Option<Arc<Timing>>>>,
 }
 
 impl Default for SimClock {
     fn default() -> Self {
         SimClock {
-            world_ptr: Arc::new(Mutex::new(None)),
+            clock_ptr: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 impl SimClock {
-    pub fn set_world(&self, world: Arc<World>) {
-        *self.world_ptr.lock() = Some(world);
+    pub fn set_clock(&self, clock: Arc<Timing>) {
+        *self.clock_ptr.lock() = Some(clock);
     }
 }
 
 impl FormatTime for SimClock {
     fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
-        let world = self.world_ptr.lock().clone();
+        let clock = self.clock_ptr.lock();
 
-        if let Some(world) = world {
-            let now = world.now();
+        if let Some(clock) = clock.as_ref() {
+            let now = clock.now();
             write!(w, "[{}]", now)
         } else {
             write!(w, "[?]")

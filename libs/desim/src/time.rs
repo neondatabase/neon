@@ -30,7 +30,7 @@ impl Timing {
     }
 
     /// Return the current world's time.
-    pub(crate) fn now(&self) -> u64 {
+    pub fn now(&self) -> u64 {
         self.current_time.load(std::sync::atomic::Ordering::SeqCst)
     }
 

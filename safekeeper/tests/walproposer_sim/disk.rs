@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use safekeeper::safekeeper::SafeKeeperState;
-use desim::sync::Mutex;
 use utils::id::TenantTimelineId;
 
 pub struct Disk {

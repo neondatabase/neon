@@ -5,9 +5,8 @@ use rand::{Rng, SeedableRng};
 use desim::{
     network::{Delay, NetworkOptions},
     proto::AnyMessage,
-    time::EmptyEvent,
     world::World,
-    world::{Node, NodeEvent, SEvent}, executor,
+    world::{Node, NodeEvent, SEvent}, executor::{self, ExternalHandle},
 };
 use tracing::{debug, info_span, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
@@ -78,10 +77,9 @@ impl TestConfig {
 
     pub fn start(&self, seed: u64) -> Test {
         let world = Arc::new(World::new(seed, Arc::new(self.network.clone())));
-        world.register_world();
 
         if let Some(clock) = &self.clock {
-            clock.set_world(world.clone());
+            clock.set_clock(world.clock());
         }
 
         let servers = [
@@ -94,9 +92,6 @@ impl TestConfig {
 
         let safekeepers_guc = server_ids.map(|id| format!("node:{}", id)).to_vec();
         let ttid = TenantTimelineId::generate();
-
-        // wait init for all servers
-        world.await_all();
 
         Test {
             world,
@@ -117,7 +112,7 @@ pub struct Test {
 }
 
 impl Test {
-    fn launch_sync(&self) -> Arc<Node> {
+    fn launch_sync(&self) -> ExternalHandle {
         let client_node = self.world.new_node();
         debug!("sync-safekeepers started at node {}", client_node.id);
 
@@ -145,11 +140,7 @@ impl Test {
             let api = SimulationApi::new(args);
             let wp = Wrapper::new(Box::new(api), config);
             wp.start();
-        });
-
-        self.world.await_all();
-
-        client_node
+        })
     }
 
     pub fn sync_safekeepers(&self) -> anyhow::Result<Lsn> {
