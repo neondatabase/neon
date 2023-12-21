@@ -1134,12 +1134,7 @@ impl Timeline {
             return Ok(None);
         };
 
-        let rtc = self
-            .remote_client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
-
-        match local_layer.evict_and_wait(rtc).await {
+        match local_layer.evict_and_wait().await {
             Ok(()) => Ok(Some(true)),
             Err(EvictionError::NotFound) => Ok(Some(false)),
             Err(EvictionError::Downloaded) => Ok(Some(false)),
@@ -4651,11 +4646,6 @@ mod tests {
             .await
             .unwrap();
 
-        let rtc = timeline
-            .remote_client
-            .clone()
-            .expect("just configured this");
-
         let layer = find_some_layer(&timeline).await;
         let layer = layer
             .keep_resident()
@@ -4664,8 +4654,8 @@ mod tests {
             .expect("should had been resident")
             .drop_eviction_guard();
 
-        let first = async { layer.evict_and_wait(&rtc).await };
-        let second = async { layer.evict_and_wait(&rtc).await };
+        let first = async { layer.evict_and_wait().await };
+        let second = async { layer.evict_and_wait().await };
 
         let (first, second) = tokio::join!(first, second);
 
