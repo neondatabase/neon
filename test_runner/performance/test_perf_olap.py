@@ -151,7 +151,9 @@ def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare, scale: 
     An OLAP-style ClickHouse benchmark
 
     Based on https://github.com/ClickHouse/ClickBench/tree/c00135ca5b6a0d86fedcdbf998fdaa8ed85c1c3b/aurora-postgresql
-    The DB prepared manually in advance
+    The DB prepared manually in advance.
+    Important: after intial data load, run `VACUUM (DISABLE_PAGE_SKIPPING, FREEZE, ANALYZE) hits;`
+    to ensure that Postgres optimizer chooses the same plans as RDS and Aurora.
     """
     explain: bool = os.getenv("TEST_OLAP_COLLECT_EXPLAIN", "false").lower() == "true"
 

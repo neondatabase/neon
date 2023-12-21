@@ -3134,6 +3134,7 @@ impl Tenant {
 
     /// For unit tests, make this visible so that other modules can directly create timelines
     #[cfg(test)]
+    #[tracing::instrument(fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))]
     pub(crate) async fn bootstrap_timeline_test(
         &self,
         timeline_id: TimelineId,
