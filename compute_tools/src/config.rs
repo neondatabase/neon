@@ -70,14 +70,7 @@ pub fn write_postgres_conf(
     }
 
     if let Some(stripe_size) = &spec.shard_stripe_size {
-        writeln!(
-            file,
-            "neon.stripe_size={}",
-            // TODO: postgres should take stripe size in page count, to match how the
-            // rest of the system stores it.
-            // https://github.com/neondatabase/neon/pull/5837#discussion_r1430485706
-            (stripe_size * 8 * 1024) / (1024 * 1024)
-        )?;
+        writeln!(file, "neon.stripe_size={}", stripe_size)?;
     }
 
     match spec.mode {
