@@ -31,7 +31,7 @@ const MIN_SCHEDULING_INTERVAL: Duration = Duration::from_secs(1);
 /// and additionally may expose a command hook to generate jobs on-demand (e.g. to implement
 /// admin APIs).
 ///
-/// For an example see [`crate::tenant::secondary::heatmap_uploader::HeatmapUploader`]
+/// For an example see [`crate::tenant::secondary::heatmap_uploader`]
 ///
 /// G: A JobGenerator that this scheduler will poll to find pending jobs
 /// PJ: 'Pending Job': type for job descriptors that are ready to run
