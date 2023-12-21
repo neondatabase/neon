@@ -99,7 +99,7 @@ impl Api {
         .await?;
         Ok(AuthInfo {
             secret,
-            allowed_ips,
+            allowed_ips: allowed_ips.iter().map(SmolStr::from).collect(),
             project_id: None,
         })
     }
