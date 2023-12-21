@@ -12,7 +12,9 @@ use crate::{
     tenant::{
         config::SecondaryLocationConfig,
         debug_assert_current_span_has_tenant_and_timeline_id,
-        remote_timeline_client::index::LayerFileMetadata,
+        remote_timeline_client::{
+            index::LayerFileMetadata, FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES,
+        },
         span::debug_assert_current_span_has_tenant_id,
         storage_layer::LayerFileName,
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
@@ -29,17 +31,18 @@ use crate::tenant::{
     mgr::TenantManager,
     remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
 };
-use anyhow::Context;
 
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{DownloadError, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
-use utils::{completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId};
+use utils::{
+    backoff, completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId,
+};
 
 use super::{
     heatmap::{HeatMapTenant, HeatMapTimeline},
@@ -306,12 +309,29 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
-            if let Err(e) = TenantDownloader::new(conf, &remote_storage, &secondary_state)
+            match TenantDownloader::new(conf, &remote_storage, &secondary_state)
                 .download()
                 .await
             {
-                tracing::info!("Failed to freshen secondary content: {e:#}")
+                Err(UpdateError::NoData) => {
+                    tracing::info!("No heatmap found for tenant.  This is fine if it is new.");
+                },
+                Err(UpdateError::NoSpace) => {
+                    tracing::warn!("Insufficient space while downloading.  Will retry later.");
+                }
+                Err(UpdateError::Cancelled) => {
+                    tracing::debug!("Shut down while downloading");
+                },
+                Err(UpdateError::Deserialize(e)) => {
+                    tracing::error!("Corrupt content while downloading tenant: {e}");
+                },
+                Err(e @ (UpdateError::DownloadError(_) | UpdateError::Other(_))) => {
+                    tracing::error!("Error while downloading tenant: {e}");
+                },
+                Ok(()) => {}
             };
+
+            // Irrespective of the result, we will reschedule ourselves to run after our usual period.
 
             // If the job had a target execution time, we may check our final execution
             // time against that for observability purposes.
@@ -452,6 +472,44 @@ struct TenantDownloader<'a> {
     secondary_state: &'a SecondaryTenant,
 }
 
+/// Errors that may be encountered while updating a tenant
+#[derive(thiserror::Error, Debug)]
+enum UpdateError {
+    #[error("No remote data found")]
+    NoData,
+    #[error("Insufficient local storage space")]
+    NoSpace,
+    #[error("Failed to download")]
+    DownloadError(DownloadError),
+    #[error(transparent)]
+    Deserialize(#[from] serde_json::Error),
+    #[error("Cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<DownloadError> for UpdateError {
+    fn from(value: DownloadError) -> Self {
+        match &value {
+            DownloadError::Cancelled => Self::Cancelled,
+            DownloadError::NotFound => Self::NoData,
+            _ => Self::DownloadError(value),
+        }
+    }
+}
+
+impl From<std::io::Error> for UpdateError {
+    fn from(value: std::io::Error) -> Self {
+        if let Some(nix::errno::Errno::ENOSPC) = value.raw_os_error().map(nix::errno::from_i32) {
+            UpdateError::NoSpace
+        } else {
+            // An I/O error from e.g. tokio::io::copy is most likely a remote storage issue
+            UpdateError::Other(anyhow::anyhow!(value))
+        }
+    }
+}
+
 impl<'a> TenantDownloader<'a> {
     fn new(
         conf: &'static PageServerConf,
@@ -465,7 +523,7 @@ impl<'a> TenantDownloader<'a> {
         }
     }
 
-    async fn download(&self) -> anyhow::Result<()> {
+    async fn download(&self) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_id();
 
         // For the duration of a download, we must hold the SecondaryTenant::gate, to ensure
@@ -496,9 +554,9 @@ impl<'a> TenantDownloader<'a> {
                 VirtualFile::crashsafe_overwrite(&heatmap_path_bg, &temp_path, &heatmap_bytes).await
             })
         })
-        .await?
-        .maybe_fatal_err(&context_msg)
-        .with_context(|| context_msg)?;
+        .await
+        .expect("Blocking task is never aborted")
+        .maybe_fatal_err(&context_msg)?;
 
         tracing::debug!("Wrote local heatmap to {}", heatmap_path);
 
@@ -522,7 +580,7 @@ impl<'a> TenantDownloader<'a> {
         Ok(())
     }
 
-    async fn download_heatmap(&self) -> anyhow::Result<Vec<u8>> {
+    async fn download_heatmap(&self) -> Result<Vec<u8>, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         // TODO: make download conditional on ETag having changed since last download
@@ -530,19 +588,38 @@ impl<'a> TenantDownloader<'a> {
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
-        let download = self.remote_storage.download(&heatmap_path).await?;
-        let mut heatmap_bytes = Vec::new();
-        let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-        let _size = tokio::io::copy(&mut body, &mut heatmap_bytes)
-            .await
-            .with_context(|| format!("download heatmap {heatmap_path:?}"))?;
+
+        let heatmap_bytes = backoff::retry(
+            || async {
+                let download = self
+                    .remote_storage
+                    .download(&heatmap_path)
+                    .await
+                    .map_err(UpdateError::from)?;
+                let mut heatmap_bytes = Vec::new();
+                let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                let _size = tokio::io::copy(&mut body, &mut heatmap_bytes).await?;
+                Ok(heatmap_bytes)
+            },
+            |e| match e {
+                UpdateError::NoData | UpdateError::Cancelled => true,
+                _ => false,
+            },
+            FAILED_DOWNLOAD_WARN_THRESHOLD,
+            FAILED_REMOTE_OP_RETRIES,
+            "download heatmap",
+            backoff::Cancel::new(self.secondary_state.cancel.clone(), || {
+                UpdateError::Cancelled
+            }),
+        )
+        .await?;
 
         SECONDARY_MODE.download_heatmap.inc();
 
         Ok(heatmap_bytes)
     }
 
-    async fn download_timeline(&self, timeline: HeatMapTimeline) -> anyhow::Result<()> {
+    async fn download_timeline(&self, timeline: HeatMapTimeline) -> Result<(), UpdateError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
         let timeline_path = self
@@ -597,7 +674,8 @@ impl<'a> TenantDownloader<'a> {
             tracing::info!("Removing secondary local layer {layer} because it's absent in heatmap",);
             tokio::fs::remove_file(&local_path)
                 .await
-                .or_else(fs_ext::ignore_not_found)?;
+                .or_else(fs_ext::ignore_not_found)
+                .maybe_fatal_err("Removing secondary layer")?;
         }
 
         // Download heatmap layers that are not present on local disk, or update their
@@ -648,7 +726,8 @@ impl<'a> TenantDownloader<'a> {
                 }
             }
 
-            match download_layer_file(
+            // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
+            let downloaded_bytes = match download_layer_file(
                 self.conf,
                 self.remote_storage,
                 *tenant_shard_id,
@@ -659,32 +738,40 @@ impl<'a> TenantDownloader<'a> {
             )
             .await
             {
-                Ok(downloaded_bytes) => {
-                    if downloaded_bytes != layer.metadata.file_size {
-                        let local_path = timeline_path.join(layer.name.to_string());
-
-                        tracing::error!(
-                            "Downloaded layer {} with unexpected size {} != {}",
-                            layer.name,
-                            downloaded_bytes,
-                            layer.metadata.file_size
-                        );
-
-                        tokio::fs::remove_file(&local_path)
-                            .await
-                            .or_else(fs_ext::ignore_not_found)?;
-                    }
-
-                    SECONDARY_MODE.download_layer.inc();
-                    touched.push(layer)
-                }
+                Ok(bytes) => bytes,
                 Err(e) => {
-                    // No retries here: secondary downloads don't have to succeed: if they fail we just proceed and expect
-                    // that on some future call to freshen the download will work.
-                    // TODO: refine this behavior.
-                    tracing::info!("Failed to download layer {}: {}", layer.name, e);
+                    if let DownloadError::NotFound = e {
+                        // A heatmap might be out of date and refer to a layer that doesn't exist any more.
+                        // This is harmless: continue to download the next layer. It is expected during compaction
+                        // GC.
+                        tracing::debug!(
+                            "Skipped downloading missing layer {}, raced with compaction/gc?",
+                            layer.name
+                        );
+                        continue;
+                    } else {
+                        return Err(e.into());
+                    }
                 }
+            };
+
+            if downloaded_bytes != layer.metadata.file_size {
+                let local_path = timeline_path.join(layer.name.to_string());
+
+                tracing::warn!(
+                    "Downloaded layer {} with unexpected size {} != {}.  Removing download.",
+                    layer.name,
+                    downloaded_bytes,
+                    layer.metadata.file_size
+                );
+
+                tokio::fs::remove_file(&local_path)
+                    .await
+                    .or_else(fs_ext::ignore_not_found)?;
             }
+
+            SECONDARY_MODE.download_layer.inc();
+            touched.push(layer)
         }
 
         // Write updates to state to record layers we just downloaded or touched.
