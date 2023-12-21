@@ -221,6 +221,7 @@ pub async fn scan_metadata(
     let spawned_timelines = Arc::new(AtomicUsize::new(0));
     let completed_tenants = AtomicUsize::new(0);
     let completed_timelines = AtomicUsize::new(0);
+    let last_tenant_id = std::cell::RefCell::new(None);
 
     let s3_client = s3_client.clone();
     let target = target.clone();
@@ -317,6 +318,8 @@ pub async fn scan_metadata(
                     more_tenants = js.len() < 1000;
 
                     spawned_tenants.fetch_add(1, Ordering::Relaxed);
+
+                    *last_tenant_id.borrow_mut() = Some(tenant_shard_id);
                 }
                 Either::Right((tenant_shard_id, timelines)) => {
                     for timeline_id in timelines {
@@ -370,11 +373,11 @@ pub async fn scan_metadata(
 
             match res {
                 Ok(()) => {
-                    tracing::info!("progress tenants: {completed_tenants} / {spawned_tenants}, timelines: {completed_timelines} / {spawned_timelines} after {:?}", started_at.elapsed());
+                    tracing::info!("progress tenants: {completed_tenants:>6} / {spawned_tenants:<6}, timelines: {completed_timelines:>6} / {spawned_timelines:<6} after {:?}", started_at.elapsed());
                     break;
                 }
                 Err(_timeout) => {
-                    tracing::info!("progress tenants: {completed_tenants} / {spawned_tenants}, timelines: {completed_timelines} / {spawned_timelines}");
+                    tracing::info!("progress tenants: {completed_tenants:>6} / {spawned_tenants:<6}, timelines: {completed_timelines:>6} / {spawned_timelines:<6}, last tenant: {:?}", &*last_tenant_id.borrow());
                 }
             }
         }
