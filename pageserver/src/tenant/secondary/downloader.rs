@@ -8,6 +8,9 @@ use std::{
 
 use crate::{
     config::PageServerConf,
+    disk_usage_eviction_task::{
+        finite_f32, DiskUsageEvictionInfo, EvictionCandidate, EvictionLayer, EvictionSecondaryLayer,
+    },
     metrics::SECONDARY_MODE,
     tenant::{
         config::SecondaryLocationConfig,
@@ -141,6 +144,46 @@ impl SecondaryDetail {
             next_download: None,
             timelines: HashMap::new(),
         }
+    }
+
+    pub(super) fn get_layers_for_eviction(
+        &self,
+        parent: &Arc<SecondaryTenant>,
+    ) -> DiskUsageEvictionInfo {
+        let mut result = DiskUsageEvictionInfo {
+            max_layer_size: None,
+            resident_layers: Vec::new(),
+        };
+        for (timeline_id, timeline_detail) in &self.timelines {
+            result
+                .resident_layers
+                .extend(timeline_detail.on_disk_layers.iter().map(|(name, ods)| {
+                    EvictionCandidate {
+                        layer: EvictionLayer::Secondary(EvictionSecondaryLayer {
+                            secondary_tenant: parent.clone(),
+                            timeline_id: *timeline_id,
+                            name: name.clone(),
+                            metadata: ods.metadata.clone(),
+                        }),
+                        last_activity_ts: ods.access_time,
+                        relative_last_activity: finite_f32::FiniteF32::ZERO,
+                    }
+                }));
+        }
+        result.max_layer_size = result
+            .resident_layers
+            .iter()
+            .map(|l| l.layer.get_file_size())
+            .max();
+
+        tracing::debug!(
+            "eviction: secondary tenant {} found {} timelines, {} layers",
+            parent.get_tenant_shard_id(),
+            self.timelines.len(),
+            result.resident_layers.len()
+        );
+
+        result
     }
 }
 

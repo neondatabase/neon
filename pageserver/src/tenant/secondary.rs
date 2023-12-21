@@ -5,14 +5,20 @@ mod scheduler;
 
 use std::sync::Arc;
 
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::{
+    disk_usage_eviction_task::DiskUsageEvictionInfo,
+    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
+};
 
 use self::{
     downloader::{downloader_task, SecondaryDetail},
     heatmap_uploader::heatmap_uploader_task,
 };
 
-use super::{config::SecondaryLocationConfig, mgr::TenantManager};
+use super::{
+    config::SecondaryLocationConfig, mgr::TenantManager,
+    span::debug_assert_current_span_has_tenant_id,
+};
 
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
@@ -109,6 +115,10 @@ impl SecondaryTenant {
 
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
+    }
+
+    pub(crate) fn get_layers_for_eviction(self: &Arc<Self>) -> DiskUsageEvictionInfo {
+        self.detail.lock().unwrap().get_layers_for_eviction(self)
     }
 }
 

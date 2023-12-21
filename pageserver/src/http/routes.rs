@@ -1595,12 +1595,13 @@ async fn disk_usage_eviction_run(
         )));
     };
 
-    let state = state.disk_usage_eviction_state.clone();
+    let eviction_state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state,
+        &eviction_state,
         storage,
         usage,
+        &state.tenant_manager,
         config.eviction_order,
         &cancel,
     )
