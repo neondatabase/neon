@@ -1,5 +1,5 @@
 use async_trait;
-use futures::Future;
+use futures::{Future, FutureExt};
 use std::{
     collections::HashMap,
     marker::PhantomData,
@@ -298,6 +298,12 @@ where
     async fn process_next_completion(&mut self) -> C {
         match self.task_result_rx.recv().await {
             Some(r) => {
+                // We use a channel to drive completions, but also
+                // need to drain the JoinSet to avoid completed tasks
+                // accumulating.  These calls are 1:1 because every task
+                // we spawn into this joinset submits is result to the channel.
+                self.tasks.join_next().now_or_never();
+
                 self.running.remove(r.get_tenant_shard_id());
                 r
             }
