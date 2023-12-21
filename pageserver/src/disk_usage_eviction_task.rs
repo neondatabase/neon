@@ -469,23 +469,30 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 continue;
             };
 
-            js.spawn(async move {
-                match candidate.layer {
-                    EvictionLayer::Attached(layer) => {
-                        let file_size = layer.layer_desc().file_size;
-
+            match candidate.layer {
+                EvictionLayer::Attached(layer) => {
+                    let file_size = layer.layer_desc().file_size;
+                    js.spawn(async move {
                         layer
                             .evict_and_wait()
                             .await
                             .map(|()| file_size)
                             .map_err(|e| (file_size, e))
-                    }
-                    EvictionLayer::Secondary(_layer) => {
-                        todo!();
-                    }
+                    });
                 }
-            });
+                EvictionLayer::Secondary(layer) => {
+                    let file_size = layer.metadata.file_size();
+                    let tenant_manager = tenant_manager.clone();
 
+                    js.spawn(async move {
+                        layer
+                            .secondary_tenant
+                            .evict_layer(tenant_manager.get_conf(), layer.timeline_id, layer.name)
+                            .await;
+                        Ok(file_size)
+                    });
+                }
+            }
             tokio::task::yield_now().await;
         }
 
@@ -731,6 +738,9 @@ async fn collect_eviction_candidates(
         .await
         .context("get list of tenants")?;
 
+    // TODO: avoid listing every layer in every tenant: this loop can block the executor,
+    // and the resulting data structure can be huge.
+    // (https://github.com/neondatabase/neon/issues/6224)
     let mut candidates = Vec::new();
 
     for (tenant_id, _state) in tenants {
@@ -865,11 +875,11 @@ async fn collect_eviction_candidates(
         }
     }
 
-    // FIXME: this is a long loop over all secondary locations.  At the least, respect
-    // cancellation here, but really we need to break up the loop.  We could extract the
-    // Arc<SecondaryTenant>s and iterate over them with some tokio yields in there.  Ideally
-    // though we should just reduce the total amount of work: our eviction goals do not require
-    // listing absolutely every layer in every tenant: we could sample this.
+    // Note: the same tenant ID might be hit twice, if it transitions from attached to
+    // secondary while we run.  That is okay: when we eventually try and run the eviction,
+    // the `Gate` on the object will ensure that whichever one has already been shut down
+    // will not delete anything.
+
     let mut secondary_tenants = Vec::new();
     tenant_manager.foreach_secondary_tenants(
         |_tenant_shard_id: &TenantShardId, state: &Arc<SecondaryTenant>| {
