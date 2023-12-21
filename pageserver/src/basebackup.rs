@@ -222,8 +222,16 @@ where
                     let restart_lsn = Lsn(u64::from_le_bytes(
                         content[offs..offs + 8].try_into().unwrap(),
                     ));
-                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
-                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_INVALIDATED;
+                    let invalidated =
+                        u32::from_le_bytes(content[offs..offs + 4].try_into().unwrap());
+                    info!(
+                        "Replication slot {} restart LSN={}, invalidated={}",
+                        path, restart_lsn, invalidated
+                    );
+                    if invalidated != pg_constants::RS_INVAL_NONE {
+                        min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+                    }
                 }
                 let header = new_tar_header(&path, content.len() as u64)?;
                 self.ar

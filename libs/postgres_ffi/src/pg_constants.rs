@@ -223,6 +223,9 @@ pub const XLP_LONG_HEADER: u16 = 0x0002;
 /* From replication/slot.h */
 pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
    + 64 /* NameData */  + 4*4;
+pub const REPL_SLOT_ON_DISK_OFFSETOF_INVALIDATED: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
+   + 64 /* NameData */  + 4*4 + 8;
+pub const RS_INVAL_NONE: u32 = 0;
 
 /* From fsm_internals.h */
 const FSM_NODES_PER_PAGE: usize = BLCKSZ as usize - SIZEOF_PAGE_HEADER_DATA - 4;
