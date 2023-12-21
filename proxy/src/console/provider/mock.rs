@@ -1,7 +1,5 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
-use std::sync::Arc;
-
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
@@ -11,6 +9,8 @@ use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use smol_str::SmolStr;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio_postgres::{config::SslMode, Client};
 use tracing::{error, info, info_span, warn, Instrument};
