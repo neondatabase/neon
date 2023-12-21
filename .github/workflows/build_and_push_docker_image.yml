@@ -15,24 +15,6 @@ on:
         value: ${{ jobs.tag.outputs.build-tools-tag }}
 
 jobs:
-  tag:
-    runs-on: ubuntu-latest
-    outputs:
-      build-tools-tag: ${{steps.buildtools-tag.outputs.image_tag}}
-
-    steps:
-      - name: Get buildtools tag
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            IMAGE_TAG=$GITHUB_RUN_ID
-          else
-            IMAGE_TAG=pinned
-          fi
-          
-          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-        shell: bash
-        id: buildtools-tag
-
   check-if-build-tools-dockerfile-changed:
     runs-on: ubuntu-latest
     outputs:
@@ -51,7 +33,28 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
+
+  tag:
+    runs-on: ubuntu-latest
+    needs: [ check-if-build-tools-dockerfile-changed ]
+    outputs:
+      build-tools-tag: ${{steps.buildtools-tag.outputs.image_tag}}
+
+    steps:
+      - name: Get buildtools tag
+        env:
+          DOCKERFILE_CHANGED: ${{ needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] && [[ "${DOCKERFILE_CHANGED}" == "true" ]]; then
+            IMAGE_TAG=$GITHUB_RUN_ID
+          else
+            IMAGE_TAG=pinned
+          fi
+
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+        shell: bash
+        id: buildtools-tag
+
   kaniko:
     if: needs.check-if-build-tools-dockerfile-changed.outputs.docker_file_changed == 'true'
     needs: [ tag, check-if-build-tools-dockerfile-changed ]
