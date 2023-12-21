@@ -110,6 +110,7 @@ pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
+redis = { version = "0.24.0", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_19"] }

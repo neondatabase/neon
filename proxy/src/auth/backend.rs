@@ -8,6 +8,7 @@ use tokio_postgres::config::AuthKeys;
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
+use crate::cache::Cached;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::AuthSecret;
 use crate::proxy::connect_compute::handle_try_wake;
@@ -19,7 +20,7 @@ use crate::{
     config::AuthenticationConfig,
     console::{
         self,
-        provider::{CachedNodeInfo, ConsoleReqExtra},
+        provider::{CachedAllowedIps, CachedNodeInfo, ConsoleReqExtra},
         Api,
     },
     metrics::LatencyTimer,
@@ -56,7 +57,7 @@ pub enum BackendType<'a, T> {
 
 pub trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
-    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError>;
+    fn get_allowed_ips(&self) -> Result<Vec<SmolStr>, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, ()> {
@@ -192,17 +193,20 @@ async fn auth_quirks(
     if !check_peer_addr_is_in_list(&info.inner.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed());
     }
-    let cached_secret = api.get_role_secret(extra, &info).await?;
+    let maybe_secret = api.get_role_secret(extra, &info).await?;
 
-    let secret = cached_secret.clone().unwrap_or_else(|| {
+    let cached_secret = maybe_secret.unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
         // prevent malicious probing (possible due to missing protocol steps).
         // This mocked secret will never lead to successful authentication.
         info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(&info.inner.user, rand::random()))
+        Cached::new_uncached(AuthSecret::Scram(scram::ServerSecret::mock(
+            &info.inner.user,
+            rand::random(),
+        )))
     });
     match authenticate_with_secret(
-        secret,
+        cached_secret.value.clone(),
         info,
         client,
         unauthenticated_password,
@@ -417,15 +421,15 @@ impl BackendType<'_, ComputeUserInfo> {
     pub async fn get_allowed_ips(
         &self,
         extra: &ConsoleReqExtra,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
+    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
         use BackendType::*;
         match self {
             Console(api, creds) => api.get_allowed_ips(extra, creds).await,
             #[cfg(feature = "testing")]
             Postgres(api, creds) => api.get_allowed_ips(extra, creds).await,
-            Link(_) => Ok(Arc::new(vec![])),
+            Link(_) => Ok(Cached::new_uncached(Arc::new(vec![]))),
             #[cfg(test)]
-            Test(x) => x.get_allowed_ips(),
+            Test(x) => Ok(Cached::new_uncached(Arc::new(x.get_allowed_ips()?))),
         }
     }
 

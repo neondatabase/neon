@@ -152,7 +152,7 @@ impl ClientCredentials {
     }
 }
 
-pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<String>) -> bool {
+pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &Vec<SmolStr>) -> bool {
     if ip_list.is_empty() {
         return true;
     }

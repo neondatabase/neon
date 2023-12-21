@@ -75,6 +75,7 @@ x509-parser.workspace = true
 native-tls.workspace = true
 postgres-native-tls.workspace = true
 postgres-protocol.workspace = true
+redis.workspace = true
 smol_str.workspace = true
 
 workspace_hack.workspace = true

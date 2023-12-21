@@ -12,6 +12,7 @@ use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
+use smol_str::SmolStr;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
 use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
@@ -469,7 +470,7 @@ impl TestBackend for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError> {
+    fn get_allowed_ips(&self) -> Result<Vec<SmolStr>, console::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 }

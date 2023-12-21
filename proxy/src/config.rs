@@ -352,6 +352,63 @@ impl FromStr for CacheOptions {
 }
 
 /// Helper for cmdline cache options parsing.
+#[derive(Debug)]
+pub struct ProjectInfoCacheOptions {
+    /// Max number of entries.
+    pub size: usize,
+    /// Entry's time-to-live.
+    pub ttl: Duration,
+    /// Max number of roles per endpoint.
+    pub max_roles: usize,
+}
+
+impl ProjectInfoCacheOptions {
+    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=10000,ttl=4m,max_roles=10";
+
+    /// Parse cache options passed via cmdline.
+    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
+    fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut size = None;
+        let mut ttl = None;
+        let mut max_roles = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "size" => size = Some(value.parse()?),
+                "ttl" => ttl = Some(humantime::parse_duration(value)?),
+                "max_roles" => max_roles = Some(value.parse()?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+
+        // TTL doesn't matter if cache is always empty.
+        if let Some(0) = size {
+            ttl.get_or_insert(Duration::default());
+        }
+
+        Ok(Self {
+            size: size.context("missing `size`")?,
+            ttl: ttl.context("missing `ttl`")?,
+            max_roles: max_roles.context("missing `max_roles`")?,
+        })
+    }
+}
+
+impl FromStr for ProjectInfoCacheOptions {
+    type Err = anyhow::Error;
+
+    fn from_str(options: &str) -> Result<Self, Self::Err> {
+        let error = || format!("failed to parse cache options '{options}'");
+        Self::parse(options).with_context(error)
+    }
+}
+
+/// Helper for cmdline cache options parsing.
 pub struct WakeComputeLockOptions {
     /// The number of shards the lock map should have
     pub shards: usize,

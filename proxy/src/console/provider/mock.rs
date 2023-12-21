@@ -6,7 +6,8 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::console::provider::CachedRoleSecret;
+use crate::cache::Cached;
+use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -157,8 +158,10 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
+    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
+        Ok(Cached::new_uncached(Arc::new(
+            self.do_get_auth_info(creds).await?.allowed_ips,
+        )))
     }
 
     #[tracing::instrument(skip_all)]

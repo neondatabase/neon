@@ -21,6 +21,7 @@ pub mod parse;
 pub mod protocol2;
 pub mod proxy;
 pub mod rate_limiter;
+pub mod redis;
 pub mod sasl;
 pub mod scram;
 pub mod serverless;
