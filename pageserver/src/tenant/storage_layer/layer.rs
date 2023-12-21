@@ -211,7 +211,7 @@ impl Layer {
     /// Delete the layer file when the `self` gets dropped, also try to schedule a remote index upload
     /// then.
     ///
-    /// On drop, this will cause a call to [`RemoteTimelineClient::schedule_deletion_of_unlinked`].
+    /// On drop, this will cause a call to [`crate::tenant::remote_timeline_client::RemoteTimelineClient::schedule_deletion_of_unlinked`].
     /// This means that the unlinking by [gc] or [compaction] must have happened strictly before
     /// the value this is called on gets dropped.
     ///
