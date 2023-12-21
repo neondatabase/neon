@@ -75,9 +75,6 @@ jobs:
     container: gcr.io/kaniko-project/executor:v1.7.0-debug
 
     steps:
-      - name: skip if no change in docker image
-        
-        run: exit 0
       - name: Checkout
         uses: actions/checkout@v1
 
