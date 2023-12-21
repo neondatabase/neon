@@ -2193,15 +2193,6 @@ mod tests {
 
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
 
-        let timeline_path = test_state.harness.timeline_path(&TIMELINE_ID);
-        let remote_timeline_dir = test_state.harness.remote_fs_dir.join(
-            timeline_path
-                .strip_prefix(&test_state.harness.conf.workdir)
-                .unwrap(),
-        );
-
-        std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
-
         let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(
                 &test_state.harness.tenant_shard_id,
@@ -2210,6 +2201,10 @@ mod tests {
             )
             .get_path(),
         );
+
+        std::fs::create_dir_all(index_path.parent().unwrap())
+            .expect("creating test dir should work");
+
         eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();
         example_index_part

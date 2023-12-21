@@ -1583,19 +1583,22 @@ async fn disk_usage_eviction_run(
     struct Config {
         /// How many bytes to evict before reporting that pressure is relieved.
         evict_bytes: u64,
+
+        #[serde(default)]
+        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
     struct Usage {
         // remains unchanged after instantiation of the struct
-        config: Config,
+        evict_bytes: u64,
         // updated by `add_available_bytes`
         freed_bytes: u64,
     }
 
     impl crate::disk_usage_eviction_task::Usage for Usage {
         fn has_pressure(&self) -> bool {
-            self.config.evict_bytes > self.freed_bytes
+            self.evict_bytes > self.freed_bytes
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {
@@ -1606,7 +1609,7 @@ async fn disk_usage_eviction_run(
     let config = json_request::<Config>(&mut r).await?;
 
     let usage = Usage {
-        config,
+        evict_bytes: config.evict_bytes,
         freed_bytes: 0,
     };
 
@@ -1621,7 +1624,11 @@ async fn disk_usage_eviction_run(
     let state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state, storage, usage, &cancel,
+        &state,
+        storage,
+        usage,
+        config.eviction_order,
+        &cancel,
     )
     .await;
 

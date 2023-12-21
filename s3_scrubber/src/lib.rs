@@ -15,6 +15,7 @@ use anyhow::Context;
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
+use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::sso::SsoCredentialsProvider;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::Region;
@@ -255,6 +256,11 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         let chain = CredentialsProviderChain::first_try(
             "env",
             EnvironmentVariableCredentialsProvider::new(),
+        )
+        // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+        .or_else(
+            "profile-sso",
+            ProfileFileCredentialsProvider::builder().build(),
         );
 
         // Use SSO if we were given an account ID
@@ -265,7 +271,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
                     .account_id(sso_account)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
-                    .region(Region::from_static("eu-central-1"))
+                    .region(bucket_region.clone())
                     .build(),
             ),
             None => chain,

@@ -44,7 +44,6 @@ jobs:
 
         exit 1
 
-
   tag:
     needs: [ check-permissions ]
     runs-on: [ self-hosted, gen3, small ]
@@ -74,11 +73,19 @@ jobs:
         shell: bash
         id: build-tag
 
-  check-codestyle-python:
+  build-buildtools-image:
     needs: [ check-permissions ]
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      dockerfile-path: Dockerfile.buildtools
+      image-name: build-tools
+    secrets: inherit
+
+  check-codestyle-python:
+    needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -108,10 +115,10 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -175,10 +182,10 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, tag, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -338,7 +345,7 @@ jobs:
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
@@ -408,10 +415,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, tag ]
+    needs: [ check-permissions, build-neon, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     strategy:
@@ -447,10 +454,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    needs: [ check-permissions, build-neon ]
+    needs: [ check-permissions, build-neon, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
@@ -479,12 +486,12 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks ]
+    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-buildtools-image ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
 
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
 
     steps:
@@ -526,11 +533,10 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests ]
-
+    needs: [ check-permissions, regress-tests, build-buildtools-image ]
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${{ needs.build-buildtools-image.outputs.build-tools-tag }}
       options: --init
     strategy:
       fail-fast: false
@@ -694,7 +700,7 @@ jobs:
             }"
 
   neon-image:
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
@@ -733,6 +739,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{ needs.tag.outputs.build-tag }}
+                           --build-arg TAG=${{ needs.build-buildtools-image.outputs.build-tools-tag }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
@@ -743,7 +750,7 @@ jobs:
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, build-buildtools-image, tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
@@ -778,6 +785,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
+                           --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -788,7 +796,7 @@ jobs:
         run: rm -rf ~/.ecr
 
   compute-node-image:
-    needs: [ check-permissions, tag ]
+    needs: [ check-permissions, build-buildtools-image, tag ]
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: gcr.io/kaniko-project/executor:v1.9.2-debug
@@ -836,6 +844,7 @@ jobs:
                            --build-arg GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
                            --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
+                           --build-arg TAG=${{needs.build-buildtools-image.outputs.build-tools-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}

@@ -1473,6 +1473,7 @@ threshold = "20m"
                 period: Duration::from_secs(10),
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
+                eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
             })
         );
         match &conf.default_tenant_conf.eviction_policy {

@@ -16,6 +16,7 @@ use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
     meta::credentials::CredentialsProviderChain,
+    profile::ProfileFileCredentialsProvider,
     provider_config::ProviderConfig,
     retry::{RetryConfigBuilder, RetryMode},
     web_identity_token::WebIdentityTokenCredentialsProvider,
@@ -74,20 +75,29 @@ impl S3Bucket {
 
         let region = Some(Region::new(aws_config.bucket_region.clone()));
 
+        let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
             CredentialsProviderChain::first_try(
                 "env",
                 EnvironmentVariableCredentialsProvider::new(),
             )
+            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+            .or_else(
+                "profile-sso",
+                ProfileFileCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
             // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
             // needed to access remote extensions bucket
-            .or_else("token", {
-                let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+            .or_else(
+                "token",
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
-                    .build()
-            })
+                    .build(),
+            )
             // uses imds v2
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
@@ -218,14 +228,6 @@ impl S3Bucket {
 
         let started_at = ScopeGuard::into_inner(started_at);
 
-        if get_object.is_err() {
-            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                kind,
-                AttemptOutcome::Err,
-                started_at,
-            );
-        }
-
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
@@ -241,11 +243,27 @@ impl S3Bucket {
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
                 Err(DownloadError::NotFound)
             }
-            Err(e) => Err(DownloadError::Other(
-                anyhow::Error::new(e).context("download s3 object"),
-            )),
+            Err(e) => {
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("download s3 object"),
+                ))
+            }
         }
     }
 }
