@@ -36,6 +36,8 @@ use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
+const MAX_SLOT_WAL_KEEP_SIZE: u64 = 1 * 1024 * 1024 * 1024; // 1GB
+
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
@@ -222,14 +224,8 @@ where
                     let restart_lsn = Lsn(u64::from_le_bytes(
                         content[offs..offs + 8].try_into().unwrap(),
                     ));
-                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_INVALIDATED;
-                    let invalidated =
-                        u32::from_le_bytes(content[offs..offs + 4].try_into().unwrap());
-                    info!(
-                        "Replication slot {} restart LSN={}, invalidated={}",
-                        path, restart_lsn, invalidated
-                    );
-                    if invalidated == pg_constants::RS_INVAL_NONE {
+                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                    if restart_lsn + MAX_SLOT_WAL_KEEP_SIZE > self.lsn {
                         min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
                     }
                 }
