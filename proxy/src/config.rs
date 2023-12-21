@@ -1,4 +1,4 @@
-use crate::{auth, rate_limiter::RateBucketInfo};
+use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
 use anyhow::{bail, ensure, Context, Ok};
 use rustls::{sign, Certificate, PrivateKey};
 use sha2::{Digest, Sha256};
@@ -36,8 +36,8 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub timeout: tokio::time::Duration,
-    pub pool_opt_in: bool,
+    pub request_timeout: tokio::time::Duration,
+    pub pool_options: GlobalConnPoolOptions,
 }
 
 pub struct AuthenticationConfig {
