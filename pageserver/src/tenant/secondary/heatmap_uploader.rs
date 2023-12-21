@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    pin::Pin,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -16,6 +17,7 @@ use crate::{
     },
 };
 
+use futures::Future;
 use md5;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
@@ -28,7 +30,6 @@ use super::{
     },
     CommandRequest,
 };
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
 use utils::{backoff, completion::Barrier};
@@ -223,10 +224,11 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
 
     fn spawn(
         &mut self,
-        join_set: &mut JoinSet<()>,
-        result_tx: tokio::sync::mpsc::UnboundedSender<WriteComplete>,
         job: UploadPending,
-    ) -> WriteInProgress {
+    ) -> (
+        WriteInProgress,
+        Pin<Box<dyn Future<Output = WriteComplete> + Send>>,
+    ) {
         let UploadPending {
             tenant,
             last_digest,
@@ -237,7 +239,7 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
         let remote_storage = self.remote_storage.clone();
         let (completion, barrier) = utils::completion::channel();
         let tenant_shard_id = *tenant.get_tenant_shard_id();
-        join_set.spawn(async move {
+        (WriteInProgress { barrier }, Box::pin(async move {
             // Guard for the barrier in [`WriteInProgress`]
             let _completion = completion;
 
@@ -285,16 +287,13 @@ impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
                 .get_heatmap_period()
                 .and_then(|period| now.checked_add(period));
 
-            result_tx
-                .send(WriteComplete {
+            WriteComplete {
                     tenant_shard_id: *tenant.get_tenant_shard_id(),
                     completed_at: now,
                     digest,
                     next_upload,
-                })
-                .ok();
-        }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
-        WriteInProgress { barrier }
+                }
+        }.instrument(info_span!(parent: None, "heatmap_upload", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 
     fn on_command(&mut self, command: UploadCommand) -> anyhow::Result<UploadPending> {

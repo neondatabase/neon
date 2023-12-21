@@ -1,7 +1,9 @@
 use async_trait;
+use futures::Future;
 use std::{
     collections::HashMap,
     marker::PhantomData,
+    pin::Pin,
     time::{Duration, Instant},
 };
 
@@ -38,7 +40,7 @@ const MIN_SCHEDULING_INTERVAL: Duration = Duration::from_secs(1);
 /// CMD: 'Command' type that the job generator will accept to create jobs on-demand
 pub(super) struct TenantBackgroundJobs<G, PJ, RJ, C, CMD>
 where
-    C: TenantScoped,
+    C: TenantScoped + Send,
     PJ: TenantScoped,
     RJ: HasBarrier,
     G: JobGenerator<PJ, RJ, C, CMD>,
@@ -91,7 +93,7 @@ pub(super) struct SchedulingResult<PJ> {
 #[async_trait::async_trait]
 pub(crate) trait JobGenerator<PJ, RJ, C, CMD>
 where
-    C: TenantScoped,
+    C: TenantScoped + Send,
     PJ: TenantScoped,
     RJ: HasBarrier,
 {
@@ -107,16 +109,9 @@ where
     async fn schedule(&mut self) -> SchedulingResult<PJ>;
 
     /// Called when a pending job is ready to be run.
-    /// //
-    /// The spawn operation _must_ spawn a task.  The task spawned _must_ send
-    /// its result to the provided result channel (including in error cases).
-    /// TODO: refactor so that implemeter can't violate these invariants.
-    fn spawn(
-        &mut self,
-        join_set: &mut JoinSet<()>,
-        result_tx: tokio::sync::mpsc::UnboundedSender<C>,
-        pending_job: PJ,
-    ) -> RJ;
+    ///
+    /// The job generation provides a future, and a RJ (Running Job) descriptor that tracks it.
+    fn spawn(&mut self, pending_job: PJ) -> (RJ, Pin<Box<dyn Future<Output = C> + Send>>);
 
     /// Called when a job previously spawned with spawn() transmits its completion
     fn on_completion(&mut self, completion: C);
@@ -161,7 +156,7 @@ where
 
 impl<G, PJ, RJ, C, CMD> TenantBackgroundJobs<G, PJ, RJ, C, CMD>
 where
-    C: TenantScoped,
+    C: TenantScoped + Send + 'static,
     PJ: TenantScoped,
     RJ: HasBarrier,
     G: JobGenerator<PJ, RJ, C, CMD>,
@@ -263,34 +258,35 @@ where
         }
     }
 
+    fn do_spawn(&mut self, job: PJ) {
+        let tenant_shard_id = *job.get_tenant_shard_id();
+        let (in_progress, fut) = self.generator.spawn(job);
+
+        let result_tx = self.task_result_tx.clone();
+        self.tasks.spawn(async move {
+            let r = fut.await;
+            // ok() because we don't care if receiver is shutdown: it is okay to drop completion in this case
+            result_tx.send(r).ok();
+        });
+
+        self.running.insert(tenant_shard_id, in_progress);
+    }
+
     /// For all pending tenants that are elegible for execution, spawn their task.
     ///
     /// Caller provides the spawn operation, we track the resulting execution.
-    ///
-    /// The spawn operation _must_ spawn a task.  The task spawned _must_ send
-    /// its result to the provided result channel (including in error cases).
-    /// TODO: refactor so that caller can't violate these invariants.
     fn spawn_pending(&mut self) {
         while !self.pending.is_empty() && self.running.len() < self.concurrency {
             // unwrap: loop condition includes !is_empty()
             let pending = self.pending.pop_front().unwrap();
-            let tenant_shard_id = *pending.get_tenant_shard_id();
-            let in_progress =
-                self.generator
-                    .spawn(&mut self.tasks, self.task_result_tx.clone(), pending);
-
-            self.running.insert(tenant_shard_id, in_progress);
+            self.do_spawn(pending);
         }
     }
 
     /// For administrative commands: skip the pending queue, ignore concurrency limits
     fn spawn_now(&mut self, job: PJ) -> &RJ {
         let tenant_shard_id = *job.get_tenant_shard_id();
-        let in_progress = self
-            .generator
-            .spawn(&mut self.tasks, self.task_result_tx.clone(), job);
-
-        self.running.insert(tenant_shard_id, in_progress);
+        self.do_spawn(job);
         self.running
             .get(&tenant_shard_id)
             .expect("We just inserted this")

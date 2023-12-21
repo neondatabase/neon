@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    pin::Pin,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
@@ -32,11 +33,11 @@ use crate::tenant::{
 use anyhow::Context;
 
 use chrono::format::{DelayedFormat, StrftimeItems};
+use futures::Future;
 use pageserver_api::shard::TenantShardId;
 use rand::Rng;
 use remote_storage::GenericRemoteStorage;
 
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
 use utils::{completion::Barrier, crashsafe::path_with_suffix_extension, fs_ext, id::TimelineId};
@@ -331,10 +332,11 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
 
     fn spawn(
         &mut self,
-        join_set: &mut JoinSet<()>,
-        result_tx: tokio::sync::mpsc::UnboundedSender<CompleteDownload>,
         job: PendingDownload,
-    ) -> RunningDownload {
+    ) -> (
+        RunningDownload,
+        Pin<Box<dyn Future<Output = CompleteDownload> + Send>>,
+    ) {
         let PendingDownload {
             secondary_state,
             last_download,
@@ -346,7 +348,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let remote_storage = self.remote_storage.clone();
         let conf = self.tenant_manager.get_conf();
         let tenant_shard_id = *secondary_state.get_tenant_shard_id();
-        join_set.spawn(async move {
+        (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
             if let Err(e) = TenantDownloader::new(conf, &remote_storage, &secondary_state)
@@ -374,14 +376,11 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                 }
             }
 
-            result_tx
-                .send(CompleteDownload {
+            CompleteDownload {
                     secondary_state,
                     completed_at: Instant::now(),
-                })
-                .ok();
-        }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())));
-        RunningDownload { barrier }
+                }
+        }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
 }
 
