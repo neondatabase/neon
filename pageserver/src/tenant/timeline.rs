@@ -42,10 +42,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::context::{
-    AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder,
-};
-use crate::tenant::storage_layer::delta_layer::DeltaEntry;
 use crate::tenant::storage_layer::{
     AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
     LayerAccessStatsReset, LayerFileName, ResidentLayer, ValueReconstructResult,
@@ -58,7 +54,15 @@ use crate::tenant::{
     metadata::{save_metadata, TimelineMetadata},
     par_fsync,
 };
+use crate::{
+    context::{AccessStatsBehavior, DownloadBehavior, RequestContext, RequestContextBuilder},
+    disk_usage_eviction_task::DiskUsageEvictionInfo,
+};
 use crate::{deletion_queue::DeletionQueueClient, tenant::remote_timeline_client::StopError};
+use crate::{
+    disk_usage_eviction_task::LocalLayerInfoForDiskUsageEviction,
+    tenant::storage_layer::delta_layer::DeltaEntry,
+};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
@@ -4414,43 +4418,6 @@ impl Timeline {
             .read()
             .unwrap()
             .clone()
-    }
-}
-
-pub(crate) struct DiskUsageEvictionInfo {
-    /// Timeline's largest layer (remote or resident)
-    pub max_layer_size: Option<u64>,
-    /// Timeline's resident layers
-    pub resident_layers: Vec<LocalLayerInfoForDiskUsageEviction>,
-}
-
-pub(crate) struct LocalLayerInfoForDiskUsageEviction {
-    pub layer: Layer,
-    pub last_activity_ts: SystemTime,
-}
-
-impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // format the tv_sec, tv_nsec into rfc3339 in case someone is looking at it
-        // having to allocate a string to this is bad, but it will rarely be formatted
-        let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
-        let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        struct DisplayIsDebug<'a, T>(&'a T);
-        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
-        f.debug_struct("LocalLayerInfoForDiskUsageEviction")
-            .field("layer", &DisplayIsDebug(&self.layer))
-            .field("last_activity", &ts)
-            .finish()
-    }
-}
-
-impl LocalLayerInfoForDiskUsageEviction {
-    pub fn file_size(&self) -> u64 {
-        self.layer.layer_desc().file_size
     }
 }
 
