@@ -14,42 +14,6 @@ use crate::walproposer_sim::{
 mod walproposer_sim;
 
 #[test]
-fn sync_empty_safekeepers() {
-    let clock = init_logger();
-    let config = TestConfig::new(Some(clock));
-    let test = config.start(1337);
-
-    let lsn = test.sync_safekeepers().unwrap();
-    assert_eq!(lsn, Lsn(0));
-    info!("Sucessfully synced empty safekeepers at 0/0");
-
-    let lsn = test.sync_safekeepers().unwrap();
-    assert_eq!(lsn, Lsn(0));
-    info!("Sucessfully synced (again) empty safekeepers at 0/0");
-}
-
-#[test]
-fn run_walproposer_generate_wal() {
-    let clock = init_logger();
-    let config = TestConfig::new(Some(clock));
-    // config.network.timeout = Some(250);
-    let test = config.start(1337);
-
-    let lsn = test.sync_safekeepers().unwrap();
-    assert_eq!(lsn, Lsn(0));
-    info!("Sucessfully synced empty safekeepers at 0/0");
-
-    let mut wp = test.launch_walproposer(lsn);
-
-    test.poll_for_duration(30);
-
-    for _ in 0..100 {
-        wp.write_tx(1);
-        test.poll_for_duration(5);
-    }
-}
-
-#[test]
 fn crash_safekeeper() {
     let clock = init_logger();
     let config = TestConfig::new(Some(clock));
@@ -162,48 +126,6 @@ fn test_many_tx() -> anyhow::Result<()> {
     // let diff = last_commit_lsn - initdb_lsn;
     // info!("Last commit lsn: {}, diff: {}", last_commit_lsn, diff);
     // assert!(diff > 10000 * 8);
-    Ok(())
-}
-
-#[test]
-fn test_random_schedules() -> anyhow::Result<()> {
-    let clock = init_logger();
-    let mut config = TestConfig::new(Some(clock));
-
-    for _ in 0..2000 {
-        let seed: u64 = rand::thread_rng().gen();
-        config.network = generate_network_opts(seed);
-
-        let test = config.start(seed);
-        warn!("Running test with seed {}", seed);
-
-        let schedule = generate_schedule(seed);
-        test.run_schedule(&schedule).unwrap();
-        validate_events(test.world.take_events());
-        test.world.deallocate();
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_one_schedule() -> anyhow::Result<()> {
-    // enable_debug();
-    let clock = init_logger();
-    let mut config = TestConfig::new(Some(clock));
-
-    let seed = 10318430968140584404;
-    config.network = generate_network_opts(seed);
-    info!("network: {:?}", config.network);
-    let test = config.start(seed);
-    warn!("Running test with seed {}", seed);
-
-    let schedule = generate_schedule(seed);
-    info!("schedule: {:?}", schedule);
-    test.run_schedule(&schedule).unwrap();
-    validate_events(test.world.take_events());
-    test.world.deallocate();
-
     Ok(())
 }
 
