@@ -2,12 +2,14 @@
 
 use std::net::IpAddr;
 
+use chrono::Utc;
 use smol_str::SmolStr;
-use tokio::time::Instant;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{error::ErrorKind, metrics::LatencyTimer};
 
+#[derive(serde::Serialize)]
 /// Context data for a single request to connect to a database.
 ///
 /// This data should **not** be used for connection logic, only for observability and limiting purposes.
@@ -15,7 +17,8 @@ use crate::{error::ErrorKind, metrics::LatencyTimer};
 pub struct RequestContext {
     pub peer_addr: IpAddr,
     pub session_id: Uuid,
-    pub first_packet: Instant,
+    #[serde(skip)]
+    pub first_packet: chrono::DateTime<Utc>,
     pub protocol: &'static str,
     pub project: Option<SmolStr>,
     pub branch: Option<SmolStr>,
@@ -24,7 +27,10 @@ pub struct RequestContext {
     pub application: Option<SmolStr>,
     pub cluster: &'static str,
     pub error_kind: Option<ErrorKind>,
+    #[serde(skip)]
     pub latency_timer: LatencyTimer,
+    #[serde(skip)]
+    logged: bool,
 }
 
 impl RequestContext {
@@ -39,7 +45,7 @@ impl RequestContext {
             session_id,
             protocol,
             latency_timer: LatencyTimer::new(protocol),
-            first_packet: tokio::time::Instant::now(),
+            first_packet: Utc::now(),
             project: None,
             branch: None,
             endpoint_id: None,
@@ -47,6 +53,14 @@ impl RequestContext {
             application: None,
             cluster,
             error_kind: None,
+            logged: false,
+        }
+    }
+
+    pub fn log(&mut self) {
+        if !self.logged {
+            self.logged = true;
+            info!("{}", serde_json::to_string(self).unwrap());
         }
     }
 }

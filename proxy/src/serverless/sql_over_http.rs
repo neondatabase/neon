@@ -148,10 +148,11 @@ fn get_conn_info(
         .next()
         .ok_or(anyhow::anyhow!("invalid database name"))?;
 
-    let username = connection_url.username();
+    let username = SmolStr::from(connection_url.username());
     if username.is_empty() {
         return Err(anyhow::anyhow!("missing username"));
     }
+    ctx.user = Some(username.clone());
 
     let password = connection_url
         .password()
@@ -193,7 +194,7 @@ fn get_conn_info(
     }
 
     Ok(ConnInfo {
-        username: username.into(),
+        username,
         dbname: dbname.into(),
         hostname,
         password: password.into(),
@@ -336,10 +337,12 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
+    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
+    drop(paused);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -443,6 +446,7 @@ async fn handle_inner(
             }
         };
 
+    ctx.log();
     let metrics = client.metrics();
 
     // how could this possibly fail

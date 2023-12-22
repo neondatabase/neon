@@ -29,6 +29,7 @@ pub trait UserFacingError: fmt::Display {
     }
 }
 
+#[derive(serde::Serialize)]
 pub enum ErrorKind {
     /// Wrong password, unknown endpoint, protocol violation, etc...
     User,

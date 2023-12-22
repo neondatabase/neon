@@ -292,6 +292,9 @@ async fn auth_and_wake_compute(
         tokio::time::sleep(wait_duration).await;
     };
 
+    ctx.branch = Some(node.aux.branch_id.clone());
+    ctx.project = Some(node.aux.project_id.clone());
+
     match compute_credentials.keys {
         #[cfg(feature = "testing")]
         ComputeCredentialKeys::Password(password) => node.config.password(password),

@@ -551,6 +551,9 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
+    ctx.branch = Some(node_info.aux.branch_id.clone());
+    ctx.project = Some(node_info.aux.project_id.clone());
+
     crate::proxy::connect_compute::connect_to_compute(
         ctx,
         &TokioMechanism {

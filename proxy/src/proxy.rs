@@ -99,7 +99,7 @@ pub async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                handle_client(
+                let res = handle_client(
                     config,
                     &mut ctx,
                     &cancel_map,
@@ -107,7 +107,11 @@ pub async fn task_main(
                     ClientMode::Tcp,
                     endpoint_rate_limiter,
                 )
-                .await
+                .await;
+
+                ctx.log();
+
+                res
             }
             .instrument(info_span!(
                 "handle_client",
@@ -137,13 +141,6 @@ pub enum ClientMode {
 
 /// Abstracts the logic of handling TCP vs WS clients
 impl ClientMode {
-    fn protocol_label(&self) -> &'static str {
-        match self {
-            ClientMode::Tcp => "tcp",
-            ClientMode::Websockets { .. } => "ws",
-        }
-    }
-
     fn allow_cleartext(&self) -> bool {
         match self {
             ClientMode::Tcp => false,
@@ -183,11 +180,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     info!(
-        protocol = mode.protocol_label(),
+        protocol = ctx.protocol,
         "handling interactive connection from client"
     );
 
-    let proto = mode.protocol_label();
+    let proto = ctx.protocol;
     let _client_gauge = NUM_CLIENT_CONNECTION_GAUGE
         .with_label_values(&[proto])
         .guard();
@@ -197,11 +194,13 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let tls = config.tls_config.as_ref();
 
+    let pause = ctx.latency_timer.pause();
     let do_handshake = handshake(stream, mode.handshake_tls(tls), cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
     };
+    drop(pause);
 
     // Extract credentials which we're going to use for auth.
     let creds = {
@@ -359,10 +358,13 @@ async fn prepare_client_connection(
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
 pub async fn proxy_pass(
+    ctx: &mut RequestContext,
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
+    ctx.log();
+
     let usage = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id.clone(),
         branch_id: aux.branch_id.clone(),
@@ -497,7 +499,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, aux).await
+        proxy_pass(ctx, stream, node.stream, aux).await
     }
 }
 
