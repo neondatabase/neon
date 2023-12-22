@@ -31,3 +31,31 @@ pgbench postgres -i -h 127.0.0.1 -p 55432 -U cloud_admin -s $SCALE
 cargo neon $ARGS tenant status
 
 # pgbench postgres -h 127.0.0.1 -p 55432 -U cloud_admin -T 600 -P 1 -c 32
+#
+# tmux
+#Ctrl+b+% horizontal split
+#Ctrl+b-o toggle panes
+
+#alias neon="cargo neon --release -q"
+
+# Pt1: baseline: one pageserver
+
+#INITIAL_SHARDS=1 bash demo_sharding.sh
+#neon tenant status
+
+#taskset -c 12-15 pgbench postgres -h 127.0.0.1 -p 55432 -U cloud_admin -T 30 -P 1 -c 64
+#taskset -c 12-15 pgbench postgres -h 127.0.0.1 -p 55432 -U cloud_admin -T 30 -P 1 -c 64 -S
+
+# Pt2: four shards
+
+#INITIAL_SHARDS=4 bash demo_sharding.sh
+#neon tenant status
+
+#taskset -c 12-15 pgbench postgres -h 127.0.0.1 -p 55432 -U cloud_admin -T 30 -P 1 -c 64
+#taskset -c 12-15 pgbench postgres -h 127.0.0.1 -p 55432 -U cloud_admin -T 30 -P 1 -c 64 -S
+
+# Pt3: 8 shards
+
+#bash demo_split_8.sh
+#taskset -c 12-15 pgbench postgres -h 127.0.0.1 -p 55432 -U cloud_admin -T 30 -P 1 -c 64 -S
+
