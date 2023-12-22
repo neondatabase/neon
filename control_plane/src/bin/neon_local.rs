@@ -561,9 +561,9 @@ async fn handle_tenant(
 
                 println!("add_row",);
                 shard_table.add_row([
-                    format!("{}", shard.shard_id),
+                    format!("{}", shard.shard_id.shard_slug()),
                     format!("{}", shard.node_id.0),
-                    format!("{}", size),
+                    format!("{} MiB", size / (1024 * 1024)),
                 ]);
 
                 if shard.shard_id.is_zero() {
@@ -580,7 +580,7 @@ async fn handle_tenant(
             tenant_table.add_row(["Tenant ID".to_string(), tenant_id.to_string()]);
             tenant_table.add_row([
                 "Synthetic size".to_string(),
-                format!("{}", synthetic_size.size.unwrap_or(0)),
+                format!("{} MiB", synthetic_size.size.unwrap_or(0) / (1024 * 1024)),
             ]);
 
             println!("{tenant_table}");
