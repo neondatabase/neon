@@ -18,7 +18,7 @@ use tokio_util::io::ReaderStream;
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{Download, DownloadError, Listing, ListingMode, RemotePath};
+use crate::{Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -331,6 +331,8 @@ impl RemoteStorage for LocalFs {
                 .map_err(DownloadError::Other)?;
             Ok(Download {
                 metadata,
+                last_modified: None,
+                etag: None,
                 download_stream: Box::pin(source),
             })
         } else {
@@ -372,17 +374,17 @@ impl RemoteStorage for LocalFs {
                 .await
                 .map_err(DownloadError::Other)?;
 
-            Ok(match end_exclusive {
-                Some(end_exclusive) => Download {
-                    metadata,
-                    download_stream: Box::pin(ReaderStream::new(
-                        source.take(end_exclusive - start_inclusive),
-                    )),
-                },
-                None => Download {
-                    metadata,
-                    download_stream: Box::pin(ReaderStream::new(source)),
-                },
+            let download_stream: DownloadStream = match end_exclusive {
+                Some(end_exclusive) => Box::pin(ReaderStream::new(
+                    source.take(end_exclusive - start_inclusive),
+                )),
+                None => Box::pin(ReaderStream::new(source)),
+            };
+            Ok(Download {
+                metadata,
+                last_modified: None,
+                etag: None,
+                download_stream,
             })
         } else {
             Err(DownloadError::NotFound)
