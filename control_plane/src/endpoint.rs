@@ -545,8 +545,11 @@ impl Endpoint {
 
         // Launch compute_ctl
         println!("Starting postgres node at '{}'", self.connstr());
-        let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
-        cmd.args(["--http-port", &self.http_address.port().to_string()])
+        let mut cmd = Command::new("/usr/bin/taskset");
+
+        cmd.args(["-c".to_string(), "8-11".to_string()])
+            .args([self.env.neon_distrib_dir.join("compute_ctl")])
+            .args(["--http-port", &self.http_address.port().to_string()])
             .args(["--pgdata", self.pgdata().to_str().unwrap()])
             .args(["--connstr", &self.connstr()])
             .args([
