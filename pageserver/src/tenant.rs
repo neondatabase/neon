@@ -3231,43 +3231,45 @@ impl Tenant {
 
             // Upload the created data dir to S3
             if let Some(storage) = &self.remote_storage {
-                let temp_path = timelines_path.join(format!(
-                    "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
-                ));
+                if self.tenant_shard_id().is_zero() {
+                    let temp_path = timelines_path.join(format!(
+                        "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
+                    ));
 
-                let (pgdata_zstd, tar_zst_size) =
-                    import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
-                backoff::retry(
-                    || async {
-                        self::remote_timeline_client::upload_initdb_dir(
-                            storage,
-                            &self.tenant_shard_id.tenant_id,
-                            &timeline_id,
-                            pgdata_zstd.try_clone().await?,
-                            tar_zst_size,
-                            &self.cancel,
-                        )
+                    let (pgdata_zstd, tar_zst_size) =
+                        import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
+                    backoff::retry(
+                        || async {
+                            self::remote_timeline_client::upload_initdb_dir(
+                                storage,
+                                &self.tenant_shard_id.tenant_id,
+                                &timeline_id,
+                                pgdata_zstd.try_clone().await?,
+                                tar_zst_size,
+                                &self.cancel,
+                            )
+                            .await
+                        },
+                        |_| false,
+                        3,
+                        u32::MAX,
+                        "persist_initdb_tar_zst",
+                        backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+                    )
+                    .await?;
+
+                    tokio::fs::remove_file(&temp_path)
                         .await
-                    },
-                    |_| false,
-                    3,
-                    u32::MAX,
-                    "persist_initdb_tar_zst",
-                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
-                )
-                .await?;
-
-                tokio::fs::remove_file(&temp_path)
-                    .await
-                    .or_else(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
-                            // If something else already removed the file, ignore the error
-                            Ok(())
-                        } else {
-                            Err(e)
-                        }
-                    })
-                    .with_context(|| format!("tempfile removal {temp_path}"))?;
+                        .or_else(|e| {
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                // If something else already removed the file, ignore the error
+                                Ok(())
+                            } else {
+                                Err(e)
+                            }
+                        })
+                        .with_context(|| format!("tempfile removal {temp_path}"))?;
+                }
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
