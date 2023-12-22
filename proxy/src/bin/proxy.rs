@@ -44,6 +44,9 @@ enum AuthBackend {
 #[derive(Parser)]
 #[command(version = GIT_VERSION, about)]
 struct ProxyCliArgs {
+    /// Name of the cluster this proxy is deployed in
+    #[clap(long, default_value_t = String::new())]
+    cluster: String,
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
@@ -381,7 +384,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
         // TODO: add this argument
-        cluster: String::new(),
+        cluster: args.cluster.clone(),
     }));
 
     Ok(config)

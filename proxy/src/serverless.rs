@@ -219,7 +219,7 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                let mut ctx = RequestContext::new(session_id, peer_addr, &config.cluster, "ws");
+                let mut ctx = RequestContext::new(session_id, peer_addr, "ws", &config.cluster);
 
                 if let Err(e) = websocket::serve_websocket(
                     config,
@@ -241,7 +241,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let mut ctx = RequestContext::new(session_id, peer_addr, &config.cluster, "http");
+        let mut ctx = RequestContext::new(session_id, peer_addr, "http", &config.cluster);
 
         let res = sql_over_http::handle(
             &config.http_config,
