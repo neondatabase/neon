@@ -310,7 +310,7 @@ impl ThreadContext {
 
         match after_ms.cmp(&0) {
             std::cmp::Ordering::Less => {
-                panic!("negative yield_me is not allowed");
+                // block until something wakes us up
             }
             std::cmp::Ordering::Equal => {
                 // tell executor that we are ready to be woken up
