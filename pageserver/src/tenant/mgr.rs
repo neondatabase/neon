@@ -132,7 +132,7 @@ impl TenantsMap {
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must
     /// resolve this to a fully qualified TenantShardId.
-    fn resolve_shard(
+    fn resolve_attached_shard(
         &self,
         tenant_id: &TenantId,
         selector: ShardSelector,
@@ -142,25 +142,27 @@ impl TenantsMap {
             TenantsMap::Initializing => None,
             TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => {
                 for slot in m.range(TenantShardId::tenant_range(*tenant_id)) {
+                    // Ignore all slots that don't contain an attached tenant
+                    let tenant = match &slot.1 {
+                        TenantSlot::Attached(t) => t,
+                        _ => continue,
+                    };
+
                     match selector {
                         ShardSelector::First => return Some(*slot.0),
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
                             return Some(*slot.0)
                         }
                         ShardSelector::Page(key) => {
-                            if let Some(tenant) = slot.1.get_attached() {
-                                // First slot we see for this tenant, calculate the expected shard number
-                                // for the key: we will use this for checking if this and subsequent
-                                // slots contain the key, rather than recalculating the hash each time.
-                                if want_shard.is_none() {
-                                    want_shard = Some(tenant.shard_identity.get_shard_number(&key));
-                                }
+                            // First slot we see for this tenant, calculate the expected shard number
+                            // for the key: we will use this for checking if this and subsequent
+                            // slots contain the key, rather than recalculating the hash each time.
+                            if want_shard.is_none() {
+                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                            }
 
-                                if Some(tenant.shard_identity.number) == want_shard {
-                                    return Some(*slot.0);
-                                }
-                            } else {
-                                continue;
+                            if Some(tenant.shard_identity.number) == want_shard {
+                                return Some(*slot.0);
                             }
                         }
                         _ => continue,
@@ -1319,9 +1321,11 @@ pub(crate) async fn get_active_tenant_with_timeout(
         let locked = TENANTS.read().unwrap();
 
         // Resolve TenantId to TenantShardId
-        let tenant_shard_id = locked.resolve_shard(&tenant_id, shard_selector).ok_or(
-            GetActiveTenantError::NotFound(GetTenantError::NotFound(tenant_id)),
-        )?;
+        let tenant_shard_id = locked
+            .resolve_attached_shard(&tenant_id, shard_selector)
+            .ok_or(GetActiveTenantError::NotFound(GetTenantError::NotFound(
+                tenant_id,
+            )))?;
 
         let peek_slot = tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Read)
             .map_err(GetTenantError::MapState)?;
