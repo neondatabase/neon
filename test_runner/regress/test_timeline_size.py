@@ -920,6 +920,6 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
         tenant_ids.remove(delete_tenant_id)
 
-    # Clear failpoint and check that all the stuck tenants proceed to active (apart from the one that deletes)
+    # Check that all the stuck tenants proceed to active (apart from the one that deletes)
     wait_until(10, 1, all_active)
     assert len(get_tenant_states()) == n_tenants - 1
