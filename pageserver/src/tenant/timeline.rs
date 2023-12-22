@@ -903,10 +903,15 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
+        tracing::info!("activate 1");
         self.spawn_initial_logical_size_computation_task(ctx);
+        tracing::info!("activate 2");
         self.launch_wal_receiver(ctx, broker_client);
+        tracing::info!("activate 3");
         self.set_state(TimelineState::Active);
+        tracing::info!("activate 4");
         self.launch_eviction_task(background_jobs_can_start);
+        tracing::info!("activate 5");
     }
 
     /// Graceful shutdown, may do a lot of I/O as we flush any open layers to disk and then

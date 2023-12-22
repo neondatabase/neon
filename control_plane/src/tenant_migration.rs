@@ -152,7 +152,7 @@ pub async fn migrate_tenant(
 
     let cplane = ComputeControlPlane::load(env.clone())?;
     for (endpoint_name, endpoint) in &cplane.endpoints {
-        if endpoint.tenant_id == tenant_shard_id.tenant_id {
+        if endpoint.tenant_id == tenant_shard_id.tenant_id && endpoint.status() == "running" {
             println!(
                 "🔁 Reconfiguring endpoint {} to use pageserver {}",
                 endpoint_name, dest_ps.conf.id
@@ -178,19 +178,24 @@ pub async fn migrate_tenant(
             continue;
         }
 
-        // Downgrade to a secondary location
-        let secondary_conf = build_location_config(
-            LocationConfigMode::Secondary,
-            None,
-            Some(LocationConfigSecondary { warm: true }),
-        );
+        // // Downgrade to a secondary location
+        // let secondary_conf = build_location_config(
+        //     LocationConfigMode::Secondary,
+        //     None,
+        //     Some(LocationConfigSecondary { warm: true }),
+        // );
 
-        println!(
-            "💤 Switching to secondary mode on pageserver {}",
-            other_ps.conf.id
-        );
+        // println!(
+        //     "💤 Switching to secondary mode on pageserver {}",
+        //     other_ps.conf.id
+        // );
+        // other_ps
+        //     .location_config(tenant_shard_id, secondary_conf, None)
+        //     .await?;
+        let detached_conf = build_location_config(LocationConfigMode::Detached, None, None);
+        println!("💤 Detaching on pageserver {}", other_ps.conf.id);
         other_ps
-            .location_config(tenant_shard_id, secondary_conf, None)
+            .location_config(tenant_shard_id, detached_conf, None)
             .await?;
     }
 

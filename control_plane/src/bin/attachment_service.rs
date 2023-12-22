@@ -612,6 +612,8 @@ async fn handle_tenant_create(mut req: Request<Body>) -> Result<Response<Body>, 
         })?;
     }
 
+    locked.save().await.map_err(ApiError::InternalServerError)?;
+
     json_response(
         StatusCode::OK,
         TenantCreateResponse {
@@ -842,6 +844,17 @@ async fn handle_tenant_shard_split(mut req: Request<Body>) -> Result<Response<Bo
             ))
         })?;
 
+        tracing::info!(
+            "Split {} into {}",
+            tenant_shard_id,
+            response
+                .new_shards
+                .iter()
+                .map(|s| format!("{:?}", s))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
         replacements.insert(*tenant_shard_id, response.new_shards);
     }
 
@@ -862,6 +875,8 @@ async fn handle_tenant_shard_split(mut req: Request<Body>) -> Result<Response<Bo
                 old_state.config.clone(),
             )
         };
+
+        locked.tenants.remove(&replaced);
 
         for child in children {
             let mut child_shard = shard_ident;
@@ -901,6 +916,8 @@ async fn handle_tenant_shard_split(mut req: Request<Body>) -> Result<Response<Bo
             response.new_shards.push(child);
         }
     }
+
+    locked.save().await.map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, response)
 }

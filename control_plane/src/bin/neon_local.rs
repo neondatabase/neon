@@ -544,6 +544,10 @@ async fn handle_tenant(
 
             let attachment_service = AttachmentService::from_env(env);
             for shard in attachment_service.tenant_locate(tenant_id).await?.shards {
+                println!(
+                    "Getting status for {} from {}",
+                    shard.shard_id, shard.node_id
+                );
                 let pageserver =
                     PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
 
@@ -554,8 +558,10 @@ async fn handle_tenant(
                     .tenant_info
                     .current_physical_size
                     .unwrap();
+
+                println!("add_row",);
                 shard_table.add_row([
-                    format!("{}", shard.shard_id.shard_number.0),
+                    format!("{}", shard.shard_id),
                     format!("{}", shard.node_id.0),
                     format!("{}", size),
                 ]);
@@ -585,9 +591,19 @@ async fn handle_tenant(
             let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
 
             let attachment_service = AttachmentService::from_env(env);
-            attachment_service
+            let result = attachment_service
                 .tenant_split(tenant_id, shard_count)
                 .await?;
+            println!(
+                "Split tenant {} into shards {}",
+                tenant_id,
+                result
+                    .new_shards
+                    .iter()
+                    .map(|s| format!("{:?}", s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
         }
 
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),

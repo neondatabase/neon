@@ -405,13 +405,20 @@ impl PageServerHandler {
         // shards (e.g. during splitting when the compute is not yet aware of the split), the tenant
         // that we look up here may not be the one that serves all the actual requests: we will double
         // check the mapping of key->shard later before calling into Timeline for getpage requests.
-        let tenant = mgr::get_active_tenant_with_timeout(
+        let tenant = match mgr::get_active_tenant_with_timeout(
             tenant_id,
             ShardSelector::First,
             ACTIVE_TENANT_TIMEOUT,
             &task_mgr::shutdown_token(),
         )
-        .await?;
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("Error at start of handle_pagerequests: {}", e);
+                return Err(e.into());
+            }
+        };
 
         // Make request tracer if needed
         let mut tracer = if tenant.get_trace_read_requests() {
@@ -426,9 +433,18 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant
-            .get_timeline(timeline_id, true)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let timeline = match tenant.get_timeline(timeline_id, true) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("Error getting timeline: {}", e);
+                return Err(QueryError::Other(anyhow::anyhow!(e)));
+            }
+        };
+
+        tracing::info!(
+            "handle_pagerequests: got timeline {}",
+            timeline.tenant_shard_id
+        );
 
         // Avoid starting new requests if the timeline has already started shutting down,
         // and block timeline shutdown until this request is complete, or drops out due
@@ -815,6 +831,10 @@ impl PageServerHandler {
 
         let key = rel_block_to_key(req.rel, req.blkno);
         let page = if timeline.get_shard_identity().is_key_local(&key) {
+            tracing::debug!(
+                "handle_get_page_at_lsn: using shard {}",
+                timeline.tenant_shard_id
+            );
             timeline
                 .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest, ctx)
                 .await?
@@ -850,6 +870,11 @@ impl PageServerHandler {
                 }
                 Err(e) => return Err(e.into()),
             };
+
+            tracing::debug!(
+                "handle_get_page_at_lsn: using shard {}",
+                timeline.tenant_shard_id
+            );
 
             // Take a GateGuard for the duration of this request.  If we were using our main Timeline object,
             // the GateGuard was already held over the whole connection.

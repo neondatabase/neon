@@ -1533,6 +1533,7 @@ impl Tenant {
             })?;
 
         if active_only && !timeline.is_active() {
+            tracing::warn!("Timeline {} is not active", timeline.timeline_id);
             Err(GetTimelineError::NotActive {
                 tenant_id: self.tenant_shard_id.tenant_id,
                 timeline_id,
