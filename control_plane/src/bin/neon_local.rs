@@ -544,10 +544,6 @@ async fn handle_tenant(
 
             let attachment_service = AttachmentService::from_env(env);
             for shard in attachment_service.tenant_locate(tenant_id).await?.shards {
-                println!(
-                    "Getting status for {} from {}",
-                    shard.shard_id, shard.node_id
-                );
                 let pageserver =
                     PageServerNode::from_env(env, env.get_pageserver_conf(shard.node_id)?);
 
@@ -559,7 +555,6 @@ async fn handle_tenant(
                     .current_physical_size
                     .unwrap();
 
-                println!("add_row",);
                 shard_table.add_row([
                     format!("{}", shard.shard_id.shard_slug()),
                     format!("{}", shard.node_id.0),
