@@ -678,6 +678,13 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             let query = "CREATE EXTENSION IF NOT EXISTS pg_stat_statements";
             info!("creating system extensions with query: {}", query);
             client.simple_query(query)?;
+            // since customers can not use superuser we grant execute to neon_superuser
+            let query = "GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser";
+            info!(
+                "granting execute on system extensions to neon_superuser: {}",
+                query
+            );
+            client.simple_query(query)?;
         }
     }
 
