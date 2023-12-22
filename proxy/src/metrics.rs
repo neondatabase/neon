@@ -119,7 +119,7 @@ pub struct LatencyTimer {
     // time since the stopwatch was started
     start: Option<time::Instant>,
     // accumulated time on the stopwatch
-    accumulated: std::time::Duration,
+    pub accumulated: std::time::Duration,
     // label data
     protocol: &'static str,
     cache_miss: bool,

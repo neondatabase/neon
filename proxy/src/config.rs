@@ -21,7 +21,7 @@ pub struct ProxyConfig {
     pub require_client_ip: bool,
     pub disable_ip_check_for_http: bool,
     pub endpoint_rps_limit: Vec<RateBucketInfo>,
-    pub cluster: String,
+    pub region: String,
 }
 
 #[derive(Debug)]

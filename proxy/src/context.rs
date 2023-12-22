@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 
 use chrono::Utc;
+use serde::{Serialize, Serializer};
 use smol_str::SmolStr;
 use tracing::info;
 use uuid::Uuid;
@@ -25,12 +26,16 @@ pub struct RequestContext {
     pub endpoint_id: Option<SmolStr>,
     pub user: Option<SmolStr>,
     pub application: Option<SmolStr>,
-    pub cluster: &'static str,
+    pub region: &'static str,
     pub error_kind: Option<ErrorKind>,
-    #[serde(skip)]
+    #[serde(rename = "request_latency", serialize_with = "latency_timer")]
     pub latency_timer: LatencyTimer,
     #[serde(skip)]
     logged: bool,
+}
+
+fn latency_timer<S: Serializer>(timer: &LatencyTimer, s: S) -> Result<S::Ok, S::Error> {
+    timer.accumulated.serialize(s)
 }
 
 impl RequestContext {
@@ -38,7 +43,7 @@ impl RequestContext {
         session_id: Uuid,
         peer_addr: IpAddr,
         protocol: &'static str,
-        cluster: &'static str,
+        region: &'static str,
     ) -> Self {
         Self {
             peer_addr,
@@ -51,7 +56,7 @@ impl RequestContext {
             endpoint_id: None,
             user: None,
             application: None,
-            cluster,
+            region,
             error_kind: None,
             logged: false,
         }

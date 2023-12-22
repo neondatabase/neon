@@ -92,7 +92,7 @@ pub async fn task_main(
                     bail!("missing required client IP");
                 }
 
-                let mut ctx = RequestContext::new(session_id, peer_addr, "tcp", &config.cluster);
+                let mut ctx = RequestContext::new(session_id, peer_addr, "tcp", &config.region);
 
                 socket
                     .inner
