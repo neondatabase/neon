@@ -24,7 +24,7 @@ pub mod defaults {
     // which is good for now to trigger bugs.
     // This parameter actually determines L0 layer file size.
     pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-    pub const DEFAULT_CHECKPOINT_TIMEOUT: &str = "10 m";
+    pub const DEFAULT_CHECKPOINT_TIMEOUT: &str = "10 s";
 
     // Target file size, when creating image and delta layers.
     // This parameter determines L1 layer file size.
