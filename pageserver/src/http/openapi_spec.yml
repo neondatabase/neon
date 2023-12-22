@@ -159,6 +159,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
+        "412":
+          description: Deletion may not proceed, tenant is not in Active state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
         "500":
           description: Generic operation error
           content:
