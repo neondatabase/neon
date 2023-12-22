@@ -262,6 +262,8 @@ pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolSt
 #[async_trait]
 pub trait Api {
     /// Get the client's auth secret for authentication.
+    /// Returns option because user not found situation is special.
+    /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
         extra: &ConsoleReqExtra,

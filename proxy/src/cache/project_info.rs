@@ -110,20 +110,26 @@ pub struct ProjectInfoCacheImpl {
 
 impl ProjectInfoCache for ProjectInfoCacheImpl {
     fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr) {
-        if let Some(endpoints) = self.project2ep.get(project_id) {
-            for endpoint_id in endpoints.value() {
-                if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
-                    endpoint_info.invalidate_allowed_ips();
-                }
+        let endpoints = self
+            .project2ep
+            .get(project_id)
+            .map(|kv| kv.value().clone())
+            .unwrap_or_default();
+        for endpoint_id in endpoints {
+            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
+                endpoint_info.invalidate_allowed_ips();
             }
         }
     }
     fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, user: &SmolStr) {
-        if let Some(endpoints) = self.project2ep.get(project_id) {
-            for endpoint_id in endpoints.value() {
-                if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
-                    endpoint_info.invalidate_role_secret(user);
-                }
+        let endpoints = self
+            .project2ep
+            .get(project_id)
+            .map(|kv| kv.value().clone())
+            .unwrap_or_default();
+        for endpoint_id in endpoints {
+            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
+                endpoint_info.invalidate_role_secret(user);
             }
         }
     }
