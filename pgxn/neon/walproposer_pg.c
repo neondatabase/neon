@@ -1716,7 +1716,25 @@ walprop_pg_after_election(WalProposer *wp)
 		fclose(f);
 		if (rc == 1 && lrRestartLsn != InvalidXLogRecPtr)
 		{
-			elog(LOG, "Logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
+			uint64		download_range_mb;
+
+			elog(LOG, "Logical replication restart LSN %X/%X, epochStartLsn %X/%X, max_slot_wal_keep_size_mb=%d",
+				LSN_FORMAT_ARGS(lrRestartLsn), LSN_FORMAT_ARGS(wp->propEpochStartLsn), max_slot_wal_keep_size_mb);
+
+			/*
+			* If we need to download more than a max_slot_wal_keep_size, cap to it to
+			* avoid risk of exploding pg_wal. Logical replication won't work until
+			* recreated, but at least compute would start; this also follows
+			* max_slot_wal_keep_size semantics.
+			*/
+			download_range_mb = (wp->propEpochStartLsn - lrRestartLsn) / 1024 / 1024;
+			if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
+			{
+				lrRestartLsn = wp->propEpochStartLsn - max_slot_wal_keep_size_mb * 1024 * 1024;
+				elog(WARNING, "capped WAL download for logical replication to %X/%X as max_slot_wal_keep_size=%dMB",
+							LSN_FORMAT_ARGS(lrRestartLsn), max_slot_wal_keep_size_mb);
+			}
+
 
 			/*
 			 * start from the beginning of the segment to fetch page headers
