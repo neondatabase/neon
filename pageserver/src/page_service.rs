@@ -844,6 +844,8 @@ impl PageServerHandler {
                     // informed yet.
                     //
                     // https://github.com/neondatabase/neon/issues/6038
+                    tracing::warn!("Page request routed to wrong shard: my identity {:?}, should go to shard{}, key {}",
+                        timeline.get_shard_identity(), timeline.get_shard_identity().get_shard_number(&key).0, key);
                     return Err(anyhow::anyhow!("Request routed to wrong shard"));
                 }
                 Err(e) => return Err(e.into()),
