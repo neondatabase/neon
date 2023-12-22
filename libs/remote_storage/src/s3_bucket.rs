@@ -631,25 +631,20 @@ impl RemoteStorage for S3Bucket {
         let mut oids = Vec::with_capacity(list.versions().len());
 
         for version in list.versions() {
-            let Some(last_modified) = version.last_modified else {
-                tracing::info!(
-                    "ignoring for S3 time travel recovery: no last modified. key={:?} version id={:?} ",
-                    version.key,
-                    version.version_id
+            let (Some(last_modified), Some(version_id), Some(key)) =
+                (version.last_modified, &version.version_id, &version.key)
+            else {
+                anyhow::bail!(
+                    "One (or more) of last_modified, key, and id is None. \
+                    Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
+                    version.last_modified, version.key, version.version_id
                 );
-                continue;
             };
-            tracing::info!("Considering version for deletion, last_modified={last_modified}, timestamp={timestamp}, key={:?}, version_id={:?}", version.key, version.version_id);
+            tracing::info!("Considering version for deletion, last_modified={last_modified}, timestamp={timestamp}, key={key}, version_id={version_id}");
             if last_modified <= timestamp {
                 tracing::info!("    -> not deleting as {last_modified} <= {timestamp}");
                 continue;
             }
-            let (Some(version_id), Some(key)) = (&version.version_id, &version.key) else {
-                tracing::warn!(
-                    "ListObjects for prefix {prefix:?} did not yield key or version_id: {version:?}"
-                );
-                continue;
-            };
             tracing::info!("    -> deleting");
 
             oids.push(
@@ -661,26 +656,22 @@ impl RemoteStorage for S3Bucket {
         }
 
         for delete_marker in list.delete_markers() {
-            let Some(last_modified) = delete_marker.last_modified else {
-                tracing::info!(
-                    "ignoring for S3 time travel recovery: no last modified. key={:?} version id={:?} ",
-                    delete_marker.key,
-                    delete_marker.version_id
+            let (Some(last_modified), Some(version_id), Some(key)) = (
+                delete_marker.last_modified,
+                &delete_marker.version_id,
+                &delete_marker.key,
+            ) else {
+                anyhow::bail!(
+                    "One (or more) of last_modified, key, and id is None. \
+                    Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
+                    delete_marker.last_modified, delete_marker.key, delete_marker.version_id
                 );
-                continue;
             };
-            tracing::info!("Considering delete marker for deletion, last_modified={last_modified}, timestamp={timestamp}, key={:?}, version_id={:?}", delete_marker.key, delete_marker.version_id);
+            tracing::info!("Considering version for deletion, last_modified={last_modified}, timestamp={timestamp}, key={key}, version_id={version_id}");
             if last_modified <= timestamp {
                 tracing::info!("    -> not deleting as {last_modified} <= {timestamp}");
                 continue;
             }
-            let (Some(version_id), Some(key)) = (&delete_marker.version_id, &delete_marker.key)
-            else {
-                tracing::warn!(
-                    "ListObjects for prefix {prefix:?} did not yield key or version_id: {delete_marker:?}"
-                );
-                continue;
-            };
             tracing::info!("    -> deleting");
 
             oids.push(

@@ -150,11 +150,12 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
         MaybeEnabledS3::Enabled(ctx) => ctx,
         MaybeEnabledS3::Disabled => return Ok(()),
     };
+    const WAIT_TIME: u64 = 1_500;
+
     // This depends on discrepancies in the clock between S3 and the environment the tests
     // run in. Therefore, wait a little bit before and after. The alternative would be
     // to take the time from S3 response headers.
     async fn time_point() -> SystemTime {
-        const WAIT_TIME: u64 = 15_000;
         tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
         let ret = SystemTime::now();
         tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
