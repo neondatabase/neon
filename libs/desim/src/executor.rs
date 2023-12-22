@@ -121,6 +121,7 @@ impl Runtime {
     }
 }
 
+#[derive(Clone)]
 pub struct ExternalHandle {
     ctx: Arc<ThreadContext>,
 }
@@ -129,6 +130,15 @@ impl ExternalHandle {
     pub fn is_finished(&self) -> bool {
         let status = self.ctx.mutex.lock();
         *status == Status::Finished
+    }
+    
+    pub fn result(&self) -> (i32, String) {
+        let result = self.ctx.result.lock();
+        result.clone()
+    }
+
+    pub fn id(&self) -> u32 {
+        self.ctx.id.load(Ordering::SeqCst)
     }
 }
 
@@ -196,7 +206,7 @@ pub struct ThreadContext {
 }
 
 impl ThreadContext {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             id: AtomicU32::new(0),
             mutex: parking_lot::Mutex::new(Status::Running),
@@ -345,7 +355,11 @@ pub trait PollSome {
     fn has_some(&self) -> bool;
 }
 
-/// Blocks current thread until one of the channels has a ready message.
+/// Blocks current thread until one of the channels has a ready message. Returns
+/// index of the channel that has a message. If timeout is reached, returns None.
+/// 
+/// Negative timeout means block forever. Zero timeout means check channels and return
+/// immediately. Positive timeout means block until timeout is reached.
 pub fn epoll_chans(chans: &[Box<dyn PollSome>], timeout: i64) -> Option<usize> {
     let deadline = if timeout < 0 {
         0

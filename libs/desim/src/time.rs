@@ -12,6 +12,8 @@ pub struct Timing {
     queue: Mutex<BinaryHeap<Pending>>,
     /// Global nonce.
     nonce: AtomicU32,
+    /// Used to schedule fake events.
+    fake_context: Arc<ThreadContext>,
 }
 
 impl Default for Timing {
@@ -26,6 +28,7 @@ impl Timing {
             current_time: AtomicU64::new(0),
             queue: Mutex::new(BinaryHeap::new()),
             nonce: AtomicU32::new(0),
+            fake_context: Arc::new(ThreadContext::new()),
         }
     }
 
@@ -62,6 +65,14 @@ impl Timing {
             nonce,
             wake_context,
         })
+    }
+
+    pub fn schedule_fake(&self, ms: u64) {
+        self.queue.lock().push(Pending {
+            time: self.now() + ms,
+            nonce: 0,
+            wake_context: self.fake_context.clone(),
+        });
     }
 
     /// Return true if there is a ready event.

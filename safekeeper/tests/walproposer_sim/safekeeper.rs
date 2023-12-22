@@ -239,6 +239,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
                     if res.is_err() {
                         debug!("conn {:?} error: {:#}", connection_id, res.unwrap_err());
                         conns.remove(&connection_id);
+                        break;
                     }
                 }
                 NetEvent::Closed => {

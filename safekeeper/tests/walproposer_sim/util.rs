@@ -112,7 +112,7 @@ pub struct Test {
 }
 
 impl Test {
-    fn launch_sync(&self) -> ExternalHandle {
+    fn launch_sync(&self) -> (Arc<Node>, ExternalHandle) {
         let client_node = self.world.new_node();
         debug!("sync-safekeepers started at node {}", client_node.id);
 
@@ -120,7 +120,7 @@ impl Test {
         let guc = self.safekeepers_guc.clone();
         let ttid = self.ttid;
         let disk = DiskWalProposer::new();
-        client_node.launch(move |os| {
+        let handle = client_node.launch(move |os| {
             let _enter = info_span!("sync", started = executor::now()).entered();
 
             os.log_event("started;walproposer;1".to_owned());
@@ -140,21 +140,22 @@ impl Test {
             let api = SimulationApi::new(args);
             let wp = Wrapper::new(Box::new(api), config);
             wp.start();
-        })
+        });
+        (client_node, handle)
     }
 
     pub fn sync_safekeepers(&self) -> anyhow::Result<Lsn> {
-        let client_node = self.launch_sync();
+        let (_, thread_handle) = self.launch_sync();
 
         // poll until exit or timeout
         let time_limit = self.timeout;
-        while self.world.step() && self.world.now() < time_limit && !client_node.is_finished() {}
+        while self.world.step() && self.world.now() < time_limit && !thread_handle.is_finished() {}
 
-        if !client_node.is_finished() {
+        if !thread_handle.is_finished() {
             anyhow::bail!("timeout or idle stuck");
         }
 
-        let res = client_node.result.lock().clone();
+        let res = thread_handle.result();
         if res.0 != 0 {
             anyhow::bail!("non-zero exitcode: {:?}", res);
         }
@@ -179,7 +180,7 @@ impl Test {
         let guc = self.safekeepers_guc.clone();
         let ttid = self.ttid;
         let wp_disk = disk.clone();
-        client_node.launch(move |os| {
+        let thread_handle = client_node.launch(move |os| {
             let _enter = info_span!("walproposer", started = executor::now()).entered();
 
             os.log_event("started;walproposer;0".to_owned());
@@ -201,9 +202,8 @@ impl Test {
             wp.start();
         });
 
-        self.world.await_all();
-
         WalProposer {
+            handle: thread_handle,
             node: client_node,
             disk,
         }
@@ -215,24 +215,28 @@ impl Test {
     }
 
     pub fn run_schedule(&self, schedule: &Schedule) -> anyhow::Result<()> {
+        // scheduling empty events so that world will stop in those points
         {
-            let empty_event = Box::new(EmptyEvent);
+            let clock = self.world.clock();
 
             let now = self.world.now();
             for (time, _) in schedule {
                 if *time < now {
                     continue;
                 }
-                self.world.schedule(*time - now, empty_event.clone())
+                clock.schedule_fake(*time - now);
             }
         }
 
-        let mut wait_node = self.launch_sync();
+        let (syncsk_node, syncsk_thread) = self.launch_sync();
         // fake walproposer
         let mut wp = WalProposer {
-            node: wait_node.clone(),
+            handle: syncsk_thread.clone(),
+            node: syncsk_node,
             disk: DiskWalProposer::new(),
         };
+
+        let mut wait_thread = syncsk_thread;
         let mut sync_in_progress = true;
 
         let mut skipped_tx = 0;
@@ -241,19 +245,19 @@ impl Test {
         let mut schedule_ptr = 0;
 
         loop {
-            if sync_in_progress && wait_node.is_finished() {
-                let res = wait_node.result.lock().clone();
+            if sync_in_progress && wait_thread.is_finished() {
+                let res = wait_thread.result();
                 if res.0 != 0 {
                     warn!("sync non-zero exitcode: {:?}", res);
                     debug!("restarting walproposer");
-                    wait_node = self.launch_sync();
+                    (_, wait_thread) = self.launch_sync();
                     continue;
                 }
                 let lsn = Lsn::from_str(&res.1)?;
                 debug!("sync-safekeepers finished at LSN {}", lsn);
                 wp = self.launch_walproposer(lsn);
-                wait_node = wp.node.clone();
-                debug!("walproposer started at node {}", wait_node.id);
+                wait_thread = wp.handle.clone();
+                debug!("walproposer started at thread {}", wp.handle.id());
                 sync_in_progress = false;
             }
 
@@ -266,7 +270,7 @@ impl Test {
                 let action = &schedule[schedule_ptr].1;
                 match action {
                     TestAction::WriteTx(size) => {
-                        if !sync_in_progress && !wait_node.is_finished() {
+                        if !sync_in_progress && !wait_thread.is_finished() {
                             started_tx += *size;
                             wp.write_tx(*size);
                             debug!("written {} transactions", size);
@@ -281,9 +285,10 @@ impl Test {
                     }
                     TestAction::RestartWalProposer => {
                         debug!("restarting walproposer");
-                        wait_node.crash_stop();
+                        todo!("implement crash");
+                        // wait_thread.crash_stop();
                         sync_in_progress = true;
-                        wait_node = self.launch_sync();
+                        (_, wait_thread) = self.launch_sync();
                     }
                 }
                 schedule_ptr += 1;
@@ -295,12 +300,12 @@ impl Test {
             let next_event_time = schedule[schedule_ptr].0;
 
             // poll until the next event
-            if wait_node.is_finished() {
+            if wait_thread.is_finished() {
                 while self.world.step() && self.world.now() < next_event_time {}
             } else {
                 while self.world.step()
                     && self.world.now() < next_event_time
-                    && !wait_node.is_finished()
+                    && !wait_thread.is_finished()
                 {}
             }
         }
@@ -314,6 +319,7 @@ impl Test {
 }
 
 pub struct WalProposer {
+    pub handle: ExternalHandle,
     pub node: Arc<Node>,
     pub disk: Arc<DiskWalProposer>,
 }
@@ -342,7 +348,8 @@ impl WalProposer {
     }
 
     pub fn stop(&self) {
-        self.node.crash_stop();
+        todo!()
+        // self.node.crash_stop();
     }
 }
 

@@ -180,10 +180,6 @@ pub struct Node {
     network: Mutex<Chan<NodeEvent>>,
     world: Arc<World>,
     pub rng: Mutex<StdRng>,
-    /// Every node can set a result string, which can be read by the test.
-    pub result: Mutex<(i32, String)>,
-    /// If set to true, next panic will not crash the whole test. This is used for controlled exit.
-    pub crash_token: AtomicBool,
 }
 
 impl Node {
@@ -193,8 +189,6 @@ impl Node {
             network: Mutex::new(Chan::new()),
             world,
             rng: Mutex::new(rng),
-            result: Mutex::new((-1, String::new())),
-            crash_token: AtomicBool::new(false),
         }
     }
 
@@ -259,13 +253,6 @@ impl Node {
         // TODO: !!!!
 
         // self.network.lock().clear();
-    }
-
-    pub fn set_crash_token(&self) {
-        let prev = self
-            .crash_token
-            .swap(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(!prev, "crash_token should be set only once");
     }
 
     pub fn log_event(&self, data: String) {
