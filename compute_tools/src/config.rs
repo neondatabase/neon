@@ -69,6 +69,8 @@ pub fn write_postgres_conf(
         )?;
     }
 
+    writeln!(file, "shared_buffers=8MB")?;
+
     if let Some(stripe_size) = &spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={}", stripe_size)?;
     }
