@@ -580,6 +580,15 @@ async fn handle_tenant(
             println!("{tenant_table}");
             println!("{shard_table}");
         }
+        Some(("shard-split", matches)) => {
+            let tenant_id = get_tenant_id(matches, env)?;
+            let shard_count: u8 = matches.get_one::<u8>("shard-count").cloned().unwrap_or(0);
+
+            let attachment_service = AttachmentService::from_env(env);
+            attachment_service
+                .tenant_split(tenant_id, shard_count)
+                .await?;
+        }
 
         Some((sub_name, _)) => bail!("Unexpected tenant subcommand '{}'", sub_name),
         None => bail!("no tenant subcommand provided"),
@@ -1507,7 +1516,11 @@ fn cli() -> Command {
                 .arg(pageserver_id_arg.clone()))
             .subcommand(Command::new("status")
                 .about("Human readable summary of the tenant's shards and attachment locations")
+                .arg(tenant_id_arg.clone()))
+            .subcommand(Command::new("shard-split")
+                .about("Increase the number of shards in the tenant")
                 .arg(tenant_id_arg.clone())
+                .arg(Arg::new("shard-count").value_parser(value_parser!(u8)).long("shard-count").action(ArgAction::Set).help("Number of shards in the new tenant (default 1)"))
                 )
         )
         .subcommand(

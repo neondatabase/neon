@@ -4,8 +4,8 @@ use camino::Utf8PathBuf;
 use hyper::{Method, StatusCode};
 use pageserver_api::{
     models::{
-        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest,
-        TimelineInfo,
+        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        TimelineCreateRequest, TimelineInfo,
     },
     shard::TenantShardId,
 };
@@ -264,9 +264,9 @@ impl AttachmentService {
         &self,
         tenant_id: TenantId,
         new_shard_count: u8,
-    ) -> anyhow::Result<()> {
-        self.dispatch::<_, ()>(
-            Method::POST,
+    ) -> anyhow::Result<TenantShardSplitResponse> {
+        self.dispatch(
+            Method::PUT,
             format!("tenant/{tenant_id}/shard_split"),
             Some(TenantShardSplitRequest { new_shard_count }),
         )
