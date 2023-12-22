@@ -224,10 +224,10 @@ get_shard_number(BufferTag* tag)
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum/(MB/BLCKSZ)/stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum/stripe_size));
 #else
 	hash = murmurhash32(tag->relNumber);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum/(MB/BLCKSZ)/stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum/stripe_size));
 #endif
 
 	return hash % n_shards;
