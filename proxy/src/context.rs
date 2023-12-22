@@ -26,3 +26,27 @@ pub struct RequestContext {
     pub error_kind: Option<ErrorKind>,
     pub latency_timer: LatencyTimer,
 }
+
+impl RequestContext {
+    pub fn new(
+        session_id: Uuid,
+        peer_addr: IpAddr,
+        protocol: &'static str,
+        cluster: &'static str,
+    ) -> Self {
+        Self {
+            peer_addr,
+            session_id,
+            protocol,
+            latency_timer: LatencyTimer::new(protocol),
+            first_packet: tokio::time::Instant::now(),
+            project: None,
+            branch: None,
+            endpoint_id: None,
+            user: None,
+            application: None,
+            cluster,
+            error_kind: None,
+        }
+    }
+}

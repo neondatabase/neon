@@ -12,7 +12,7 @@ use crate::{
     console::{self, messages::MetricsAuxInfo},
     context::RequestContext,
     metrics::{
-        LatencyTimer, NUM_BYTES_PROXIED_COUNTER, NUM_BYTES_PROXIED_PER_CLIENT_COUNTER,
+        NUM_BYTES_PROXIED_COUNTER, NUM_BYTES_PROXIED_PER_CLIENT_COUNTER,
         NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE,
     },
     protocol2::WithClientIp,
@@ -92,21 +92,7 @@ pub async fn task_main(
                     bail!("missing required client IP");
                 }
 
-                let mut ctx = RequestContext {
-                    peer_addr,
-                    session_id,
-                    first_packet: tokio::time::Instant::now(),
-                    protocol: "tcp",
-                    project: None,
-                    branch: None,
-                    endpoint_id: None,
-                    user: None,
-                    application: None,
-                    cluster: &config.cluster,
-                    error_kind: None,
-                    latency_timer: LatencyTimer::new("tcp"),
-                };
-                // ctx.latency_timer.
+                let mut ctx = RequestContext::new(session_id, peer_addr, &config.cluster, "tcp");
 
                 socket
                     .inner
@@ -241,7 +227,6 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         stream,
         creds,
         &params,
-        ctx.session_id,
         mode.allow_self_signed_compute(config),
         endpoint_rate_limiter,
     );
@@ -419,8 +404,6 @@ struct Client<'a, S> {
     creds: auth::BackendType<'a, auth::ClientCredentials>,
     /// KV-dictionary with PostgreSQL connection params.
     params: &'a StartupMessageParams,
-    /// Unique connection ID.
-    session_id: uuid::Uuid,
     /// Allow self-signed certificates (for testing).
     allow_self_signed_compute: bool,
     /// Rate limiter for endpoints
@@ -433,7 +416,6 @@ impl<'a, S> Client<'a, S> {
         stream: PqStream<Stream<S>>,
         creds: auth::BackendType<'a, auth::ClientCredentials>,
         params: &'a StartupMessageParams,
-        session_id: uuid::Uuid,
         allow_self_signed_compute: bool,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> Self {
@@ -441,7 +423,6 @@ impl<'a, S> Client<'a, S> {
             stream,
             creds,
             params,
-            session_id,
             allow_self_signed_compute,
             endpoint_rate_limiter,
         }
@@ -464,7 +445,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             mut stream,
             creds,
             params,
-            session_id,
             allow_self_signed_compute,
             endpoint_rate_limiter,
         } = self;
@@ -478,14 +458,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         }
 
-        let proto = mode.protocol_label();
         let extra = console::ConsoleReqExtra {
-            session_id, // aka this connection's id
-            application_name: format!(
-                "{}/{}",
-                params.get("application_name").unwrap_or_default(),
-                proto
-            ),
             options: neon_options(params),
         };
 
@@ -497,7 +470,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             Ok(auth_result) => auth_result,
             Err(e) => {
                 let db = params.get("database");
-                let app = params.get("application_name");
+                let app = ctx.application.as_deref();
                 let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
                 return stream.throw_error(e).instrument(params_span).await;
@@ -509,15 +482,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
         let aux = node_info.aux.clone();
-        let mut node = connect_to_compute(
-            &TcpMechanism { params, proto },
-            node_info,
-            &extra,
-            &creds,
-            &mut ctx.latency_timer,
-        )
-        .or_else(|e| stream.throw_error(e))
-        .await?;
+        let mut node = connect_to_compute(ctx, &TcpMechanism { params }, node_info, &extra, &creds)
+            .or_else(|e| stream.throw_error(e))
+            .await?;
 
         prepare_client_connection(&node, session, &mut stream).await?;
         // Before proxy passing, forward to compute whatever data is left in the

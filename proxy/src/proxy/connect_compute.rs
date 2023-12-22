@@ -2,7 +2,8 @@ use crate::{
     auth,
     compute::{self, PostgresConnection},
     console::{self, errors::WakeComputeError, Api},
-    metrics::{bool_to_str, LatencyTimer, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
+    context::RequestContext,
+    metrics::{bool_to_str, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
     proxy::retry::{retry_after, ShouldRetry},
 };
 use async_trait::async_trait;
@@ -35,15 +36,15 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
 /// Try to connect to the compute node once.
 #[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute_once(
+    ctx: &mut RequestContext,
     node_info: &console::CachedNodeInfo,
     timeout: time::Duration,
-    proto: &'static str,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
     let allow_self_signed_compute = node_info.allow_self_signed_compute;
 
     node_info
         .config
-        .connect(allow_self_signed_compute, timeout, proto)
+        .connect(ctx, allow_self_signed_compute, timeout)
         .await
 }
 
@@ -54,6 +55,7 @@ pub trait ConnectMechanism {
     type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
+        ctx: &mut RequestContext,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
@@ -64,7 +66,6 @@ pub trait ConnectMechanism {
 pub struct TcpMechanism<'a> {
     /// KV-dictionary with PostgreSQL connection params.
     pub params: &'a StartupMessageParams,
-    pub proto: &'static str,
 }
 
 #[async_trait]
@@ -75,10 +76,11 @@ impl ConnectMechanism for TcpMechanism<'_> {
 
     async fn connect_once(
         &self,
+        ctx: &mut RequestContext,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
-        connect_to_compute_once(node_info, timeout, self.proto).await
+        connect_to_compute_once(ctx, node_info, timeout).await
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
@@ -123,11 +125,11 @@ fn report_error(e: &WakeComputeError, retry: bool) {
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
 pub async fn connect_to_compute<M: ConnectMechanism>(
+    ctx: &mut RequestContext,
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra,
     creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
-    latency_timer: &mut LatencyTimer,
 ) -> Result<M::Connection, M::Error>
 where
     M::ConnectError: ShouldRetry + std::fmt::Debug,
@@ -136,9 +138,12 @@ where
     mechanism.update_connect_config(&mut node_info.config);
 
     // try once
-    let (config, err) = match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
+    let (config, err) = match mechanism
+        .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
+        .await
+    {
         Ok(res) => {
-            latency_timer.success();
+            ctx.latency_timer.success();
             return Ok(res);
         }
         Err(e) => {
@@ -147,7 +152,7 @@ where
         }
     };
 
-    latency_timer.cache_miss();
+    ctx.latency_timer.cache_miss();
 
     let mut num_retries = 1;
 
@@ -155,9 +160,9 @@ where
     info!("compute node's state has likely changed; requesting a wake-up");
     let node_info = loop {
         let wake_res = match creds {
-            auth::BackendType::Console(api, creds) => api.wake_compute(extra, creds).await,
+            auth::BackendType::Console(api, creds) => api.wake_compute(ctx, extra, creds).await,
             #[cfg(feature = "testing")]
-            auth::BackendType::Postgres(api, creds) => api.wake_compute(extra, creds).await,
+            auth::BackendType::Postgres(api, creds) => api.wake_compute(ctx, extra, creds).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend
@@ -195,9 +200,12 @@ where
     // * DNS connection settings haven't quite propagated yet
     info!("wake_compute success. attempting to connect");
     loop {
-        match mechanism.connect_once(&node_info, CONNECT_TIMEOUT).await {
+        match mechanism
+            .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
+            .await
+        {
             Ok(res) => {
-                latency_timer.success();
+                ctx.latency_timer.success();
                 return Ok(res);
             }
             Err(e) => {

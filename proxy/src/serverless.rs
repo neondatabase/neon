@@ -18,7 +18,7 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
 use crate::context::RequestContext;
-use crate::metrics::{LatencyTimer, NUM_CLIENT_CONNECTION_GAUGE};
+use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
@@ -219,20 +219,7 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
-                let mut ctx = RequestContext {
-                    peer_addr,
-                    session_id,
-                    first_packet: tokio::time::Instant::now(),
-                    protocol: "ws",
-                    project: None,
-                    branch: None,
-                    endpoint_id: None,
-                    user: None,
-                    application: None,
-                    cluster: &config.cluster,
-                    error_kind: None,
-                    latency_timer: LatencyTimer::new("ws"),
-                };
+                let mut ctx = RequestContext::new(session_id, peer_addr, &config.cluster, "ws");
 
                 if let Err(e) = websocket::serve_websocket(
                     config,
@@ -253,20 +240,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let mut ctx = RequestContext {
-            peer_addr,
-            session_id,
-            first_packet: tokio::time::Instant::now(),
-            protocol: "http",
-            project: None,
-            branch: None,
-            endpoint_id: None,
-            user: None,
-            application: None,
-            cluster: &config.cluster,
-            error_kind: None,
-            latency_timer: LatencyTimer::new("http"),
-        };
+        let mut ctx = RequestContext::new(session_id, peer_addr, &config.cluster, "http");
 
         sql_over_http::handle(
             &config.http_config,

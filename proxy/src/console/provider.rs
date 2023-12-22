@@ -6,7 +6,9 @@ use super::messages::MetricsAuxInfo;
 use crate::{
     auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
-    compute, scram,
+    compute,
+    context::RequestContext,
+    scram,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -198,10 +200,6 @@ pub mod errors {
 
 /// Extra query params we'd like to pass to the console.
 pub struct ConsoleReqExtra {
-    /// A unique identifier for a connection.
-    pub session_id: uuid::Uuid,
-    /// Name of client application, if set.
-    pub application_name: String,
     pub options: Vec<(String, String)>,
 }
 
@@ -263,19 +261,20 @@ pub trait Api {
     /// Get the client's auth secret for authentication.
     async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestContext,
         creds: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestContext,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
+        ctx: &mut RequestContext,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;

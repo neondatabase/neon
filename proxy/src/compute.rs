@@ -1,6 +1,7 @@
 use crate::{
     auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
-    error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE, proxy::neon_option,
+    context::RequestContext, error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE,
+    proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
@@ -232,9 +233,9 @@ impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
         &self,
+        ctx: &mut RequestContext,
         allow_self_signed_compute: bool,
         timeout: Duration,
-        proto: &'static str,
     ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
 
@@ -268,7 +269,9 @@ impl ConnCfg {
             stream,
             params,
             cancel_closure,
-            _guage: NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).guard(),
+            _guage: NUM_DB_CONNECTIONS_GAUGE
+                .with_label_values(&[ctx.protocol])
+                .guard(),
         };
 
         Ok(connection)
