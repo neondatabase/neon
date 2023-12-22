@@ -82,7 +82,7 @@ impl Timing {
             .map_or(false, |x| x.time <= self.now())
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub(crate) fn clear(&self) {
         self.queue.lock().clear();
     }
 }

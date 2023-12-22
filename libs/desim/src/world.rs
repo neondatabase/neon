@@ -98,10 +98,7 @@ impl World {
     }
 
     pub fn stop_all(&self) {
-        let nodes = self.nodes.lock().clone();
-        for node in nodes {
-            node.crash_stop();
-        }
+        self.runtime.lock().crash_all_threads();
     }
 
     /// Returns a writable end of a TCP connection, to send src->dst messages.
@@ -137,40 +134,9 @@ impl World {
     }
 
     pub fn deallocate(&self) {
-        // TODO:
-
-        // self.stop_all();
-
-        // self.timing.lock().clear();
-        // self.unconditional_parking.lock().clear();
-
-        // let mut connections = Vec::new();
-        // std::mem::swap(&mut connections, &mut self.connections.lock());
-        // for conn in connections {
-        //     conn.deallocate();
-        //     trace!("conn strong count: {}", Arc::strong_count(&conn));
-        // }
-
-        // let mut nodes = Vec::new();
-        // std::mem::swap(&mut nodes, &mut self.nodes.lock());
-
-        // let mut weak_ptrs = Vec::new();
-        // for node in nodes {
-        //     node.deallocate();
-        //     weak_ptrs.push(Arc::downgrade(&node));
-        // }
-
-        // for weak_ptr in weak_ptrs {
-        //     let node = weak_ptr.upgrade();
-        //     if node.is_none() {
-        //         trace!("node is already deallocated");
-        //         continue;
-        //     }
-        //     let node = node.unwrap();
-        //     debug!("node strong count: {}", Arc::strong_count(&node));
-        // }
-
-        // self.events.lock().clear();
+        self.stop_all();
+        self.timing.clear();
+        self.nodes.lock().clear();
     }
 }
 
@@ -204,55 +170,6 @@ impl Node {
     /// Returns a channel to receive events from the network.
     pub fn network_chan(&self) -> Chan<NodeEvent> {
         self.network.lock().clone()
-    }
-
-    pub fn crash_stop(self: &Arc<Self>) {
-        todo!()
-
-        // TODO: !!!
-
-        // self.world.await_all();
-
-        // let status = *self.status.lock();
-        // match status {
-        //     NodeStatus::NotStarted | NodeStatus::Finished | NodeStatus::Failed => return,
-        //     NodeStatus::Running => {
-        //         panic!("crash unexpected node state: Running")
-        //     }
-        //     NodeStatus::Waiting | NodeStatus::Parked => {}
-        // }
-
-        // debug!("Node {} is crashing, status={:?}", self.id, status);
-
-        // let park = self.world.find_parked_node(self);
-
-        // let park = if let Some(park) = park {
-        //     assert!(status == NodeStatus::Parked);
-        //     park
-        // } else {
-        //     assert!(status == NodeStatus::Waiting);
-        //     self.waiting_park.lock().clone()
-        // };
-
-        // park.debug_print();
-        // // self.world.debug_print_state();
-
-        // // unplug old network socket, and create a new one
-        // *self.network.lock() = Chan::new();
-
-        // self.world.wait_group.add(1);
-        // self.set_crash_token();
-        // park.crash_panic();
-        // // self.world.debug_print_state();
-        // self.world.wait_group.wait();
-    }
-
-    pub fn deallocate(&self) {
-        todo!()
-
-        // TODO: !!!!
-
-        // self.network.lock().clear();
     }
 
     pub fn log_event(&self, data: String) {

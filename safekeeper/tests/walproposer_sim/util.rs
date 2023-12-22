@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc, cell::Cell};
 
 use crate::walproposer_sim::{safekeeper::run_server, wp_api::SimulationApi};
 use rand::{Rng, SeedableRng};
@@ -18,33 +18,37 @@ pub struct SkNode {
     pub node: Arc<Node>,
     pub id: u32,
     pub disk: Arc<Disk>,
+    pub thread: Cell<ExternalHandle>,
 }
 
 impl SkNode {
     pub fn new(node: Arc<Node>) -> Self {
         let disk = Arc::new(Disk::new());
-        let res = Self {
+        
+        let thread = Cell::new(
+            SkNode::launch(disk.clone(), node.clone())
+        );
+
+        Self {
             id: node.id,
             node,
             disk,
-        };
-        res.launch();
-        res
+            thread,
+        }
     }
 
-    pub fn launch(&self) {
-        let id = self.id;
-        let disk = self.disk.clone();
+    fn launch(disk: Arc<Disk>, node: Arc<Node>) -> ExternalHandle {
         // start the server thread
-        self.node.launch(move |os| {
+        node.launch(move |os| {
             let res = run_server(os, disk);
-            debug!("server {} finished: {:?}", id, res);
-        });
+            debug!("server finished: {:?}", res);
+        })
     }
 
     pub fn restart(&self) {
-        self.node.crash_stop();
-        self.launch();
+        let new_thread = SkNode::launch(self.disk.clone(), self.node.clone());
+        let old_thread = self.thread.replace(new_thread);
+        old_thread.crash_stop();
     }
 }
 
@@ -285,8 +289,7 @@ impl Test {
                     }
                     TestAction::RestartWalProposer => {
                         debug!("restarting walproposer");
-                        todo!("implement crash");
-                        // wait_thread.crash_stop();
+                        wait_thread.crash_stop();
                         sync_in_progress = true;
                         (_, wait_thread) = self.launch_sync();
                     }
@@ -348,8 +351,7 @@ impl WalProposer {
     }
 
     pub fn stop(&self) {
-        todo!()
-        // self.node.crash_stop();
+        self.handle.crash_stop();
     }
 }
 

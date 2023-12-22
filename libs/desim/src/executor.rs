@@ -37,17 +37,18 @@ impl Runtime {
         debug!("spawning thread-{}", tid);
 
         let join = std::thread::spawn(move || {
-            with_thread_context(|ctx| {
-                assert!(ctx.clock.set(clock).is_ok());
-                ctx.id.store(tid, Ordering::SeqCst);
-                tx.send(ctx.clone()).expect("failed to send thread context");
-                // suspend thread to put it to `threads` in sleeping state
-                ctx.yield_me(0);
-            });
             let _guard = tracing::info_span!("", tid).entered();
             
-            // start user-provided function
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                with_thread_context(|ctx| {
+                    assert!(ctx.clock.set(clock).is_ok());
+                    ctx.id.store(tid, Ordering::SeqCst);
+                    tx.send(ctx.clone()).expect("failed to send thread context");
+                    // suspend thread to put it to `threads` in sleeping state
+                    ctx.yield_me(0);
+                });
+
+                // start user-provided function
                 f();
             }));
             debug!("thread finished");
@@ -119,6 +120,24 @@ impl Runtime {
 
         true
     }
+
+    pub fn crash_all_threads(&mut self) {
+        for thread in self.threads.iter() {
+            thread.ctx.crash_stop();
+        }
+
+        // all threads should be finished after a few steps
+        while self.threads.len() > 0 {
+            self.step();
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        debug!("dropping the runtime");
+        self.crash_all_threads();
+    }
 }
 
 #[derive(Clone)]
@@ -139,6 +158,10 @@ impl ExternalHandle {
 
     pub fn id(&self) -> u32 {
         self.ctx.id.load(Ordering::SeqCst)
+    }
+
+    pub fn crash_stop(&self) {
+        self.ctx.crash_stop();
     }
 }
 
@@ -203,6 +226,8 @@ pub struct ThreadContext {
     result: parking_lot::Mutex<(i32, String)>,
     // determines if process should be killed on receiving panic
     allow_panic: AtomicBool,
+    // acts as a signal that thread should crash itself on the next wakeup
+    crash_request: AtomicBool,
 }
 
 impl ThreadContext {
@@ -215,6 +240,7 @@ impl ThreadContext {
             clock: OnceLock::new(),
             result: parking_lot::Mutex::new((-1, String::new())),
             allow_panic: AtomicBool::new(false),
+            crash_request: AtomicBool::new(false),
         }
     }
 }
@@ -233,6 +259,22 @@ impl ThreadContext {
 
     fn tid(&self) -> u32 {
         self.id.load(Ordering::SeqCst)
+    }
+
+    fn crash_stop(&self) {
+        let status = self.mutex.lock();
+        if *status == Status::Finished {
+            debug!("trying to crash thread-{}, which is already finished", self.tid());
+            return;
+        }
+        assert!(matches!(*status, Status::Sleep));
+        drop(status);
+
+        self.allow_panic.store(true, Ordering::SeqCst);
+        self.crash_request.store(true, Ordering::SeqCst);
+        // set a wakeup
+        self.inc_wake();
+        // it will panic on the next wakeup
     }
 }
 
@@ -259,6 +301,10 @@ impl ThreadContext {
         // wait until executor wakes us up
         while *status != Status::Running {
             self.condvar.wait(&mut status);
+        }
+
+        if self.crash_request.load(Ordering::SeqCst) {
+            panic!("crashed by request");
         }
     }
 
