@@ -1,7 +1,15 @@
-use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, sync::{Arc, atomic::{AtomicU64, AtomicU32}}, ops::DerefMut};
+use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
+    ops::DerefMut,
+    sync::{
+        atomic::{AtomicU32, AtomicU64},
+        Arc,
+    },
+};
 
 use parking_lot::Mutex;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::executor::ThreadContext;
 
@@ -49,7 +57,8 @@ impl Timing {
 
         if !self.is_event_ready(queue.deref_mut()) {
             let next_time = queue.peek().unwrap().time;
-            self.current_time.store(next_time, std::sync::atomic::Ordering::SeqCst);
+            self.current_time
+                .store(next_time, std::sync::atomic::Ordering::SeqCst);
             trace!("rewind time to {}", next_time);
             assert!(self.is_event_ready(queue.deref_mut()));
         }
@@ -77,9 +86,7 @@ impl Timing {
 
     /// Return true if there is a ready event.
     fn is_event_ready(&self, queue: &mut BinaryHeap<Pending>) -> bool {
-        queue
-            .peek()
-            .map_or(false, |x| x.time <= self.now())
+        queue.peek().map_or(false, |x| x.time <= self.now())
     }
 
     pub(crate) fn clear(&self) {

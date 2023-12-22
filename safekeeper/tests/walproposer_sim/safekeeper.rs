@@ -7,6 +7,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{bail, Result};
 use bytes::{Bytes, BytesMut};
 use camino::Utf8PathBuf;
+use desim::{
+    executor::{self, PollSome},
+    network::TCP,
+    node_os::NodeOs,
+    proto::AnyMessage,
+    world::{NetEvent, NodeEvent},
+};
 use hyper::Uri;
 use safekeeper::{
     safekeeper::{
@@ -16,7 +23,6 @@ use safekeeper::{
     wal_storage::Storage,
     SafeKeeperConf,
 };
-use desim::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::{NodeEvent, NetEvent}, executor::{PollSome, self}};
 use tracing::{debug, info_span};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -217,7 +223,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
                             runtime: tokio::runtime::Builder::new_current_thread().build()?,
                         },
                     );
-                },
+                }
                 NodeEvent::Internal(_) => unreachable!(),
             }
             continue;

@@ -6,10 +6,11 @@ use std::{
 
 use bytes::Bytes;
 use desim::{
+    executor::{self, PollSome},
     network::TCP,
     node_os::NodeOs,
     proto::AnyMessage,
-    world::{NodeEvent, NodeId, NetEvent}, executor::{self, PollSome},
+    world::{NetEvent, NodeEvent, NodeId},
 };
 use tracing::debug;
 use utils::lsn::Lsn;
@@ -85,7 +86,11 @@ impl EventSet {
     }
 
     fn update_event_set(&mut self, conn: &SafekeeperConn, event_mask: u32) {
-        let index = self.sk_ptrs.iter().position(|&ptr| ptr == conn.raw_ptr).expect("safekeeper should exist in event set");
+        let index = self
+            .sk_ptrs
+            .iter()
+            .position(|&ptr| ptr == conn.raw_ptr)
+            .expect("safekeeper should exist in event set");
         self.masks[index] = event_mask;
     }
 
@@ -94,7 +99,12 @@ impl EventSet {
             assert!(*ptr != sk.raw_ptr);
         }
 
-        self.chans.push(Box::new(sk.socket.as_ref().expect("socket should not be closed").recv_chan()));
+        self.chans.push(Box::new(
+            sk.socket
+                .as_ref()
+                .expect("socket should not be closed")
+                .recv_chan(),
+        ));
         self.sk_ptrs.push(sk.raw_ptr);
         self.masks.push(event_mask);
     }
@@ -103,7 +113,10 @@ impl EventSet {
         // all channels are always writeable
         for (i, mask) in self.masks.iter().enumerate() {
             if *mask & WL_SOCKET_WRITEABLE != 0 {
-                return walproposer::walproposer::WaitResult::Network(self.sk_ptrs[i], WL_SOCKET_WRITEABLE);
+                return walproposer::walproposer::WaitResult::Network(
+                    self.sk_ptrs[i],
+                    WL_SOCKET_WRITEABLE,
+                );
             }
         }
 
@@ -123,9 +136,10 @@ impl EventSet {
                 }
                 walproposer::walproposer::WaitResult::Latch
             }
-            Some(index) => {
-                walproposer::walproposer::WaitResult::Network(self.sk_ptrs[index], WL_SOCKET_READABLE)
-            }
+            Some(index) => walproposer::walproposer::WaitResult::Network(
+                self.sk_ptrs[index],
+                WL_SOCKET_READABLE,
+            ),
         }
     }
 }
@@ -199,8 +213,11 @@ impl SimulationApi {
     fn find_conn(&self, tcp: TCP) -> Option<RefMut<'_, SafekeeperConn>> {
         let state = self.safekeepers.borrow_mut();
         RefMut::filter_map(state, |v| {
-            v.iter_mut()
-                .find(|conn| conn.socket.as_ref().is_some_and(|s| s.connection_id() == tcp.connection_id()))
+            v.iter_mut().find(|conn| {
+                conn.socket
+                    .as_ref()
+                    .is_some_and(|s| s.connection_id() == tcp.connection_id())
+            })
         })
         .ok()
     }
@@ -273,17 +290,17 @@ impl ApiImpl for SimulationApi {
         };
 
         let msg = socket.recv_chan().try_recv();
-        
+
         match msg {
             None => {
                 // no message is ready
-                return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN;
+                walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_TRY_AGAIN
             }
             Some(NetEvent::Closed) => {
                 // connection is closed
                 debug!("conn_async_read: connection is closed");
                 conn.socket = None;
-                return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_FAIL;
+                walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_FAIL
             }
             Some(NetEvent::Message(msg)) => {
                 // got a message
@@ -292,7 +309,7 @@ impl ApiImpl for SimulationApi {
                     _ => unreachable!(),
                 };
                 vec.extend_from_slice(&b);
-                return walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS;
+                walproposer::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS
             }
         }
     }
@@ -301,9 +318,7 @@ impl ApiImpl for SimulationApi {
         let mut conn = self.get_conn(sk);
         debug!("conn_blocking_write to {}: {:?}", conn.node_id, buf);
         let socket = conn.socket.as_mut().unwrap();
-        socket.send(desim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
-            buf,
-        )));
+        socket.send(desim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(buf)));
         true
     }
 
@@ -315,9 +330,7 @@ impl ApiImpl for SimulationApi {
         let mut conn = self.get_conn(sk);
         debug!("conn_async_write to {}: {:?}", conn.node_id, buf);
         if let Some(socket) = conn.socket.as_mut() {
-            socket.send(desim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(
-                buf,
-            )));
+            socket.send(desim::proto::AnyMessage::Bytes(Bytes::copy_from_slice(buf)));
         } else {
             // connection is already closed
             debug!("conn_async_write: writing to a closed socket!");
@@ -408,7 +421,8 @@ impl ApiImpl for SimulationApi {
         }
         drop(conns);
 
-        let res = self.event_set
+        let res = self
+            .event_set
             .borrow_mut()
             .as_mut()
             .unwrap()
@@ -549,7 +563,7 @@ impl ApiImpl for SimulationApi {
 
         let conn = self.os.open_tcp(async_conn.node_id);
         conn.send(desim::proto::AnyMessage::Bytes(replication_prompt.into()));
-        
+
         let chan = conn.recv_chan();
         while startpos < endpos {
             let event = chan.recv();

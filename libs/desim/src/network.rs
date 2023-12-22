@@ -1,21 +1,24 @@
 use std::{
-    collections::{VecDeque, BinaryHeap},
+    cmp::Ordering,
+    collections::{BinaryHeap, VecDeque},
     fmt::{self, Debug},
     ops::DerefMut,
-    sync::{Arc, atomic::AtomicU64, mpsc}, cmp::Ordering,
+    sync::{mpsc, Arc},
 };
 
-use parking_lot::{Mutex, lock_api::{MutexGuard, MappedMutexGuard}, RawMutex};
+use parking_lot::{
+    lock_api::{MappedMutexGuard, MutexGuard},
+    Mutex, RawMutex,
+};
 use rand::{rngs::StdRng, Rng};
 use tracing::debug;
 
-use crate::{world::NetEvent, executor::{self, ThreadContext}};
-
-use super::{
-    chan::Chan,
-    proto::AnyMessage,
-    world::NodeEvent,
+use crate::{
+    executor::{self, ThreadContext},
+    world::NetEvent,
 };
+
+use super::{chan::Chan, proto::AnyMessage, world::NodeEvent};
 
 #[derive(Clone, Debug)]
 pub struct Delay {
@@ -98,8 +101,8 @@ impl NetworkTask {
                 rng,
             }),
         };
-        vc.schedule_timeout(&self);
-        vc.send_connect(&self);
+        vc.schedule_timeout(self);
+        vc.send_connect(self);
 
         let recv_chan = vc.dst_sockets[0].clone();
         self.connections.lock().push(vc);
@@ -260,7 +263,8 @@ impl VirtualConnection {
                     if now - last_recv >= timeout {
                         debug!(
                             "NET: connection {} timed out at {}",
-                            self.connection_id, receiver_str(direction as MessageDirection)
+                            self.connection_id,
+                            receiver_str(direction as MessageDirection)
                         );
                         let node_idx = direction ^ 1;
                         to_close[node_idx] = true;
@@ -367,14 +371,16 @@ impl VirtualConnection {
         if recv_buffer.recv_closed {
             debug!(
                 "NET: TCP #{} closed twice at {}",
-                self.connection_id, sender_str(node_idx as MessageDirection),
+                self.connection_id,
+                sender_str(node_idx as MessageDirection),
             );
             return;
         }
 
         debug!(
             "NET: TCP #{} closed at {}",
-            self.connection_id, sender_str(node_idx as MessageDirection),
+            self.connection_id,
+            sender_str(node_idx as MessageDirection),
         );
         recv_buffer.recv_closed = true;
         for msg in recv_buffer.buf.drain(..) {
@@ -432,12 +438,7 @@ pub struct TCP {
 
 impl Debug for TCP {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "TCP #{} ({})",
-            self.conn_id,
-            sender_str(self.dir),
-        )
+        write!(f, "TCP #{} ({})", self.conn_id, sender_str(self.dir),)
     }
 }
 

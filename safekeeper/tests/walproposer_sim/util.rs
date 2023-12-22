@@ -1,13 +1,14 @@
-use std::{str::FromStr, sync::Arc, cell::Cell};
+use std::{cell::Cell, str::FromStr, sync::Arc};
 
 use crate::walproposer_sim::{safekeeper::run_server, wp_api::SimulationApi};
-use rand::{Rng, SeedableRng};
 use desim::{
+    executor::{self, ExternalHandle},
     network::{Delay, NetworkOptions},
     proto::AnyMessage,
     world::World,
-    world::{Node, NodeEvent, SEvent}, executor::{self, ExternalHandle},
+    world::{Node, NodeEvent, SEvent},
 };
+use rand::{Rng, SeedableRng};
 use tracing::{debug, info_span, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 use walproposer::walproposer::{Config, Wrapper};
@@ -24,10 +25,8 @@ pub struct SkNode {
 impl SkNode {
     pub fn new(node: Arc<Node>) -> Self {
         let disk = Arc::new(Disk::new());
-        
-        let thread = Cell::new(
-            SkNode::launch(disk.clone(), node.clone())
-        );
+
+        let thread = Cell::new(SkNode::launch(disk.clone(), node.clone()));
 
         Self {
             id: node.id,

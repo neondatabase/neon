@@ -1,17 +1,15 @@
 use parking_lot::Mutex;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 use std::{
-    cell::RefCell,
     ops::DerefMut,
-    panic::AssertUnwindSafe,
-    sync::{
-        atomic::{AtomicBool, AtomicU64},
-        Arc, mpsc,
-    },
+    sync::{mpsc, Arc},
 };
-use tracing::{debug, error, trace};
 
-use crate::{executor::{Runtime, ExternalHandle}, network::NetworkTask, time::Timing};
+use crate::{
+    executor::{ExternalHandle, Runtime},
+    network::NetworkTask,
+    time::Timing,
+};
 
 use super::{
     chan::Chan,
@@ -38,13 +36,10 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(
-        seed: u64,
-        options: Arc<NetworkOptions>,
-    ) -> World {
+    pub fn new(seed: u64, options: Arc<NetworkOptions>) -> World {
         let timing = Arc::new(Timing::new());
         let mut runtime = Runtime::new(timing.clone());
-        
+
         let (tx, rx) = mpsc::channel();
 
         runtime.spawn(move || {

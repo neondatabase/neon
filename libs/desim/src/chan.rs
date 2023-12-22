@@ -80,6 +80,12 @@ impl<T> Clone for Chan<T> {
 //     }
 // }
 
+impl<T> Default for Chan<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> Chan<T> {
     pub fn new() -> Chan<T> {
         Chan {

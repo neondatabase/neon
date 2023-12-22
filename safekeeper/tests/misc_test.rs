@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
-use rand::Rng;
 use tracing::{info, warn};
 use utils::lsn::Lsn;
 
 use crate::walproposer_sim::{
     log::init_logger,
-    util::{
-        generate_network_opts, generate_schedule, validate_events, Schedule, TestAction, TestConfig,
-    },
+    util::{generate_network_opts, generate_schedule, Schedule, TestAction, TestConfig},
 };
 
 mod walproposer_sim;

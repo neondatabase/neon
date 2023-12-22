@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
+use desim::time::Timing;
 use once_cell::sync::OnceCell;
-use desim::{world::World, time::Timing};
 use parking_lot::Mutex;
 use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
 

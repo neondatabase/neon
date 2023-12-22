@@ -1,6 +1,13 @@
-use std::{thread::JoinHandle, cell::{OnceCell, RefCell}, sync::{mpsc, Arc, atomic::{AtomicU8, Ordering, AtomicU32, AtomicBool}, OnceLock}, panic::AssertUnwindSafe};
+use std::{
+    panic::AssertUnwindSafe,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        mpsc, Arc, OnceLock,
+    },
+    thread::JoinHandle,
+};
 
-use tracing::{debug, trace, error};
+use tracing::{debug, error, trace};
 
 use crate::time::Timing;
 
@@ -38,7 +45,7 @@ impl Runtime {
 
         let join = std::thread::spawn(move || {
             let _guard = tracing::info_span!("", tid).entered();
-            
+
             let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 with_thread_context(|ctx| {
                     assert!(ctx.clock.set(clock).is_ok());
@@ -54,7 +61,7 @@ impl Runtime {
             debug!("thread finished");
 
             match res {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
                     with_thread_context(|ctx| {
                         if !ctx.allow_panic.load(std::sync::atomic::Ordering::SeqCst) {
@@ -81,9 +88,7 @@ impl Runtime {
 
         self.threads.push(handle);
 
-        ExternalHandle {
-            ctx,
-        }
+        ExternalHandle { ctx }
     }
 
     pub fn step(&mut self) -> bool {
@@ -91,15 +96,24 @@ impl Runtime {
 
         let mut ran = false;
         self.threads.retain(|thread: &ThreadHandle| {
-            let res = thread.ctx.wakeup.compare_exchange(PENDING_WAKEUP, NO_WAKEUP, Ordering::SeqCst, Ordering::SeqCst);
-            if !res.is_ok() {
-                return true
+            let res = thread.ctx.wakeup.compare_exchange(
+                PENDING_WAKEUP,
+                NO_WAKEUP,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            if res.is_err() {
+                return true;
             }
             ran = true;
 
             trace!("entering thread-{}", thread.ctx.tid());
             let status = thread.step();
-            trace!("out of thread-{} with status {:?}", thread.ctx.tid(), status);
+            trace!(
+                "out of thread-{} with status {:?}",
+                thread.ctx.tid(),
+                status
+            );
             if status == Status::Sleep {
                 true
             } else {
@@ -127,7 +141,7 @@ impl Runtime {
         }
 
         // all threads should be finished after a few steps
-        while self.threads.len() > 0 {
+        while !self.threads.is_empty() {
             self.step();
         }
     }
@@ -150,7 +164,7 @@ impl ExternalHandle {
         let status = self.ctx.mutex.lock();
         *status == Status::Finished
     }
-    
+
     pub fn result(&self) -> (i32, String) {
         let result = self.ctx.result.lock();
         result.clone()
@@ -196,7 +210,7 @@ impl ThreadHandle {
         while *status == Status::Running {
             self.ctx.condvar.wait(&mut status);
         }
-        
+
         *status
     }
 }
@@ -254,7 +268,10 @@ impl ThreadContext {
 
     /// Internal function used for event queues.
     pub(crate) fn schedule_wakeup(self: &Arc<Self>, after_ms: u64) {
-        self.clock.get().unwrap().schedule_wakeup(after_ms as u64, self.clone());
+        self.clock
+            .get()
+            .unwrap()
+            .schedule_wakeup(after_ms, self.clone());
     }
 
     fn tid(&self) -> u32 {
@@ -264,7 +281,10 @@ impl ThreadContext {
     fn crash_stop(&self) {
         let status = self.mutex.lock();
         if *status == Status::Finished {
-            debug!("trying to crash thread-{}, which is already finished", self.tid());
+            debug!(
+                "trying to crash thread-{}, which is already finished",
+                self.tid()
+            );
             return;
         }
         assert!(matches!(*status, Status::Sleep));
@@ -293,7 +313,10 @@ impl ThreadContext {
             self.inc_wake();
         } else if after_ms > 0 {
             // schedule wakeup
-            self.clock.get().unwrap().schedule_wakeup(after_ms as u64, self.clone());
+            self.clock
+                .get()
+                .unwrap()
+                .schedule_wakeup(after_ms as u64, self.clone());
         }
         *status = Status::Sleep;
         self.condvar.notify_all();
@@ -339,6 +362,12 @@ pub struct Waker {
     contexts: parking_lot::Mutex<smallvec::SmallVec<[Arc<ThreadContext>; 8]>>,
 }
 
+impl Default for Waker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Waker {
     pub fn new() -> Self {
         Self {
@@ -365,16 +394,12 @@ impl Waker {
 
 /// See [`ThreadContext::yield_me`].
 pub fn yield_me(after_ms: i64) {
-    with_thread_context(|ctx| {
-        ctx.yield_me(after_ms)
-    })
+    with_thread_context(|ctx| ctx.yield_me(after_ms))
 }
 
 /// Get current time.
 pub fn now() -> u64 {
-    with_thread_context(|ctx| {
-        ctx.clock.get().unwrap().now()
-    })
+    with_thread_context(|ctx| ctx.clock.get().unwrap().now())
 }
 
 pub fn exit(code: i32, msg: String) {
@@ -387,9 +412,7 @@ pub fn exit(code: i32, msg: String) {
 }
 
 pub(crate) fn get_thread_ctx() -> Arc<ThreadContext> {
-    with_thread_context(|ctx| {
-        ctx.clone()
-    })
+    with_thread_context(|ctx| ctx.clone())
 }
 
 /// Trait for polling channels until they have something.
@@ -403,7 +426,7 @@ pub trait PollSome {
 
 /// Blocks current thread until one of the channels has a ready message. Returns
 /// index of the channel that has a message. If timeout is reached, returns None.
-/// 
+///
 /// Negative timeout means block forever. Zero timeout means check channels and return
 /// immediately. Positive timeout means block until timeout is reached.
 pub fn epoll_chans(chans: &[Box<dyn PollSome>], timeout: i64) -> Option<usize> {
