@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod reliable_copy_test {
     use anyhow::Result;
-    use parking_lot::Mutex;
     use desim::executor::{self, PollSome};
     use desim::network::{Delay, NetworkOptions};
     use desim::proto::ReplCell;
-    use desim::world::{NodeId, World, NetEvent};
+    use desim::world::{NetEvent, NodeId, World};
     use desim::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+    use parking_lot::Mutex;
     use std::sync::Arc;
     use tracing::info;
 
@@ -83,33 +83,27 @@ mod reliable_copy_test {
             if index == 0 {
                 let node_event = node_events.must_recv();
                 info!("got node event: {:?}", node_event);
-                match node_event {
-                    NodeEvent::Accept(tcp) => {
-                        tcp.send(AnyMessage::Just32(storage.flush_pos()));
-                        epoll_vec.push(Box::new(tcp.recv_chan()));
-                        sockets.push(tcp);
-                    }
-                    _ => {},
+                if let NodeEvent::Accept(tcp) = node_event {
+                    tcp.send(AnyMessage::Just32(storage.flush_pos()));
+                    epoll_vec.push(Box::new(tcp.recv_chan()));
+                    sockets.push(tcp);
                 }
                 continue;
             }
 
-            let recv_chan = sockets[index-1].recv_chan();
-            let socket = &sockets[index-1];
+            let recv_chan = sockets[index - 1].recv_chan();
+            let socket = &sockets[index - 1];
 
             let event = recv_chan.must_recv();
             info!("got event: {:?}", event);
-            match event {
-                NetEvent::Message(AnyMessage::ReplCell(cell)) => {
-                    if cell.seqno != storage.flush_pos() {
-                        info!("got out of order data: {:?}", cell);
-                        continue;
-                    }
-                    storage.write(cell.value);
-                    storage.flush().unwrap();
-                    socket.send(AnyMessage::Just32(storage.flush_pos()));
+            if let NetEvent::Message(AnyMessage::ReplCell(cell)) = event {
+                if cell.seqno != storage.flush_pos() {
+                    info!("got out of order data: {:?}", cell);
+                    continue;
                 }
-                _ => {}
+                storage.write(cell.value);
+                storage.flush().unwrap();
+                socket.send(AnyMessage::Just32(storage.flush_pos()));
             }
         }
     }

@@ -308,16 +308,23 @@ impl ThreadContext {
         let mut status = self.mutex.lock();
         assert!(matches!(*status, Status::Running));
 
-        if after_ms == 0 {
-            // tell executor that we are ready to be woken up
-            self.inc_wake();
-        } else if after_ms > 0 {
-            // schedule wakeup
-            self.clock
-                .get()
-                .unwrap()
-                .schedule_wakeup(after_ms as u64, self.clone());
+        match after_ms.cmp(&0) {
+            std::cmp::Ordering::Less => {
+                panic!("negative yield_me is not allowed");
+            }
+            std::cmp::Ordering::Equal => {
+                // tell executor that we are ready to be woken up
+                self.inc_wake();
+            }
+            std::cmp::Ordering::Greater => {
+                // schedule wakeup
+                self.clock
+                    .get()
+                    .unwrap()
+                    .schedule_wakeup(after_ms as u64, self.clone());
+            }
         }
+
         *status = Status::Sleep;
         self.condvar.notify_all();
 

@@ -2,7 +2,7 @@ use std::{collections::VecDeque, sync::Arc};
 
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::executor::{Waker, self, PollSome};
+use crate::executor::{self, PollSome, Waker};
 
 // use super::sync::{Condvar, Mutex, Park};
 
@@ -101,7 +101,9 @@ impl<T> Chan<T> {
     }
 
     pub fn must_recv(&self) -> T {
-        self.shared.try_recv().expect("message should've been ready")
+        self.shared
+            .try_recv()
+            .expect("message should've been ready")
     }
 
     pub fn try_recv(&self) -> Option<T> {
