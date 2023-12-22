@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "access/xlogdefs.h"
 #include "access/xlogutils.h"
 #include "access/xloginsert.h"
@@ -50,6 +51,8 @@
 #define XLOG_HDR_SIZE (1 + 8 * 3)	/* 'w' + startPos + walEnd + timestamp */
 #define XLOG_HDR_START_POS 1	/* offset of start position in wal sender*
 								 * message header */
+
+#define MB ((XLogRecPtr)1024 * 1024)
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
@@ -214,7 +217,6 @@ backpressure_lag_impl(void)
 		XLogRecPtr	myFlushLsn = GetFlushRecPtr();
 #endif
 		replication_feedback_get_lsns(&writePtr, &flushPtr, &applyPtr);
-#define MB ((XLogRecPtr)1024 * 1024)
 
 		elog(DEBUG2, "current flushLsn %X/%X PageserverFeedback: write %X/%X flush %X/%X apply %X/%X",
 			 LSN_FORMAT_ARGS(myFlushLsn),
@@ -1718,12 +1720,15 @@ walprop_pg_after_election(WalProposer *wp)
 		{
 			elog(LOG, "Logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
 
-			/*
-			 * start from the beginning of the segment to fetch page headers
-			 * verifed by XLogReader
-			 */
-			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
-			wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
+			if (max_slot_wal_keep_size_mb <= 0 || lrRestartLsn + max_slot_wal_keep_size_mb*MB > wp->truncateLsn)
+			{
+				/*
+				 * start from the beginning of the segment to fetch page headers
+				 * verifed by XLogReader
+				 */
+				lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
+				wp->truncateLsn = Min(wp->truncateLsn, lrRestartLsn);
+			}
 		}
 	}
 }
