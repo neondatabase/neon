@@ -207,14 +207,16 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let creds = {
         let hostname = mode.hostname(stream.get_ref());
 
-        // record the endpoint ID if we have it
+        // record the values if we have them
+        ctx.application = params.get("application_name").map(SmolStr::from);
+        ctx.user = params.get("user").map(SmolStr::from);
         ctx.endpoint_id = hostname.map(SmolStr::from);
 
         let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names, ctx.peer_addr))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
             .transpose();
 
         match result {
@@ -222,6 +224,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             Err(e) => stream.throw_error(e).await?,
         }
     };
+
+    ctx.endpoint_id = creds.get_endpoint();
 
     let client = Client::new(
         stream,

@@ -529,12 +529,7 @@ async fn connect_to_compute(
         ("application_name", APP_NAME),
         ("options", conn_info.options.as_deref().unwrap_or("")),
     ]);
-    let creds = auth::ClientCredentials::parse(
-        &params,
-        Some(&conn_info.hostname),
-        common_names,
-        ctx.peer_addr,
-    )?;
+    let creds = auth::ClientCredentials::parse(&params, Some(&conn_info.hostname), common_names)?;
 
     let creds =
         ComputeUserInfo::try_from(creds).map_err(|_| anyhow!("missing endpoint identifier"))?;

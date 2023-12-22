@@ -27,7 +27,6 @@ use crate::{
 };
 use futures::TryFutureExt;
 use std::borrow::Cow;
-use std::net::IpAddr;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -129,7 +128,6 @@ pub struct ComputeCredentials<T> {
 
 pub struct ComputeUserInfoNoEndpoint {
     pub user: SmolStr,
-    pub peer_addr: IpAddr,
     pub cache_key: SmolStr,
 }
 
@@ -151,7 +149,6 @@ impl TryFrom<ClientCredentials> for ComputeUserInfo {
     fn try_from(creds: ClientCredentials) -> Result<Self, Self::Error> {
         let inner = ComputeUserInfoNoEndpoint {
             user: creds.user,
-            peer_addr: creds.peer_addr,
             cache_key: creds.cache_key,
         };
         match creds.project {
@@ -190,7 +187,7 @@ async fn auth_quirks(
     let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
 
     // check allowed list
-    if !check_peer_addr_is_in_list(&info.inner.peer_addr, &allowed_ips) {
+    if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
         return Err(auth::AuthError::ip_address_not_allowed());
     }
     let cached_secret = api.get_role_secret(ctx, &info).await?;
