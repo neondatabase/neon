@@ -821,8 +821,25 @@ impl RemoteTimelineClient {
     fn schedule_deletion_of_unlinked0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
+        mut with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
     ) {
+        // Filter out any layers which were not created by this tenant shard.  These are
+        // layers that originate from some ancestor shard after a split, and may still
+        // be referenced by other shards. We are free to delete them locally and remove
+        // them from our index (and would have already done so when we reach this point
+        // in the code), but we may not delete them remotely.
+        with_metadata.retain(|(name, meta)| {
+            let retain = meta.shard.shard_number == self.tenant_shard_id.shard_number
+                && meta.shard.shard_count == self.tenant_shard_id.shard_count;
+            if !retain {
+                tracing::debug!(
+                    "Skipping deletion of ancestor-shard layer {name}, from shard {}",
+                    meta.shard
+                );
+            }
+            retain
+        });
+
         for (name, meta) in &with_metadata {
             info!(
                 "scheduling deletion of layer {}{} (shard {})",
