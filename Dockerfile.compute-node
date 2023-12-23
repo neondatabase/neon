@@ -28,8 +28,8 @@ RUN cd postgres && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
     if [ "${PG_VERSION}" != "v14" ]; then \
-    # zstd is available only from PG15
-    export CONFIGURE_CMD="${CONFIGURE_CMD} --with-zstd"; \
+        # zstd is available only from PG15
+        export CONFIGURE_CMD="${CONFIGURE_CMD} --with-zstd"; \
     fi && \
     eval $CONFIGURE_CMD && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
@@ -51,17 +51,17 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control && \
     old_list="pg_stat_statements--1.0--1.1.sql pg_stat_statements--1.1--1.2.sql pg_stat_statements--1.2--1.3.sql pg_stat_statements--1.3--1.4.sql pg_stat_statements--1.4--1.5.sql pg_stat_statements--1.4.sql pg_stat_statements--1.5--1.6.sql"; \
     for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
-    filename=$(basename "$file"); \
-    if echo "$old_list" | grep -q -F "$filename"; then \
-    echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser;' >> $file; \
-    fi; \
+        filename=$(basename "$file"); \
+        if echo "$old_list" | grep -q -F "$filename"; then \
+            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser;' >> $file; \
+        fi; \
     done; \
     for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
-    filename=$(basename "$file"); \
-    if ! echo "$old_list" | grep -q -F "$filename"; then \
-    echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
-    fi; \
-    done   
+        filename=$(basename "$file"); \
+        if ! echo "$old_list" | grep -q -F "$filename"; then \
+            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
+        fi; \
+    done      
 
 #########################################################################################
 #
@@ -138,17 +138,17 @@ RUN apt update && \
     apt install -y ninja-build python3-dev libncurses5 binutils clang
 
 RUN case "${PG_VERSION}" in \
-    "v14" | "v15") \
-    export PLV8_VERSION=3.1.5 \
-    export PLV8_CHECKSUM=1e108d5df639e4c189e1c5bdfa2432a521c126ca89e7e5a969d46899ca7bf106 \
-    ;; \
-    "v16") \
-    export PLV8_VERSION=3.1.8 \
-    export PLV8_CHECKSUM=92b10c7db39afdae97ff748c9ec54713826af222c459084ad002571b79eb3f49 \
-    ;; \
-    *) \
-    echo "Export the valid PG_VERSION variable" && exit 1 \
-    ;; \
+      "v14" | "v15") \
+        export PLV8_VERSION=3.1.5 \
+        export PLV8_CHECKSUM=1e108d5df639e4c189e1c5bdfa2432a521c126ca89e7e5a969d46899ca7bf106 \
+        ;; \
+      "v16") \
+        export PLV8_VERSION=3.1.8 \
+        export PLV8_CHECKSUM=92b10c7db39afdae97ff748c9ec54713826af222c459084ad002571b79eb3f49 \
+        ;; \
+      *) \
+        echo "Export the valid PG_VERSION variable" && exit 1 \
+        ;; \
     esac && \
     wget https://github.com/plv8/plv8/archive/refs/tags/v${PLV8_VERSION}.tar.gz -O plv8.tar.gz && \
     echo "${PLV8_CHECKSUM} plv8.tar.gz" | sha256sum --check && \
@@ -171,22 +171,22 @@ FROM build-deps AS h3-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN case "$(uname -m)" in \
-    "x86_64") \
-    export CMAKE_CHECKSUM=739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 \
-    ;; \
-    "aarch64") \
-    export CMAKE_CHECKSUM=281b42627c9a1beed03e29706574d04c6c53fae4994472e90985ef018dd29c02 \
-    ;; \
-    *) \
-    echo "Unsupported architecture '$(uname -m)'. Supported are x86_64 and aarch64" && exit 1 \
-    ;; \
+      "x86_64") \
+        export CMAKE_CHECKSUM=739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 \
+        ;; \
+      "aarch64") \
+        export CMAKE_CHECKSUM=281b42627c9a1beed03e29706574d04c6c53fae4994472e90985ef018dd29c02 \
+        ;; \
+      *) \
+        echo "Unsupported architecture '$(uname -m)'. Supported are x86_64 and aarch64" && exit 1 \
+        ;; \
     esac && \
     wget https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2-linux-$(uname -m).sh \
-    -q -O /tmp/cmake-install.sh \
-    && echo "${CMAKE_CHECKSUM} /tmp/cmake-install.sh" | sha256sum --check \
-    && chmod u+x /tmp/cmake-install.sh \
-    && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
-    && rm /tmp/cmake-install.sh
+      -q -O /tmp/cmake-install.sh \
+      && echo "${CMAKE_CHECKSUM} /tmp/cmake-install.sh" | sha256sum --check \
+      && chmod u+x /tmp/cmake-install.sh \
+      && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
+      && rm /tmp/cmake-install.sh
 
 RUN wget https://github.com/uber/h3/archive/refs/tags/v4.1.0.tar.gz -O h3.tar.gz && \
     echo "ec99f1f5974846bde64f4513cf8d2ea1b8d172d2218ab41803bf6a63532272bc h3.tar.gz" | sha256sum --check && \
@@ -401,14 +401,14 @@ ARG PG_VERSION
 ENV PATH "/usr/local/pgsql/bin:$PATH"
 
 RUN case "${PG_VERSION}" in \
-    "v14" | "v15") \
-    export TIMESCALEDB_VERSION=2.10.1 \
-    export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
-    ;; \
-    *) \
-    export TIMESCALEDB_VERSION=2.13.0 \
-    export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
-    ;; \
+      "v14" | "v15") \
+        export TIMESCALEDB_VERSION=2.10.1 \
+        export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
+        ;; \
+      *) \
+        export TIMESCALEDB_VERSION=2.13.0 \
+        export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
+        ;; \
     esac && \
     apt-get update && \
     apt-get install -y cmake && \
@@ -434,21 +434,21 @@ ARG PG_VERSION
 ENV PATH "/usr/local/pgsql/bin:$PATH"
 
 RUN case "${PG_VERSION}" in \
-    "v14") \
-    export PG_HINT_PLAN_VERSION=14_1_4_1 \
-    export PG_HINT_PLAN_CHECKSUM=c3501becf70ead27f70626bce80ea401ceac6a77e2083ee5f3ff1f1444ec1ad1 \
-    ;; \
-    "v15") \
-    export PG_HINT_PLAN_VERSION=15_1_5_0 \
-    export PG_HINT_PLAN_CHECKSUM=564cbbf4820973ffece63fbf76e3c0af62c4ab23543142c7caaa682bc48918be \
-    ;; \
-    "v16") \
-    export PG_HINT_PLAN_VERSION=16_1_6_0 \
-    export PG_HINT_PLAN_CHECKSUM=fc85a9212e7d2819d4ae4ac75817481101833c3cfa9f0fe1f980984e12347d00 \
-    ;; \
-    *) \
-    echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
-    ;; \
+      "v14") \
+        export PG_HINT_PLAN_VERSION=14_1_4_1 \
+        export PG_HINT_PLAN_CHECKSUM=c3501becf70ead27f70626bce80ea401ceac6a77e2083ee5f3ff1f1444ec1ad1 \
+        ;; \
+      "v15") \
+        export PG_HINT_PLAN_VERSION=15_1_5_0 \
+        export PG_HINT_PLAN_CHECKSUM=564cbbf4820973ffece63fbf76e3c0af62c4ab23543142c7caaa682bc48918be \
+        ;; \
+      "v16") \
+        export PG_HINT_PLAN_VERSION=16_1_6_0 \
+        export PG_HINT_PLAN_CHECKSUM=fc85a9212e7d2819d4ae4ac75817481101833c3cfa9f0fe1f980984e12347d00 \
+        ;; \
+      *) \
+        echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
+        ;; \
     esac && \
     wget https://github.com/ossc-db/pg_hint_plan/archive/refs/tags/REL${PG_HINT_PLAN_VERSION}.tar.gz -O pg_hint_plan.tar.gz && \
     echo "${PG_HINT_PLAN_CHECKSUM} pg_hint_plan.tar.gz" | sha256sum --check && \
@@ -511,39 +511,39 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt-get update && \
     apt-get install -y \
-    cmake \
-    libboost-iostreams1.74-dev \
-    libboost-regex1.74-dev \
-    libboost-serialization1.74-dev \
-    libboost-system1.74-dev \
-    libeigen3-dev \
-    libfreetype6-dev
+        cmake \
+        libboost-iostreams1.74-dev \
+        libboost-regex1.74-dev \
+        libboost-serialization1.74-dev \
+        libboost-system1.74-dev \
+        libeigen3-dev \
+        libfreetype6-dev
 
 ENV PATH "/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
 RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.gz -O rdkit.tar.gz && \
     echo "bdbf9a2e6988526bfeb8c56ce3cdfe2998d60ac289078e2215374288185e8c8d rdkit.tar.gz" | sha256sum --check && \
     mkdir rdkit-src && cd rdkit-src && tar xvzf ../rdkit.tar.gz --strip-components=1 -C . && \
     cmake \
-    -D RDK_BUILD_CAIRO_SUPPORT=OFF \
-    -D RDK_BUILD_INCHI_SUPPORT=ON \
-    -D RDK_BUILD_AVALON_SUPPORT=ON \
-    -D RDK_BUILD_PYTHON_WRAPPERS=OFF \
-    -D RDK_BUILD_DESCRIPTORS3D=OFF \
-    -D RDK_BUILD_FREESASA_SUPPORT=OFF \
-    -D RDK_BUILD_COORDGEN_SUPPORT=ON \
-    -D RDK_BUILD_MOLINTERCHANGE_SUPPORT=OFF \
-    -D RDK_BUILD_YAEHMOP_SUPPORT=OFF \
-    -D RDK_BUILD_STRUCTCHECKER_SUPPORT=OFF \
-    -D RDK_USE_URF=OFF \
-    -D RDK_BUILD_PGSQL=ON \
-    -D RDK_PGSQL_STATIC=ON \
-    -D PostgreSQL_CONFIG=pg_config \
-    -D PostgreSQL_INCLUDE_DIR=`pg_config --includedir` \
-    -D PostgreSQL_TYPE_INCLUDE_DIR=`pg_config --includedir-server` \
-    -D PostgreSQL_LIBRARY_DIR=`pg_config --libdir` \
-    -D RDK_INSTALL_INTREE=OFF \
-    -D CMAKE_BUILD_TYPE=Release \
-    . && \
+        -D RDK_BUILD_CAIRO_SUPPORT=OFF \
+        -D RDK_BUILD_INCHI_SUPPORT=ON \
+        -D RDK_BUILD_AVALON_SUPPORT=ON \
+        -D RDK_BUILD_PYTHON_WRAPPERS=OFF \
+        -D RDK_BUILD_DESCRIPTORS3D=OFF \
+        -D RDK_BUILD_FREESASA_SUPPORT=OFF \
+        -D RDK_BUILD_COORDGEN_SUPPORT=ON \
+        -D RDK_BUILD_MOLINTERCHANGE_SUPPORT=OFF \
+        -D RDK_BUILD_YAEHMOP_SUPPORT=OFF \
+        -D RDK_BUILD_STRUCTCHECKER_SUPPORT=OFF \
+        -D RDK_USE_URF=OFF \
+        -D RDK_BUILD_PGSQL=ON \
+        -D RDK_PGSQL_STATIC=ON \
+        -D PostgreSQL_CONFIG=pg_config \
+        -D PostgreSQL_INCLUDE_DIR=`pg_config --includedir` \
+        -D PostgreSQL_TYPE_INCLUDE_DIR=`pg_config --includedir-server` \
+        -D PostgreSQL_LIBRARY_DIR=`pg_config --libdir` \
+        -D RDK_INSTALL_INTREE=OFF \
+        -D CMAKE_BUILD_TYPE=Release \
+        . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/rdkit.control
@@ -610,12 +610,12 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in \
-    "v14" | "v15") \
-    export PG_EMBEDDING_VERSION=0.3.5 \
-    export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
-    ;; \
-    *) \
-    echo "pg_embedding not supported on this PostgreSQL version. Use pgvector instead." && exit 0;; \
+      "v14" | "v15") \
+        export PG_EMBEDDING_VERSION=0.3.5 \
+        export PG_EMBEDDING_CHECKSUM=0e95b27b8b6196e2cf0a0c9ec143fe2219b82e54c5bb4ee064e76398cbe69ae9 \
+        ;; \
+      *) \
+        echo "pg_embedding not supported on this PostgreSQL version. Use pgvector instead." && exit 0;; \
     esac && \
     wget https://github.com/neondatabase/pg_embedding/archive/refs/tags/${PG_EMBEDDING_VERSION}.tar.gz -O pg_embedding.tar.gz && \
     echo "${PG_EMBEDDING_CHECKSUM} pg_embedding.tar.gz" | sha256sum --check && \
@@ -804,31 +804,31 @@ COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
-    PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-    -C pgxn/neon \
-    -s install && \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon \
+        -s install && \
     make -j $(getconf _NPROCESSORS_ONLN) \
-    PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-    -C pgxn/neon_utils \
-    -s install && \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon_utils \
+        -s install && \
     make -j $(getconf _NPROCESSORS_ONLN) \
-    PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-    -C pgxn/neon_rmgr \
-    -s install && \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon_rmgr \
+        -s install && \
     case "${PG_VERSION}" in \
-    "v14" | "v15") \
-    ;; \
-    "v16") \
-    echo "Skipping HNSW for PostgreSQL 16" && exit 0 \
-    ;; \
-    *) \
-    echo "unexpected PostgreSQL version" && exit 1 \
-    ;; \
-    esac && \
+        "v14" | "v15") \
+        ;; \
+        "v16") \
+            echo "Skipping HNSW for PostgreSQL 16" && exit 0 \
+        ;; \
+        *) \
+            echo "unexpected PostgreSQL version" && exit 1 \
+        ;; \
+        esac && \
     make -j $(getconf _NPROCESSORS_ONLN) \
-    PG_CONFIG=/usr/local/pgsql/bin/pg_config \
-    -C pgxn/hnsw \
-    -s install
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/hnsw \
+        -s install
 
 #########################################################################################
 #
@@ -895,29 +895,29 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # ca-certificates for communicating with s3 by compute_ctl
 RUN apt update &&  \
     apt install --no-install-recommends -y \
-    gdb \
-    libicu67 \
-    liblz4-1 \
-    libreadline8 \
-    libboost-iostreams1.74.0 \
-    libboost-regex1.74.0 \
-    libboost-serialization1.74.0 \
-    libboost-system1.74.0 \
-    libossp-uuid16 \
-    libfreetype6 \
-    libgeos-c1v5 \
-    libgdal28 \
-    libproj19 \
-    libprotobuf-c1 \
-    libsfcgal1 \
-    libxml2 \
-    libxslt1.1 \
-    libzstd1 \
-    libcurl4-openssl-dev \
-    locales \
-    procps \
-    zlib1g \
-    ca-certificates && \
+        gdb \
+        libicu67 \
+        liblz4-1 \
+        libreadline8 \
+        libboost-iostreams1.74.0 \
+        libboost-regex1.74.0 \
+        libboost-serialization1.74.0 \
+        libboost-system1.74.0 \
+        libossp-uuid16 \
+        libfreetype6 \
+        libgeos-c1v5 \
+        libgdal28 \
+        libproj19 \
+        libprotobuf-c1 \
+        libsfcgal1 \
+        libxml2 \
+        libxslt1.1 \
+        libzstd1 \
+        libcurl4-openssl-dev \
+        locales \
+        procps \
+        zlib1g \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
