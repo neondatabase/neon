@@ -2827,7 +2827,7 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 					 errmsg(NEON_TAG "could not read SLRU %d segment %d at lsn %X/%08X",
 							kind,
 							segno,
-							(uint32) (request_lsn >> 32), (uint32) request_lsn),
+							LSN_FORMAT_ARGS(request_lsn)),
 					 errdetail("page server returned error: %s",
 							   ((NeonErrorResponse *) resp)->message)));
 			break;
