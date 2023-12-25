@@ -2793,7 +2793,6 @@ static int
 neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer)
 {
 	XLogRecPtr request_lsn;
-	/* TODO: any better alternative than flush LSN? Actually we to request SLRU at basebackup creation time... */
 	request_lsn = GetRedoStartLsn();
 	request_lsn = nm_adjust_lsn(request_lsn);
 
@@ -2818,6 +2817,7 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 	{
 		case T_NeonGetSlruSegmentResponse:
 			n_blocks = ((NeonGetSlruSegmentResponse *) resp)->n_blocks;
+			elog(LOG, "Read %d blocks of SLRU %d segment %d", n_blocks, kind, segno);
 			memcpy(buffer, ((NeonGetSlruSegmentResponse *) resp)->data, n_blocks*BLCKSZ);
 			break;
 
