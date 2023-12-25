@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::*;
 
 use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
-use crate::safekeeper::SafeKeeperState;
+use crate::state::TimelinePersistentState;
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
 use postgres_ffi::waldecoder::WalStreamDecoder;
@@ -125,7 +125,7 @@ impl PhysicalStorage {
         ttid: &TenantTimelineId,
         timeline_dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
-        state: &SafeKeeperState,
+        state: &TimelinePersistentState,
     ) -> Result<PhysicalStorage> {
         let wal_seg_size = state.server.wal_seg_size as usize;
 
@@ -525,7 +525,7 @@ impl WalReader {
     pub fn new(
         workdir: Utf8PathBuf,
         timeline_dir: Utf8PathBuf,
-        state: &SafeKeeperState,
+        state: &TimelinePersistentState,
         start_pos: Lsn,
         enable_remote_read: bool,
     ) -> Result<Self> {

@@ -160,7 +160,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         commit_lsn: inmem.commit_lsn,
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
-        remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
+        remote_consistent_lsn: inmem.remote_consistent_lsn,
         peers: tli.get_peers(conf).await,
         walsenders: tli.get_walsenders().get_all(),
         walreceivers: tli.get_walreceivers().get_all(),

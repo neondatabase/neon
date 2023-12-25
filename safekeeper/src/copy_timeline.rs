@@ -14,7 +14,7 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 use crate::{
     control_file::{FileStorage, Storage},
     pull_timeline::{create_temp_timeline_dir, load_temp_timeline, validate_temp_timeline},
-    safekeeper::SafeKeeperState,
+    state::TimelinePersistentState,
     timeline::{Timeline, TimelineError},
     wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
@@ -137,7 +137,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
     )
     .await?;
 
-    let mut new_state = SafeKeeperState::new(
+    let mut new_state = TimelinePersistentState::new(
         &request.destination_ttid,
         state.server.clone(),
         vec![],
@@ -160,7 +160,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
 
 async fn copy_disk_segments(
     conf: &SafeKeeperConf,
-    persisted_state: &SafeKeeperState,
+    persisted_state: &TimelinePersistentState,
     wal_seg_size: usize,
     source_ttid: &TenantTimelineId,
     start_lsn: Lsn,
