@@ -35,7 +35,7 @@ fn test_one_schedule() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
 
-    let seed = 10318430968140584404;
+    let seed = 2717576027256331644;
     config.network = generate_network_opts(seed);
     info!("network: {:?}", config.network);
     let test = config.start(seed);

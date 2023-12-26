@@ -15,7 +15,7 @@ use tracing::debug;
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
-    bindings::{pg_atomic_uint64, PageserverFeedback, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE},
+    bindings::{pg_atomic_uint64, PageserverFeedback, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE, NeonWALReadResult, SafekeeperStateDesiredEvents},
     walproposer::{ApiImpl, Config},
 };
 
@@ -106,6 +106,41 @@ impl EventSet {
         ));
         self.sk_ptrs.push(sk.raw_ptr);
         self.masks.push(event_mask);
+    }
+
+    fn remove_safekeeper(&mut self, sk: &SafekeeperConn) {
+        let index = self
+            .sk_ptrs
+            .iter()
+            .position(|&ptr| ptr == sk.raw_ptr)
+            .expect("safekeeper should exist in event set");
+
+        self.chans.remove(index);
+        self.sk_ptrs.remove(index);
+        self.masks.remove(index);
+
+        // to simulate the actual behaviour
+        self.refresh_event_set();
+    }
+
+    fn refresh_event_set(&mut self) {
+        for (i, mask) in self.masks.iter_mut().enumerate() {
+            if i == 0 {
+                continue;
+            }
+
+            let mut mask_sk: u32 = 0;
+            let mut mask_nwr: u32 = 0;
+            unsafe { SafekeeperStateDesiredEvents(self.sk_ptrs[i], &mut mask_sk, &mut mask_nwr) };
+
+            if mask_sk != *mask {
+                debug!(
+                    "refresh_event_set: sk={:?}, old_mask={:#b}, new_mask={:#b}",
+                    self.sk_ptrs[i], *mask, mask_sk
+                );
+                *mask = mask_sk;
+            }
+        }
     }
 
     fn wait(&mut self, timeout_millis: i64) -> walproposer::walproposer::WaitResult {
@@ -338,18 +373,14 @@ impl ApiImpl for SimulationApi {
         walproposer::bindings::PGAsyncWriteResult_PG_ASYNC_WRITE_SUCCESS
     }
 
-    fn wal_reader_allocate(&self, _: &mut walproposer::bindings::Safekeeper) {
-        debug!("wal_reader_allocate")
+    fn wal_reader_allocate(&self, _: &mut walproposer::bindings::Safekeeper) -> NeonWALReadResult {
+        debug!("wal_reader_allocate");
+        walproposer::bindings::NeonWALReadResult_NEON_WALREAD_SUCCESS
     }
 
-    fn wal_read(&self, _sk: &mut walproposer::bindings::Safekeeper, buf: &mut [u8], startpos: u64) {
+    fn wal_read(&self, _sk: &mut walproposer::bindings::Safekeeper, buf: &mut [u8], startpos: u64) -> NeonWALReadResult {
         self.disk.lock().read(startpos, buf);
-    }
-
-    fn free_event_set(&self, _: &mut walproposer::bindings::WalProposer) {
-        debug!("free_event_set");
-        let old_event_set = self.event_set.replace(None);
-        assert!(old_event_set.is_some());
+        walproposer::bindings::NeonWALReadResult_NEON_WALREAD_SUCCESS
     }
 
     fn init_event_set(&self, _: &mut walproposer::bindings::WalProposer) {
@@ -388,6 +419,30 @@ impl ApiImpl for SimulationApi {
             .as_mut()
             .unwrap()
             .add_safekeeper(&self.get_conn(sk), event_mask);
+    }
+
+    fn rm_safekeeper_event_set(&self, sk: &mut walproposer::bindings::Safekeeper) {
+        debug!(
+            "rm_safekeeper_event_set, sk={:?}",
+            sk as *mut walproposer::bindings::Safekeeper,
+        );
+
+        self.event_set
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .remove_safekeeper(&self.get_conn(sk));
+    }
+
+    fn active_state_update_event_set(&self, sk: &mut walproposer::bindings::Safekeeper) {
+        debug!("active_state_update_event_set");
+
+        assert!(sk.state == walproposer::bindings::SafekeeperState_SS_ACTIVE);
+        self.event_set.borrow_mut().as_mut().unwrap().refresh_event_set();
+    }
+
+    fn wal_reader_events(&self, _sk: &mut walproposer::bindings::Safekeeper) -> u32 {
+        0
     }
 
     fn wait_event_set(
@@ -448,10 +503,6 @@ impl ApiImpl for SimulationApi {
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
         debug!("walprop_log[{}] {}", level, msg);
         if level == Level::Fatal || level == Level::Panic {
-            if msg == "Failed to recover state" {
-                // Recovery connection broken in the middle of recovery
-                executor::exit(1, msg.to_owned());
-            }
             if msg.contains("rejects our connection request with term") {
                 // collected quorum with lower term, then got rejected by next connected safekeeper
                 executor::exit(1, msg.to_owned());
@@ -459,6 +510,10 @@ impl ApiImpl for SimulationApi {
             if msg.contains("collected propEpochStartLsn") && msg.contains(", but basebackup LSN ")
             {
                 // sync-safekeepers collected wrong quorum, walproposer collected another quorum
+                executor::exit(1, msg.to_owned());
+            }
+            if msg.contains("failed to download WAL for logical replicaiton") {
+                // Recovery connection broken and recovery was failed
                 executor::exit(1, msg.to_owned());
             }
             panic!("unknown FATAL error from walproposer: {}", msg);
@@ -540,25 +595,29 @@ impl ApiImpl for SimulationApi {
         lsn.0
     }
 
-    fn confirm_wal_streamed(&self, _wp: &mut walproposer::bindings::WalProposer, lsn: u64) {
-        debug!("confirm_wal_streamed: {}", Lsn(lsn))
-    }
-
     fn recovery_download(
         &self,
-        sk: &mut walproposer::bindings::Safekeeper,
-        mut startpos: u64,
-        endpos: u64,
+        wp: &mut walproposer::bindings::WalProposer,
+        sk: &mut walproposer::bindings::Safekeeper
     ) -> bool {
+        let mut startpos = wp.truncateLsn;
+        let endpos = wp.propEpochStartLsn;
+
+        if startpos == endpos {
+            debug!("recovery_download: nothing to download");
+            return true;
+        }
+
+        debug!(
+            "recovery_download from {} to {}",
+            startpos, endpos,
+        );
+
         let replication_prompt = format!(
             "START_REPLICATION {} {} {} {}",
             self.config.ttid.tenant_id, self.config.ttid.timeline_id, startpos, endpos,
         );
         let async_conn = self.get_conn(sk);
-        debug!(
-            "recovery_download from {} to {}, sk={}",
-            startpos, endpos, async_conn.node_id
-        );
 
         let conn = self.os.open_tcp(async_conn.node_id);
         conn.send(desim::proto::AnyMessage::Bytes(replication_prompt.into()));

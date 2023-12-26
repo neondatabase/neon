@@ -7,7 +7,7 @@ use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
         NeonWALReadResult, Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate,
-        WalProposerFree, WalProposerStart,
+        WalProposerFree, WalProposerStart, WalProposerBroadcast, WalProposerPoll,
     },
 };
 
