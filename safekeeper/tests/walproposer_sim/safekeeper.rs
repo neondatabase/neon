@@ -11,8 +11,7 @@ use desim::{
     executor::{self, PollSome},
     network::TCP,
     node_os::NodeOs,
-    proto::AnyMessage,
-    world::{NetEvent, NodeEvent},
+    proto::{AnyMessage, NodeEvent, NetEvent},
 };
 use hyper::Uri;
 use safekeeper::{

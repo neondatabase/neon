@@ -23,7 +23,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Init new runtime. Virtual time is 0ms, no running threads.
+    /// Init new runtime, no running threads.
     pub fn new(clock: Arc<Timing>) -> Self {
         Self {
             threads: Vec::new(),
@@ -60,22 +60,19 @@ impl Runtime {
             }));
             debug!("thread finished");
 
-            match res {
-                Ok(_) => {}
-                Err(e) => {
-                    with_thread_context(|ctx| {
-                        if !ctx.allow_panic.load(std::sync::atomic::Ordering::SeqCst) {
-                            error!("thread panicked, terminating the process: {:?}", e);
-                            std::process::exit(1);
-                        }
+            if let Err(e) = res {
+                with_thread_context(|ctx| {
+                    if !ctx.allow_panic.load(std::sync::atomic::Ordering::SeqCst) {
+                        error!("thread panicked, terminating the process: {:?}", e);
+                        std::process::exit(1);
+                    }
 
-                        debug!("thread panicked: {:?}", e);
-                        let mut result = ctx.result.lock();
-                        if result.0 == -1 {
-                            *result = (256, format!("thread panicked: {:?}", e));
-                        }
-                    });
-                }
+                    debug!("thread panicked: {:?}", e);
+                    let mut result = ctx.result.lock();
+                    if result.0 == -1 {
+                        *result = (256, format!("thread panicked: {:?}", e));
+                    }
+                });
             }
 
             with_thread_context(|ctx| {
@@ -91,10 +88,14 @@ impl Runtime {
         ExternalHandle { ctx }
     }
 
+    /// Returns true if there are any unfinished activity, such as running thread or pending events.
+    /// Otherwise returns false, which means all threads are blocked forever.
     pub fn step(&mut self) -> bool {
         trace!("runtime step");
 
+        // have we run any thread?
         let mut ran = false;
+
         self.threads.retain(|thread: &ThreadHandle| {
             let res = thread.ctx.wakeup.compare_exchange(
                 PENDING_WAKEUP,
@@ -103,6 +104,7 @@ impl Runtime {
                 Ordering::SeqCst,
             );
             if res.is_err() {
+                // thread has no pending wakeups, leaving as is
                 return true;
             }
             ran = true;
@@ -114,16 +116,18 @@ impl Runtime {
                 thread.ctx.tid(),
                 status
             );
+
             if status == Status::Sleep {
                 true
             } else {
                 trace!("thread has finished");
+                // removing the thread from the list
                 false
             }
         });
 
         if !ran {
-            trace!("no pending threads, stepping clock");
+            trace!("no threads were run, stepping clock");
             if let Some(ctx_to_wake) = self.clock.step() {
                 trace!("waking up thread-{}", ctx_to_wake.tid());
                 ctx_to_wake.inc_wake();
@@ -135,6 +139,7 @@ impl Runtime {
         true
     }
 
+    /// Kill all threads. This is done by setting a flag in each thread context and waking it up.
     pub fn crash_all_threads(&mut self) {
         for thread in self.threads.iter() {
             thread.ctx.crash_stop();
@@ -160,26 +165,29 @@ pub struct ExternalHandle {
 }
 
 impl ExternalHandle {
+    /// Returns true if thread has finished execution.
     pub fn is_finished(&self) -> bool {
         let status = self.ctx.mutex.lock();
         *status == Status::Finished
     }
 
+    /// Returns exitcode and message, which is available after thread has finished execution.
     pub fn result(&self) -> (i32, String) {
         let result = self.ctx.result.lock();
         result.clone()
     }
 
+    /// Returns thread id.
     pub fn id(&self) -> u32 {
         self.ctx.id.load(Ordering::SeqCst)
     }
 
+    /// Sets a flag to crash thread on the next wakeup.
     pub fn crash_stop(&self) {
         self.ctx.crash_stop();
     }
 }
 
-/// [`Runtime`] stores [`ThreadHandle`] for each thread which is currently running.
 struct ThreadHandle {
     ctx: Arc<ThreadContext>,
     _join: JoinHandle<()>,
@@ -219,7 +227,7 @@ impl ThreadHandle {
 enum Status {
     /// Thread is running.
     Running,
-    /// Waiting for event to complete, will be woken up by the event.
+    /// Waiting for event to complete, will be resumed by the executor step, once wakeup flag is set.
     Sleep,
     /// Thread finished execution.
     Finished,

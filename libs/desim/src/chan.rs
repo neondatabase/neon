@@ -4,12 +4,10 @@ use parking_lot::{Mutex, MutexGuard};
 
 use crate::executor::{self, PollSome, Waker};
 
-// use super::sync::{Condvar, Mutex, Park};
-
 /// FIFO channel with blocking send and receive. Can be cloned and shared between threads.
+/// Blocking functions should be used only from threads that are managed by the executor.
 pub struct Chan<T> {
-    // shared: Arc<ChanState<T>>,
-    shared: Arc<Chan2State<T>>,
+    shared: Arc<State<T>>,
 }
 
 impl<T> Clone for Chan<T> {
@@ -20,66 +18,6 @@ impl<T> Clone for Chan<T> {
     }
 }
 
-// struct ChanState<T> {
-//     queue: Mutex<VecDeque<T>>,
-//     waker: Waker,
-// }
-
-// impl<T: Clone> Default for Chan<T> {
-//     fn default() -> Self {
-//         Self::new()
-//     }
-// }
-
-// impl<T: Clone> Chan<T> {
-//     pub fn new() -> Chan<T> {
-//         Chan {
-//             shared: Arc::new(ChanState {
-//                 queue: Mutex::new(VecDeque::new()),
-//                 waker: Waker::new(),
-//             }),
-//         }
-//     }
-
-//     /// Append a message to the end of the queue.
-//     /// Can be called from any thread.
-//     pub fn send(&self, t: T) {
-//         self.shared.queue.lock().push_back(t);
-//         self.shared.waker.wake_all();
-//     }
-
-//     /// Same as `recv`, but doesn't take the message from the queue.
-//     pub fn peek(&self) -> T {
-//         // interrupt the receiver to prevent consuming everything at once
-//         Park::yield_thread();
-
-//         let mut queue = self.shared.queue.lock();
-//         loop {
-//             if let Some(t) = queue.front().cloned() {
-//                 return t;
-//             }
-//             self.shared.condvar.wait(&mut queue);
-//         }
-//     }
-
-//     /// Get a message from the front of the queue, or return `None` if the queue is empty.
-//     pub fn try_recv(&self) -> Option<T> {
-//         let mut queue = self.shared.queue.lock();
-//         queue.pop_front()
-//     }
-
-//     /// Clone a message from the front of the queue, or return `None` if the queue is empty.
-//     pub fn try_peek(&self) -> Option<T> {
-//         let queue = self.shared.queue.lock();
-//         queue.front().cloned()
-//     }
-
-//     pub fn clear(&self) {
-//         let mut queue = self.shared.queue.lock();
-//         queue.clear();
-//     }
-// }
-
 impl<T> Default for Chan<T> {
     fn default() -> Self {
         Self::new()
@@ -89,51 +27,55 @@ impl<T> Default for Chan<T> {
 impl<T> Chan<T> {
     pub fn new() -> Chan<T> {
         Chan {
-            shared: Arc::new(Chan2State {
+            shared: Arc::new(State {
                 queue: Mutex::new(VecDeque::new()),
                 waker: Waker::new(),
             }),
         }
     }
 
+    /// Get a message from the front of the queue, block if the queue is empty.
+    /// If not called from the executor thread, it can block forever.
     pub fn recv(&self) -> T {
         self.shared.recv()
     }
 
+    /// Panic if the queue is empty.
     pub fn must_recv(&self) -> T {
         self.shared
             .try_recv()
             .expect("message should've been ready")
     }
 
+    /// Get a message from the front of the queue, return None if the queue is empty.
+    /// Never blocks.
     pub fn try_recv(&self) -> Option<T> {
         self.shared.try_recv()
     }
 
+    /// Send a message to the back of the queue.
     pub fn send(&self, t: T) {
         self.shared.send(t);
     }
 }
 
-pub struct Chan2State<T> {
+struct State<T> {
     queue: Mutex<VecDeque<T>>,
     waker: Waker,
 }
 
-impl<T> Chan2State<T> {
-    pub fn send(&self, t: T) {
+impl<T> State<T> {
+    fn send(&self, t: T) {
         self.queue.lock().push_back(t);
         self.waker.wake_all();
     }
 
-    pub fn try_recv(&self) -> Option<T> {
+    fn try_recv(&self) -> Option<T> {
         let mut q = self.queue.lock();
         q.pop_front()
     }
 
-    /// Get a message from the front of the queue, block if the queue is empty.
-    /// Can be called only from the node thread.
-    pub fn recv(&self) -> T {
+    fn recv(&self) -> T {
         // interrupt the receiver to prevent consuming everything at once
         executor::yield_me(0);
 

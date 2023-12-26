@@ -8,25 +8,24 @@ use std::{
 use crate::{
     executor::{ExternalHandle, Runtime},
     network::NetworkTask,
-    time::Timing,
+    time::Timing, proto::{SimEvent, NodeEvent}, options::NetworkOptions,
 };
 
 use super::{
     chan::Chan,
-    network::{NetworkOptions, TCP},
+    network::TCP,
     node_os::NodeOs,
-    proto::AnyMessage,
 };
 
 pub type NodeId = u32;
 
-/// Full world simulation state, shared between all nodes.
+/// World contains simulation state.
 pub struct World {
     nodes: Mutex<Vec<Arc<Node>>>,
     /// Random number generator.
     rng: Mutex<StdRng>,
     /// Internal event log.
-    events: Mutex<Vec<SEvent>>,
+    events: Mutex<Vec<SimEvent>>,
     /// Separate task that processes all network messages.
     network_task: Arc<NetworkTask>,
     /// Runtime for running threads and moving time.
@@ -100,7 +99,7 @@ impl World {
     pub fn open_tcp(self: &Arc<World>, dst: NodeId) -> TCP {
         // TODO: replace unwrap() with /dev/null socket.
         let dst = self.get_node(dst).unwrap();
-        let dst_accept = dst.network.lock().clone();
+        let dst_accept = dst.node_events.lock().clone();
 
         let rng = self.new_rng();
         self.network_task.start_new_connection(rng, dst_accept)
@@ -118,10 +117,10 @@ impl World {
 
     pub fn add_event(&self, node: NodeId, data: String) {
         let time = self.now();
-        self.events.lock().push(SEvent { time, node, data });
+        self.events.lock().push(SimEvent { time, node, data });
     }
 
-    pub fn take_events(&self) -> Vec<SEvent> {
+    pub fn take_events(&self) -> Vec<SimEvent> {
         let mut events = self.events.lock();
         let mut res = Vec::new();
         std::mem::swap(&mut res, &mut events);
@@ -138,16 +137,16 @@ impl World {
 /// Internal node state.
 pub struct Node {
     pub id: NodeId,
-    network: Mutex<Chan<NodeEvent>>,
+    node_events: Mutex<Chan<NodeEvent>>,
     world: Arc<World>,
-    pub rng: Mutex<StdRng>,
+    pub(crate) rng: Mutex<StdRng>,
 }
 
 impl Node {
     pub fn new(id: NodeId, world: Arc<World>, rng: StdRng) -> Node {
         Node {
             id,
-            network: Mutex::new(Chan::new()),
+            node_events: Mutex::new(Chan::new()),
             world,
             rng: Mutex::new(rng),
         }
@@ -162,32 +161,18 @@ impl Node {
         })
     }
 
-    /// Returns a channel to receive events from the network.
-    pub fn network_chan(&self) -> Chan<NodeEvent> {
-        self.network.lock().clone()
+    /// Returns a channel to receive Accepts and internal messages.
+    pub fn node_events(&self) -> Chan<NodeEvent> {
+        self.node_events.lock().clone()
     }
 
+    /// This will drop all in-flight Accept messages.
+    pub fn replug_node_events(&self, chan: Chan<NodeEvent>) {
+        *self.node_events.lock() = chan;
+    }
+
+    /// Append event to the world's log.
     pub fn log_event(&self, data: String) {
         self.world.add_event(self.id, data)
     }
-}
-
-/// Network events and timers.
-#[derive(Debug)]
-pub enum NodeEvent {
-    Accept(TCP),
-    Internal(AnyMessage),
-}
-
-#[derive(Clone, Debug)]
-pub enum NetEvent {
-    Message(AnyMessage),
-    Closed,
-}
-
-#[derive(Debug)]
-pub struct SEvent {
-    pub time: u64,
-    pub node: NodeId,
-    pub data: String,
 }

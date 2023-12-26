@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use rand::Rng;
 
+use crate::proto::NodeEvent;
+
 use super::{
     chan::Chan,
     network::TCP,
-    world::{Node, NodeEvent, NodeId, World},
+    world::{Node, NodeId, World},
 };
 
 /// Abstraction with all functions (aka syscalls) available to the node.
@@ -32,7 +34,7 @@ impl NodeOs {
 
     /// Returns a channel to receive node events (socket Accept and internal messages).
     pub fn node_events(&self) -> Chan<NodeEvent> {
-        self.internal.network_chan()
+        self.internal.node_events()
     }
 
     /// Generate a random number in range [0, max).
@@ -40,6 +42,7 @@ impl NodeOs {
         self.internal.rng.lock().gen_range(0..max)
     }
 
+    /// Append a new event to the world event log.
     pub fn log_event(&self, data: String) {
         self.world.add_event(self.id(), data)
     }

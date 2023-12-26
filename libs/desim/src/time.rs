@@ -13,6 +13,7 @@ use tracing::trace;
 
 use crate::executor::ThreadContext;
 
+/// Holds current time and all pending wakeup events.
 pub struct Timing {
     /// Current world's time.
     current_time: AtomicU64,
@@ -31,6 +32,7 @@ impl Default for Timing {
 }
 
 impl Timing {
+    /// Create a new empty clock with time set to 0.
     pub fn new() -> Timing {
         Timing {
             current_time: AtomicU64::new(0),
@@ -66,6 +68,7 @@ impl Timing {
         Some(queue.pop().unwrap().wake_context)
     }
 
+    /// Append an event to the queue, to wakeup the thread in `ms` milliseconds.
     pub(crate) fn schedule_wakeup(&self, ms: u64, wake_context: Arc<ThreadContext>) {
         self.nonce.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let nonce = self.nonce.load(std::sync::atomic::Ordering::SeqCst);
@@ -76,6 +79,7 @@ impl Timing {
         })
     }
 
+    /// Append a fake event to the queue, to prevent clocks from skipping this time.
     pub fn schedule_fake(&self, ms: u64) {
         self.queue.lock().push(Pending {
             time: self.now() + ms,
@@ -89,6 +93,7 @@ impl Timing {
         queue.peek().map_or(false, |x| x.time <= self.now())
     }
 
+    /// Clear all pending events.
     pub(crate) fn clear(&self) {
         self.queue.lock().clear();
     }

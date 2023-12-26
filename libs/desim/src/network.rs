@@ -10,59 +10,16 @@ use parking_lot::{
     lock_api::{MappedMutexGuard, MutexGuard},
     Mutex, RawMutex,
 };
-use rand::{rngs::StdRng, Rng};
+use rand::rngs::StdRng;
 use tracing::debug;
 
 use crate::{
     executor::{self, ThreadContext},
-    world::NetEvent,
+    options::NetworkOptions, proto::NodeEvent,
+    proto::NetEvent,
 };
 
-use super::{chan::Chan, proto::AnyMessage, world::NodeEvent};
-
-#[derive(Clone, Debug)]
-pub struct Delay {
-    pub min: u64,
-    pub max: u64,
-    pub fail_prob: f64, // [0; 1]
-}
-
-impl Delay {
-    /// No delay, no failures.
-    pub fn empty() -> Delay {
-        Delay {
-            min: 0,
-            max: 0,
-            fail_prob: 0.0,
-        }
-    }
-
-    /// Fixed delay.
-    pub fn fixed(ms: u64) -> Delay {
-        Delay {
-            min: ms,
-            max: ms,
-            fail_prob: 0.0,
-        }
-    }
-
-    /// Generate a random delay in range [min, max]. Return None if the
-    /// message should be dropped.
-    pub fn delay(&self, rng: &mut StdRng) -> Option<u64> {
-        if rng.gen_bool(self.fail_prob) {
-            return None;
-        }
-        Some(rng.gen_range(self.min..=self.max))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct NetworkOptions {
-    /// Connection will be automatically closed after this timeout.
-    pub keepalive_timeout: Option<u64>,
-    pub connect_delay: Delay,
-    pub send_delay: Delay,
-}
+use super::{chan::Chan, proto::AnyMessage};
 
 pub struct NetworkTask {
     options: Arc<NetworkOptions>,

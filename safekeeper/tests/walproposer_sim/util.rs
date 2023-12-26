@@ -3,10 +3,10 @@ use std::{cell::Cell, str::FromStr, sync::Arc};
 use crate::walproposer_sim::{safekeeper::run_server, wp_api::SimulationApi};
 use desim::{
     executor::{self, ExternalHandle},
-    network::{Delay, NetworkOptions},
-    proto::AnyMessage,
+    options::{Delay, NetworkOptions},
+    proto::{AnyMessage, NodeEvent, SimEvent},
     world::World,
-    world::{Node, NodeEvent, SEvent},
+    world::{Node},
 };
 use rand::{Rng, SeedableRng};
 use tracing::{debug, info_span, warn};
@@ -345,7 +345,7 @@ impl WalProposer {
 
         // now we need to set "Latch" in walproposer
         self.node
-            .network_chan()
+            .node_events()
             .send(NodeEvent::Internal(AnyMessage::Just32(0)));
     }
 
@@ -488,7 +488,7 @@ impl GlobalState {
     }
 }
 
-pub fn validate_events(events: Vec<SEvent>) {
+pub fn validate_events(events: Vec<SimEvent>) {
     const INITDB_LSN: u64 = 21623024;
 
     let hook = std::panic::take_hook();

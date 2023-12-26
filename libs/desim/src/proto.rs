@@ -3,8 +3,32 @@ use std::fmt::Debug;
 use bytes::Bytes;
 use utils::lsn::Lsn;
 
-/// All possible flavours of messages.
-/// Grouped by the receiver node.
+use crate::{network::TCP, world::NodeId};
+
+/// Internal node events.
+#[derive(Debug)]
+pub enum NodeEvent {
+    Accept(TCP),
+    Internal(AnyMessage),
+}
+
+/// Events that are coming from a network socket.
+#[derive(Clone, Debug)]
+pub enum NetEvent {
+    Message(AnyMessage),
+    Closed,
+}
+
+/// Custom events generated throughout the simulation. Can be used by the test to verify the correctness.
+#[derive(Debug)]
+pub struct SimEvent {
+    pub time: u64,
+    pub node: NodeId,
+    pub data: String,
+}
+
+/// Umbrella type for all possible flavours of messages. These events can be sent over network
+/// or to an internal node events channel.
 #[derive(Clone)]
 pub enum AnyMessage {
     /// Not used, empty placeholder.
@@ -30,6 +54,7 @@ impl Debug for AnyMessage {
     }
 }
 
+/// Used in reliable_copy_test.rs
 #[derive(Clone, Debug)]
 pub struct ReplCell {
     pub value: u32,

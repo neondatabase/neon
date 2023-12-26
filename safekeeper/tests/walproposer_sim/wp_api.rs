@@ -9,8 +9,7 @@ use desim::{
     executor::{self, PollSome},
     network::TCP,
     node_os::NodeOs,
-    proto::AnyMessage,
-    world::{NetEvent, NodeEvent, NodeId},
+    proto::{AnyMessage, NodeEvent, NetEvent}, world::NodeId,
 };
 use tracing::debug;
 use utils::lsn::Lsn;
