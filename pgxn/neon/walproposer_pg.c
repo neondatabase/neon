@@ -1748,8 +1748,8 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
 
 	/*
-	 * Now that we prepared the condvar, check flush ptr again -- it might have
-	 * changed before we subscribed to cv so we missed the wakeup.
+	 * Now that we prepared the condvar, check flush ptr again -- it might
+	 * have changed before we subscribed to cv so we missed the wakeup.
 	 *
 	 * Do that only when we're interested in new WAL: without sync-safekeepers
 	 * and if election already passed.
