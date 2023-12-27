@@ -231,6 +231,8 @@ impl S3Bucket {
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
+                let etag = object_output.e_tag.clone();
+                let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
 
                 let body = object_output.body;
                 let body = ByteStreamAsStream::from(body);
@@ -239,6 +241,8 @@ impl S3Bucket {
 
                 Ok(Download {
                     metadata,
+                    etag,
+                    last_modified,
                     download_stream: Box::pin(body),
                 })
             }

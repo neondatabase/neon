@@ -1091,6 +1091,71 @@ impl TenantManager {
                 .collect(),
         }
     }
+
+    pub(crate) async fn delete_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+        activation_timeout: Duration,
+    ) -> Result<(), DeleteTenantError> {
+        // We acquire a SlotGuard during this function to protect against concurrent
+        // changes while the ::prepare phase of DeleteTenantFlow executes, but then
+        // have to return the Tenant to the map while the background deletion runs.
+        //
+        // TODO: refactor deletion to happen outside the lifetime of a Tenant.
+        // Currently, deletion requires a reference to the tenants map in order to
+        // keep the Tenant in the map until deletion is complete, and then remove
+        // it at the end.
+        //
+        // See https://github.com/neondatabase/neon/issues/5080
+
+        let slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+
+        // unwrap is safe because we used MustExist mode when acquiring
+        let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
+            TenantSlot::Attached(tenant) => tenant.clone(),
+            _ => {
+                // Express "not attached" as equivalent to "not found"
+                return Err(DeleteTenantError::NotAttached);
+            }
+        };
+
+        match tenant.current_state() {
+            TenantState::Broken { .. } | TenantState::Stopping { .. } => {
+                // If a tenant is broken or stopping, DeleteTenantFlow can
+                // handle it: broken tenants proceed to delete, stopping tenants
+                // are checked for deletion already in progress.
+            }
+            _ => {
+                tenant
+                    .wait_to_become_active(activation_timeout)
+                    .await
+                    .map_err(|e| match e {
+                        GetActiveTenantError::WillNotBecomeActive(_) => {
+                            DeleteTenantError::InvalidState(tenant.current_state())
+                        }
+                        GetActiveTenantError::Cancelled => DeleteTenantError::Cancelled,
+                        GetActiveTenantError::NotFound(_) => DeleteTenantError::NotAttached,
+                        GetActiveTenantError::WaitForActiveTimeout {
+                            latest_state: _latest_state,
+                            wait_time: _wait_time,
+                        } => DeleteTenantError::InvalidState(tenant.current_state()),
+                    })?;
+            }
+        }
+
+        let result = DeleteTenantFlow::run(
+            self.conf,
+            self.resources.remote_storage.clone(),
+            &TENANTS,
+            tenant,
+        )
+        .await;
+
+        // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
+        slot_guard.revert();
+        result
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1266,41 +1331,6 @@ pub(crate) async fn get_active_tenant_with_timeout(
         .wait_to_become_active(deadline.duration_since(Instant::now()))
         .await?;
     Ok(tenant)
-}
-
-pub(crate) async fn delete_tenant(
-    conf: &'static PageServerConf,
-    remote_storage: Option<GenericRemoteStorage>,
-    tenant_shard_id: TenantShardId,
-) -> Result<(), DeleteTenantError> {
-    // We acquire a SlotGuard during this function to protect against concurrent
-    // changes while the ::prepare phase of DeleteTenantFlow executes, but then
-    // have to return the Tenant to the map while the background deletion runs.
-    //
-    // TODO: refactor deletion to happen outside the lifetime of a Tenant.
-    // Currently, deletion requires a reference to the tenants map in order to
-    // keep the Tenant in the map until deletion is complete, and then remove
-    // it at the end.
-    //
-    // See https://github.com/neondatabase/neon/issues/5080
-
-    // TODO(sharding): make delete API sharding-aware
-    let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
-
-    // unwrap is safe because we used MustExist mode when acquiring
-    let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
-        TenantSlot::Attached(tenant) => tenant.clone(),
-        _ => {
-            // Express "not attached" as equivalent to "not found"
-            return Err(DeleteTenantError::NotAttached);
-        }
-    };
-
-    let result = DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant).await;
-
-    // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
-    slot_guard.revert();
-    result
 }
 
 #[derive(Debug, thiserror::Error)]
