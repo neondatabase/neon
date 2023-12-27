@@ -256,10 +256,6 @@ impl VirtualConnection {
         while !buffer.buf.is_empty() && buffer.buf.front().unwrap().0 <= now {
             let msg = buffer.buf.pop_front().unwrap().1;
 
-            // debug!(
-            //     "NET: {:?} delivered, {}=>{}",
-            //     msg, from_node.id, to_node.id
-            // );
             buffer.last_recv = Some(now);
             self.schedule_timeout(net);
 

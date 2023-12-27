@@ -38,11 +38,13 @@ impl Delay {
     }
 }
 
-/// Describes
+/// Describes network settings. All network packets will be subjected to the same delays and failures.
 #[derive(Clone, Debug)]
 pub struct NetworkOptions {
-    /// Connection will be automatically closed after this timeout.
+    /// Connection will be automatically closed after this timeout if no data is received.
     pub keepalive_timeout: Option<u64>,
+    /// New connections will be delayed by this amount of time.
     pub connect_delay: Delay,
+    /// Each message will be delayed by this amount of time.
     pub send_delay: Delay,
 }
