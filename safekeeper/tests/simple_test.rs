@@ -1,7 +1,7 @@
 use tracing::info;
 use utils::lsn::Lsn;
 
-use crate::walproposer_sim::{log::init_logger, util::TestConfig};
+use crate::walproposer_sim::{log::init_logger, simulation::TestConfig};
 
 pub mod walproposer_sim;
 
