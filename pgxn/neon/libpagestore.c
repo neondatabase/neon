@@ -75,11 +75,9 @@ static shmem_request_hook_type prev_shmem_request_hook;
  * It is copied to shared memory because config can not be loaded during query execution and we need to
  * reestablish connection to page server.
  *
- * So usually copying connection string to shared memory is done by postmaster. And other backends
+ * Copying connection string to shared memory is done by postmaster. And other backends
  * should check update counter to determine of connection URL is changed and connection needs to be reestablished.
- *
- * But at startup shared memory is not yet initialized and so we need to copy in some other process.
- * Moreover, we can not use standard Postgres LW-locks, because postmaster has proc entry and so can not wait
+ * We can not use standard Postgres LW-locks, because postmaster has proc entry and so can not wait
  * on this primitive. This is why lockless access algorithm is implemented using two atomic counters to enforce
  * consistent reading of connection string value from shared memory.
  */
@@ -111,7 +109,6 @@ typedef struct
 } PageServer;
 
 static PageServer page_servers[MAX_SHARDS];
-static shardno_t  max_attached_shard_no;
 
 static void
 psm_shmem_startup(void)
@@ -160,7 +157,7 @@ psm_init(void)
 }
 
 /*
- * Reload page map if needed and return number of shards and connection string for the specified shard
+ * Reload shard map if needed and return number of shards and connection string for the specified shard
  * 'connstr' is an output buffer. If not NULL, it must point to a buffer at least MAX_PS_CONNSTR_LEN bytes
  * long. The connection string for the gven shard is copied to it.
  */
@@ -186,10 +183,6 @@ load_shard_map(shardno_t shard_no, char* connstr)
 
 		if (connstr)
 		{
-			/*
-			 * We need to use strlcpy here because due to race condition string oin shared memory
-			 * may be not zero terminated.
-			 */
 			strlcpy(connstr, shard_map->shard_connstr[shard_no], MAX_PS_CONNSTR_LEN);
 			pg_memory_barrier();
 		}
@@ -203,12 +196,11 @@ load_shard_map(shardno_t shard_no, char* connstr)
 	if (shard_map_update_counter != end_update_counter)
 	{
 		/* Reset all connections if connection strings are changed */
-		for (shardno_t i = 0; i < max_attached_shard_no; i++)
+		for (shardno_t i = 0; i < MAX_SHARDS; i++)
 		{
 			if (page_servers[i].conn)
 				pageserver_disconnect(i);
 		}
-		max_attached_shard_no = 0;
 		shard_map_update_counter = end_update_counter;
 	}
 
@@ -253,7 +245,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 	Assert(page_servers[shard_no].conn == NULL);
 
-	(void)load_shard_map(shard_no, connstr); /* refresh page map if needed */
+	(void)load_shard_map(shard_no, connstr); /* refresh shard map if needed */
 
 	now = GetCurrentTimestamp();
         us_since_last_connect = now - last_connect_time;
@@ -306,10 +298,12 @@ pageserver_connect(shardno_t shard_no, int elevel)
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
 				 errmsg(NEON_TAG "[shard %d] could not establish connection to pageserver", shard_no),
 				 errdetail_internal("%s", msg)));
+		pfree(msg);
 		return false;
 	}
 	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
 	ret = PQsendQuery(conn, query);
+	pfree(query);
 	if (ret != 1)
 	{
 		PQfinish(conn);
@@ -324,37 +318,46 @@ pageserver_connect(shardno_t shard_no, int elevel)
 					  NULL, NULL);
 	AddWaitEventToSet(wes, WL_SOCKET_READABLE, PQsocket(conn), NULL, NULL);
 
-	while (PQisBusy(conn))
+	PG_TRY();
 	{
-		WaitEvent	event;
-
-		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(wes, -1L, &event, 1, PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
-
-		CHECK_FOR_INTERRUPTS();
-
-		/* Data available in socket? */
-		if (event.events & WL_SOCKET_READABLE)
+		while (PQisBusy(conn))
 		{
-			if (!PQconsumeInput(conn))
+			WaitEvent	event;
+
+			/* Sleep until there's something to do */
+			(void) WaitEventSetWait(wes, -1L, &event, 1, PG_WAIT_EXTENSION);
+			ResetLatch(MyLatch);
+
+			CHECK_FOR_INTERRUPTS();
+
+			/* Data available in socket? */
+			if (event.events & WL_SOCKET_READABLE)
 			{
-				char	   *msg = pchomp(PQerrorMessage(conn));
+				if (!PQconsumeInput(conn))
+				{
+					char	   *msg = pchomp(PQerrorMessage(conn));
 
-				PQfinish(conn);
-				FreeWaitEventSet(wes);
+					PQfinish(conn);
+					FreeWaitEventSet(wes);
 
-				neon_shard_log(shard_no, elevel, "could not complete handshake with pageserver: %s",
-							   msg);
-				return false;
+					neon_shard_log(shard_no, elevel, "could not complete handshake with pageserver: %s",
+								   msg);
+					return false;
+				}
 			}
 		}
 	}
+	PG_CATCH();
+	{
+		PQfinish(conn);
+		FreeWaitEventSet(wes);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	neon_shard_log(shard_no, LOG, "libpagestore: connected to '%s'", connstr);
 	page_servers[shard_no].conn = conn;
 	page_servers[shard_no].wes = wes;
-	max_attached_shard_no = Max(shard_no+1, max_attached_shard_no);
 
 	return true;
 }
@@ -416,6 +419,10 @@ pageserver_disconnect(shardno_t shard_no)
 		PQfinish(page_servers[shard_no].conn);
 		page_servers[shard_no].conn = NULL;
 
+		/*
+		 * If the connection to any pageserver is lost, we throw away the whole prefetch queue, even for other pageservers.
+		 * It should not cause big problems, because connection loss is supposed to be a rare event.
+		 */
 		prefetch_on_ps_disconnect();
 	}
 	if (page_servers[shard_no].wes != NULL)
@@ -601,7 +608,7 @@ CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 	{
 		sep = strchr(shard_connstr, ',');
 		connstr_len = sep != NULL ? sep - shard_connstr : strlen(shard_connstr);
-		if (connstr_len == 0)
+		if (connstr_len == 0 && sep == NULL)
 			break; /* trailing comma */
 		if (i >= MAX_SHARDS)
 		{
@@ -627,11 +634,9 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	 * Load shard map only at Postmaster.
 	 * If old page server is not available, then backends can be blocked in attempts to reconnect to it and do not reload config in this loop
 	 *
-	 * Copying GUC value to shared memory is usually performed by postmaster. But in case of startup,
-	 * shared memory is not yet initialized. So it has to be performed by any other process.
-	 * It is not a problem if more than one process do this initialization.
+	 * Copying GUC value to shared memory is usually performed by postmaster.
 	 */
-	if (shard_map != NULL && UsedShmemSegAddr != NULL && (MyProcPid == PostmasterPid || shard_map->n_shards == 0))
+	if (shard_map != NULL && UsedShmemSegAddr != NULL && MyProcPid == PostmasterPid)
 	{
 		const char* shard_connstr = newval;
 		const char* sep;
@@ -654,7 +659,8 @@ AssignPageserverConnstring(const char *newval, void *extra)
 					pg_atomic_add_fetch_u64(&shard_map->begin_update_counter, 1);
 					shard_map_changed = true;
 				}
-				memcpy(shard_map->shard_connstr[i], shard_connstr, connstr_len+1);
+				memcpy(shard_map->shard_connstr[i], shard_connstr, connstr_len);
+				shard_map->shard_connstr[i][connstr_len] = '\0';
 			}
 			shard_connstr = sep + 1;
 			i += 1;
