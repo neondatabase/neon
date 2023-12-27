@@ -7,7 +7,7 @@ use smol_str::SmolStr;
 
 use crate::cache::project_info::ProjectInfoCache;
 
-const CHANNEL_NAME: &str = "proxy_notifications";
+const CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 
 struct ConsoleRedisClient {
     client: redis::Client,
@@ -27,7 +27,7 @@ impl ConsoleRedisClient {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 enum Notification {
     #[serde(rename = "allowed_ips_updated")]
     AllowedIpsUpdate { project: SmolStr },
@@ -78,16 +78,16 @@ where
     C: ProjectInfoCache + Send + Sync + 'static,
 {
     cache.enable_ttl();
-    let redis = ConsoleRedisClient::new(&url)?;
 
     loop {
+        let redis = ConsoleRedisClient::new(&url)?;
         let conn = match redis.try_connect().await {
             Ok(conn) => {
                 cache.disable_ttl();
                 conn
             }
             Err(e) => {
-                tracing::error!("failed to connect to redis: {e}");
+                tracing::error!("failed to connect to redis: {e}, will try to reconnect in 100 seconds");
                 tokio::time::sleep(std::time::Duration::from_secs(100)).await;
                 continue;
             }
