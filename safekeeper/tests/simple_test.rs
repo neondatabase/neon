@@ -3,7 +3,7 @@ use utils::lsn::Lsn;
 
 use crate::walproposer_sim::{log::init_logger, util::TestConfig};
 
-mod walproposer_sim;
+pub mod walproposer_sim;
 
 #[test]
 fn sync_empty_safekeepers() {

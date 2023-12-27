@@ -246,19 +246,6 @@ impl SimulationApi {
                 .expect("safekeeper conn not found by port")
         })
     }
-
-    /// Find existing connection by TCP object.
-    fn find_conn(&self, tcp: TCP) -> Option<RefMut<'_, SafekeeperConn>> {
-        let state = self.safekeepers.borrow_mut();
-        RefMut::filter_map(state, |v| {
-            v.iter_mut().find(|conn| {
-                conn.socket
-                    .as_ref()
-                    .is_some_and(|s| s.connection_id() == tcp.connection_id())
-            })
-        })
-        .ok()
-    }
 }
 
 impl ApiImpl for SimulationApi {

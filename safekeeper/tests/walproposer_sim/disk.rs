@@ -9,6 +9,12 @@ pub struct Disk {
     pub timelines: Mutex<HashMap<TenantTimelineId, Arc<TimelineDisk>>>,
 }
 
+impl Default for Disk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Disk {
     pub fn new() -> Self {
         Disk {
@@ -43,6 +49,12 @@ const BLOCK_SIZE: usize = 8192;
 
 pub struct BlockStorage {
     blocks: HashMap<u64, [u8; BLOCK_SIZE]>,
+}
+
+impl Default for BlockStorage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BlockStorage {

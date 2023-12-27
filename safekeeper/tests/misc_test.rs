@@ -8,7 +8,7 @@ use crate::walproposer_sim::{
     util::{generate_network_opts, generate_schedule, Schedule, TestAction, TestConfig},
 };
 
-mod walproposer_sim;
+pub mod walproposer_sim;
 
 #[test]
 fn crash_safekeeper() {

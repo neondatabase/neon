@@ -6,7 +6,7 @@ use crate::walproposer_sim::{
     util::{generate_network_opts, generate_schedule, validate_events, TestConfig},
 };
 
-mod walproposer_sim;
+pub mod walproposer_sim;
 
 #[test]
 fn test_random_schedules() -> anyhow::Result<()> {
