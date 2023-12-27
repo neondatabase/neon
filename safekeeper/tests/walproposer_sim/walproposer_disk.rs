@@ -21,8 +21,9 @@ use postgres_ffi::{
 };
 use utils::lsn::Lsn;
 
-use super::disk::BlockStorage;
+use super::block_storage::BlockStorage;
 
+/// Simulation implementation of walproposer WAL storage.
 pub struct DiskWalProposer {
     state: Mutex<State>,
 }
@@ -44,9 +45,11 @@ impl DiskWalProposer {
 }
 
 pub struct State {
+    // flush_lsn
     internal_available_lsn: Lsn,
     // needed for WAL generation
     prev_lsn: Lsn,
+    // actual WAL storage
     disk: BlockStorage,
 }
 
@@ -70,6 +73,7 @@ impl State {
         self.internal_available_lsn
     }
 
+    /// Generate a new WAL record at the current LSN.
     pub fn insert_logical_message(&mut self, prefix: &str, msg: &[u8]) -> anyhow::Result<()> {
         let prefix_cstr = CString::new(prefix)?;
         let prefix_bytes = prefix_cstr.as_bytes_with_nul();
@@ -82,9 +86,7 @@ impl State {
         };
 
         let record_bytes = lm.encode();
-
         let rdatas: Vec<&[u8]> = vec![&record_bytes, prefix_bytes, msg];
-
         insert_wal_record(self, rdatas, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE)
     }
 }
@@ -227,9 +229,6 @@ fn write_walrecord_to_disk(
         freespace -= rdata.len();
     }
 
-    // Assert(written == write_len);
-    // CurrPos = MAXALIGN64(CurrPos);
-    // Assert(CurrPos == EndPos);
     assert!(written == total_len as usize);
     curr_ptr.0 = maxalign(curr_ptr.0);
     assert!(curr_ptr == end);

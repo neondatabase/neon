@@ -1,7 +1,7 @@
-pub mod disk;
-pub mod disk_walproposer;
+pub mod block_storage;
 pub mod log;
 pub mod safekeeper;
-pub mod storage;
+pub mod safekeeper_disk;
 pub mod util;
-pub mod wp_api;
+pub mod walproposer_api;
+pub mod walproposer_disk;

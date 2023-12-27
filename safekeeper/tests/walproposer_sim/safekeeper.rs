@@ -28,22 +28,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::walproposer_sim::storage::DiskStateStorage;
-
-use super::{
-    disk::{Disk, TimelineDisk},
-    storage::DiskWALStorage,
-};
-
-struct ConnState {
-    tcp: TCP,
-
-    greeting: bool,
-    ttid: TenantTimelineId,
-    flush_pending: bool,
-
-    runtime: tokio::runtime::Runtime,
-}
+use super::safekeeper_disk::{DiskStateStorage, DiskWALStorage, SafekeeperDisk, TimelineDisk};
 
 struct SharedState {
     sk: SafeKeeper<DiskStateStorage, DiskWALStorage>,
@@ -53,11 +38,12 @@ struct SharedState {
 struct GlobalMap {
     timelines: HashMap<TenantTimelineId, SharedState>,
     conf: SafeKeeperConf,
-    disk: Arc<Disk>,
+    disk: Arc<SafekeeperDisk>,
 }
 
 impl GlobalMap {
-    fn new(disk: Arc<Disk>, conf: SafeKeeperConf) -> Result<Self> {
+    /// Restores global state from disk.
+    fn new(disk: Arc<SafekeeperDisk>, conf: SafeKeeperConf) -> Result<Self> {
         let mut timelines = HashMap::new();
 
         for (&ttid, disk) in disk.timelines.lock().iter() {
@@ -110,7 +96,6 @@ impl GlobalMap {
         let commit_lsn = Lsn::INVALID;
         let local_start_lsn = Lsn::INVALID;
 
-        // TODO: load state from in-memory storage
         let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
         if state.server.wal_seg_size == 0 {
@@ -154,7 +139,18 @@ impl GlobalMap {
     }
 }
 
-pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
+/// State of a single connection to walproposer.
+struct ConnState {
+    tcp: TCP,
+
+    greeting: bool,
+    ttid: TenantTimelineId,
+    flush_pending: bool,
+
+    runtime: tokio::runtime::Runtime,
+}
+
+pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
     let _enter = info_span!("safekeeper", id = os.id()).entered();
     debug!("started server");
     os.log_event("started;safekeeper".to_owned());
@@ -196,16 +192,20 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
 
     // TODO: batch events processing (multiple events per tick)
     loop {
-        // waiting for the next message
         epoll_vec.clear();
         epoll_idx.clear();
+
+        // node events channel
         epoll_vec.push(Box::new(node_events.clone()));
         epoll_idx.push(0);
+
+        // tcp connections
         for conn in conns.values() {
             epoll_vec.push(Box::new(conn.tcp.recv_chan()));
             epoll_idx.push(conn.tcp.connection_id());
         }
 
+        // waiting for the next message
         let index = executor::epoll_chans(&epoll_vec, -1).unwrap();
 
         if index == 0 {
@@ -266,6 +266,7 @@ pub fn run_server(os: NodeOs, disk: Arc<Disk>) -> Result<()> {
 }
 
 impl ConnState {
+    /// Process a message from the network. It can be START_REPLICATION request or a valid ProposerAcceptorMessage message.
     fn process_any(&mut self, any: AnyMessage, global: &mut GlobalMap) -> Result<()> {
         if let AnyMessage::Bytes(copy_data) = any {
             let repl_prefix = b"START_REPLICATION ";
@@ -282,6 +283,7 @@ impl ConnState {
         }
     }
 
+    /// Process START_REPLICATION request.
     fn process_start_replication(
         &mut self,
         copy_data: Bytes,
@@ -308,6 +310,7 @@ impl ConnState {
         Ok(())
     }
 
+    /// Get or create a timeline.
     fn init_timeline(
         &mut self,
         ttid: TenantTimelineId,
@@ -322,6 +325,7 @@ impl ConnState {
         global.create(ttid, server_info)
     }
 
+    /// Process a ProposerAcceptorMessage.
     fn process(&mut self, msg: ProposerAcceptorMessage, global: &mut GlobalMap) -> Result<()> {
         if !self.greeting {
             self.greeting = true;
@@ -366,8 +370,8 @@ impl ConnState {
     }
 
     /// Process FlushWAL if needed.
-    // TODO: add extra flushes, to verify that extra flushes don't break anything
     fn flush(&mut self, global: &mut GlobalMap) -> Result<()> {
+        // TODO: try to add extra flushes in simulation, to verify that extra flushes don't break anything
         if !self.flush_pending {
             return Ok(());
         }
@@ -384,10 +388,7 @@ impl ConnState {
     ) -> Result<()> {
         let mut reply = self.runtime.block_on(shared_state.sk.process_msg(msg))?;
         if let Some(reply) = &mut reply {
-            // // if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
-            // if let AcceptorProposerMessage::AppendResponse(ref mut resp) = reply {
-            //     // TODO:
-            // }
+            // TODO: if this is AppendResponse, fill in proper hot standby feedback and disk consistent lsn
 
             let mut buf = BytesMut::with_capacity(128);
             reply.serialize(&mut buf)?;

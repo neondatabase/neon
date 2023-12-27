@@ -5,6 +5,7 @@ use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
 
+/// SimClock can be plugged into tracing logger to print simulation time.
 #[derive(Clone)]
 pub struct SimClock {
     clock_ptr: Arc<Mutex<Option<Arc<Timing>>>>,
@@ -66,7 +67,7 @@ fn init_tracing_logger(debug_enabled: bool) -> SimClock {
 }
 
 pub fn init_logger() -> SimClock {
-    // check env for DEBUG
+    // RUST_TRACEBACK envvar controls whether we print all logs or only warnings.
     let debug_enabled = std::env::var("RUST_TRACEBACK").is_ok();
 
     init_tracing_logger(debug_enabled)

@@ -23,17 +23,20 @@ use walproposer::{
     walproposer::{ApiImpl, Config},
 };
 
-use super::disk_walproposer::DiskWalProposer;
+use super::walproposer_disk::DiskWalProposer;
 
+/// Special state for each wp->sk connection.
 struct SafekeeperConn {
     host: String,
     port: String,
     node_id: NodeId,
+    // socket is Some(..) equals to connection is established
     socket: Option<TCP>,
     // connection is in progress
     is_connecting: bool,
     // START_WAL_PUSH is in progress
     is_start_wal_push: bool,
+    // pointer to Safekeeper in walproposer for callbacks
     raw_ptr: *mut walproposer::bindings::Safekeeper,
 }
 
@@ -53,6 +56,8 @@ impl SafekeeperConn {
     }
 }
 
+/// Simulation version of a postgres WaitEventSet. At pos 0 there is always
+/// a special NodeEvents channel, which is used as a latch.
 struct EventSet {
     os: NodeOs,
     // all pollable channels, 0 is always NodeEvent channel
@@ -127,6 +132,7 @@ impl EventSet {
         self.refresh_event_set();
     }
 
+    /// Updates all masks to match the result of a SafekeeperStateDesiredEvents.
     fn refresh_event_set(&mut self) {
         for (i, mask) in self.masks.iter_mut().enumerate() {
             if i == 0 {
@@ -147,6 +153,7 @@ impl EventSet {
         }
     }
 
+    /// Wait for events on all channels.
     fn wait(&mut self, timeout_millis: i64) -> walproposer::walproposer::WaitResult {
         // all channels are always writeable
         for (i, mask) in self.masks.iter().enumerate() {
@@ -182,6 +189,7 @@ impl EventSet {
     }
 }
 
+/// This struct handles all calls from walproposer into walproposer_api.
 pub struct SimulationApi {
     os: NodeOs,
     safekeepers: RefCell<Vec<SafekeeperConn>>,
@@ -251,6 +259,7 @@ impl SimulationApi {
 impl ApiImpl for SimulationApi {
     fn get_current_timestamp(&self) -> i64 {
         debug!("get_current_timestamp");
+        // TODO: use simulation time
         0
     }
 
@@ -259,6 +268,7 @@ impl ApiImpl for SimulationApi {
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerConnStatusType {
         debug!("conn_status");
+        // break the connection with a 10% chance
         if self.os.random(100) < 10 {
             walproposer::bindings::WalProposerConnStatusType_WP_CONNECTION_BAD
         } else {
@@ -282,6 +292,7 @@ impl ApiImpl for SimulationApi {
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerConnectPollStatusType {
         debug!("conn_connect_poll");
+        // TODO: break the connection here
         walproposer::bindings::WalProposerConnectPollStatusType_WP_CONN_POLLING_OK
     }
 
@@ -296,6 +307,7 @@ impl ApiImpl for SimulationApi {
         _: &mut walproposer::bindings::Safekeeper,
     ) -> walproposer::bindings::WalProposerExecStatusType {
         debug!("conn_get_query_result");
+        // TODO: break the connection here
         walproposer::bindings::WalProposerExecStatusType_WP_EXEC_SUCCESS_COPYBOTH
     }
 
@@ -450,7 +462,7 @@ impl ApiImpl for SimulationApi {
         _: &mut walproposer::bindings::WalProposer,
         timeout_millis: i64,
     ) -> walproposer::walproposer::WaitResult {
-        // TODO: use real event set for connection state
+        // TODO: handle multiple stages as part of the simulation (e.g. connect, start_wal_push, etc)
         let mut conns = self.safekeepers.borrow_mut();
         for conn in conns.iter_mut() {
             if conn.socket.is_some() && conn.is_connecting {

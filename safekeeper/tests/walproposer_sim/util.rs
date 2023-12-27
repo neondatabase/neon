@@ -1,6 +1,6 @@
 use std::{cell::Cell, str::FromStr, sync::Arc};
 
-use crate::walproposer_sim::{safekeeper::run_server, wp_api::SimulationApi};
+use crate::walproposer_sim::{safekeeper::run_server, walproposer_api::SimulationApi};
 use desim::{
     executor::{self, ExternalHandle},
     options::{Delay, NetworkOptions},
@@ -13,18 +13,21 @@ use tracing::{debug, info_span, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 use walproposer::walproposer::{Config, Wrapper};
 
-use super::{disk::Disk, disk_walproposer::DiskWalProposer, log::SimClock, wp_api};
+use super::{
+    log::SimClock, safekeeper_disk::SafekeeperDisk, walproposer_api,
+    walproposer_disk::DiskWalProposer,
+};
 
 pub struct SkNode {
     pub node: Arc<Node>,
     pub id: u32,
-    pub disk: Arc<Disk>,
+    pub disk: Arc<SafekeeperDisk>,
     pub thread: Cell<ExternalHandle>,
 }
 
 impl SkNode {
     pub fn new(node: Arc<Node>) -> Self {
-        let disk = Arc::new(Disk::new());
+        let disk = Arc::new(SafekeeperDisk::new());
 
         let thread = Cell::new(SkNode::launch(disk.clone(), node.clone()));
 
@@ -36,11 +39,10 @@ impl SkNode {
         }
     }
 
-    fn launch(disk: Arc<Disk>, node: Arc<Node>) -> ExternalHandle {
+    fn launch(disk: Arc<SafekeeperDisk>, node: Arc<Node>) -> ExternalHandle {
         // start the server thread
         node.launch(move |os| {
-            let res = run_server(os, disk);
-            debug!("server finished: {:?}", res);
+            run_server(os, disk).expect("server should finish without errors");
         })
     }
 
@@ -134,7 +136,7 @@ impl Test {
                 safekeeper_connection_timeout: 5000,
                 sync_safekeepers: true,
             };
-            let args = wp_api::Args {
+            let args = walproposer_api::Args {
                 os,
                 config: config.clone(),
                 disk,
@@ -194,7 +196,7 @@ impl Test {
                 safekeeper_connection_timeout: 5000,
                 sync_safekeepers: false,
             };
-            let args = wp_api::Args {
+            let args = walproposer_api::Args {
                 os,
                 config: config.clone(),
                 disk: wp_disk,

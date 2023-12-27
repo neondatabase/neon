@@ -1,17 +1,65 @@
-use std::{ops::Deref, sync::Arc, time::Instant};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use safekeeper::safekeeper::SafeKeeperState;
+use utils::id::TenantTimelineId;
+
+use super::block_storage::BlockStorage;
+
+use std::{ops::Deref, time::Instant};
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::future::BoxFuture;
 use postgres_ffi::{waldecoder::WalStreamDecoder, XLogSegNo};
-use safekeeper::{
-    control_file, metrics::WalStorageMetrics, safekeeper::SafeKeeperState, wal_storage,
-};
+use safekeeper::{control_file, metrics::WalStorageMetrics, wal_storage};
 use tracing::{debug, info};
 use utils::lsn::Lsn;
 
-use super::disk::TimelineDisk;
+/// All safekeeper state that is usually saved to disk.
+pub struct SafekeeperDisk {
+    pub timelines: Mutex<HashMap<TenantTimelineId, Arc<TimelineDisk>>>,
+}
 
+impl Default for SafekeeperDisk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SafekeeperDisk {
+    pub fn new() -> Self {
+        SafekeeperDisk {
+            timelines: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn put_state(&self, ttid: &TenantTimelineId, state: SafeKeeperState) -> Arc<TimelineDisk> {
+        self.timelines
+            .lock()
+            .entry(*ttid)
+            .and_modify(|e| {
+                let mut mu = e.state.lock();
+                *mu = state.clone();
+            })
+            .or_insert_with(|| {
+                Arc::new(TimelineDisk {
+                    state: Mutex::new(state),
+                    wal: Mutex::new(BlockStorage::new()),
+                })
+            })
+            .clone()
+    }
+}
+
+/// Control file state and WAL storage.
+pub struct TimelineDisk {
+    pub state: Mutex<SafeKeeperState>,
+    pub wal: Mutex<BlockStorage>,
+}
+
+/// Implementation of `control_file::Storage` trait.
 pub struct DiskStateStorage {
     persisted_state: SafeKeeperState,
     disk: Arc<TimelineDisk>,
@@ -54,6 +102,7 @@ impl Deref for DiskStateStorage {
     }
 }
 
+/// Implementation of `wal_storage::Storage` trait.
 pub struct DiskWALStorage {
     /// Written to disk, but possibly still in the cache and not fully persisted.
     /// Also can be ahead of record_lsn, if happen to be in the middle of a WAL record.
@@ -68,8 +117,10 @@ pub struct DiskWALStorage {
     /// Decoder is required for detecting boundaries of WAL records.
     decoder: WalStreamDecoder,
 
+    /// Bytes of WAL records that are not yet written to disk.
     unflushed_bytes: BytesMut,
 
+    /// Contains BlockStorage for WAL.
     disk: Arc<TimelineDisk>,
 }
 
