@@ -26,13 +26,55 @@ impl ConsoleRedisClient {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "topic", content = "data")]
 enum Notification {
-    #[serde(rename = "/allowed_ips_updated")]
+    #[serde(
+        rename = "/allowed_ips_updated",
+        deserialize_with = "deserialize_allowed_ips"
+    )]
     AllowedIpsUpdate { project: SmolStr },
-    #[serde(rename = "/password_updated")]
+    #[serde(
+        rename = "/password_updated",
+        deserialize_with = "deserialize_password_updated"
+    )]
     PasswordUpdate { project: SmolStr, role: SmolStr },
+}
+
+fn deserialize_allowed_ips<'de, D>(deserializer: D) -> Result<SmolStr, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let project = serde_json::from_str::<serde_json::Value>(&s)
+        .map_err(serde::de::Error::custom)?
+        .get("project")
+        .ok_or_else(|| serde::de::Error::custom("no project field"))?
+        .as_str()
+        .ok_or_else(|| serde::de::Error::custom("project is not a string"))?
+        .to_string();
+    Ok(project.into())
+}
+
+fn deserialize_password_updated<'de, D>(deserializer: D) -> Result<(SmolStr, SmolStr), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let data = serde_json::from_str::<serde_json::Value>(&s).map_err(serde::de::Error::custom)?;
+    let project = data
+        .get("project")
+        .ok_or_else(|| serde::de::Error::custom("no project field"))?
+        .as_str()
+        .ok_or_else(|| serde::de::Error::custom("project is not a string"))?
+        .to_string();
+    let role = data
+        .get("role")
+        .ok_or_else(|| serde::de::Error::custom("no role field"))?
+        .as_str()
+        .ok_or_else(|| serde::de::Error::custom("role is not a string"))?
+        .to_string();
+    Ok((project.into(), role.into()))
 }
 
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
@@ -114,16 +156,49 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parse_notification() -> anyhow::Result<()> {
+    fn parse_allowed_ips() -> anyhow::Result<()> {
+        let project = "new_project".to_string();
+        let data = format!("{{\"project\": \"{project}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/allowed_ips_updated",
-            "data": {"project": "new_project"},
+            "data": data,
             "extre_fields": "something"
         })
         .to_string();
 
-        let _: Notification = serde_json::from_str(&text)?;
+        let result: Notification = serde_json::from_str(&text)?;
+        assert_eq!(
+            result,
+            Notification::AllowedIpsUpdate {
+                project: project.into()
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_password_updated() -> anyhow::Result<()> {
+        let project = "new_project".to_string();
+        let role = "new_role".to_string();
+        let data = format!("{{\"project\": \"{project}\", \"role\": \"{role}\"}}");
+        let text = json!({
+            "type": "message",
+            "topic": "/password_updated",
+            "data": data,
+            "extre_fields": "something"
+        })
+        .to_string();
+
+        let result: Notification = serde_json::from_str(&text)?;
+        assert_eq!(
+            result,
+            Notification::PasswordUpdate {
+                project: project.into(),
+                role: role.into()
+            }
+        );
 
         Ok(())
     }
