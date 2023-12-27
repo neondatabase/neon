@@ -38,7 +38,7 @@ impl Delay {
     }
 }
 
-/// Describes 
+/// Describes
 #[derive(Clone, Debug)]
 pub struct NetworkOptions {
     /// Connection will be automatically closed after this timeout.
@@ -46,4 +46,3 @@ pub struct NetworkOptions {
     pub connect_delay: Delay,
     pub send_delay: Delay,
 }
-

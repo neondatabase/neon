@@ -6,8 +6,8 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
-        NeonWALReadResult, Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate,
-        WalProposerFree, WalProposerStart, WalProposerBroadcast, WalProposerPoll,
+        NeonWALReadResult, Safekeeper, WalProposer, WalProposerBroadcast, WalProposerConfig,
+        WalProposerCreate, WalProposerFree, WalProposerPoll, WalProposerStart,
     },
 };
 

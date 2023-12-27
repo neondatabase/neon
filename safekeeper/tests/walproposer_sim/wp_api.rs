@@ -9,13 +9,17 @@ use desim::{
     executor::{self, PollSome},
     network::TCP,
     node_os::NodeOs,
-    proto::{AnyMessage, NodeEvent, NetEvent}, world::NodeId,
+    proto::{AnyMessage, NetEvent, NodeEvent},
+    world::NodeId,
 };
 use tracing::debug;
 use utils::lsn::Lsn;
 use walproposer::{
     api_bindings::Level,
-    bindings::{pg_atomic_uint64, PageserverFeedback, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE, NeonWALReadResult, SafekeeperStateDesiredEvents},
+    bindings::{
+        pg_atomic_uint64, NeonWALReadResult, PageserverFeedback, SafekeeperStateDesiredEvents,
+        WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
+    },
     walproposer::{ApiImpl, Config},
 };
 
@@ -378,7 +382,12 @@ impl ApiImpl for SimulationApi {
         walproposer::bindings::NeonWALReadResult_NEON_WALREAD_SUCCESS
     }
 
-    fn wal_read(&self, _sk: &mut walproposer::bindings::Safekeeper, buf: &mut [u8], startpos: u64) -> NeonWALReadResult {
+    fn wal_read(
+        &self,
+        _sk: &mut walproposer::bindings::Safekeeper,
+        buf: &mut [u8],
+        startpos: u64,
+    ) -> NeonWALReadResult {
         self.disk.lock().read(startpos, buf);
         walproposer::bindings::NeonWALReadResult_NEON_WALREAD_SUCCESS
     }
@@ -438,7 +447,11 @@ impl ApiImpl for SimulationApi {
         debug!("active_state_update_event_set");
 
         assert!(sk.state == walproposer::bindings::SafekeeperState_SS_ACTIVE);
-        self.event_set.borrow_mut().as_mut().unwrap().refresh_event_set();
+        self.event_set
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .refresh_event_set();
     }
 
     fn wal_reader_events(&self, _sk: &mut walproposer::bindings::Safekeeper) -> u32 {
@@ -598,7 +611,7 @@ impl ApiImpl for SimulationApi {
     fn recovery_download(
         &self,
         wp: &mut walproposer::bindings::WalProposer,
-        sk: &mut walproposer::bindings::Safekeeper
+        sk: &mut walproposer::bindings::Safekeeper,
     ) -> bool {
         let mut startpos = wp.truncateLsn;
         let endpos = wp.propEpochStartLsn;
@@ -608,10 +621,7 @@ impl ApiImpl for SimulationApi {
             return true;
         }
 
-        debug!(
-            "recovery_download from {} to {}",
-            startpos, endpos,
-        );
+        debug!("recovery_download from {} to {}", startpos, endpos,);
 
         let replication_prompt = format!(
             "START_REPLICATION {} {} {} {}",

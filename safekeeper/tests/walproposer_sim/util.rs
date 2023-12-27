@@ -5,8 +5,8 @@ use desim::{
     executor::{self, ExternalHandle},
     options::{Delay, NetworkOptions},
     proto::{AnyMessage, NodeEvent, SimEvent},
+    world::Node,
     world::World,
-    world::{Node},
 };
 use rand::{Rng, SeedableRng};
 use tracing::{debug, info_span, warn};

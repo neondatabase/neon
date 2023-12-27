@@ -4,7 +4,7 @@ mod reliable_copy_test {
     use anyhow::Result;
     use desim::executor::{self, PollSome};
     use desim::options::{Delay, NetworkOptions};
-    use desim::proto::{ReplCell, NodeEvent, NetEvent};
+    use desim::proto::{NetEvent, NodeEvent, ReplCell};
     use desim::world::{NodeId, World};
     use desim::{node_os::NodeOs, proto::AnyMessage};
     use parking_lot::Mutex;
@@ -16,7 +16,7 @@ mod reliable_copy_test {
         fn flush_pos(&self) -> u32;
         fn flush(&mut self) -> Result<()>;
         fn write(&mut self, t: T);
-    }   
+    }
 
     #[derive(Clone)]
     pub struct SharedStorage<T> {

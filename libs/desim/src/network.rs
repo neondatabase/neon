@@ -15,8 +15,9 @@ use tracing::debug;
 
 use crate::{
     executor::{self, ThreadContext},
-    options::NetworkOptions, proto::NodeEvent,
+    options::NetworkOptions,
     proto::NetEvent,
+    proto::NodeEvent,
 };
 
 use super::{chan::Chan, proto::AnyMessage};

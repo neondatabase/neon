@@ -8,14 +8,12 @@ use std::{
 use crate::{
     executor::{ExternalHandle, Runtime},
     network::NetworkTask,
-    time::Timing, proto::{SimEvent, NodeEvent}, options::NetworkOptions,
+    options::NetworkOptions,
+    proto::{NodeEvent, SimEvent},
+    time::Timing,
 };
 
-use super::{
-    chan::Chan,
-    network::TCP,
-    node_os::NodeOs,
-};
+use super::{chan::Chan, network::TCP, node_os::NodeOs};
 
 pub type NodeId = u32;
 
