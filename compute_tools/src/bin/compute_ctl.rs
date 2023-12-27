@@ -46,7 +46,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use tracing::{error, info};
+use tracing::{error, info, info_span};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -59,6 +59,7 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
+use utils::id::TenantTimelineId;
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -265,11 +266,20 @@ fn main() -> Result<()> {
 
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
+    let pspec = state.pspec.as_ref().expect("spec must be set");
+    let ttid = TenantTimelineId {
+        tenant_id: pspec.tenant_id,
+        timeline_id: pspec.timeline_id,
+    };
     drop(state);
 
+    // Log ttid everywhere for easier log identification (e.g. loki agent can
+    // create label on that).
+    let _guard = info_span!("", ttid = %ttid).entered();
+
     // Launch remaining service threads
-    let _monitor_handle = launch_monitor(&compute);
-    let _configurator_handle = launch_configurator(&compute);
+    let _monitor_handle = launch_monitor(&compute, ttid);
+    let _configurator_handle = launch_configurator(&compute, ttid);
 
     // Start Postgres
     let mut delay_exit = false;
