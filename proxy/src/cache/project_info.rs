@@ -110,6 +110,7 @@ pub struct ProjectInfoCacheImpl {
 
 impl ProjectInfoCache for ProjectInfoCacheImpl {
     fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr) {
+        info!("invalidating allowed ips for project `{}`", project_id);
         let endpoints = self
             .project2ep
             .get(project_id)
@@ -122,6 +123,10 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
         }
     }
     fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, user: &SmolStr) {
+        info!(
+            "invalidating role secret for project `{}` and user `{}`",
+            project_id, user
+        );
         let endpoints = self
             .project2ep
             .get(project_id)
