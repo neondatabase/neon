@@ -496,6 +496,11 @@ impl Timeline {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
 
+        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
+        // already checked the key against the shard_identity when looking up the Timeline from
+        // page_service.
+        debug_assert!(!self.shard_identity.is_key_disposable(&key));
+
         // XXX: structured stats collection for layer eviction here.
         trace!(
             "get page request for {}@{} from task kind {:?}",
@@ -2224,13 +2229,13 @@ impl Timeline {
                     return Err(layer_traversal_error(
                         if cfg!(test) {
                             format!(
-                                "could not find data for key {} at LSN {}, for request at LSN {}\n{}",
-                                key, cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
+                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}\n{}",
+                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
                             )
                         } else {
                             format!(
-                                "could not find data for key {} at LSN {}, for request at LSN {}",
-                                key, cont_lsn, request_lsn
+                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
+                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn
                             )
                         },
                         traversal_path,
@@ -3054,6 +3059,15 @@ impl Timeline {
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
+                        if self.shard_identity.is_key_disposable(&key) {
+                            debug!(
+                                "Dropping key {} during compaction (it belongs on shard {:?})",
+                                key,
+                                self.shard_identity.get_shard_number(&key)
+                            );
+                            key = key.next();
+                            continue;
+                        }
                         let img = match self.get(key, lsn, ctx).await {
                             Ok(img) => img,
                             Err(err) => {
@@ -3080,6 +3094,7 @@ impl Timeline {
                                 }
                             }
                         };
+
                         image_layer_writer.put_image(key, &img).await?;
                         key = key.next();
                     }
@@ -3650,7 +3665,15 @@ impl Timeline {
                 )))
             });
 
-            writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+            if !self.shard_identity.is_key_disposable(&key) {
+                writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+            } else {
+                debug!(
+                    "Dropping key {} during compaction (it belongs on shard {:?})",
+                    key,
+                    self.shard_identity.get_shard_number(&key)
+                );
+            }
 
             if !new_layers.is_empty() {
                 fail_point!("after-timeline-compacted-first-L1");
