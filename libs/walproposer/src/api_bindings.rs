@@ -183,6 +183,10 @@ extern "C" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bo
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
+
+        // currently `recovery_download` is always called right after election
+        (*api).after_election(&mut (*wp));
+
         (*api).recovery_download(&mut (*wp), &mut (*sk))
     }
 }
@@ -339,14 +343,6 @@ extern "C" fn log_internal(
         let line = CStr::from_ptr(line);
         let line = line.to_str().unwrap();
         (*api).log_internal(&mut (*wp), Level::from(level as u32), line)
-    }
-}
-
-extern "C" fn after_election(wp: *mut WalProposer) {
-    unsafe {
-        let callback_data = (*(*wp).config).callback_data;
-        let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).after_election(&mut (*wp))
     }
 }
 
