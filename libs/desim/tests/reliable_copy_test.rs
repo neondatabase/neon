@@ -113,7 +113,6 @@ mod reliable_copy_test {
     pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
         info!("started client");
 
-        // let epoll = os.epoll();
         let mut delivered = 0;
 
         let mut sock = os.open_tcp(dst);

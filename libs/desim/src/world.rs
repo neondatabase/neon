@@ -150,7 +150,7 @@ impl Node {
         }
     }
 
-    /// Set a code to run in this node thread.
+    /// Spawn a new thread with this node context.
     pub fn launch(self: &Arc<Self>, f: impl FnOnce(NodeOs) + Send + 'static) -> ExternalHandle {
         let node = self.clone();
         let world = self.world.clone();
