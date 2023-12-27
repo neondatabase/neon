@@ -147,7 +147,7 @@ pub(crate) static BACKGROUND_RUNTIME_WORKER_THREADS: Lazy<usize> = Lazy::new(|| 
     // else, but that has not been needed in a long time.
     std::env::var("TOKIO_WORKER_THREADS")
         .map(|s| s.parse::<usize>().unwrap())
-        .unwrap_or_else(|_e| usize::max(1, num_cpus::get()))
+        .unwrap_or_else(|_e| usize::max(2, num_cpus::get()))
 });
 
 #[derive(Debug, Clone, Copy)]
