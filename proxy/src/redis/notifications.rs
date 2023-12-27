@@ -27,11 +27,11 @@ impl ConsoleRedisClient {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "topic", content = "data")]
 enum Notification {
-    #[serde(rename = "allowed_ips_updated")]
+    #[serde(rename = "/allowed_ips_updated")]
     AllowedIpsUpdate { project: SmolStr },
-    #[serde(rename = "password_updated")]
+    #[serde(rename = "/password_updated")]
     PasswordUpdate { project: SmolStr, role: SmolStr },
 }
 
@@ -87,7 +87,9 @@ where
                 conn
             }
             Err(e) => {
-                tracing::error!("failed to connect to redis: {e}, will try to reconnect in 100 seconds");
+                tracing::error!(
+                    "failed to connect to redis: {e}, will try to reconnect in 100 seconds"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(100)).await;
                 continue;
             }
@@ -114,8 +116,9 @@ mod tests {
     #[test]
     fn parse_notification() -> anyhow::Result<()> {
         let text = json!({
-            "type": "allowed_ips_updated",
-            "project": "new_project",
+            "type": "message",
+            "topic": "/allowed_ips_updated",
+            "data": {"project": "new_project"},
             "extre_fields": "something"
         })
         .to_string();
