@@ -62,6 +62,13 @@ typedef struct
 														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
 														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
 
+/* SLRUs downloadable from page server */
+typedef enum {
+	SLRU_CLOG,
+	SLRU_MULTIXACT_MEMBERS,
+	SLRU_MULTIXACT_OFFSETS
+} SlruKind;
+
 /*
  * supertype of all the Neon*Request structs below
  *

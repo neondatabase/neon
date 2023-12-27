@@ -2789,12 +2789,24 @@ neon_end_unlogged_build(SMgrRelation reln)
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 }
 
+#define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
+
 static int
-neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer)
+neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
 {
 	XLogRecPtr request_lsn;
 	request_lsn = GetRedoStartLsn();
 	request_lsn = nm_adjust_lsn(request_lsn);
+	SlruKind kind;
+
+    if (STRPREFIX(path, "pg_xact"))
+        kind = SLRU_CLOG;
+    else if (STRPREFIX(path, "pg_multixact/members"))
+        kind = SLRU_MULTIXACT_MEMBERS;
+    else if (STRPREFIX(path, "pg_multixact/offsets"))
+        kind = SLRU_MULTIXACT_OFFSETS;
+    else
+        return -1;
 
 	NeonResponse *resp;
 	NeonGetSlruSegmentRequest request = {
