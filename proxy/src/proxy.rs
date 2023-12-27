@@ -99,7 +99,7 @@ pub async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                let res = handle_client(
+                handle_client(
                     config,
                     &mut ctx,
                     &cancel_map,
@@ -107,11 +107,7 @@ pub async fn task_main(
                     ClientMode::Tcp,
                     endpoint_rate_limiter,
                 )
-                .await;
-
-                ctx.log();
-
-                res
+                .await
             }
             .instrument(info_span!(
                 "handle_client",

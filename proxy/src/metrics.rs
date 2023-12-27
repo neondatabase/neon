@@ -115,6 +115,7 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
+#[derive(Clone)]
 pub struct LatencyTimer {
     // time since the stopwatch was started
     start: Option<time::Instant>,

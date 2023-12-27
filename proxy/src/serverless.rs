@@ -233,7 +233,6 @@ async fn request_handler(
                 {
                     error!(session_id = ?session_id, "error in websocket connection: {e:#}");
                 }
-                ctx.log();
             }
             .in_current_span(),
         );
@@ -243,18 +242,14 @@ async fn request_handler(
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
         let mut ctx = RequestContext::new(session_id, peer_addr, "http", &config.region);
 
-        let res = sql_over_http::handle(
+        sql_over_http::handle(
             &config.http_config,
             &mut ctx,
             request,
             sni_hostname,
             conn_pool,
         )
-        .await;
-
-        ctx.log();
-
-        res
+        .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
         Response::builder()
             .header("Allow", "OPTIONS, POST")
