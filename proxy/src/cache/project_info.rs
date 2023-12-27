@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dashmap::DashMap;
+use dashmap::{DashMap, RwLock};
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
 use tracing::{debug, info};
@@ -62,26 +62,41 @@ impl EndpointInfo {
             allowed_ips: Some(allowed_ips.into()),
         }
     }
-    pub fn get_role_secret(&self, user: &SmolStr, ttl: Option<Duration>) -> Option<AuthSecret> {
+    fn check_ignore_cache(ignore_cache_since: Option<Instant>, created_at: Instant) -> bool {
+        match ignore_cache_since {
+            None => false,
+            Some(t) => t < created_at,
+        }
+    }
+    pub fn get_role_secret(
+        &self,
+        user: &SmolStr,
+        valid_since: Instant,
+        ignore_cache_since: Option<Instant>,
+    ) -> Option<(AuthSecret, bool)> {
         if let Some(secret) = self.secret.get(user) {
-            if let Some(ttl) = ttl {
-                if secret.created_at.elapsed() > ttl {
-                    return None;
-                }
+            if valid_since < secret.created_at {
+                return Some((
+                    secret.value.clone(),
+                    Self::check_ignore_cache(ignore_cache_since, secret.created_at),
+                ));
             }
-            return Some(secret.value.clone());
         }
         None
     }
 
-    pub fn get_allowed_ips(&self, ttl: Option<Duration>) -> Option<Arc<Vec<SmolStr>>> {
+    pub fn get_allowed_ips(
+        &self,
+        valid_since: Instant,
+        ignore_cache_since: Option<Instant>,
+    ) -> Option<(Arc<Vec<SmolStr>>, bool)> {
         if let Some(allowed_ips) = &self.allowed_ips {
-            if let Some(ttl) = ttl {
-                if allowed_ips.created_at.elapsed() > ttl {
-                    return None;
-                }
+            if valid_since < allowed_ips.created_at {
+                return Some((
+                    allowed_ips.value.clone(),
+                    Self::check_ignore_cache(ignore_cache_since, allowed_ips.created_at),
+                ));
             }
-            return Some(allowed_ips.value.clone());
         }
         None
     }
@@ -106,6 +121,8 @@ pub struct ProjectInfoCacheImpl {
     project2ep: DashMap<SmolStr, HashSet<SmolStr>>,
     config: ProjectInfoCacheOptions,
     ttl_enabled: AtomicBool,
+
+    ttl_disabled_since: RwLock<Instant>,
 }
 
 impl ProjectInfoCache for ProjectInfoCacheImpl {
@@ -145,7 +162,10 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
 
     fn disable_ttl(&self) {
         self.ttl_enabled
-            .store(false, std::sync::atomic::Ordering::Relaxed)
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.ttl_disabled_since
+            .write()
+            .clone_from(&(Instant::now() + self.config.ttl));
     }
 }
 
@@ -156,6 +176,7 @@ impl ProjectInfoCacheImpl {
             project2ep: DashMap::new(),
             config,
             ttl_enabled: true.into(),
+            ttl_disabled_since: RwLock::new(Instant::now()),
         }
     }
 
@@ -164,11 +185,11 @@ impl ProjectInfoCacheImpl {
         endpoint_id: &SmolStr,
         user: &SmolStr,
     ) -> Option<Cached<&Self, AuthSecret>> {
-        let ttl = self.get_ttl();
+        let (valid_since, ignore_cache_since) = self.get_cache_times();
         if let Some(endpoint_info) = self.cache.get(endpoint_id) {
-            let value = endpoint_info.get_role_secret(user, ttl);
-            if let Some(value) = value {
-                if ttl.is_some() {
+            let value = endpoint_info.get_role_secret(user, valid_since, ignore_cache_since);
+            if let Some((value, ignore_cache)) = value {
+                if !ignore_cache {
                     let cached = Cached {
                         token: Some((
                             self,
@@ -189,11 +210,11 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &SmolStr,
     ) -> Option<Cached<&Self, Arc<Vec<SmolStr>>>> {
-        let ttl = self.get_ttl();
+        let (valid_since, ignore_cache_since) = self.get_cache_times();
         if let Some(endpoint_info) = self.cache.get(endpoint_id) {
-            let value = endpoint_info.get_allowed_ips(ttl);
-            if let Some(value) = value {
-                if ttl.is_some() {
+            let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
+            if let Some((value, ignore_cache)) = value {
+                if !ignore_cache {
                     let cached = Cached {
                         token: Some((self, CachedLookupInfo::new_allowed_ips(endpoint_id.clone()))),
                         value,
@@ -258,12 +279,18 @@ impl ProjectInfoCacheImpl {
                 .insert(project_id.clone(), HashSet::from([endpoint_id.clone()]));
         }
     }
-    fn get_ttl(&self) -> Option<Duration> {
-        if self.ttl_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-            Some(self.config.ttl)
+    fn get_cache_times(&self) -> (Instant, Option<Instant>) {
+        let mut valid_since = Instant::now() - self.config.ttl;
+        // Only ignore cache if ttl is disabled.
+        let ignore_cache_since = if !self.ttl_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            let ignore_cache_since = self.ttl_disabled_since.read().clone();
+            // We are fine if entry is not older than ttl or was added before we are getting notifications.
+            valid_since = valid_since.min(ignore_cache_since);
+            Some(ignore_cache_since)
         } else {
             None
-        }
+        };
+        (valid_since, ignore_cache_since)
     }
 
     pub async fn gc_worker(&self) -> anyhow::Result<Infallible> {
@@ -402,11 +429,14 @@ mod tests {
 
     #[test]
     fn test_project_info_cache_invalidations() {
-        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+        let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
             size: 2,
             max_roles: 2,
-            ttl: Duration::from_secs(1),
-        });
+            ttl: Duration::from_millis(500),
+        }));
+        cache.clone().disable_ttl();
+        std::thread::sleep(Duration::from_secs(1));
+
         let project_id = "project".into();
         let endpoint_id = "endpoint".into();
         let user1: SmolStr = "user1".into();
@@ -418,8 +448,7 @@ mod tests {
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
         cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
 
-        cache.disable_ttl();
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(1));
         // Nothing should be invalidated.
 
         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
@@ -438,6 +467,53 @@ mod tests {
         // The only way to invalidate this value is to invalidate via the api.
         cache.invalidate_role_secret_for_project(&project_id, &user2);
         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
+        assert!(!cached.cached());
+        assert_eq!(cached.value, allowed_ips);
+    }
+
+    #[test]
+    fn test_disable_ttl_invalidate_added_before() {
+        let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+            size: 2,
+            max_roles: 2,
+            ttl: Duration::from_millis(500),
+        }));
+
+        let project_id = "project".into();
+        let endpoint_id = "endpoint".into();
+        let user1: SmolStr = "user1".into();
+        let user2: SmolStr = "user2".into();
+        let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
+        let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
+        let allowed_ips = Arc::new(vec!["allowed_ip1".into(), "allowed_ip2".into()]);
+        cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
+        cache.clone().disable_ttl();
+        std::thread::sleep(Duration::from_millis(100));
+        cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
+
+        // Added before ttl was disabled + ttl should be still cached.
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
+        assert!(cached.cached());
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
+        assert!(cached.cached());
+
+        std::thread::sleep(Duration::from_secs(1));
+        // Added before ttl was disabled + ttl should expire.
+        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+
+        // Added after ttl was disabled + ttl should not be cached.
+        cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
+        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
+        assert!(!cached.cached());
+
+        std::thread::sleep(Duration::from_secs(1));
+        // Added before ttl was disabled + ttl still should expire.
+        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+        // Shouldn't be invalidated.
 
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
         assert!(!cached.cached());
