@@ -2796,8 +2796,6 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 	request_lsn = GetRedoStartLsn();
 	request_lsn = nm_adjust_lsn(request_lsn);
 
-	elog(WARNING, "neon_read_slru_segment is called for segment %d of SLRU %d", kind, segno);
-
 	NeonResponse *resp;
 	NeonGetSlruSegmentRequest request = {
 		.req.tag = T_NeonGetSlruSegmentRequest,
@@ -2819,7 +2817,6 @@ neon_read_slru_segment(SMgrRelation reln, SlruKind kind, int segno, void* buffer
 	{
 		case T_NeonGetSlruSegmentResponse:
 			n_blocks = ((NeonGetSlruSegmentResponse *) resp)->n_blocks;
-			elog(WARNING, "Read %d blocks of SLRU %d segment %d", n_blocks, kind, segno);
 			memcpy(buffer, ((NeonGetSlruSegmentResponse *) resp)->data, n_blocks*BLCKSZ);
 			break;
 
