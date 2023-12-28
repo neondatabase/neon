@@ -37,6 +37,10 @@ impl From<RequestContext> for RequestData {
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
             endpoint_id: value.endpoint_id.as_deref().map(String::from),
+            project: value.project.as_deref().map(String::from),
+            branch: value.branch.as_deref().map(String::from),
+            protocol: value.protocol,
+            region: value.region,
         }
     }
 }
@@ -229,6 +233,10 @@ build_column_writers!(
         username: Option<String>,
         application_name: Option<String>,
         endpoint_id: Option<String>,
+        project: Option<String>,
+        branch: Option<String>,
+        protocol: &'static str,
+        region: &'static str,
     }
 );
 
@@ -289,6 +297,24 @@ impl ParquetType for String {
         optional: bool,
     ) -> parquet::errors::Result<usize> {
         let val = &[ByteArray::from(self.as_bytes().to_vec())];
+        let def = optional.then_some(&1_i16).map(std::slice::from_ref);
+        w.write_batch(val, def, None)
+    }
+}
+
+impl ParquetType for &'static str {
+    type PhysicalType = ByteArrayType;
+
+    fn get_type(name: &str) -> Type {
+        String::get_type(name)
+    }
+
+    fn write(
+        self,
+        w: &mut ColumnWriterImpl<'_, Self::PhysicalType>,
+        optional: bool,
+    ) -> parquet::errors::Result<usize> {
+        let val = &[ByteArray::from(Bytes::from_static(self.as_bytes()))];
         let def = optional.then_some(&1_i16).map(std::slice::from_ref);
         w.write_batch(val, def, None)
     }
