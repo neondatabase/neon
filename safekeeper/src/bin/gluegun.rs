@@ -70,6 +70,7 @@ struct Args {
     datafrom: Utf8PathBuf,
     /// Path to the data directory.
     datato: Utf8PathBuf,
+    #[arg(long, default_value = "false", action=ArgAction::Set)]
     dryrun: bool,
 }
 
