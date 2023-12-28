@@ -18,7 +18,7 @@ use toml_edit::Document;
 use utils::id::{TenantId, TimelineId, TenantTimelineId};
 use utils::lsn::Lsn;
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write, Read, Seek};
 use std::path::Path;
 use std::str::FromStr;
@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
         let copy_start_lsn = Lsn(copy_start_lsn);
         let copy_end_lsn = new_tli.control_file.local_start_lsn;
 
-        assert!(copy_end_lsn > copy_start_lsn);
+        assert!(copy_end_lsn >= copy_start_lsn);
 
         if args.dryrun {
             continue;
@@ -186,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         info!("ACTION: Copying bytes {} - {} (commit_lsn={}, flush_lsn={}) from {} to {}", copy_start_lsn, copy_end_lsn, tli.control_file.commit_lsn, flush_lsn, valid_segname, new_segname);
 
         assert!(copy_end_lsn <= flush_lsn);
+        assert!(new_tli.control_file.commit_lsn >= new_tli.control_file.local_start_lsn);
 
         if flush_lsn > copy_end_lsn {
             // check intersection from two segments
@@ -197,10 +198,15 @@ async fn main() -> anyhow::Result<()> {
 
         if copy_end_lsn > tli.control_file.commit_lsn {
             info!("Missing some committed bytes");
-            continue;
         }
 
-        // TODO:
+        let valid_slice = read_slice(&valid_segname, copy_start_lsn, copy_end_lsn, wal_seg_size)?;
+
+        info!("Read {} bytes, going to write", valid_slice.len());
+        assert!(valid_slice.len() == (copy_end_lsn.0 - copy_start_lsn.0) as usize);
+
+        write_slice(&new_segname, copy_start_lsn, wal_seg_size, &valid_slice)?;
+        info!("Success, timeline {} WAL is fixed", new_tli.ttid);
     }
 
     Ok(())
@@ -277,4 +283,12 @@ fn read_slice(path: &Utf8Path, start: Lsn, end: Lsn, wal_seg_size: usize) -> Res
     file.seek(std::io::SeekFrom::Start(start as u64))?;
     file.take((end - start) as u64).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+fn write_slice(path: &Utf8Path, start: Lsn, wal_seg_size: usize, buf: &[u8]) -> Result<()> {
+    let start = start.segment_offset(wal_seg_size);
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    file.seek(std::io::SeekFrom::Start(start as u64))?;
+    file.write_all(buf)?;
+    Ok(())
 }
