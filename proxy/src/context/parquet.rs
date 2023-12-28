@@ -28,104 +28,205 @@ use super::{RequestContext, LOG_CHAN};
 //
 // We might be able to skip the second buffer and stream it directly to S3. Will need faff because no async API.
 
-pub struct ParquetRequestStream {
-    properties: WriterPropertiesPtr,
-    schema: SchemaDescPtr,
-    session_id: TrackedWrite<BytesWriter>,
-    peer_addr: TrackedWrite<BytesWriter>,
-    timestamp: TrackedWrite<BytesWriter>,
-    username: TrackedWrite<BytesWriter>,
-    application: TrackedWrite<BytesWriter>,
-    endpoint: TrackedWrite<BytesWriter>,
+impl From<RequestContext> for RequestData {
+    fn from(value: RequestContext) -> Self {
+        Self {
+            session_id: value.session_id,
+            peer_addr: value.peer_addr.to_string(),
+            timestamp: value.first_packet,
+            username: value.user.as_deref().map(String::from),
+            application_name: value.application.as_deref().map(String::from),
+            endpoint_id: value.endpoint_id.as_deref().map(String::from),
+        }
+    }
 }
 
-/// Column writers for each column we have
-pub struct ParquetStreamWriter<'a> {
-    session_id: ColumnWriterImpl<'a, FixedLenByteArrayType>,
-    peer_addr: ColumnWriterImpl<'a, ByteArrayType>,
-    timestamp: ColumnWriterImpl<'a, Int64Type>,
-    username: ColumnWriterImpl<'a, ByteArrayType>,
-    application: ColumnWriterImpl<'a, ByteArrayType>,
-    endpoint: ColumnWriterImpl<'a, ByteArrayType>,
-}
+/// Parquet request context worker
+///
+/// It listened on a channel for all completed requests, extracts the data and writes it into a parquet file,
+/// then uploads a completed batch to S3
+pub async fn worker(cancellation_token: CancellationToken) -> parquet::errors::Result<()> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    LOG_CHAN.set(tx).unwrap();
 
-/// Collection of closed columns
-pub struct ParquetStreamClosed {
-    session_id: ColumnCloseResult,
-    peer_addr: ColumnCloseResult,
-    timestamp: ColumnCloseResult,
-    username: ColumnCloseResult,
-    application: ColumnCloseResult,
-    endpoint: ColumnCloseResult,
-}
+    let schema = RequestData::schema();
+    let root = schema.root_schema_ptr();
+    let properties = Arc::new(WriterProperties::builder().build());
 
-pub struct ParquetStreamBytes {
-    properties: WriterPropertiesPtr,
-    schema: TypePtr,
-    session_id: Bytes,
-    peer_addr: Bytes,
-    timestamp: Bytes,
-    username: Bytes,
-    application: Bytes,
-    endpoint: Bytes,
-}
+    let mut b = ColumnBytesWriters::new()?;
 
-fn write_required_string(
-    stream: &mut ColumnWriterImpl<'_, ByteArrayType>,
-    s: impl Into<String>,
-) -> parquet::errors::Result<()> {
-    stream.write_batch(&[ByteArray::from(s.into().into_bytes())], None, None)?;
+    let tracker = TaskTracker::new();
+    let mut columns = b.start(properties.clone(), schema.clone());
+
+    while let Some(Some(ctx)) = run_until_cancelled(rx.recv(), &cancellation_token).await {
+        columns.write(ctx.into())?;
+
+        if columns.size() > 1_000_000 {
+            let closed = columns.close()?;
+            let bytes = b.flush()?;
+            columns = b.start(properties.clone(), schema.clone());
+
+            let root = root.clone();
+            let props = properties.clone();
+            tracker.spawn_blocking(|| bytes.write_to(closed, root, props));
+        }
+    }
+
+    // drain
+    rx.close();
+
+    while let Some(ctx) = rx.recv().await {
+        columns.write(ctx.into())?;
+    }
+
+    // closed
+    let closed = columns.close()?;
+    let bytes = b.flush()?;
+
+    tracker.spawn_blocking(|| bytes.write_to(closed, root, properties));
+    tracker.close();
+    tracker.wait().await;
+
     Ok(())
 }
 
-fn write_optional_string(
-    stream: &mut ColumnWriterImpl<'_, ByteArrayType>,
-    s: Option<impl Into<String>>,
-) -> parquet::errors::Result<()> {
-    if let Some(s) = s {
-        stream.write_batch(&[ByteArray::from(s.into().into_bytes())], Some(&[1]), None)?;
-    } else {
-        stream.write_batch(&[], Some(&[0]), None)?;
-    }
-    Ok(())
-}
-
-impl ParquetStreamWriter<'_> {
-    fn close(self) -> parquet::errors::Result<ParquetStreamClosed> {
-        Ok(ParquetStreamClosed {
-            session_id: self.session_id.close()?,
-            peer_addr: self.peer_addr.close()?,
-            timestamp: self.timestamp.close()?,
-            username: self.username.close()?,
-            application: self.application.close()?,
-            endpoint: self.endpoint.close()?,
-        })
-    }
-
-    fn size(&self) -> u64 {
-        self.session_id.get_total_bytes_written()
-            + self.peer_addr.get_total_bytes_written()
-            + self.timestamp.get_total_bytes_written()
-    }
-
-    fn write(&mut self, ctx: RequestContext) -> parquet::errors::Result<()> {
-        self.session_id.write_batch(
-            &[FixedLenByteArray::from(ctx.session_id.as_bytes().to_vec())],
-            None,
-            None,
-        )?;
-        write_required_string(&mut self.peer_addr, ctx.peer_addr.to_string())?;
-        self.timestamp.write_batch(
-            &[ctx.first_packet.timestamp_nanos_opt().unwrap()],
-            None,
-            None,
-        )?;
-        write_optional_string(&mut self.username, ctx.user.as_deref())?;
-        write_optional_string(&mut self.application, ctx.application.as_deref())?;
-        write_optional_string(&mut self.endpoint, ctx.endpoint_id.as_deref())?;
-        Ok(())
+impl ColumnBytes {
+    fn write_to(
+        self,
+        closed: ClosedColumns,
+        schema_root: TypePtr,
+        properties: WriterPropertiesPtr,
+    ) {
+        // std::fs::create_dir_all("parquet_test").unwrap();
+        // let file = std::fs::File::create(format!("parquet_test/{}.parquet", Utc::now())).unwrap();
+        // self.write(closed, file).unwrap();
+        self.write(
+            closed,
+            SerializedFileWriter::new(vec![], schema_root, properties).unwrap(),
+        )
+        .unwrap();
     }
 }
+
+/// this macro reduces the repitition required with all the different columns we store
+macro_rules! build_column_writers {
+    (
+        struct RequestData {$(
+            $name:ident: $ty:ty,
+        )*}
+    ) => {
+        struct RequestData {$(
+            $name: $ty,
+        )*}
+
+        impl RequestData {
+            fn schema() -> SchemaDescPtr {
+                Arc::new(SchemaDescriptor::new(Arc::new(
+                    Type::group_type_builder("schema")
+                        .with_fields(vec![$(
+                            Arc::new(<$ty>::get_type(stringify!($name))),
+                        )*])
+                        .build()
+                        .unwrap()
+                )))
+            }
+        }
+
+        /// The `io::Write`rs for each column
+        struct ColumnBytesWriters {$(
+            $name: TrackedWrite<BytesWriter>,
+        )*}
+
+        /// The bytes for each completed column
+        struct ColumnBytes {$(
+            $name: Bytes,
+        )*}
+
+        /// The parquet writer abstraction for each column
+        struct ColumnWriters<'a> {$(
+            $name: ColumnWriterImpl<'a, <$ty as ParquetType>::PhysicalType>,
+        )*}
+
+        impl ColumnWriters<'_> {
+            fn close(self) -> parquet::errors::Result<ClosedColumns> {
+                Ok(ClosedColumns {$(
+                    $name: self.$name.close()?,
+                )*})
+            }
+
+            /// Note: this value does not include any buffered data that has not yet been flushed to a page.
+            fn size(&self) -> u64 {
+                0 $( + self.$name.get_total_bytes_written() )*
+            }
+
+            fn write(&mut self, ctx: RequestData) -> parquet::errors::Result<()> {
+                $(ctx.$name.write(&mut self.$name, false)?;)*
+                Ok(())
+            }
+        }
+
+        /// The metadata of each closed parquet column
+        struct ClosedColumns {$(
+            $name: ColumnCloseResult,
+        )*}
+
+        impl ColumnBytes {
+            fn write(
+                self,
+                closed: ClosedColumns,
+                mut w: SerializedFileWriter<impl std::io::Write + Send>,
+            ) -> parquet::errors::Result<FileMetaData> {
+                let mut g = w.next_row_group()?;
+
+                // write each column in order to the row group
+                $(g.append_column(&self.$name, closed.$name)?;)*
+
+                g.close()?;
+                w.close()
+            }
+        }
+
+        impl ColumnBytesWriters {
+            fn start(
+                &mut self,
+                properties: WriterPropertiesPtr,
+                schema: SchemaDescPtr,
+            ) -> ColumnWriters<'_> {
+                let mut n = 0;
+                ColumnWriters {$(
+                    $name: ColumnWriterImpl::new(
+                        schema.column({ n += 1; n - 1 }),
+                        properties.clone(),
+                        Box::new(SerializedPageWriter::new(&mut self.$name)),
+                    ),
+                )*}
+            }
+
+            fn flush(&mut self) -> parquet::errors::Result<ColumnBytes> {
+                Ok(ColumnBytes {$(
+                    $name: take_bytes(&mut self.$name),
+                )*})
+            }
+
+            fn new() -> parquet::errors::Result<Self> {
+                Ok(Self {$(
+                    $name: TrackedWrite::new(BytesWriter::default()),
+                )*})
+            }
+        }
+    };
+}
+
+build_column_writers!(
+    struct RequestData {
+        session_id: uuid::Uuid,
+        peer_addr: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        username: Option<String>,
+        application_name: Option<String>,
+        endpoint_id: Option<String>,
+    }
+);
 
 // why doesn't BytesMut impl io::Write?
 #[derive(Default)]
@@ -157,195 +258,110 @@ fn take_bytes(w: &mut TrackedWrite<BytesWriter>) -> Bytes {
     bytes
 }
 
-impl ParquetRequestStream {
-    fn start(&mut self) -> ParquetStreamWriter<'_> {
-        ParquetStreamWriter {
-            session_id: ColumnWriterImpl::new(
-                self.schema.column(0),
-                self.properties.clone(),
-                Box::new(SerializedPageWriter::new(&mut self.session_id)),
-            ),
-            peer_addr: ColumnWriterImpl::new(
-                self.schema.column(1),
-                self.properties.clone(),
-                Box::new(SerializedPageWriter::new(&mut self.peer_addr)),
-            ),
-            timestamp: ColumnWriterImpl::new(
-                self.schema.column(2),
-                self.properties.clone(),
-                Box::new(SerializedPageWriter::new(&mut self.timestamp)),
-            ),
-            username: ColumnWriterImpl::new(
-                self.schema.column(3),
-                self.properties.clone(),
-                Box::new(SerializedPageWriter::new(&mut self.username)),
-            ),
-            application: ColumnWriterImpl::new(
-                self.schema.column(4),
-                self.properties.clone(),
-                Box::new(SerializedPageWriter::new(&mut self.application)),
-            ),
-            endpoint: ColumnWriterImpl::new(
-                self.schema.column(5),
-                self.properties.clone(),
-                Box::new(SerializedPageWriter::new(&mut self.endpoint)),
-            ),
-        }
-    }
-
-    fn flush(&mut self) -> parquet::errors::Result<ParquetStreamBytes> {
-        Ok(ParquetStreamBytes {
-            schema: self.schema.root_schema_ptr(),
-            properties: self.properties.clone(),
-            session_id: take_bytes(&mut self.session_id),
-            peer_addr: take_bytes(&mut self.peer_addr),
-            timestamp: take_bytes(&mut self.timestamp),
-            username: take_bytes(&mut self.username),
-            application: take_bytes(&mut self.application),
-            endpoint: take_bytes(&mut self.endpoint),
-        })
-    }
-
-    pub fn new() -> parquet::errors::Result<Self> {
-        let session_id = Arc::new(
-            Type::primitive_type_builder("session_id", PhysicalType::FIXED_LEN_BYTE_ARRAY)
-                .with_length(16)
-                .with_logical_type(Some(LogicalType::Uuid))
-                .with_repetition(Repetition::REQUIRED)
-                .build()?,
-        );
-
-        let peer_addr = Arc::new(
-            Type::primitive_type_builder("peer_addr", PhysicalType::BYTE_ARRAY)
-                .with_logical_type(Some(LogicalType::String))
-                .with_converted_type(ConvertedType::UTF8)
-                .with_repetition(Repetition::REQUIRED)
-                .build()?,
-        );
-
-        let timestamp = Arc::new(
-            Type::primitive_type_builder("timestamp", PhysicalType::INT64)
-                .with_logical_type(Some(LogicalType::Timestamp {
-                    is_adjusted_to_u_t_c: true,
-                    unit: parquet::format::TimeUnit::NANOS(NanoSeconds::new()),
-                }))
-                .with_repetition(Repetition::REQUIRED)
-                .build()?,
-        );
-
-        let username = Arc::new(
-            Type::primitive_type_builder("username", PhysicalType::BYTE_ARRAY)
-                .with_logical_type(Some(LogicalType::String))
-                .with_converted_type(ConvertedType::UTF8)
-                .with_repetition(Repetition::OPTIONAL)
-                .build()?,
-        );
-
-        let application = Arc::new(
-            Type::primitive_type_builder("application_name", PhysicalType::BYTE_ARRAY)
-                .with_logical_type(Some(LogicalType::String))
-                .with_converted_type(ConvertedType::UTF8)
-                .with_repetition(Repetition::OPTIONAL)
-                .build()?,
-        );
-
-        let endpoint = Arc::new(
-            Type::primitive_type_builder("endpoint_id", PhysicalType::BYTE_ARRAY)
-                .with_logical_type(Some(LogicalType::String))
-                .with_converted_type(ConvertedType::UTF8)
-                .with_repetition(Repetition::OPTIONAL)
-                .build()?,
-        );
-
-        let schema = Arc::new(
-            Type::group_type_builder("proxy_connection_requests")
-                .with_fields(vec![
-                    session_id,
-                    peer_addr,
-                    timestamp,
-                    username,
-                    application,
-                    endpoint,
-                ])
-                .build()?,
-        );
-
-        Ok(Self {
-            properties: Arc::new(WriterProperties::builder().build()),
-            schema: Arc::new(SchemaDescriptor::new(schema)),
-            session_id: TrackedWrite::new(BytesWriter::default()),
-            peer_addr: TrackedWrite::new(BytesWriter::default()),
-            timestamp: TrackedWrite::new(BytesWriter::default()),
-            username: TrackedWrite::new(BytesWriter::default()),
-            application: TrackedWrite::new(BytesWriter::default()),
-            endpoint: TrackedWrite::new(BytesWriter::default()),
-        })
-    }
-
-    pub async fn worker(
-        mut self,
-        cancellation_token: CancellationToken,
-    ) -> parquet::errors::Result<()> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        LOG_CHAN.set(tx).unwrap();
-
-        let tracker = TaskTracker::new();
-        let mut columns = self.start();
-
-        while let Some(Some(ctx)) = run_until_cancelled(rx.recv(), &cancellation_token).await {
-            columns.write(ctx)?;
-
-            if columns.size() > 1_000_000 {
-                let closed = columns.close()?;
-                let bytes = self.flush()?;
-                columns = self.start();
-
-                tracker.spawn_blocking(|| bytes.write_to(closed));
-            }
-        }
-
-        // drain
-        rx.close();
-
-        while let Some(ctx) = rx.recv().await {
-            columns.write(ctx)?;
-        }
-
-        // closed
-        let closed = columns.close()?;
-        let bytes = self.flush()?;
-
-        tracker.spawn_blocking(|| bytes.write_to(closed));
-        tracker.close();
-        tracker.wait().await;
-
-        Ok(())
-    }
+trait ParquetType {
+    type PhysicalType: parquet::data_type::DataType;
+    fn get_type(name: &str) -> Type;
+    fn write(
+        self,
+        w: &mut ColumnWriterImpl<'_, Self::PhysicalType>,
+        optional: bool,
+    ) -> parquet::errors::Result<usize>;
 }
 
-impl ParquetStreamBytes {
-    fn write_to(self, closed: ParquetStreamClosed) {
-        // std::fs::create_dir_all("parquet_test").unwrap();
-        // let file = std::fs::File::create(format!("parquet_test/{}.parquet", Utc::now())).unwrap();
-        // self.write(closed, file).unwrap();
-        self.write(closed, vec![]).unwrap();
+impl ParquetType for String {
+    type PhysicalType = ByteArrayType;
+
+    fn get_type(name: &str) -> Type {
+        Type::primitive_type_builder(name, PhysicalType::BYTE_ARRAY)
+            .with_logical_type(Some(LogicalType::String))
+            .with_converted_type(ConvertedType::UTF8)
+            .with_repetition(Repetition::REQUIRED)
+            .build()
+            .unwrap()
     }
 
     fn write(
         self,
-        closed: ParquetStreamClosed,
-        w: impl std::io::Write + Send,
-    ) -> parquet::errors::Result<FileMetaData> {
-        let mut w = SerializedFileWriter::new(w, self.schema, self.properties)?;
-        let mut g = w.next_row_group()?;
-        g.append_column(&self.session_id, closed.session_id)?;
-        g.append_column(&self.peer_addr, closed.peer_addr)?;
-        g.append_column(&self.timestamp, closed.timestamp)?;
-        g.append_column(&self.username, closed.username)?;
-        g.append_column(&self.application, closed.application)?;
-        g.append_column(&self.endpoint, closed.endpoint)?;
+        w: &mut ColumnWriterImpl<'_, Self::PhysicalType>,
+        optional: bool,
+    ) -> parquet::errors::Result<usize> {
+        let val = &[ByteArray::from(self.as_bytes().to_vec())];
+        let def = optional.then_some(&1_i16).map(std::slice::from_ref);
+        w.write_batch(val, def, None)
+    }
+}
 
-        g.close()?;
-        w.close()
+impl ParquetType for uuid::Uuid {
+    type PhysicalType = FixedLenByteArrayType;
+
+    fn get_type(name: &str) -> Type {
+        Type::primitive_type_builder(name, PhysicalType::FIXED_LEN_BYTE_ARRAY)
+            .with_length(16)
+            .with_logical_type(Some(LogicalType::String))
+            .with_converted_type(ConvertedType::UTF8)
+            .with_repetition(Repetition::REQUIRED)
+            .build()
+            .unwrap()
+    }
+
+    fn write(
+        self,
+        w: &mut ColumnWriterImpl<'_, Self::PhysicalType>,
+        optional: bool,
+    ) -> parquet::errors::Result<usize> {
+        let val = &[FixedLenByteArray::from(self.as_bytes().to_vec())];
+        let def = optional.then_some(&1_i16).map(std::slice::from_ref);
+        w.write_batch(val, def, None)
+    }
+}
+
+impl ParquetType for chrono::DateTime<chrono::Utc> {
+    type PhysicalType = Int64Type;
+
+    fn get_type(name: &str) -> Type {
+        Type::primitive_type_builder(name, PhysicalType::INT64)
+            .with_logical_type(Some(LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: parquet::format::TimeUnit::NANOS(NanoSeconds::new()),
+            }))
+            .with_repetition(Repetition::REQUIRED)
+            .build()
+            .unwrap()
+    }
+
+    fn write(
+        self,
+        w: &mut ColumnWriterImpl<'_, Self::PhysicalType>,
+        optional: bool,
+    ) -> parquet::errors::Result<usize> {
+        let val = &[self.timestamp_nanos_opt().unwrap()];
+        let def = optional.then_some(&1_i16).map(std::slice::from_ref);
+        w.write_batch(val, def, None)
+    }
+}
+
+impl<T: ParquetType> ParquetType for Option<T> {
+    type PhysicalType = T::PhysicalType;
+
+    fn get_type(name: &str) -> Type {
+        let t = T::get_type(name);
+        Type::primitive_type_builder(t.name(), t.get_physical_type())
+            .with_logical_type(t.get_basic_info().logical_type())
+            .with_converted_type(t.get_basic_info().converted_type())
+            .with_repetition(Repetition::OPTIONAL)
+            .build()
+            .unwrap()
+    }
+
+    fn write(
+        self,
+        w: &mut ColumnWriterImpl<'_, Self::PhysicalType>,
+        _optional: bool,
+    ) -> parquet::errors::Result<usize> {
+        if let Some(s) = self {
+            s.write(w, true)
+        } else {
+            w.write_batch(&[], Some(&[0]), None)
+        }
     }
 }

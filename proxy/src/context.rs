@@ -10,8 +10,7 @@ use uuid::Uuid;
 
 use crate::{error::ErrorKind, metrics::LatencyTimer};
 
-mod parquet;
-pub use parquet::ParquetRequestStream;
+pub mod parquet;
 
 static LOG_CHAN: OnceCell<mpsc::UnboundedSender<RequestContext>> = OnceCell::new();
 

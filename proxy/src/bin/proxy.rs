@@ -224,9 +224,8 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    let context_parquet = proxy::context::ParquetRequestStream::new().unwrap();
     let token2 = cancellation_token.clone();
-    client_tasks.spawn(async { Ok(context_parquet.worker(token2).await?) });
+    client_tasks.spawn(async { Ok(proxy::context::parquet::worker(token2).await?) });
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
