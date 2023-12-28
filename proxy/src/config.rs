@@ -360,11 +360,14 @@ pub struct ProjectInfoCacheOptions {
     pub ttl: Duration,
     /// Max number of roles per endpoint.
     pub max_roles: usize,
+    /// Gc interval.
+    pub gc_interval: Duration,
 }
 
 impl ProjectInfoCacheOptions {
     /// Default options for [`crate::console::provider::NodeInfoCache`].
-    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=10000,ttl=4m,max_roles=10";
+    pub const CACHE_DEFAULT_OPTIONS: &'static str =
+        "size=10000,ttl=4m,max_roles=10,gc_interval=10m";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
@@ -372,6 +375,7 @@ impl ProjectInfoCacheOptions {
         let mut size = None;
         let mut ttl = None;
         let mut max_roles = None;
+        let mut gc_interval = None;
 
         for option in options.split(',') {
             let (key, value) = option
@@ -382,6 +386,7 @@ impl ProjectInfoCacheOptions {
                 "size" => size = Some(value.parse()?),
                 "ttl" => ttl = Some(humantime::parse_duration(value)?),
                 "max_roles" => max_roles = Some(value.parse()?),
+                "gc_interval" => gc_interval = Some(humantime::parse_duration(value)?),
                 unknown => bail!("unknown key: {unknown}"),
             }
         }
@@ -395,6 +400,7 @@ impl ProjectInfoCacheOptions {
             size: size.context("missing `size`")?,
             ttl: ttl.context("missing `ttl`")?,
             max_roles: max_roles.context("missing `max_roles`")?,
+            gc_interval: gc_interval.context("missing `gc_interval`")?,
         })
     }
 }

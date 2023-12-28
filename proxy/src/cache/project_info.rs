@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     convert::Infallible,
     sync::{atomic::AtomicBool, Arc},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use dashmap::{DashMap, RwLock};
@@ -294,8 +294,8 @@ impl ProjectInfoCacheImpl {
     }
 
     pub async fn gc_worker(&self) -> anyhow::Result<Infallible> {
-        let epoch = Duration::from_secs(600);
-        let mut interval = tokio::time::interval(epoch / (self.cache.shards().len()) as u32);
+        let mut interval =
+            tokio::time::interval(self.config.gc_interval / (self.cache.shards().len()) as u32);
         loop {
             interval.tick().await;
             self.gc();
@@ -381,7 +381,7 @@ mod tests {
     use super::*;
     use crate::{console::AuthSecret, scram::ServerSecret};
     use smol_str::SmolStr;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     #[test]
     fn test_project_info_cache_settings() {
@@ -389,6 +389,7 @@ mod tests {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_secs(1),
+            gc_interval: Duration::from_secs(600),
         });
         let project_id = "project".into();
         let endpoint_id = "endpoint".into();
@@ -433,6 +434,7 @@ mod tests {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_millis(500),
+            gc_interval: Duration::from_secs(600),
         }));
         cache.clone().disable_ttl();
         std::thread::sleep(Duration::from_secs(1));
@@ -479,6 +481,7 @@ mod tests {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_millis(500),
+            gc_interval: Duration::from_secs(600),
         }));
 
         let project_id = "project".into();
