@@ -115,7 +115,6 @@ impl FileStorage {
     pub fn load_control_file<P: AsRef<Path>>(control_file_path: P) -> Result<SafeKeeperState> {
         let mut control_file = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
             .open(&control_file_path)
             .with_context(|| {
                 format!(
