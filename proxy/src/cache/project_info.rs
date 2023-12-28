@@ -283,7 +283,7 @@ impl ProjectInfoCacheImpl {
         let mut valid_since = Instant::now() - self.config.ttl;
         // Only ignore cache if ttl is disabled.
         let ignore_cache_since = if !self.ttl_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-            let ignore_cache_since = self.ttl_disabled_since.read().clone();
+            let ignore_cache_since = *self.ttl_disabled_since.read();
             // We are fine if entry is not older than ttl or was added before we are getting notifications.
             valid_since = valid_since.min(ignore_cache_since);
             Some(ignore_cache_since)
