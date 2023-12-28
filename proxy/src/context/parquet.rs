@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use parquet::{
-    basic::{ConvertedType, LogicalType, Repetition, Type as PhysicalType},
+    basic::{LogicalType, Repetition, Type as PhysicalType, ZstdLevel},
     column::writer::{ColumnCloseResult, ColumnWriterImpl},
     data_type::{ByteArray, ByteArrayType, FixedLenByteArray, FixedLenByteArrayType, Int64Type},
     file::{
@@ -51,7 +51,13 @@ pub async fn worker(cancellation_token: CancellationToken) -> parquet::errors::R
 
     let schema = RequestData::schema();
     let root = schema.root_schema_ptr();
-    let properties = Arc::new(WriterProperties::builder().build());
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::ZSTD(ZstdLevel::default()))
+            .set_data_page_size_limit(1024 * 1024)
+            .set_write_batch_size(1024)
+            .build(),
+    );
 
     let mut b = ColumnBytesWriters::new()?;
 
@@ -61,7 +67,7 @@ pub async fn worker(cancellation_token: CancellationToken) -> parquet::errors::R
     while let Some(Some(ctx)) = run_until_cancelled(rx.recv(), &cancellation_token).await {
         columns.write(ctx.into())?;
 
-        if columns.size() > 1_000_000 {
+        if columns.size() > 100 * 1024 * 1024 {
             let closed = columns.close()?;
             let bytes = b.flush()?;
             columns = b.start(properties.clone(), schema.clone());
@@ -98,13 +104,11 @@ impl ColumnBytes {
         properties: WriterPropertiesPtr,
     ) {
         // std::fs::create_dir_all("parquet_test").unwrap();
-        // let file = std::fs::File::create(format!("parquet_test/{}.parquet", Utc::now())).unwrap();
-        // self.write(closed, file).unwrap();
-        self.write(
-            closed,
-            SerializedFileWriter::new(vec![], schema_root, properties).unwrap(),
-        )
-        .unwrap();
+        // let file =
+        //     std::fs::File::create(format!("parquet_test/{}.parquet", chrono::Utc::now())).unwrap();
+        let file = vec![];
+        let w = SerializedFileWriter::new(file, schema_root, properties).unwrap();
+        dbg!(self.write(closed, w).unwrap());
     }
 }
 
@@ -274,7 +278,6 @@ impl ParquetType for String {
     fn get_type(name: &str) -> Type {
         Type::primitive_type_builder(name, PhysicalType::BYTE_ARRAY)
             .with_logical_type(Some(LogicalType::String))
-            .with_converted_type(ConvertedType::UTF8)
             .with_repetition(Repetition::REQUIRED)
             .build()
             .unwrap()
@@ -297,8 +300,7 @@ impl ParquetType for uuid::Uuid {
     fn get_type(name: &str) -> Type {
         Type::primitive_type_builder(name, PhysicalType::FIXED_LEN_BYTE_ARRAY)
             .with_length(16)
-            .with_logical_type(Some(LogicalType::String))
-            .with_converted_type(ConvertedType::UTF8)
+            .with_logical_type(Some(LogicalType::Uuid))
             .with_repetition(Repetition::REQUIRED)
             .build()
             .unwrap()
