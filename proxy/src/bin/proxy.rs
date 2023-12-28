@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    let context_parquet = proxy::context::ParquetStreamOwned::new().unwrap();
+    let context_parquet = proxy::context::ParquetRequestStream::new().unwrap();
     let token2 = cancellation_token.clone();
     client_tasks.spawn(async { Ok(context_parquet.worker(token2).await?) });
 
