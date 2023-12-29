@@ -5,16 +5,13 @@ use bytes::BytesMut;
 use futures::{Future, Stream, StreamExt};
 use parquet::{
     basic::ZstdLevel,
-    file::{
-        properties::WriterProperties, reader::FileReader, serialized_reader::SerializedFileReader,
-        writer::SerializedFileWriter,
-    },
+    file::{properties::WriterProperties, writer::SerializedFileWriter},
     record::RecordWriter,
 };
 use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, Span};
 
 use super::{RequestContext, LOG_CHAN};
 
@@ -105,13 +102,12 @@ async fn worker_inner(
     let properties = Arc::new(
         WriterProperties::builder()
             .set_compression(parquet::basic::Compression::ZSTD(ZstdLevel::default()))
-            .set_data_page_size_limit(1024 * 1024)
-            .set_write_batch_size(1024)
             .build(),
     );
 
-    let file = BytesWriter::default();
-    let mut w = SerializedFileWriter::new(file, schema.clone(), properties.clone()).unwrap();
+    let mut w =
+        SerializedFileWriter::new(BytesWriter::default(), schema.clone(), properties.clone())
+            .unwrap();
 
     while let Some(row) = rx.next().await {
         rows.push(row);
@@ -123,7 +119,7 @@ async fn worker_inner(
                 .iter()
                 .map(|rg| rg.compressed_size())
                 .sum::<i64>();
-            if len > 1024 * 1024 {
+            if len > 100 * 1024 * 1024 {
                 let file = upload_parquet(w, len, &storage).await?;
                 w = SerializedFileWriter::new(file, schema.clone(), properties.clone())?;
             }
@@ -150,7 +146,10 @@ async fn flush_rows(
     rows: Vec<RequestData>,
     mut w: SerializedFileWriter<BytesWriter>,
 ) -> anyhow::Result<(Vec<RequestData>, SerializedFileWriter<BytesWriter>)> {
+    let span = Span::current();
     let (mut rows, w) = tokio::task::spawn_blocking(move || {
+        let _enter = span.enter();
+
         let mut rg = w.next_row_group()?;
         rows.as_slice().write_to_row_group(&mut rg)?;
         let meta = rg.close()?;
@@ -180,18 +179,13 @@ async fn upload_parquet(
         .map(|rg| rg.total_byte_size())
         .sum::<i64>();
 
-    // I don't know how compute intensive this is, although it probably isn't much...
-    let mut file = tokio::task::spawn_blocking(move || w.into_inner())
+    // I don't know how compute intensive this is, although it probably isn't much... better be safe than sorry.
+    // finish method only available on the fork: https://github.com/apache/arrow-rs/issues/5253
+    let (mut file, metadata) = tokio::task::spawn_blocking(move || w.finish())
         .await
         .unwrap()?;
 
     let data = file.buf.split().freeze();
-
-    // get metadata: https://github.com/apache/arrow-rs/issues/5253
-    let metadata = SerializedFileReader::new(data.clone())?
-        .metadata()
-        .file_metadata()
-        .clone();
 
     let compression = len as f64 / len_uncompressed as f64;
     let size = data.len();
@@ -199,7 +193,7 @@ async fn upload_parquet(
 
     info!(
         %id,
-        rows = metadata.num_rows(),
+        rows = metadata.num_rows,
         size, compression, "uploading request parquet file"
     );
 

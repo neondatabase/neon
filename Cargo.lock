@@ -3415,8 +3415,7 @@ dependencies = [
 [[package]]
 name = "parquet"
 version = "49.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af88740a842787da39b3d69ce5fbf6fce97d20211d3b299fee0a0da6430c74d4"
+source = "git+https://github.com/neondatabase/arrow-rs?branch=neon-fix-bugs#8a0bc58aa67b98aabbd8eee7c6ca4281967ff9e9"
 dependencies = [
  "ahash",
  "bytes",
@@ -3434,8 +3433,7 @@ dependencies = [
 [[package]]
 name = "parquet_derive"
 version = "49.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b24a05041227ebe2886276ca52f7bcc8c5c1f9adfe27bc23a867d98cbf2b066f"
+source = "git+https://github.com/neondatabase/arrow-rs?branch=neon-fix-bugs#8a0bc58aa67b98aabbd8eee7c6ca4281967ff9e9"
 dependencies = [
  "parquet",
  "proc-macro2",
