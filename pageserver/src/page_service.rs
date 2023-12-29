@@ -802,7 +802,7 @@ impl PageServerHandler {
         }))
     }
 
-    async fn handle_get_page_at_lsn_request(
+    async fn do_handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
@@ -812,20 +812,25 @@ impl PageServerHandler {
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
                 .await?;
-        /*
-        // Add a 1s delay to some requests. The delay helps the requests to
-        // hit the race condition from github issue #1047 more easily.
-        use rand::Rng;
-        if rand::thread_rng().gen::<u8>() < 5 {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-        }
-        */
+        let page = timeline
+            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
+            .await?;
 
+        Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+            page,
+        }))
+    }
+
+    async fn handle_get_page_at_lsn_request(
+        &self,
+        timeline: &Timeline,
+        req: &PagestreamGetPageRequest,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let key = rel_block_to_key(req.rel, req.blkno);
-        let page = if timeline.get_shard_identity().is_key_local(&key) {
-            timeline
-                .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
-                .await?
+        if timeline.get_shard_identity().is_key_local(&key) {
+            self.do_handle_get_page_at_lsn_request(timeline, req, ctx)
+                .await
         } else {
             // The Tenant shard we looked up at connection start does not hold this particular
             // key: look for other shards in this tenant.  This scenario occurs if a pageserver
@@ -860,14 +865,10 @@ impl PageServerHandler {
             // Take a GateGuard for the duration of this request.  If we were using our main Timeline object,
             // the GateGuard was already held over the whole connection.
             let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown)?;
-            timeline
-                .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
-                .await?
-        };
 
-        Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
-            page,
-        }))
+            self.do_handle_get_page_at_lsn_request(&timeline, req, ctx)
+                .await
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
