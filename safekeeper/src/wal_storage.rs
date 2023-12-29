@@ -565,6 +565,9 @@ impl WalReader {
         })
     }
 
+    /// Read WAL at current position into provided buf, returns number of bytes
+    /// read. It can be smaller than buf size only if segment boundary is
+    /// reached.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         // If this timeline is new, we may not have a full segment yet, so
         // we pad the first bytes of the timeline's first WAL segment with 0s

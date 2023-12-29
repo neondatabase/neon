@@ -529,12 +529,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             );
 
             // try to send as much as available, capped by MAX_SEND_SIZE
-            let mut send_size = self
-                .end_pos
-                .checked_sub(self.start_pos)
-                .context("reading wal without waiting for it first")?
-                .0 as usize;
-            send_size = min(send_size, self.send_buf.len());
+            let mut chunk_end_pos = self.start_pos + MAX_SEND_SIZE as u64;
+            // if we went behind available WAL, back off
+            if chunk_end_pos >= self.end_pos {
+                chunk_end_pos = self.end_pos;
+            } else {
+                // If sending not up to end pos, round down to page boundary to
+                // avoid breaking WAL record not at page boundary, as protocol
+                // demands. See walsender.c (XLogSendPhysical).
+                chunk_end_pos = chunk_end_pos
+                    .checked_sub(chunk_end_pos.block_offset())
+                    .unwrap();
+            }
+            let send_size = (chunk_end_pos.0 - self.start_pos.0) as usize;
             let send_buf = &mut self.send_buf[..send_size];
             let send_size: usize;
             {
@@ -545,7 +552,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 } else {
                     None
                 };
-                // read wal into buffer
+                // Read WAL into buffer. send_size can be additionally capped to
+                // segment boundary here.
                 send_size = self.wal_reader.read(send_buf).await?
             };
             let send_buf = &send_buf[..send_size];
