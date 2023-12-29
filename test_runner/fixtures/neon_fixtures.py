@@ -347,7 +347,9 @@ class PgProtocol:
         """
         return self.safe_psql_many([query], **kwargs)[0]
 
-    def safe_psql_many(self, queries: List[str], **kwargs: Any) -> List[List[Tuple[Any, ...]]]:
+    def safe_psql_many(
+        self, queries: List[str], log_query=True, **kwargs: Any
+    ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
         This method passes all extra params to connstr.
@@ -356,7 +358,8 @@ class PgProtocol:
         with closing(self.connect(**kwargs)) as conn:
             with conn.cursor() as cur:
                 for query in queries:
-                    log.info(f"Executing query: {query}")
+                    if log_query:
+                        log.info(f"Executing query: {query}")
                     cur.execute(query)
 
                     if cur.description is None:
@@ -365,11 +368,11 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query) -> Any:
+    def safe_psql_scalar(self, query, log_query=True) -> Any:
         """
         Execute query returning single row with single column.
         """
-        return self.safe_psql(query)[0][0]
+        return self.safe_psql(query, log_query=log_query)[0][0]
 
 
 @dataclass
@@ -2925,7 +2928,9 @@ class Safekeeper:
 
     def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
         is_testing_enabled = '"testing"' in self.env.get_binary_version("safekeeper")
-        return SafekeeperHttpClient(port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled)
+        return SafekeeperHttpClient(
+            port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled
+        )
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
@@ -2976,7 +2981,7 @@ class SafekeeperMetrics:
 class SafekeeperHttpClient(requests.Session):
     HTTPError = requests.HTTPError
 
-    def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled = False):
+    def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled=False):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
