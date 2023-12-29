@@ -17,6 +17,7 @@ use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
+use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::lsn::AtomicLsn;
 use utils::pageserver_feedback::PageserverFeedback;
@@ -559,6 +560,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 }))
                 .await?;
 
+            if let Some(appname) = &self.appname {
+                if appname == "replica" {
+                    failpoint_support::sleep_millis_async!("sk-send-wal-replica-sleep");
+                }
+            }
             trace!(
                 "sent {} bytes of WAL {}-{}",
                 send_size,
