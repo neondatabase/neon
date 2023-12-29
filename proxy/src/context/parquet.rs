@@ -15,8 +15,17 @@ use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, Remo
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
+use utils::backoff;
 
 use super::{RequestContext, LOG_CHAN};
+
+// Occasional network issues and such can cause remote operations to fail, and
+// that's expected. If a upload fails, we log it at info-level, and retry.
+// But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
+// level instead, as repeated failures can mean a more serious problem. If it
+// fails more than FAILED_UPLOAD_RETRIES times, we give up
+pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.
@@ -98,6 +107,9 @@ struct ParquetConfig {
     propeties: WriterPropertiesPtr,
     rows_per_group: usize,
     file_size: i64,
+
+    #[cfg(any(test, feature = "testing"))]
+    test_remote_failures: u64,
 }
 
 impl Default for ParquetConfig {
@@ -112,6 +124,9 @@ impl Default for ParquetConfig {
             rows_per_group: 8192,
             // 100 MiB
             file_size: 100 * 1024 * 1024,
+
+            #[cfg(any(test, feature = "testing"))]
+            test_remote_failures: 0,
         }
     }
 }
@@ -121,6 +136,13 @@ async fn worker_inner(
     rx: impl Stream<Item = RequestData>,
     config: ParquetConfig,
 ) -> anyhow::Result<()> {
+    #[cfg(any(test, feature = "testing"))]
+    let storage = if config.test_remote_failures > 0 {
+        GenericRemoteStorage::unreliable_wrapper(storage, config.test_remote_failures)
+    } else {
+        storage
+    };
+
     let mut rx = std::pin::pin!(rx);
 
     let mut rows = Vec::with_capacity(config.rows_per_group);
@@ -218,9 +240,20 @@ async fn upload_parquet(
     );
 
     let path = RemotePath::from_string(&format!("requests_{id}.parquet"))?;
-    storage
-        .upload(futures::stream::iter(Some(Ok(data))), size, &path, None)
-        .await?;
+    backoff::retry(
+        || async {
+            let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
+            storage.upload(stream, data.len(), &path, None).await
+        },
+        |_e| false,
+        FAILED_UPLOAD_WARN_THRESHOLD,
+        FAILED_UPLOAD_MAX_RETRIES,
+        "request_data_upload",
+        // we don't want cancellation to interrupt here, so we make a dummy cancel token
+        backoff::Cancel::new(CancellationToken::new(), || anyhow::anyhow!("Cancelled")),
+    )
+    .await
+    .context("request_data_upload")?;
 
     Ok(file)
 }
@@ -290,16 +323,19 @@ mod tests {
             .take(100_000)
             .collect_vec();
 
-        worker_inner(storage.clone(), futures::stream::iter(rx), config)
+        worker_inner(storage, futures::stream::iter(rx), config)
             .await
             .unwrap();
 
-        let mut files = storage.list_files(None).await.unwrap();
+        let mut files = std::fs::read_dir(tmpdir.as_std_path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect_vec();
         files.sort();
 
         files
             .into_iter()
-            .map(|path| std::fs::File::open(tmpdir.join(path.get_path()).as_std_path()).unwrap())
+            .map(|path| std::fs::File::open(tmpdir.as_std_path().join(path)).unwrap())
             .map(|file| {
                 (
                     file.metadata().unwrap(),
@@ -324,6 +360,7 @@ mod tests {
             propeties: Arc::new(WriterProperties::new()),
             rows_per_group: 2_000,
             file_size: 1_000_000,
+            test_remote_failures: 0,
         };
 
         let file_stats = run_test(tmpdir.path(), config).await;
@@ -358,6 +395,7 @@ mod tests {
             ),
             rows_per_group: 2_000,
             file_size: 1_000_000,
+            test_remote_failures: 0,
         };
 
         let file_stats = run_test(tmpdir.path(), config).await;
@@ -392,6 +430,7 @@ mod tests {
             ),
             rows_per_group: 2_000,
             file_size: 1_000_000,
+            test_remote_failures: 0,
         };
 
         let file_stats = run_test(tmpdir.path(), config).await;
@@ -405,6 +444,37 @@ mod tests {
                 (1114420, 10, 20000),
                 (1114353, 10, 20000),
                 (1114591, 10, 20000),
+            ],
+        );
+
+        tmpdir.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn verify_parquet_unreliable() {
+        let tmpdir = camino_tempfile::tempdir().unwrap();
+
+        let config = ParquetConfig {
+            propeties: Arc::new(WriterProperties::new()),
+            rows_per_group: 2_000,
+            file_size: 1_000_000,
+            test_remote_failures: 2,
+        };
+
+        let file_stats = run_test(tmpdir.path(), config).await;
+
+        assert_eq!(
+            file_stats,
+            [
+                (1186400, 6, 12000),
+                (1186279, 6, 12000),
+                (1186301, 6, 12000),
+                (1186520, 6, 12000),
+                (1186486, 6, 12000),
+                (1186560, 6, 12000),
+                (1186537, 6, 12000),
+                (1186366, 6, 12000),
+                (395418, 2, 4000),
             ],
         );
 
