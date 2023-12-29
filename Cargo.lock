@@ -3865,6 +3865,7 @@ dependencies = [
  "bstr",
  "bytes",
  "camino",
+ "camino-tempfile",
  "chrono",
  "clap",
  "consumption_metrics",

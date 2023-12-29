@@ -84,6 +84,7 @@ smol_str.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
+camino-tempfile.workspace = true
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
