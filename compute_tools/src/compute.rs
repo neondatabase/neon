@@ -6,6 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
@@ -33,6 +35,9 @@ use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
+
+pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
+pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -501,6 +506,7 @@ impl ComputeNode {
             .stdout(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
+        SYNC_SAFEKEEPERS_PID.store(sync_handle.id(), Ordering::SeqCst);
 
         // `postgres --sync-safekeepers` will print all log output to stderr and
         // final LSN to stdout. So we pipe only stdout, while stderr will be automatically
@@ -508,6 +514,7 @@ impl ComputeNode {
         let sync_output = sync_handle
             .wait_with_output()
             .expect("postgres --sync-safekeepers failed");
+        SYNC_SAFEKEEPERS_PID.store(0, Ordering::SeqCst);
 
         if !sync_output.status.success() {
             anyhow::bail!(
@@ -662,6 +669,7 @@ impl ComputeNode {
             })
             .spawn()
             .expect("cannot start postgres process");
+        PG_PID.store(pg.id(), Ordering::SeqCst);
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 

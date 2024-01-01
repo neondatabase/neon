@@ -40,18 +40,22 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::process::exit;
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use nix::sys::signal::{kill, Signal};
+use signal_hook::consts::{SIGQUIT, SIGTERM};
+use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
 
-use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
+use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec, PG_PID, SYNC_SAFEKEEPERS_PID};
 use compute_tools::configurator::launch_configurator;
 use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
@@ -66,6 +70,13 @@ const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
+    thread::spawn(move || {
+        for sig in signals.forever() {
+            handle_exit_signal(sig);
+        }
+    });
 
     let build_tag = option_env!("BUILD_TAG")
         .unwrap_or(BUILD_TAG_DEFAULT)
@@ -346,6 +357,7 @@ fn main() -> Result<()> {
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");
+        PG_PID.store(0, Ordering::SeqCst);
         info!("Postgres exited with code {}, shutting down", ecode);
         exit_code = ecode.code()
     }
@@ -517,6 +529,24 @@ fn cli() -> clap::Command {
                 .default_value("/etc/pgbouncer.ini")
                 .value_name("PGBOUNCER_INI_PATH"),
         )
+}
+
+/// When compute_ctl is killed, send also termination signal to sync-safekeepers
+/// to prevent leakage. TODO: it is better to convert compute_ctl to async and
+/// wait for termination which would be easy then.
+fn handle_exit_signal(sig: i32) {
+    info!("received {sig} termination signal");
+    let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
+    if ss_pid != 0 {
+        let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
+        kill(ss_pid, Signal::SIGTERM).ok();
+    }
+    let pg_pid = PG_PID.load(Ordering::SeqCst);
+    if pg_pid != 0 {
+        let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
+        kill(pg_pid, Signal::SIGTERM).ok();
+    }
+    exit(1);
 }
 
 #[test]
