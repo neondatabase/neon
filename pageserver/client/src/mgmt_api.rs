@@ -5,6 +5,8 @@ use utils::{
     id::{TenantId, TimelineId},
 };
 
+pub mod util;
+
 #[derive(Debug)]
 pub struct Client {
     mgmt_api_endpoint: String,
@@ -62,6 +64,18 @@ impl Client {
         let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
         let resp = self.get(&uri).await?;
         resp.json().await.map_err(Error::ReceiveBody)
+    }
+
+    pub async fn tenant_details(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<pageserver_api::models::TenantDetails> {
+        let uri = format!("{}/v1/tenant/{tenant_id}", self.mgmt_api_endpoint);
+        self.get(uri)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
     }
 
     pub async fn list_timelines(

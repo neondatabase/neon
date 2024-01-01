@@ -878,6 +878,23 @@ impl LayerInner {
                         Ok(())
                     }
                     Err(e) => {
+                        let consecutive_failures =
+                            this.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+
+                        let backoff = utils::backoff::exponential_backoff_duration_seconds(
+                            consecutive_failures.min(u32::MAX as usize) as u32,
+                            1.5,
+                            60.0,
+                        );
+
+                        let backoff = std::time::Duration::from_secs_f64(backoff);
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {},
+                            _ = crate::task_mgr::shutdown_token().cancelled_owned() => {},
+                            _ = timeline.cancel.cancelled() => {},
+                        };
+
                         Err(e)
                     }
                 };
@@ -926,21 +943,9 @@ impl LayerInner {
                 Ok(permit)
             }
             Ok((Err(e), _permit)) => {
-                // FIXME: this should be with the spawned task and be cancellation sensitive
-                //
-                // while we should not need this, this backoff has turned out to be useful with
-                // a bug of unexpectedly deleted remote layer file (#5787).
-                let consecutive_failures =
-                    self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+                // sleep already happened in the spawned task, if it was not cancelled
+                let consecutive_failures = self.consecutive_failures.load(Ordering::Relaxed);
                 tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
-                let backoff = utils::backoff::exponential_backoff_duration_seconds(
-                    consecutive_failures.min(u32::MAX as usize) as u32,
-                    1.5,
-                    60.0,
-                );
-                let backoff = std::time::Duration::from_secs_f64(backoff);
-
-                tokio::time::sleep(backoff).await;
                 Err(DownloadError::DownloadFailed)
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),

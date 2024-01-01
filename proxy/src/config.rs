@@ -1,4 +1,4 @@
-use crate::{auth, rate_limiter::RateBucketInfo};
+use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
 use anyhow::{bail, ensure, Context, Ok};
 use rustls::{sign, Certificate, PrivateKey};
 use sha2::{Digest, Sha256};
@@ -36,8 +36,8 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub timeout: tokio::time::Duration,
-    pub pool_opt_in: bool,
+    pub request_timeout: tokio::time::Duration,
+    pub pool_options: GlobalConnPoolOptions,
 }
 
 pub struct AuthenticationConfig {
@@ -310,10 +310,10 @@ pub struct CacheOptions {
 
 impl CacheOptions {
     /// Default options for [`crate::console::provider::NodeInfoCache`].
-    pub const DEFAULT_OPTIONS_NODE_INFO: &'static str = "size=4000,ttl=4m";
+    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
-    /// Example: [`Self::DEFAULT_OPTIONS_NODE_INFO`].
+    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
     fn parse(options: &str) -> anyhow::Result<Self> {
         let mut size = None;
         let mut ttl = None;

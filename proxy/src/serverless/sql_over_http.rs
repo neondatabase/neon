@@ -206,7 +206,7 @@ pub async fn handle(
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        config.timeout,
+        config.request_timeout,
         handle_inner(
             config,
             request,
@@ -278,7 +278,7 @@ pub async fn handle(
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                config.timeout.as_secs()
+                config.request_timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -320,7 +320,8 @@ async fn handle_inner(
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
-    let allow_pool = !config.pool_opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    let allow_pool =
+        !config.pool_options.opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level, read only and deferrable
 
@@ -359,7 +360,7 @@ async fn handle_inner(
     let payload: Payload = serde_json::from_slice(&body)?;
 
     let mut client = conn_pool
-        .get(&conn_info, !allow_pool, session_id, peer_addr)
+        .get(conn_info, !allow_pool, session_id, peer_addr)
         .await?;
 
     let mut response = Response::builder()

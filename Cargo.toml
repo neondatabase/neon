@@ -6,6 +6,7 @@ members = [
     "pageserver",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/pagebench",
     "proxy",
     "safekeeper",
     "storage_broker",
@@ -79,6 +80,7 @@ futures-util = "0.3"
 git-version = "0.3"
 hashbrown = "0.13"
 hashlink = "0.8.1"
+hdrhistogram = "7.5.2"
 hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
@@ -91,7 +93,7 @@ hyper-tungstenite = "0.11"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
-jsonwebtoken = "8"
+jsonwebtoken = "9"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"

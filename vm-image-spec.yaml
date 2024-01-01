@@ -36,6 +36,7 @@ files:
       max_client_conn=10000
       default_pool_size=64
       max_prepared_statements=0
+      admin_users=cloud_admin
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes

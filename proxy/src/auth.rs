@@ -87,6 +87,10 @@ impl AuthError {
     pub fn too_many_connections() -> Self {
         AuthErrorImpl::TooManyConnections.into()
     }
+
+    pub fn is_auth_failed(&self) -> bool {
+        matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
+    }
 }
 
 impl<E: Into<AuthErrorImpl>> From<E> for AuthError {

@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::TenantDetails;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -307,6 +308,7 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
             SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
+            Cancelled => ApiError::ShuttingDown,
         }
     }
 }
@@ -592,8 +594,6 @@ async fn get_lsn_by_timestamp_handler(
         )));
     }
 
-    let version: Option<u8> = parse_query_param(&request, "version")?;
-
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
@@ -606,31 +606,18 @@ async fn get_lsn_by_timestamp_handler(
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &cancel, &ctx)
         .await?;
-
-    if version.unwrap_or(0) > 1 {
-        #[derive(serde::Serialize)]
-        struct Result {
-            lsn: Lsn,
-            kind: &'static str,
-        }
-        let (lsn, kind) = match result {
-            LsnForTimestamp::Present(lsn) => (lsn, "present"),
-            LsnForTimestamp::Future(lsn) => (lsn, "future"),
-            LsnForTimestamp::Past(lsn) => (lsn, "past"),
-            LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
-        };
-        json_response(StatusCode::OK, Result { lsn, kind })
-    } else {
-        // FIXME: this is a temporary crutch not to break backwards compatibility
-        // See https://github.com/neondatabase/neon/pull/5608
-        let result = match result {
-            LsnForTimestamp::Present(lsn) => format!("{lsn}"),
-            LsnForTimestamp::Future(_lsn) => "future".into(),
-            LsnForTimestamp::Past(_lsn) => "past".into(),
-            LsnForTimestamp::NoData(_lsn) => "nodata".into(),
-        };
-        json_response(StatusCode::OK, result)
+    #[derive(serde::Serialize)]
+    struct Result {
+        lsn: Lsn,
+        kind: &'static str,
     }
+    let (lsn, kind) = match result {
+        LsnForTimestamp::Present(lsn) => (lsn, "present"),
+        LsnForTimestamp::Future(lsn) => (lsn, "future"),
+        LsnForTimestamp::Past(lsn) => (lsn, "past"),
+        LsnForTimestamp::NoData(lsn) => (lsn, "nodata"),
+    };
+    json_response(StatusCode::OK, Result { lsn, kind })
 }
 
 async fn get_timestamp_of_lsn_handler(
@@ -872,11 +859,14 @@ async fn tenant_status(
         }
 
         let state = tenant.current_state();
-        Result::<_, ApiError>::Ok(TenantInfo {
-            id: tenant_shard_id,
-            state: state.clone(),
-            current_physical_size: Some(current_physical_size),
-            attachment_status: state.attachment_status(),
+        Result::<_, ApiError>::Ok(TenantDetails {
+            tenant_info: TenantInfo {
+                id: tenant_shard_id,
+                state: state.clone(),
+                current_physical_size: Some(current_physical_size),
+                attachment_status: state.attachment_status(),
+            },
+            timelines: tenant.list_timeline_ids(),
         })
     }
     .instrument(info_span!("tenant_status_handler",
@@ -897,7 +887,9 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
+    state
+        .tenant_manager
+        .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard = %tenant_shard_id.shard_slug()
@@ -1577,19 +1569,22 @@ async fn disk_usage_eviction_run(
     struct Config {
         /// How many bytes to evict before reporting that pressure is relieved.
         evict_bytes: u64,
+
+        #[serde(default)]
+        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
     struct Usage {
         // remains unchanged after instantiation of the struct
-        config: Config,
+        evict_bytes: u64,
         // updated by `add_available_bytes`
         freed_bytes: u64,
     }
 
     impl crate::disk_usage_eviction_task::Usage for Usage {
         fn has_pressure(&self) -> bool {
-            self.config.evict_bytes > self.freed_bytes
+            self.evict_bytes > self.freed_bytes
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {
@@ -1600,7 +1595,7 @@ async fn disk_usage_eviction_run(
     let config = json_request::<Config>(&mut r).await?;
 
     let usage = Usage {
-        config,
+        evict_bytes: config.evict_bytes,
         freed_bytes: 0,
     };
 
@@ -1615,7 +1610,11 @@ async fn disk_usage_eviction_run(
     let state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state, storage, usage, &cancel,
+        &state,
+        storage,
+        usage,
+        config.eviction_order,
+        &cancel,
     )
     .await;
 

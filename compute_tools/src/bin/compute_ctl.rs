@@ -31,7 +31,9 @@
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
 //!             -b /usr/local/bin/postgres \
-//!             -r http://pg-ext-s3-gateway
+//!             -r http://pg-ext-s3-gateway \
+//!             --pgbouncer-connstr 'host=localhost port=6432 dbname=pgbouncer user=cloud_admin sslmode=disable'
+//!             --pgbouncer-ini-path /etc/pgbouncer.ini \
 //! ```
 //!
 use std::collections::HashMap;
@@ -98,6 +100,9 @@ fn main() -> Result<()> {
         .expect("Postgres connection string is required");
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
+
+    let pgbouncer_connstr = matches.get_one::<String>("pgbouncer-connstr");
+    let pgbouncer_ini_path = matches.get_one::<String>("pgbouncer-ini-path");
 
     // Extract OpenTelemetry context for the startup actions from the
     // TRACEPARENT and TRACESTATE env variables, and attach it to the current
@@ -209,6 +214,8 @@ fn main() -> Result<()> {
         ext_remote_storage: ext_remote_storage.map(|s| s.to_string()),
         ext_download_progress: RwLock::new(HashMap::new()),
         build_tag,
+        pgbouncer_connstr: pgbouncer_connstr.map(|s| s.to_string()),
+        pgbouncer_ini_path: pgbouncer_ini_path.map(|s| s.to_string()),
     };
     let compute = Arc::new(compute_node);
 
@@ -492,6 +499,23 @@ fn cli() -> clap::Command {
                     "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
                 )
                 .value_name("FILECACHE_CONNSTR"),
+        )
+        .arg(
+            Arg::new("pgbouncer-connstr")
+                .long("pgbouncer-connstr")
+                .default_value(
+                    "host=localhost port=6432 dbname=pgbouncer user=cloud_admin sslmode=disable",
+                )
+                .value_name("PGBOUNCER_CONNSTR"),
+        )
+        .arg(
+            Arg::new("pgbouncer-ini-path")
+                .long("pgbouncer-ini-path")
+                // Note: this doesn't match current path for pgbouncer.ini.
+                // Until we fix it, we need to pass the path explicitly
+                // or this will be effectively no-op.
+                .default_value("/etc/pgbouncer.ini")
+                .value_name("PGBOUNCER_INI_PATH"),
         )
 }
 

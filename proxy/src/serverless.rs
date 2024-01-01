@@ -6,9 +6,13 @@ mod conn_pool;
 mod sql_over_http;
 mod websocket;
 
+pub use conn_pool::GlobalConnPoolOptions;
+
 use anyhow::bail;
 use hyper::StatusCode;
 use metrics::IntCounterPairGuard;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
@@ -46,6 +50,11 @@ pub async fn task_main(
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
+
+    let conn_pool2 = Arc::clone(&conn_pool);
+    tokio::spawn(async move {
+        conn_pool2.gc_worker(StdRng::from_entropy()).await;
+    });
 
     // shutdown the connection pool
     tokio::spawn({
