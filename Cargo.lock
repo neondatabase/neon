@@ -5880,6 +5880,7 @@ dependencies = [
  "chrono",
  "const_format",
  "criterion",
+ "fail",
  "futures",
  "heapless",
  "hex",

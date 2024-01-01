@@ -4,6 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
+# which adds some runtime cost to run tests on outage conditions
+testing = ["fail/failpoints"]
+
 [dependencies]
 arc-swap.workspace = true
 sentry.workspace = true
@@ -16,6 +22,7 @@ chrono.workspace = true
 heapless.workspace = true
 hex = { workspace = true, features = ["serde"] }
 hyper = { workspace = true, features = ["full"] }
+fail.workspace = true
 futures = { workspace = true}
 jsonwebtoken.workspace = true
 nix.workspace = true
