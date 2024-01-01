@@ -25,8 +25,6 @@ pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
 
-pub mod failpoint_support;
-
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;

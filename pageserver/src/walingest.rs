@@ -29,6 +29,7 @@ use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
+use utils::failpoint_support;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
@@ -344,9 +345,7 @@ impl<'a> WalIngest<'a> {
                         // particular point in the WAL. For more fine-grained control,
                         // we could peek into the message and only pause if it contains
                         // a particular string, for example, but this is enough for now.
-                        crate::failpoint_support::sleep_millis_async!(
-                            "wal-ingest-logical-message-sleep"
-                        );
+                        failpoint_support::sleep_millis_async!("wal-ingest-logical-message-sleep");
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
                     }
