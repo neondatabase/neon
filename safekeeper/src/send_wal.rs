@@ -391,15 +391,8 @@ impl SafekeeperPostgresHandler {
         // application_name: give only committed WAL (used by pageserver) or all
         // existing WAL (up to flush_lsn, used by walproposer or peer recovery).
         // The second case is always driven by a consensus leader which term
-        // must generally be also supplied. However we're sloppy to do this in
-        // walproposer recovery which will be removed soon. So TODO is to make
-        // it not Option'al then.
-        //
-        // Fetching WAL without term in recovery creates a small risk of this
-        // WAL getting concurrently garbaged if another compute rises which
-        // collects majority and starts fixing log on this safekeeper itself.
-        // That's ok as (old) proposer will never be able to commit such WAL.
-        let end_watch = if self.is_walproposer_recovery() {
+        // must be supplied.
+        let end_watch = if term.is_some() {
             EndWatch::Flush(tli.get_term_flush_lsn_watch_rx())
         } else {
             EndWatch::Commit(tli.get_commit_lsn_watch_rx())
