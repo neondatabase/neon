@@ -39,6 +39,9 @@ pub(crate) struct Args {
     runtime: Option<humantime::Duration>,
     #[clap(long)]
     per_target_rate_limit: Option<usize>,
+    /// Probability for sending `latest=true` in the request (uniform distribution).
+    #[clap(long, default_value = "1")]
+    req_latest_probability: f64,
     #[clap(long)]
     limit_to_first_n_targets: Option<usize>,
     targets: Option<Vec<TenantTimelineId>>,
@@ -210,7 +213,7 @@ async fn main_impl(
                     (
                         r.timeline,
                         PagestreamGetPageRequest {
-                            latest: false,
+                            latest: rng.gen_bool(args.req_latest_probability),
                             lsn: r.timeline_lsn,
                             rel: rel_tag,
                             blkno: block_no,
@@ -256,7 +259,7 @@ async fn main_impl(
                             let (rel_tag, block_no) = key_to_rel_block(key)
                                 .expect("we filter non-rel-block keys out above");
                             PagestreamGetPageRequest {
-                                latest: false,
+                                latest: rng.gen_bool(args.req_latest_probability),
                                 lsn: r.timeline_lsn,
                                 rel: rel_tag,
                                 blkno: block_no,
