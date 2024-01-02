@@ -17,6 +17,7 @@ use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
+use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::lsn::AtomicLsn;
 use utils::pageserver_feedback::PageserverFeedback;
@@ -391,15 +392,8 @@ impl SafekeeperPostgresHandler {
         // application_name: give only committed WAL (used by pageserver) or all
         // existing WAL (up to flush_lsn, used by walproposer or peer recovery).
         // The second case is always driven by a consensus leader which term
-        // must generally be also supplied. However we're sloppy to do this in
-        // walproposer recovery which will be removed soon. So TODO is to make
-        // it not Option'al then.
-        //
-        // Fetching WAL without term in recovery creates a small risk of this
-        // WAL getting concurrently garbaged if another compute rises which
-        // collects majority and starts fixing log on this safekeeper itself.
-        // That's ok as (old) proposer will never be able to commit such WAL.
-        let end_watch = if self.is_walproposer_recovery() {
+        // must be supplied.
+        let end_watch = if term.is_some() {
             EndWatch::Flush(tli.get_term_flush_lsn_watch_rx())
         } else {
             EndWatch::Commit(tli.get_commit_lsn_watch_rx())
@@ -535,12 +529,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             );
 
             // try to send as much as available, capped by MAX_SEND_SIZE
-            let mut send_size = self
-                .end_pos
-                .checked_sub(self.start_pos)
-                .context("reading wal without waiting for it first")?
-                .0 as usize;
-            send_size = min(send_size, self.send_buf.len());
+            let mut chunk_end_pos = self.start_pos + MAX_SEND_SIZE as u64;
+            // if we went behind available WAL, back off
+            if chunk_end_pos >= self.end_pos {
+                chunk_end_pos = self.end_pos;
+            } else {
+                // If sending not up to end pos, round down to page boundary to
+                // avoid breaking WAL record not at page boundary, as protocol
+                // demands. See walsender.c (XLogSendPhysical).
+                chunk_end_pos = chunk_end_pos
+                    .checked_sub(chunk_end_pos.block_offset())
+                    .unwrap();
+            }
+            let send_size = (chunk_end_pos.0 - self.start_pos.0) as usize;
             let send_buf = &mut self.send_buf[..send_size];
             let send_size: usize;
             {
@@ -551,7 +552,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 } else {
                     None
                 };
-                // read wal into buffer
+                // Read WAL into buffer. send_size can be additionally capped to
+                // segment boundary here.
                 send_size = self.wal_reader.read(send_buf).await?
             };
             let send_buf = &send_buf[..send_size];
@@ -566,6 +568,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 }))
                 .await?;
 
+            if let Some(appname) = &self.appname {
+                if appname == "replica" {
+                    failpoint_support::sleep_millis_async!("sk-send-wal-replica-sleep");
+                }
+            }
             trace!(
                 "sent {} bytes of WAL {}-{}",
                 send_size,

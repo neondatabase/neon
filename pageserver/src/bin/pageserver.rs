@@ -31,6 +31,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
@@ -126,7 +127,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Initialize up failpoints support
-    let scenario = pageserver::failpoint_support::init();
+    let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
     virtual_file::init(conf.max_file_descriptors);

@@ -347,7 +347,9 @@ class PgProtocol:
         """
         return self.safe_psql_many([query], **kwargs)[0]
 
-    def safe_psql_many(self, queries: List[str], **kwargs: Any) -> List[List[Tuple[Any, ...]]]:
+    def safe_psql_many(
+        self, queries: List[str], log_query=True, **kwargs: Any
+    ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
         This method passes all extra params to connstr.
@@ -356,7 +358,8 @@ class PgProtocol:
         with closing(self.connect(**kwargs)) as conn:
             with conn.cursor() as cur:
                 for query in queries:
-                    log.info(f"Executing query: {query}")
+                    if log_query:
+                        log.info(f"Executing query: {query}")
                     cur.execute(query)
 
                     if cur.description is None:
@@ -365,11 +368,11 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query) -> Any:
+    def safe_psql_scalar(self, query, log_query=True) -> Any:
         """
         Execute query returning single row with single column.
         """
-        return self.safe_psql(query)[0][0]
+        return self.safe_psql(query, log_query=log_query)[0][0]
 
 
 @dataclass
@@ -890,8 +893,8 @@ class NeonEnv:
         """Get list of safekeeper endpoints suitable for safekeepers GUC"""
         return ",".join(f"localhost:{wa.port.pg}" for wa in self.safekeepers)
 
-    def get_pageserver_version(self) -> str:
-        bin_pageserver = str(self.neon_binpath / "pageserver")
+    def get_binary_version(self, binary_name: str) -> str:
+        bin_pageserver = str(self.neon_binpath / binary_name)
         res = subprocess.run(
             [bin_pageserver, "--version"],
             check=True,
@@ -1656,7 +1659,7 @@ class NeonPageserver(PgProtocol):
         self.running = False
         self.service_port = port
         self.config_override = config_override
-        self.version = env.get_pageserver_version()
+        self.version = env.get_binary_version("pageserver")
 
         # After a test finishes, we will scrape the log to see if there are any
         # unexpected error messages. If your test expects an error, add it to
@@ -2924,7 +2927,10 @@ class Safekeeper:
                 return res
 
     def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
-        return SafekeeperHttpClient(port=self.port.http, auth_token=auth_token)
+        is_testing_enabled = '"testing"' in self.env.get_binary_version("safekeeper")
+        return SafekeeperHttpClient(
+            port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled
+        )
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
@@ -2975,16 +2981,41 @@ class SafekeeperMetrics:
 class SafekeeperHttpClient(requests.Session):
     HTTPError = requests.HTTPError
 
-    def __init__(self, port: int, auth_token: Optional[str] = None):
+    def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled=False):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
+        self.is_testing_enabled = is_testing_enabled
 
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
+
+    def is_testing_enabled_or_skip(self):
+        if not self.is_testing_enabled:
+            pytest.skip("safekeeper was built without 'testing' feature")
+
+    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+        self.is_testing_enabled_or_skip()
+
+        if isinstance(config_strings, tuple):
+            pairs = [config_strings]
+        else:
+            pairs = config_strings
+
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
+        res = self.put(
+            f"http://localhost:{self.port}/v1/failpoints",
+            json=[{"name": name, "actions": actions} for name, actions in pairs],
+        )
+        log.info(f"Got failpoints request response code {res.status_code}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert res_json is None
+        return res_json
 
     def debug_dump(self, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         params = params or {}

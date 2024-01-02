@@ -54,6 +54,19 @@ const ID_FILE_NAME: &str = "safekeeper.id";
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+const FEATURES: &[&str] = &[
+    #[cfg(feature = "testing")]
+    "testing",
+];
+
+fn version() -> String {
+    format!(
+        "{GIT_VERSION} failpoints: {}, features: {:?}",
+        fail::has_failpoints(),
+        FEATURES,
+    )
+}
+
 const ABOUT: &str = r#"
 A fleet of safekeepers is responsible for reliably storing WAL received from
 compute, passing it through consensus (mitigating potential computes brain
@@ -167,7 +180,9 @@ async fn main() -> anyhow::Result<()> {
     // getting 'argument cannot be used multiple times' error. This seems to be
     // impossible with pure Derive API, so convert struct to Command, modify it,
     // parse arguments, and then fill the struct back.
-    let cmd = <Args as clap::CommandFactory>::command().args_override_self(true);
+    let cmd = <Args as clap::CommandFactory>::command()
+        .args_override_self(true)
+        .version(version());
     let mut matches = cmd.get_matches();
     let mut args = <Args as clap::FromArgMatches>::from_arg_matches_mut(&mut matches)?;
 
