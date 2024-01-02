@@ -2907,6 +2907,13 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	if (!OidIsValid(NInfoGetDbOid(rinfo)))
 		return false;
 
+	/*
+	 * Always apply updates of VM because otherwise index-only scan may return wrong results
+	 * based on the wrong assumption that page is still all visible
+	 */
+	if (forknum == VISIBILITYMAP_FORKNUM)
+		return false;
+
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forknum;
 	tag.blockNum = blkno;
