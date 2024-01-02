@@ -13,7 +13,7 @@ from urllib3.util.retry import Retry
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import Fn
 
 
@@ -437,7 +437,7 @@ class PageserverHttpClient(requests.Session):
 
     def timeline_detail(
         self,
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
@@ -459,7 +459,7 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
+    def timeline_delete(self, tenant_id: TenantShardId, timeline_id: TimelineId, **kwargs):
         """
         Note that deletion is not instant, it is scheduled and performed mostly in the background.
         So if you need to wait for it to complete use `timeline_delete_wait_completed`.
@@ -473,7 +473,7 @@ class PageserverHttpClient(requests.Session):
         assert res_json is None
 
     def timeline_gc(
-        self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
+        self, tenant_id: TenantShardId, timeline_id: TimelineId, gc_horizon: Optional[int]
     ) -> dict[str, Any]:
         """
         Unlike most handlers, this will wait for the layers to be actually
@@ -544,7 +544,7 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_checkpoint(
-        self, tenant_id: TenantId, timeline_id: TimelineId, force_repartition=False
+        self, tenant_id: TenantShardId, timeline_id: TimelineId, force_repartition=False
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -685,6 +685,34 @@ class PageserverHttpClient(requests.Session):
             return None
         assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
         return results[0].value
+
+    def get_metrics_values(
+        self, names: list[str], filter: Optional[Dict[str, str]] = None
+    ) -> Dict[str, float]:
+        """
+        When fetching multiple named metrics, it is more efficient to use this
+        than to call `get_metric_value` repeatedly.
+
+        Throws RuntimeError if no metrics matching `names` are found, or if
+        not all of `names` are found: this method is intended for loading sets
+        of metrics whose existence is coupled.
+        """
+        metrics = self.get_metrics()
+        samples = []
+        for name in names:
+            samples.extend(metrics.query_all(name, filter=filter))
+
+        result = {}
+        for sample in samples:
+            if sample.name in result:
+                raise RuntimeError(f"Multiple values found for {sample.name}")
+            result[sample.name] = sample.value
+
+        if len(result) != len(names):
+            log.info(f"Metrics found: {metrics.metrics}")
+            raise RuntimeError(f"could not find all metrics {' '.join(names)}")
+
+        return result
 
     def layer_map_info(
         self,
