@@ -169,8 +169,7 @@ build: |
           curl \
           build-essential \
           pkg-config \
-          libevent-dev \
-          libssl-dev
+          libevent-dev
 
   ENV PGBOUNCER_VERSION 1.21.0
   ENV PGBOUNCER_GITPATH 1_21_0
