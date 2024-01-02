@@ -75,6 +75,10 @@ pub struct ComputeSpec {
     pub remote_extensions: Option<RemoteExtSpec>,
 
     pub pgbouncer_settings: Option<HashMap<String, String>>,
+
+    // Stripe size for pageserver sharding, in pages
+    #[serde(default)]
+    pub shard_stripe_size: Option<usize>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
