@@ -18,10 +18,11 @@ Each call must traverse the layer map to gather reconstruct data (`Timeline::get
 That is quite inefficient because:
 
 1. We do the layer map traversal repeatedly, even if, e.g., all the data sits in the same image layer at the bottom of the stack.
-2. Anecdotally, keys adjacent in keyspace and written simultaneously also end up physically adjacent in the layer files [^analysis_slow_basebackup_2023_12_07].
-   So, to provide the reconstruct data for N adjacent keys, we would actually only _need_ to issue a single large read to the filesystem, instead of the N reads we currently do. The filesystem in turn ideally stores the data physically contiguously, so, the large read will turn into one IOP.)
+2. Anecdotally, keys adjacent in keyspace and written simultaneously also end up physically adjacent in the layer files [^1].
+   So, to provide the reconstruct data for N adjacent keys, we would actually only _need_ to issue a single large read to the filesystem, instead of the N reads we currently do.
+   The filesystem, in turn, ideally stores the layer file physically contiguously, so our large read will turn into one IOP toward the disk.
 
-[^analysis_slow_basebackup_2023-12_07]: https://www.notion.so/neondatabase/Christian-Investigation-Slow-Basebackups-Early-2023-12-34ea5c7dcdc1485d9ac3731da4d2a6fc?pvs=4#15ee4e143392461fa64590679c8f54c9
+[^1]: https://www.notion.so/neondatabase/Christian-Investigation-Slow-Basebackups-Early-2023-12-34ea5c7dcdc1485d9ac3731da4d2a6fc?pvs=4#15ee4e143392461fa64590679c8f54c9
 
 # Solution
 
@@ -35,7 +36,7 @@ We should have a vectored aka batched aka scatter-gather style alternative API f
 # DoD
 
 There is a new variant of `Timeline::get`, called `Timeline::get_vectored`.
-It takes as arguments an `lsn: Lsn`, `src: &[KeyVec]` where `struct KeyVec { base: Key, count: usize }`.
+It takes as arguments an `lsn: Lsn` and a `src: &[KeyVec]` where `struct KeyVec { base: Key, count: usize }`.
 
 It is up to the implementor to figure out a suitable and efficient way to return the reconstructed page images.
 It is sufficient to simply return a `Vec<Bytes>`, but, likely more efficient solutions can be found after studying all the callers of `Timeline::get`.
@@ -55,7 +56,7 @@ return out;
 
 # Performance
 
-A single invocation of `Timeline::get_vectored` visits each layer at most once.
+A single invocation of `Timeline::get_vectored` visits each layer in the layer map at most once.
 
 The base performance is identical to the current `Timeline::get`.
 
