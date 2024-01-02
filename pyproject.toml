@@ -6,7 +6,7 @@ authors = []
 
 [tool.poetry.dependencies]
 python = "^3.9"
-pytest = "^7.3.1"
+pytest = "^7.4.4"
 psycopg2-binary = "^2.9.6"
 typing-extensions = "^4.6.1"
 PyJWT = {version = "^2.1.0", extras = ["crypto"]}
