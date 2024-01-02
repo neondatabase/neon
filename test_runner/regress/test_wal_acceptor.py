@@ -566,7 +566,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
         f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
     )
 
-    endpoint.stop_and_destroy()
+    endpoint.stop()
     timeline_delete_wait_completed(ps_http, tenant_id, timeline_id)
 
     # Also delete and manually create timeline on safekeepers -- this tests
