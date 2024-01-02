@@ -1,0 +1,25 @@
+[package]
+name = "attachment_service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+hyper.workspace = true
+pageserver_api.workspace = true
+postgres_connection.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+utils = { path = "../../libs/utils/" }
+control_plane = { path = ".." }
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+

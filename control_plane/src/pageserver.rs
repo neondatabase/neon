@@ -12,12 +12,15 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::models::{self, LocationConfig, ShardParameters, TenantInfo, TimelineInfo};
+use pageserver_api::models::{
+    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -216,11 +219,19 @@ impl PageServerNode {
         if update_config {
             args.push(Cow::Borrowed("--update-config"));
         }
+
+        let mut taskset_args = vec![
+            "-c".to_string(),
+            format!("{}", self.conf.id.0 - 1),
+            self.env.pageserver_bin().to_string_lossy().into(),
+        ];
+        taskset_args.extend(args.into_iter().map(|a| a.to_string()));
+
         background_process::start_process(
             "pageserver",
             &datadir,
-            &self.env.pageserver_bin(),
-            args.iter().map(Cow::as_ref),
+            &PathBuf::from_str("/usr/bin/taskset").unwrap(),
+            taskset_args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
@@ -301,16 +312,8 @@ impl PageServerNode {
     pub async fn tenant_list(&self) -> mgmt_api::Result<Vec<TenantInfo>> {
         self.http_client.list_tenants().await
     }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
+    pub fn parse_config(mut settings: HashMap<&str, &str>) -> anyhow::Result<models::TenantConfig> {
+        let result = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -371,6 +374,20 @@ impl PageServerNode {
                 .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
         };
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        } else {
+            Ok(result)
+        }
+    }
+
+    pub async fn tenant_create(
+        &self,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
+        settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<TenantId> {
+        let config = Self::parse_config(settings.clone())?;
 
         let request = models::TenantCreateRequest {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),
@@ -472,31 +489,32 @@ impl PageServerNode {
 
     pub async fn location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<Duration>,
     ) -> anyhow::Result<()> {
         Ok(self
             .http_client
-            .location_config(tenant_id, config, flush_ms)
+            .location_config(tenant_shard_id, config, flush_ms)
             .await?)
     }
 
-    pub async fn timeline_list(&self, tenant_id: &TenantId) -> anyhow::Result<Vec<TimelineInfo>> {
-        Ok(self.http_client.list_timelines(*tenant_id).await?)
+    pub async fn timeline_list(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> anyhow::Result<Vec<TimelineInfo>> {
+        Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
     }
 
     pub async fn timeline_create(
         &self,
         tenant_id: TenantId,
-        new_timeline_id: Option<TimelineId>,
+        new_timeline_id: TimelineId,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
         existing_initdb_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
-        // If timeline ID was not specified, generate one
-        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
         let req = models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
@@ -581,5 +599,15 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+
+    pub async fn tenant_synthetic_size(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> anyhow::Result<TenantHistorySize> {
+        Ok(self
+            .http_client
+            .tenant_synthetic_size(tenant_shard_id)
+            .await?)
     }
 }
