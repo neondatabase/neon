@@ -48,6 +48,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use compute_api::spec::RemoteExtSpec;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
+use pageserver_api::models::ShardParameters;
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -543,6 +544,7 @@ impl Endpoint {
             storage_auth_token: auth_token.clone(),
             remote_extensions,
             pgbouncer_settings: None,
+            shard_stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE.0 as usize,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
