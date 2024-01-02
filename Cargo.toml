@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
+    "control_plane/attachment_service",
     "pageserver",
     "pageserver/ctl",
     "pageserver/client",

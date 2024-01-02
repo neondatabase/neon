@@ -201,14 +201,29 @@ impl Client {
 
     pub async fn timeline_create(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         req: &TimelineCreateRequest,
     ) -> Result<TimelineInfo> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline",
-            self.mgmt_api_endpoint, tenant_id
+            self.mgmt_api_endpoint, tenant_shard_id
         );
         self.request(Method::POST, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn timeline_list(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> Result<Vec<TimelineInfo>> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.get(&uri)
             .await?
             .json()
             .await
