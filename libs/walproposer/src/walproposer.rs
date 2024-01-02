@@ -425,7 +425,7 @@ mod tests {
         }
 
         fn log_internal(&self, _wp: &mut crate::bindings::WalProposer, level: Level, msg: &str) {
-            println!("walprop_log[{}] {}", level, msg);
+            println!("wp_log[{}] {}", level, msg);
         }
 
         fn after_election(&self, _wp: &mut crate::bindings::WalProposer) {

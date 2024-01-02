@@ -424,8 +424,8 @@ walprop_pg_start_streaming(WalProposer *wp, XLogRecPtr startpos)
 {
 	StartReplicationCmd cmd;
 
-	elog(LOG, "WAL proposer starts streaming at %X/%X",
-		 LSN_FORMAT_ARGS(startpos));
+	wpg_log(LOG, "WAL proposer starts streaming at %X/%X",
+			LSN_FORMAT_ARGS(startpos));
 	cmd.slotname = WAL_PROPOSER_SLOT_NAME;
 	cmd.timeline = wp->greetRequest.timeline;
 	cmd.startpoint = startpos;
@@ -549,7 +549,7 @@ walprop_pg_load_libpqwalreceiver(void)
 {
 	load_file("libpqwalreceiver", false);
 	if (WalReceiverFunctions == NULL)
-		elog(ERROR, "libpqwalreceiver didn't initialize correctly");
+		wpg_log(ERROR, "libpqwalreceiver didn't initialize correctly");
 }
 
 /* Helper function */
@@ -630,7 +630,7 @@ libpqwp_connect_start(char *conninfo)
 	 * PGconn structure"
 	 */
 	if (!pg_conn)
-		elog(FATAL, "failed to allocate new PGconn object");
+		wpg_log(FATAL, "failed to allocate new PGconn object");
 
 	/*
 	 * And in theory this allocation can fail as well, but it's incredibly
@@ -680,7 +680,7 @@ walprop_connect_poll(Safekeeper *sk)
 			 * unused. We'll expect it's never returned.
 			 */
 		case PGRES_POLLING_ACTIVE:
-			elog(FATAL, "Unexpected PGRES_POLLING_ACTIVE returned from PQconnectPoll");
+			wpg_log(FATAL, "unexpected PGRES_POLLING_ACTIVE returned from PQconnectPoll");
 
 			/*
 			 * This return is never actually reached, but it's here to make
@@ -745,7 +745,7 @@ libpqwp_get_query_result(WalProposerConn *conn)
 	 */
 	if (!result)
 	{
-		elog(WARNING, "[libpqwalproposer] Unexpected successful end of command results");
+		wpg_log(WARNING, "[libpqwalproposer] Unexpected successful end of command results");
 		return WP_EXEC_UNEXPECTED_SUCCESS;
 	}
 
@@ -793,7 +793,7 @@ libpqwp_get_query_result(WalProposerConn *conn)
 	}
 
 	if (unexpected_success)
-		elog(WARNING, "[libpqwalproposer] Unexpected successful %s", unexpected_success);
+		wpg_log(WARNING, "[libpqwalproposer] Unexpected successful %s", unexpected_success);
 
 	return return_val;
 }
@@ -872,7 +872,7 @@ libpqwp_async_read(WalProposerConn *conn, char **buf, int *amount)
 				ExecStatusType status = PQresultStatus(PQgetResult(conn->pg_conn));
 
 				if (status != PGRES_FATAL_ERROR)
-					elog(FATAL, "unexpected result status %d after failed PQgetCopyData", status);
+					wpg_log(FATAL, "unexpected result status %d after failed PQgetCopyData", status);
 
 				/*
 				 * If there was actually an error, it'll be properly reported
@@ -937,7 +937,7 @@ walprop_async_write(Safekeeper *sk, void const *buf, size_t size)
 		case -1:
 			return PG_ASYNC_WRITE_FAIL;
 		default:
-			elog(FATAL, "invalid return %d from PQputCopyData", result);
+			wpg_log(FATAL, "invalid return %d from PQputCopyData", result);
 	}
 
 	/*
@@ -958,7 +958,7 @@ walprop_async_write(Safekeeper *sk, void const *buf, size_t size)
 		case -1:
 			return PG_ASYNC_WRITE_FAIL;
 		default:
-			elog(FATAL, "invalid return %d from PQflush", result);
+			wpg_log(FATAL, "invalid return %d from PQflush", result);
 	}
 }
 
@@ -1247,8 +1247,8 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 	if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
 	{
 		startpos = endpos - max_slot_wal_keep_size_mb * 1024 * 1024;
-		walprop_log(WARNING, "capped WAL download for logical replication to %X/%X as max_slot_wal_keep_size=%dMB",
-					LSN_FORMAT_ARGS(startpos), max_slot_wal_keep_size_mb);
+		wpg_log(WARNING, "capped WAL download for logical replication to %X/%X as max_slot_wal_keep_size=%dMB",
+				LSN_FORMAT_ARGS(startpos), max_slot_wal_keep_size_mb);
 	}
 	timeline = wp->greetRequest.timeline;
 
@@ -1262,7 +1262,7 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 
 		written = snprintf((char *) conninfo, MAXCONNINFO, "password=%s %s", neon_auth_token, sk->conninfo);
 		if (written > MAXCONNINFO || written < 0)
-			elog(FATAL, "could not append password to the safekeeper connection string");
+			wpg_log(FATAL, "could not append password to the safekeeper connection string");
 	}
 
 #if PG_MAJORVERSION_NUM < 16
@@ -1279,11 +1279,11 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 						err)));
 		return false;
 	}
-	elog(LOG,
-		 "start recovery for logical replication from %s:%s starting from %X/%08X till %X/%08X timeline "
-		 "%d",
-		 sk->host, sk->port, (uint32) (startpos >> 32),
-		 (uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
+	wpg_log(LOG,
+			"start recovery for logical replication from %s:%s starting from %X/%08X till %X/%08X timeline "
+			"%d",
+			sk->host, sk->port, (uint32) (startpos >> 32),
+			(uint32) startpos, (uint32) (endpos >> 32), (uint32) endpos, timeline);
 
 	options.logical = false;
 	options.startpoint = startpos;
@@ -1481,11 +1481,11 @@ walprop_pg_wal_reader_allocate(Safekeeper *sk)
 {
 	char		log_prefix[64];
 
-	snprintf(log_prefix, sizeof(log_prefix), "sk %s:%s nwr: ", sk->host, sk->port);
+	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->host, sk->port);
 	Assert(!sk->xlogreader);
 	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propEpochStartLsn, sk->wp, log_prefix);
 	if (sk->xlogreader == NULL)
-		elog(FATAL, "Failed to allocate xlog reader");
+		wpg_log(FATAL, "failed to allocate xlog reader");
 }
 
 static NeonWALReadResult
@@ -1549,7 +1549,7 @@ static void
 walprop_pg_init_event_set(WalProposer *wp)
 {
 	if (waitEvents)
-		elog(FATAL, "double-initialization of event set");
+		wpg_log(FATAL, "double-initialization of event set");
 
 	/* for each sk, we have socket plus potentially socket for neon walreader */
 	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + 2 * wp->n_safekeepers);
@@ -1581,7 +1581,7 @@ add_nwr_event_set(Safekeeper *sk, uint32 events)
 	Assert(sk->nwrEventPos == -1);
 	sk->nwrEventPos = AddWaitEventToSet(waitEvents, events, NeonWALReaderSocket(sk->xlogreader), NULL, sk);
 	sk->nwrConnEstablished = NeonWALReaderIsRemConnEstablished(sk->xlogreader);
-	elog(DEBUG5, "sk %s:%s: added nwr socket events %d", sk->host, sk->port, events);
+	wpg_log(DEBUG5, "sk %s:%s: added nwr socket events %d", sk->host, sk->port, events);
 }
 
 static void
@@ -1680,8 +1680,8 @@ rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk)
 {
 	WalProposer *wp = to_remove->wp;
 
-	elog(DEBUG5, "sk %s:%s: removing event, is_sk %d",
-		 to_remove->host, to_remove->port, is_sk);
+	wpg_log(DEBUG5, "sk %s:%s: removing event, is_sk %d",
+			to_remove->host, to_remove->port, is_sk);
 
 	/*
 	 * Shortpath for exiting if have nothing to do. We never call this
@@ -1835,13 +1835,13 @@ GetLatestNeonFeedback(PageserverFeedback *rf, WalProposer *wp)
 	rf->remote_consistent_lsn = wp->safekeeper[latest_safekeeper].appendResponse.rf.remote_consistent_lsn;
 	rf->replytime = wp->safekeeper[latest_safekeeper].appendResponse.rf.replytime;
 
-	elog(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
-		 " last_received_lsn %X/%X, disk_consistent_lsn %X/%X, remote_consistent_lsn %X/%X, replytime %lu",
-		 rf->currentClusterSize,
-		 LSN_FORMAT_ARGS(rf->last_received_lsn),
-		 LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
-		 LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
-		 rf->replytime);
+	wpg_log(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
+			" last_received_lsn %X/%X, disk_consistent_lsn %X/%X, remote_consistent_lsn %X/%X, replytime %lu",
+			rf->currentClusterSize,
+			LSN_FORMAT_ARGS(rf->last_received_lsn),
+			LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
+			LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
+			rf->replytime);
 }
 
 /*
@@ -1987,7 +1987,7 @@ GetLogRepRestartLSN(WalProposer *wp)
 		{
 			uint64		download_range_mb;
 
-			elog(LOG, "logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
+			wpg_log(LOG, "logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
 
 			/*
 			 * If we need to download more than a max_slot_wal_keep_size,
@@ -1999,8 +1999,8 @@ GetLogRepRestartLSN(WalProposer *wp)
 			download_range_mb = (wp->propEpochStartLsn - lrRestartLsn) / MB;
 			if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
 			{
-				walprop_log(WARNING, "not downloading WAL for logical replication since %X/%X as max_slot_wal_keep_size=%dMB",
-							LSN_FORMAT_ARGS(lrRestartLsn), max_slot_wal_keep_size_mb);
+				wpg_log(WARNING, "not downloading WAL for logical replication since %X/%X as max_slot_wal_keep_size=%dMB",
+						LSN_FORMAT_ARGS(lrRestartLsn), max_slot_wal_keep_size_mb);
 				return InvalidXLogRecPtr;
 			}
 
