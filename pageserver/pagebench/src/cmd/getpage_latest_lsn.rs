@@ -3,7 +3,7 @@ use futures::future::join_all;
 use pageserver::pgdatadir_mapping::key_to_rel_block;
 use pageserver::repository;
 use pageserver_api::key::is_rel_block_key;
-use pageserver_client::page_service::RelTagBlockNo;
+use pageserver_api::models::PagestreamGetPageRequest;
 
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -200,18 +200,26 @@ async fn main_impl(
             start_work_barrier.wait().await;
 
             loop {
-                let (range, key) = {
+                let (timeline, req) = {
                     let mut rng = rand::thread_rng();
                     let r = &all_ranges[weights.sample(&mut rng)];
                     let key: i128 = rng.gen_range(r.start..r.end);
                     let key = repository::Key::from_i128(key);
                     let (rel_tag, block_no) =
                         key_to_rel_block(key).expect("we filter non-rel-block keys out above");
-                    (r, RelTagBlockNo { rel_tag, block_no })
+                    (
+                        r.timeline,
+                        PagestreamGetPageRequest {
+                            latest: false,
+                            lsn: r.timeline_lsn,
+                            rel: rel_tag,
+                            blkno: block_no,
+                        },
+                    )
                 };
-                let sender = work_senders.get(&range.timeline).unwrap();
+                let sender = work_senders.get(&timeline).unwrap();
                 // TODO: what if this blocks?
-                sender.send((key, range.timeline_lsn)).await.ok().unwrap();
+                sender.send(req).await.ok().unwrap();
             }
         }),
         Some(rps_limit) => Box::pin(async move {
@@ -240,16 +248,21 @@ async fn main_impl(
                     );
                     loop {
                         ticker.tick().await;
-                        let (range, key) = {
+                        let req = {
                             let mut rng = rand::thread_rng();
                             let r = &ranges[weights.sample(&mut rng)];
                             let key: i128 = rng.gen_range(r.start..r.end);
                             let key = repository::Key::from_i128(key);
                             let (rel_tag, block_no) = key_to_rel_block(key)
                                 .expect("we filter non-rel-block keys out above");
-                            (r, RelTagBlockNo { rel_tag, block_no })
+                            PagestreamGetPageRequest {
+                                latest: false,
+                                lsn: r.timeline_lsn,
+                                rel: rel_tag,
+                                blkno: block_no,
+                            }
                         };
-                        sender.send((key, range.timeline_lsn)).await.ok().unwrap();
+                        sender.send(req).await.ok().unwrap();
                     }
                 })
             };
@@ -303,7 +316,7 @@ async fn client(
     args: &'static Args,
     timeline: TenantTimelineId,
     start_work_barrier: Arc<Barrier>,
-    mut work: tokio::sync::mpsc::Receiver<(RelTagBlockNo, Lsn)>,
+    mut work: tokio::sync::mpsc::Receiver<PagestreamGetPageRequest>,
     all_work_done_barrier: Arc<Barrier>,
     live_stats: Arc<LiveStats>,
 ) {
@@ -317,10 +330,10 @@ async fn client(
         .await
         .unwrap();
 
-    while let Some((key, lsn)) = work.recv().await {
+    while let Some(req) = work.recv().await {
         let start = Instant::now();
         client
-            .getpage(key, lsn)
+            .getpage(req)
             .await
             .with_context(|| format!("getpage for {timeline}"))
             .unwrap();
