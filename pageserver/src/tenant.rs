@@ -33,6 +33,7 @@ use tracing::*;
 use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::failpoint_support;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
@@ -890,7 +891,7 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
-        crate::failpoint_support::sleep_millis_async!("before-attaching-tenant");
+        failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
         let preload = match preload {
             Some(p) => p,
@@ -1002,7 +1003,7 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
+        failpoint_support::sleep_millis_async!("attach-before-activate");
 
         info!("Done");
 
@@ -2839,9 +2840,7 @@ impl Tenant {
             }
         };
 
-        crate::failpoint_support::sleep_millis_async!(
-            "gc_iteration_internal_after_getting_gc_timelines"
-        );
+        failpoint_support::sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
         // If there is nothing to GC, we don't want any messages in the INFO log.
         if !gc_timelines.is_empty() {

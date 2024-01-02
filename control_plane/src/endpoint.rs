@@ -46,6 +46,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use compute_api::spec::RemoteExtSpec;
+use nix::sys::signal::kill;
+use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -439,11 +441,14 @@ impl Endpoint {
         Ok(())
     }
 
-    fn wait_for_compute_ctl_to_exit(&self) -> Result<()> {
+    fn wait_for_compute_ctl_to_exit(&self, send_sigterm: bool) -> Result<()> {
         // TODO use background_process::stop_process instead
         let pidfile_path = self.endpoint_path().join("compute_ctl.pid");
         let pid: u32 = std::fs::read_to_string(pidfile_path)?.parse()?;
         let pid = nix::unistd::Pid::from_raw(pid as i32);
+        if send_sigterm {
+            kill(pid, Signal::SIGTERM).ok();
+        }
         crate::background_process::wait_until_stopped("compute_ctl", pid)?;
         Ok(())
     }
@@ -537,6 +542,7 @@ impl Endpoint {
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
             remote_extensions,
+            pgbouncer_settings: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -732,10 +738,15 @@ impl Endpoint {
             &None,
         )?;
 
-        // Also wait for the compute_ctl process to die. It might have some cleanup
-        // work to do after postgres stops, like syncing safekeepers, etc.
+        // Also wait for the compute_ctl process to die. It might have some
+        // cleanup work to do after postgres stops, like syncing safekeepers,
+        // etc.
         //
-        self.wait_for_compute_ctl_to_exit()?;
+        // If destroying, send it SIGTERM before waiting. Sometimes we do *not*
+        // want this cleanup: tests intentionally do stop when majority of
+        // safekeepers is down, so sync-safekeepers would hang otherwise. This
+        // could be a separate flag though.
+        self.wait_for_compute_ctl_to_exit(destroy)?;
         if destroy {
             println!(
                 "Destroying postgres data directory '{}'",

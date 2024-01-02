@@ -35,7 +35,8 @@
 
 #define PageStoreTrace DEBUG5
 
-#define RECONNECT_INTERVAL_USEC 1000000
+#define MIN_RECONNECT_INTERVAL_USEC 100
+#define MAX_RECONNECT_INTERVAL_USEC 1000000
 
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
@@ -133,11 +134,32 @@ pageserver_connect(int elevel)
 	const char *values[3];
 	int			n;
 
+	static TimestampTz last_connect_time = 0;
+	static uint64_t delay_us = MIN_RECONNECT_INTERVAL_USEC;
+	TimestampTz now;
+        uint64_t us_since_last_connect;
+
 	Assert(!connected);
 
 	if (CheckConnstringUpdated())
 	{
 		ReloadConnstring();
+	}
+
+	now = GetCurrentTimestamp();
+        us_since_last_connect = now - last_connect_time;
+	if (us_since_last_connect < delay_us)
+	{
+		pg_usleep(delay_us - us_since_last_connect);
+		delay_us *= 2;
+		if (delay_us > MAX_RECONNECT_INTERVAL_USEC)
+			delay_us = MAX_RECONNECT_INTERVAL_USEC;
+		last_connect_time = GetCurrentTimestamp();
+	}
+	else
+	{
+		delay_us = MIN_RECONNECT_INTERVAL_USEC;
+		last_connect_time = now;
 	}
 
 	/*
@@ -333,7 +355,6 @@ pageserver_send(NeonRequest *request)
 		{
 			HandleMainLoopInterrupts();
 			n_reconnect_attempts += 1;
-			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
 		n_reconnect_attempts = 0;
 	}

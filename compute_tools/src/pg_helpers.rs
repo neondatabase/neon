@@ -9,9 +9,11 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
-use tracing::{debug, instrument};
+use tokio_postgres::NoTls;
+use tracing::{debug, error, info, instrument};
 
 use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
@@ -356,6 +358,71 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
     let _ok = fs::remove_dir_all(pgdata);
     fs::create_dir(pgdata)?;
     fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
+
+    Ok(())
+}
+
+/// Update pgbouncer.ini with provided options
+pub fn update_pgbouncer_ini(
+    pgbouncer_config: HashMap<String, String>,
+    pgbouncer_ini_path: &str,
+) -> Result<()> {
+    let mut conf = Ini::load_from_file(pgbouncer_ini_path)?;
+    let section = conf.section_mut(Some("pgbouncer")).unwrap();
+
+    for (option_name, value) in pgbouncer_config.iter() {
+        section.insert(option_name, value);
+    }
+
+    conf.write_to_file(pgbouncer_ini_path)?;
+    Ok(())
+}
+
+/// Tune pgbouncer.
+/// 1. Apply new config using pgbouncer admin console
+/// 2. Add new values to pgbouncer.ini to preserve them after restart
+pub async fn tune_pgbouncer(
+    pgbouncer_settings: Option<HashMap<String, String>>,
+    pgbouncer_connstr: &str,
+    pgbouncer_ini_path: Option<String>,
+) -> Result<()> {
+    if let Some(pgbouncer_config) = pgbouncer_settings {
+        // Apply new config
+        let connect_result = tokio_postgres::connect(pgbouncer_connstr, NoTls).await;
+        let (client, connection) = connect_result.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+
+        for (option_name, value) in pgbouncer_config.iter() {
+            info!(
+                "Applying pgbouncer setting change: {} = {}",
+                option_name, value
+            );
+            let query = format!("SET {} = {}", option_name, value);
+
+            let result = client.simple_query(&query).await;
+
+            info!("Applying pgbouncer setting change: {}", query);
+            info!("pgbouncer setting change result: {:?}", result);
+
+            if let Err(err) = result {
+                // Don't fail on error, just print it into log
+                error!(
+                    "Failed to apply pgbouncer setting change: {},  {}",
+                    query, err
+                );
+            };
+        }
+
+        // save values to pgbouncer.ini
+        // so that they are preserved after pgbouncer restart
+        if let Some(pgbouncer_ini_path) = pgbouncer_ini_path {
+            update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+        }
+    }
 
     Ok(())
 }

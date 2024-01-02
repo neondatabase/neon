@@ -73,6 +73,8 @@ pub struct ComputeSpec {
 
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
+
+    pub pgbouncer_settings: Option<HashMap<String, String>>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.

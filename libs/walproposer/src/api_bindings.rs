@@ -8,12 +8,12 @@ use std::ffi::CString;
 
 use crate::bindings::uint32;
 use crate::bindings::walproposer_api;
+use crate::bindings::NeonWALReadResult;
 use crate::bindings::PGAsyncReadResult;
 use crate::bindings::PGAsyncWriteResult;
 use crate::bindings::Safekeeper;
 use crate::bindings::Size;
 use crate::bindings::StringInfoData;
-use crate::bindings::TimeLineID;
 use crate::bindings::TimestampTz;
 use crate::bindings::WalProposer;
 use crate::bindings::WalProposerConnStatusType;
@@ -178,31 +178,11 @@ extern "C" fn conn_blocking_write(
     }
 }
 
-extern "C" fn recovery_download(
-    sk: *mut Safekeeper,
-    _timeline: TimeLineID,
-    startpos: XLogRecPtr,
-    endpos: XLogRecPtr,
-) -> bool {
+extern "C" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bool {
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).recovery_download(&mut (*sk), startpos, endpos)
-    }
-}
-
-#[allow(clippy::unnecessary_cast)]
-extern "C" fn wal_read(
-    sk: *mut Safekeeper,
-    buf: *mut ::std::os::raw::c_char,
-    startptr: XLogRecPtr,
-    count: Size,
-) {
-    unsafe {
-        let buf = std::slice::from_raw_parts_mut(buf as *mut u8, count);
-        let callback_data = (*(*(*sk).wp).config).callback_data;
-        let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).wal_read(&mut (*sk), buf, startptr)
+        (*api).recovery_download(&mut (*wp), &mut (*sk))
     }
 }
 
@@ -214,11 +194,28 @@ extern "C" fn wal_reader_allocate(sk: *mut Safekeeper) {
     }
 }
 
-extern "C" fn free_event_set(wp: *mut WalProposer) {
+#[allow(clippy::unnecessary_cast)]
+extern "C" fn wal_read(
+    sk: *mut Safekeeper,
+    buf: *mut ::std::os::raw::c_char,
+    startptr: XLogRecPtr,
+    count: Size,
+    _errmsg: *mut *mut ::std::os::raw::c_char,
+) -> NeonWALReadResult {
     unsafe {
-        let callback_data = (*(*wp).config).callback_data;
+        let buf = std::slice::from_raw_parts_mut(buf as *mut u8, count);
+        let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).free_event_set(&mut (*wp));
+        // TODO: errmsg is not forwarded
+        (*api).wal_read(&mut (*sk), buf, startptr)
+    }
+}
+
+extern "C" fn wal_reader_events(sk: *mut Safekeeper) -> uint32 {
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).wal_reader_events(&mut (*sk))
     }
 }
 
@@ -238,11 +235,27 @@ extern "C" fn update_event_set(sk: *mut Safekeeper, events: uint32) {
     }
 }
 
+extern "C" fn active_state_update_event_set(sk: *mut Safekeeper) {
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).active_state_update_event_set(&mut (*sk));
+    }
+}
+
 extern "C" fn add_safekeeper_event_set(sk: *mut Safekeeper, events: uint32) {
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         (*api).add_safekeeper_event_set(&mut (*sk), events);
+    }
+}
+
+extern "C" fn rm_safekeeper_event_set(sk: *mut Safekeeper) {
+    unsafe {
+        let callback_data = (*(*(*sk).wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).rm_safekeeper_event_set(&mut (*sk));
     }
 }
 
@@ -313,14 +326,6 @@ extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, commit_lsn: XLog
     }
 }
 
-extern "C" fn confirm_wal_streamed(wp: *mut WalProposer, lsn: XLogRecPtr) {
-    unsafe {
-        let callback_data = (*(*wp).config).callback_data;
-        let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).confirm_wal_streamed(&mut (*wp), lsn)
-    }
-}
-
 extern "C" fn log_internal(
     wp: *mut WalProposer,
     level: ::std::os::raw::c_int,
@@ -332,14 +337,6 @@ extern "C" fn log_internal(
         let line = CStr::from_ptr(line);
         let line = line.to_str().unwrap();
         (*api).log_internal(&mut (*wp), Level::from(level as u32), line)
-    }
-}
-
-extern "C" fn after_election(wp: *mut WalProposer) {
-    unsafe {
-        let callback_data = (*(*wp).config).callback_data;
-        let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).after_election(&mut (*wp))
     }
 }
 
@@ -401,20 +398,20 @@ pub(crate) fn create_api() -> walproposer_api {
         conn_async_write: Some(conn_async_write),
         conn_blocking_write: Some(conn_blocking_write),
         recovery_download: Some(recovery_download),
-        wal_read: Some(wal_read),
         wal_reader_allocate: Some(wal_reader_allocate),
-        free_event_set: Some(free_event_set),
+        wal_read: Some(wal_read),
+        wal_reader_events: Some(wal_reader_events),
         init_event_set: Some(init_event_set),
         update_event_set: Some(update_event_set),
+        active_state_update_event_set: Some(active_state_update_event_set),
         add_safekeeper_event_set: Some(add_safekeeper_event_set),
+        rm_safekeeper_event_set: Some(rm_safekeeper_event_set),
         wait_event_set: Some(wait_event_set),
         strong_random: Some(strong_random),
         get_redo_start_lsn: Some(get_redo_start_lsn),
         finish_sync_safekeepers: Some(finish_sync_safekeepers),
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
-        confirm_wal_streamed: Some(confirm_wal_streamed),
         log_internal: Some(log_internal),
-        after_election: Some(after_election),
     }
 }
 

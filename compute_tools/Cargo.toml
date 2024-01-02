@@ -13,6 +13,7 @@ clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
+nix.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
 opentelemetry.workspace = true
@@ -20,6 +21,7 @@ postgres.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 tar.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
@@ -39,3 +41,4 @@ remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
 vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }
 zstd = "0.13"
 bytes = "1.0"
+rust-ini = "0.20.0"
