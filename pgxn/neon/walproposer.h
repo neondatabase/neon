@@ -707,11 +707,23 @@ extern Safekeeper *GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn);
 #define WPEVENT		1337		/* special log level for walproposer internal
 								 * events */
 
+#define WP_LOG_PREFIX "[WP] "
+
+/*
+ * wp_log is used in pure wp code (walproposer.c), allowing API callback to
+ * catch logging.
+ */
 #ifdef WALPROPOSER_LIB
 extern void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...);
-#define walprop_log(elevel, ...) WalProposerLibLog(wp, elevel, __VA_ARGS__)
+#define wp_log(elevel, fmt, ...) WalProposerLibLog(wp, elevel, fmt, ## __VA_ARGS__)
 #else
-#define walprop_log(elevel, ...) elog(elevel, __VA_ARGS__)
+#define wp_log(elevel, fmt, ...) elog(elevel, WP_LOG_PREFIX fmt, ## __VA_ARGS__)
 #endif
+
+/*
+ * And wpg_log is used all other (postgres specific) walproposer code, just
+ * adding prefix.
+ */
+#define wpg_log(elevel, fmt, ...) elog(elevel, WP_LOG_PREFIX fmt, ## __VA_ARGS__)
 
 #endif							/* __NEON_WALPROPOSER_H__ */
