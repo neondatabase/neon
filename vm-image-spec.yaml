@@ -166,17 +166,18 @@ build: |
   RUN set -e \
       && apt-get update \
       && apt-get install -y \
-          curl \
           build-essential \
-          pkg-config \
-          libevent-dev
+          git \
+          libevent-dev \
+          libtool \
+          pkg-config
 
-  ENV PGBOUNCER_VERSION 1.21.0
-  ENV PGBOUNCER_GITPATH 1_21_0
+  # Note, we use pgbouncer from neondatabase/pgbouncer fork, which could contain extra commits
+  ENV PGBOUNCER_TAG pgbouncer_1_21_0-neon-1
   RUN set -e \
-      && curl -sfSL https://github.com/pgbouncer/pgbouncer/releases/download/pgbouncer_${PGBOUNCER_GITPATH}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz -o pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
-      && tar xzvf pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
-      && cd pgbouncer-${PGBOUNCER_VERSION} \
+      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/neondatabase/pgbouncer.git pgbouncer \
+      && cd pgbouncer \
+      && ./autogen.sh \
       && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
       && make -j $(nproc) \
       && make install
