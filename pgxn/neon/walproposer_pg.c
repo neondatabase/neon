@@ -1237,19 +1237,6 @@ WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 		return true;			/* recovery not needed */
 	endpos = wp->propEpochStartLsn;
 
-	/*
-	 * If we need to download more than a max_slot_wal_keep_size, cap to it to
-	 * avoid risk of exploding pg_wal. Logical replication won't work until
-	 * recreated, but at least compute would start; this also follows
-	 * max_slot_wal_keep_size semantics.
-	 */
-	download_range_mb = (endpos - startpos) / 1024 / 1024;
-	if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
-	{
-		startpos = endpos - max_slot_wal_keep_size_mb * 1024 * 1024;
-		wpg_log(WARNING, "capped WAL download for logical replication to %X/%X as max_slot_wal_keep_size=%dMB",
-				LSN_FORMAT_ARGS(startpos), max_slot_wal_keep_size_mb);
-	}
 	timeline = wp->greetRequest.timeline;
 
 	if (!neon_auth_token)
