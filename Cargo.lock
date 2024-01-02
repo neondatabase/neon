@@ -271,6 +271,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "attachment_service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "clap",
+ "control_plane",
+ "futures",
+ "hyper",
+ "pageserver_api",
+ "pageserver_client",
+ "postgres_connection",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

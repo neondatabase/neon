@@ -17,7 +17,9 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
-use pageserver_api::models::{self, LocationConfig, ShardParameters, TenantInfo, TimelineInfo};
+use pageserver_api::models::{
+    self, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo, TimelineInfo,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -106,6 +108,16 @@ impl PageServerNode {
                 "control_plane_api='{}'",
                 control_plane_api.as_str()
             ));
+
+            // Attachment service uses the same auth as pageserver: if JWT is enabled
+            // for us, we will also need it to talk to them.
+            if matches!(self.conf.http_auth_type, AuthType::NeonJWT) {
+                let jwt_token = self
+                    .env
+                    .generate_auth_token(&Claims::new(None, Scope::PageServerApi))
+                    .unwrap();
+                overrides.push(format!("control_plane_api_token='{}'", jwt_token));
+            }
         }
 
         if !cli_overrides
@@ -301,16 +313,8 @@ impl PageServerNode {
     pub async fn tenant_list(&self) -> mgmt_api::Result<Vec<TenantInfo>> {
         self.http_client.list_tenants().await
     }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
+    pub fn parse_config(mut settings: HashMap<&str, &str>) -> anyhow::Result<models::TenantConfig> {
+        let result = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -371,6 +375,20 @@ impl PageServerNode {
                 .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
         };
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        } else {
+            Ok(result)
+        }
+    }
+
+    pub async fn tenant_create(
+        &self,
+        new_tenant_id: TenantId,
+        generation: Option<u32>,
+        settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<TenantId> {
+        let config = Self::parse_config(settings.clone())?;
 
         let request = models::TenantCreateRequest {
             new_tenant_id: TenantShardId::unsharded(new_tenant_id),
@@ -498,15 +516,13 @@ impl PageServerNode {
 
     pub async fn timeline_create(
         &self,
-        tenant_id: TenantId,
-        new_timeline_id: Option<TimelineId>,
+        tenant_shard_id: TenantShardId,
+        new_timeline_id: TimelineId,
         ancestor_start_lsn: Option<Lsn>,
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
         existing_initdb_timeline_id: Option<TimelineId>,
     ) -> anyhow::Result<TimelineInfo> {
-        // If timeline ID was not specified, generate one
-        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
         let req = models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
@@ -514,7 +530,10 @@ impl PageServerNode {
             pg_version,
             existing_initdb_timeline_id,
         };
-        Ok(self.http_client.timeline_create(tenant_id, &req).await?)
+        Ok(self
+            .http_client
+            .timeline_create(tenant_shard_id, &req)
+            .await?)
     }
 
     /// Import a basebackup prepared using either:
@@ -591,5 +610,15 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+
+    pub async fn tenant_synthetic_size(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> anyhow::Result<TenantHistorySize> {
+        Ok(self
+            .http_client
+            .tenant_synthetic_size(tenant_shard_id)
+            .await?)
     }
 }
