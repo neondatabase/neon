@@ -133,6 +133,13 @@ impl IntentState {
         result
     }
 
+    pub(crate) fn single(node_id: Option<NodeId>) -> Self {
+        Self {
+            attached: node_id,
+            secondary: vec![],
+        }
+    }
+
     /// When a node goes offline, we update intents to avoid using it
     /// as their attached pageserver.
     ///

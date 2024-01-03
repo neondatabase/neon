@@ -2,7 +2,7 @@ use crate::reconciler::ReconcileError;
 use crate::service::Service;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response};
-use pageserver_api::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver_api::models::{TenantCreateRequest, TenantShardSplitRequest, TimelineCreateRequest};
 use pageserver_api::shard::TenantShardId;
 use std::sync::Arc;
 use utils::http::endpoint::request_span;
@@ -129,6 +129,20 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, state.service.node_configure(config_req)?)
 }
 
+async fn handle_tenant_shard_split(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let split_req = json_request::<TenantShardSplitRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .tenant_shard_split(tenant_id, split_req)
+            .await?,
+    )
+}
+
 async fn handle_tenant_shard_migrate(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     let migrate_req = json_request::<TenantShardMigrateRequest>(&mut req).await?;
@@ -171,6 +185,9 @@ pub fn make_router(service: Arc<Service>) -> RouterBuilder<hyper::Body, ApiError
         })
         .get("/tenant/:tenant_id/locate", |r| {
             request_span(r, handle_tenant_locate)
+        })
+        .put("/tenant/:tenant_id/shard_split", |r| {
+            request_span(r, handle_tenant_shard_split)
         })
         .put("/tenant/:tenant_shard_id/migrate", |r| {
             request_span(r, handle_tenant_shard_migrate)

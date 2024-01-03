@@ -3,7 +3,10 @@ use anyhow::anyhow;
 use camino::Utf8PathBuf;
 use hyper::{Method, StatusCode};
 use pageserver_api::{
-    models::{ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo},
+    models::{
+        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        TimelineCreateRequest, TimelineInfo,
+    },
     shard::TenantShardId,
 };
 use postgres_connection::parse_host_port;
@@ -340,6 +343,20 @@ impl AttachmentService {
                 tenant_shard_id,
                 node_id,
             }),
+        )
+        .await
+    }
+
+    #[instrument(skip(self), fields(%tenant_id, %new_shard_count))]
+    pub async fn tenant_split(
+        &self,
+        tenant_id: TenantId,
+        new_shard_count: u8,
+    ) -> anyhow::Result<TenantShardSplitResponse> {
+        self.dispatch(
+            Method::PUT,
+            format!("tenant/{tenant_id}/shard_split"),
+            Some(TenantShardSplitRequest { new_shard_count }),
         )
         .await
     }

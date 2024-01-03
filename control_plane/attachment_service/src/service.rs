@@ -16,7 +16,10 @@ use pageserver_api::{
         ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
         ValidateResponse, ValidateResponseTenant,
     },
-    models::{ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo},
+    models::{
+        ShardParameters, TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
+        TimelineCreateRequest, TimelineInfo,
+    },
     shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId},
 };
 use reqwest::Client;
@@ -29,8 +32,12 @@ use utils::{
 use crate::{
     compute_hook::ComputeHook,
     node::Node,
+    reconciler::attached_location_conf,
     scheduler::Scheduler,
-    tenant_state::{ReconcileResult, ReconcilerWaiter, TenantState},
+    tenant_state::{
+        IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcilerWaiter,
+        TenantState,
+    },
     PlacementPolicy,
 };
 
@@ -522,6 +529,167 @@ impl Service {
             shards: result,
             shard_params,
         })
+    }
+
+    pub(crate) async fn tenant_shard_split(
+        &self,
+        tenant_id: TenantId,
+        split_req: TenantShardSplitRequest,
+    ) -> Result<TenantShardSplitResponse, ApiError> {
+        let mut policy = None;
+        let (targets, compute_hook) = {
+            let mut locked = self.inner.write().unwrap();
+
+            let pageservers = locked.nodes.clone();
+
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in locked
+                .tenants
+                .range_mut(TenantShardId::tenant_range(tenant_id))
+            {
+                if policy.is_none() {
+                    policy = Some(shard.policy.clone());
+                }
+
+                if tenant_shard_id.shard_count == ShardCount(split_req.new_shard_count) {
+                    tracing::warn!(
+                        "Tenant shard {} already has shard count {}",
+                        tenant_shard_id,
+                        split_req.new_shard_count
+                    );
+                    continue;
+                }
+
+                let node_id =
+                    shard
+                        .intent
+                        .attached
+                        .ok_or(ApiError::BadRequest(anyhow::anyhow!(
+                            "Cannot split a tenant that is not attached"
+                        )))?;
+
+                let node = pageservers
+                    .get(&node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                // TODO: if any reconciliation is currently in progress for this shard, wait for it.
+
+                targets.push((*tenant_shard_id, node.clone()));
+            }
+            (targets, locked.compute_hook.clone())
+        };
+
+        let mut replacements = HashMap::new();
+        for (tenant_shard_id, node) in targets {
+            let client = Client::new();
+            let response = client
+                .request(
+                    Method::PUT,
+                    format!("{}/tenant/{}/shard_split", node.base_url(), tenant_shard_id),
+                )
+                .json(&TenantShardSplitRequest {
+                    new_shard_count: split_req.new_shard_count,
+                })
+                .send()
+                .await
+                .map_err(|e| {
+                    ApiError::Conflict(format!("Failed to split {}: {}", tenant_shard_id, e))
+                })?;
+            response.error_for_status_ref().map_err(|e| {
+                ApiError::Conflict(format!("Failed to split {}: {}", tenant_shard_id, e))
+            })?;
+            let response: TenantShardSplitResponse = response.json().await.map_err(|e| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "Malformed response from pageserver: {}",
+                    e
+                ))
+            })?;
+
+            tracing::info!(
+                "Split {} into {}",
+                tenant_shard_id,
+                response
+                    .new_shards
+                    .iter()
+                    .map(|s| format!("{:?}", s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+
+            replacements.insert(tenant_shard_id, response.new_shards);
+        }
+
+        // TODO: concurrency: we're dropping the state lock while issuing split API calls.
+        //       We should add some marker to the TenantState that causes any other change
+        //       to refuse until the split is complete.  This will be related to a persistent
+        //       splitting marker that will ensure resume after crash.
+
+        // Replace all the shards we just split with their children
+        let mut response = TenantShardSplitResponse {
+            new_shards: Vec::new(),
+        };
+        let mut child_locations = Vec::new();
+        {
+            let mut locked = self.inner.write().unwrap();
+            for (replaced, children) in replacements.into_iter() {
+                let (pageserver, generation, shard_ident, config) = {
+                    let old_state = locked
+                        .tenants
+                        .remove(&replaced)
+                        .expect("It was present, we just split it");
+                    (
+                        old_state.intent.attached.unwrap(),
+                        old_state.generation,
+                        old_state.shard,
+                        old_state.config.clone(),
+                    )
+                };
+
+                locked.tenants.remove(&replaced);
+
+                for child in children {
+                    let mut child_shard = shard_ident;
+                    child_shard.number = child.shard_number;
+                    child_shard.count = child.shard_count;
+
+                    let mut child_observed: HashMap<NodeId, ObservedStateLocation> = HashMap::new();
+                    child_observed.insert(
+                        pageserver,
+                        ObservedStateLocation {
+                            conf: Some(attached_location_conf(generation, &child_shard, &config)),
+                        },
+                    );
+
+                    let mut child_state = TenantState::new(
+                        child,
+                        child_shard,
+                        policy
+                            .clone()
+                            .expect("We set this if any replacements are pushed"),
+                    );
+                    child_state.intent = IntentState::single(Some(pageserver));
+                    child_state.observed = ObservedState {
+                        locations: child_observed,
+                    };
+                    child_state.generation = generation;
+                    child_state.config = config.clone();
+
+                    child_locations.push((child, pageserver));
+
+                    locked.tenants.insert(child, child_state);
+                    response.new_shards.push(child);
+                }
+            }
+        }
+
+        for (child_id, child_ps) in child_locations {
+            if let Err(e) = compute_hook.notify(child_id, child_ps).await {
+                tracing::warn!("Failed to update compute of {}->{} during split, proceeding anyway to complete split ({e})",
+                        child_id, child_ps);
+            }
+        }
+        Ok(response)
     }
 
     pub(crate) async fn tenant_shard_migrate(
