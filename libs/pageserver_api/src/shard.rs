@@ -88,6 +88,10 @@ impl TenantShardId {
     pub fn is_unsharded(&self) -> bool {
         self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
     }
+
+    /// Convenience for dropping the tenant_id and just getting the ShardIndex: this
+    /// is useful when logging from code that is already in a span that includes tenant ID, to
+    /// keep messages reasonably terse.
     pub fn to_index(&self) -> ShardIndex {
         ShardIndex {
             shard_number: self.shard_number,
