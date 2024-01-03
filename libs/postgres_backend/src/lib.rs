@@ -35,6 +35,9 @@ pub enum QueryError {
     /// We were instructed to shutdown while processing the query
     #[error("Shutting down")]
     Shutdown,
+    /// Query handler indicated that client should reconnect
+    #[error("Server requested reconnect")]
+    Reconnect,
     /// Authentication failure
     #[error("Unauthorized: {0}")]
     Unauthorized(std::borrow::Cow<'static, str>),
@@ -54,7 +57,7 @@ impl From<io::Error> for QueryError {
 impl QueryError {
     pub fn pg_error_code(&self) -> &'static [u8; 5] {
         match self {
-            Self::Disconnected(_) | Self::SimulatedConnectionError => b"08006", // connection failure
+            Self::Disconnected(_) | Self::SimulatedConnectionError | Self::Reconnect => b"08006", // connection failure
             Self::Shutdown => SQLSTATE_ADMIN_SHUTDOWN,
             Self::Unauthorized(_) => SQLSTATE_INTERNAL_ERROR,
             Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
@@ -423,6 +426,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             Ok(()) => Ok(()),
             Err(QueryError::Shutdown) => {
                 info!("Stopped due to shutdown");
+                Ok(())
+            }
+            Err(QueryError::Reconnect) => {
+                // Dropping out of this loop implicitly disconnects
+                info!("Stopped due to handler reconnect request");
                 Ok(())
             }
             Err(QueryError::Disconnected(e)) => {
@@ -974,6 +982,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'a, I
 pub fn short_error(e: &QueryError) -> String {
     match e {
         QueryError::Disconnected(connection_error) => connection_error.to_string(),
+        QueryError::Reconnect => "reconnect".to_string(),
         QueryError::Shutdown => "shutdown".to_string(),
         QueryError::Unauthorized(_e) => "JWT authentication error".to_string(),
         QueryError::SimulatedConnectionError => "simulated connection error".to_string(),
@@ -995,6 +1004,9 @@ fn log_query_error(query: &str, e: &QueryError) {
         }
         QueryError::SimulatedConnectionError => {
             error!("query handler for query '{query}' failed due to a simulated connection error")
+        }
+        QueryError::Reconnect => {
+            info!("query handler for '{query}' requested client to reconnect")
         }
         QueryError::Shutdown => {
             info!("query handler for '{query}' cancelled during tenant shutdown")
