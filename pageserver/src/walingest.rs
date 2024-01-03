@@ -62,6 +62,8 @@ enum IngestRecordOutcome {
     Noop,
     /// Pageserver does not know this record type.
     UnknownRecordType,
+    /// Is it the same as UnknownRecordType? Heikki introduced this.
+    UnexpectedRecordType,
 }
 
 impl<'a> WalIngest<'a> {
@@ -155,13 +157,15 @@ impl<'a> WalIngest<'a> {
                     } else if info == postgres_ffi::v14::bindings::XLOG_DBASE_DROP {
                         let dropdb = XlDropDatabase::decode(&mut buf);
                         // HEIKKI: I think 0 tablespaces cannot happen.
+                        let mut outcome = IngestRecordOutcome::Noop;
                         for tablespace_id in dropdb.tablespace_ids {
                             trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
                             modification
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
-                            IngestRecordOutcome::Stored
+                            outcome = IngestRecordOutcome::Stored;
                         }
+                        outcome
                     } else {
                         IngestRecordOutcome::UnknownRecordType
                     }
@@ -180,8 +184,8 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::Stored
                     } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_DROP {
                         let dropdb = XlDropDatabase::decode(&mut buf);
-                        let mut outcome = IngestRecordOutcome::Noop;
                         // HEIKKI: I think 0 tablespaces cannot happen.
+                        let mut outcome = IngestRecordOutcome::Noop;
                         for tablespace_id in dropdb.tablespace_ids {
                             trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
                             modification
@@ -217,9 +221,12 @@ impl<'a> WalIngest<'a> {
                                 .await?;
                             outcome = IngestRecordOutcome::Stored;
                         }
+                        outcome
                     } else {
                         IngestRecordOutcome::UnknownRecordType
                     }
+                } else {
+                    IngestRecordOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_TBLSPC_ID => {
@@ -298,6 +305,8 @@ impl<'a> WalIngest<'a> {
                     IngestRecordOutcome::Noop
                 } else if info == pg_constants::XLOG_XACT_INVALIDATIONS {
                     IngestRecordOutcome::Noop
+                } else {
+                    IngestRecordOutcome::UnexpectedRecordType
                 }
             }
             pg_constants::RM_MULTIXACT_ID => {
@@ -409,6 +418,7 @@ impl<'a> WalIngest<'a> {
                     // HEIKKI: I suspect we're not handling these correctly.
                     // See https://github.com/neondatabase/neon/issues/934
                     // Given that, not sure what the right outcome is.
+                    todo!()
                 } else {
                     IngestRecordOutcome::UnexpectedRecordType
                 }
@@ -432,6 +442,8 @@ impl<'a> WalIngest<'a> {
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
                         IngestRecordOutcome::Stored
+                    } else {
+                        IngestRecordOutcome::Noop
                     }
                 } else {
                     IngestRecordOutcome::UnexpectedRecordType
@@ -469,7 +481,7 @@ impl<'a> WalIngest<'a> {
                 // TODO: https://github.com/neondatabase/neon/issues/5962
                 // => assert that indeed last_record_lsn is this record's LSN
             }
-            IngestRecordOutcome::UnknownRecordType => {
+            IngestRecordOutcome::UnknownRecordType | IngestRecordOutcome::UnexpectedRecordType => {
                 // TODO: should probably log & fail here instead of blindly
                 // doing something without understanding the protocol.
                 // No issue exists for this yet.
