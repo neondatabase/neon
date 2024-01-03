@@ -12,6 +12,7 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -216,11 +217,19 @@ impl PageServerNode {
         if update_config {
             args.push(Cow::Borrowed("--update-config"));
         }
+
+        let mut taskset_args = vec![
+            "-c".to_string(),
+            format!("{}", self.conf.id.0 - 1),
+            self.env.pageserver_bin().to_string_lossy().into(),
+        ];
+        taskset_args.extend(args.into_iter().map(|a| a.to_string()));
+
         background_process::start_process(
             "pageserver",
             &datadir,
-            &self.env.pageserver_bin(),
-            args.iter().map(Cow::as_ref),
+            &PathBuf::from_str("/usr/bin/taskset").unwrap(),
+            taskset_args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             || async {
