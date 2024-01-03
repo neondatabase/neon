@@ -184,6 +184,13 @@ impl IntentState {
         result
     }
 
+    pub(crate) fn single(node_id: Option<NodeId>) -> Self {
+        Self {
+            attached: node_id,
+            secondary: vec![],
+        }
+    }
+
     /// When a node goes offline, we update intents to avoid using it
     /// as their attached pageserver.
     ///
@@ -275,6 +282,9 @@ impl TenantState {
         // TODO: before scheduling new nodes, check if any existing content in
         // self.intent refers to pageservers that are offline, and pick other
         // pageservers if so.
+
+        // TODO: respect the splitting bit on tenants: if they are currently splitting then we may not
+        // change their attach location.
 
         // Build the set of pageservers already in use by this tenant, to avoid scheduling
         // more work on the same pageservers we're already using.

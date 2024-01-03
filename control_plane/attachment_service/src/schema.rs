@@ -20,6 +20,7 @@ diesel::table! {
         generation -> Int4,
         generation_pageserver -> Int8,
         placement_policy -> Varchar,
+        splitting -> Int4,
         config -> Text,
     }
 }
