@@ -559,7 +559,10 @@ pub async fn copy_s3_segments(
         .filter_map(|file| file.object_name().map(ToOwned::to_owned))
         .collect::<HashSet<_>>();
 
-    debug!("these segments have already been uploaded: {:?}", uploaded_segments);
+    debug!(
+        "these segments have already been uploaded: {:?}",
+        uploaded_segments
+    );
 
     let relative_src_path =
         Utf8Path::new(&src_ttid.tenant_id.to_string()).join(src_ttid.timeline_id.to_string());
@@ -581,6 +584,9 @@ pub async fn copy_s3_segments(
         storage.copy_object(&from, &to).await?;
     }
 
-    info!("finished copying segments from {} until {}", from_segment, to_segment);
+    info!(
+        "finished copying segments from {} until {}",
+        from_segment, to_segment
+    );
     Ok(())
 }

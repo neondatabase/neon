@@ -14,6 +14,7 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use utils::failpoint_support::failpoints_handler;
+use utils::http::request::parse_query_param;
 
 use std::io::Write as _;
 use tokio::sync::mpsc;
@@ -228,14 +229,25 @@ async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Bo
     json_response(StatusCode::OK, ())
 }
 
-async fn timeline_digest_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let request: TimelineDigestRequest = json_request(&mut request).await?;
+    let from_lsn: Option<Lsn> = parse_query_param(&request, "from_lsn")?;
+    let until_lsn: Option<Lsn> = parse_query_param(&request, "until_lsn")?;
+
+    let request = TimelineDigestRequest {
+        from_lsn: from_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "from_lsn is required"
+        )))?,
+        until_lsn: until_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "until_lsn is required"
+        )))?,
+    };
+
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
 
     let response = debug_dump::calculate_digest(&tli, request)
@@ -521,7 +533,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             request_span(r, record_safekeeper_info)
         })
         .get("/v1/debug_dump", |r| request_span(r, dump_debug_handler))
-        .post("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
             request_span(r, timeline_digest_handler)
         })
 }

@@ -24,7 +24,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use bytes::Bytes;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::Semaphore};
+use tokio::sync::Semaphore;
 use toml_edit::Item;
 use tracing::info;
 
