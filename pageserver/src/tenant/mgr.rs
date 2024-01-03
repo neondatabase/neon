@@ -2,6 +2,7 @@
 //! page server.
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
+use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
-use utils::crashsafe;
+use utils::{completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -619,8 +620,6 @@ pub(crate) async fn shutdown_all_tenants() {
 }
 
 async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
-    use utils::completion;
-
     let mut join_set = JoinSet::new();
 
     // Atomically, 1. create the shutdown tasks and 2. prevent creation of new tenants.
@@ -1179,6 +1178,163 @@ impl TenantManager {
         // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
         slot_guard.revert();
         result
+    }
+
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), new_shard_count=%new_shard_count.0))]
+    pub(crate) async fn shard_split(
+        &self,
+        tenant_shard_id: TenantShardId,
+        new_shard_count: ShardCount,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<TenantShardId>> {
+        let tenant = get_tenant(tenant_shard_id, true)?;
+
+        // Plan: identify what the new child shards will be
+        let effective_old_shard_count = std::cmp::max(tenant_shard_id.shard_count.0, 1);
+        if new_shard_count <= ShardCount(effective_old_shard_count) {
+            anyhow::bail!("Requested shard count is not an increase");
+        }
+        let expansion_factor = new_shard_count.0 / effective_old_shard_count;
+        if expansion_factor & (expansion_factor - 1) != 0 {
+            anyhow::bail!("Requested split is not a power of two");
+        }
+
+        // Key mapping is based on a round robin mapping of key hash modulo shard count,
+        // so our child shards are the ones which the same keys would map to.
+        let mut child_shards = Vec::new();
+        for shard_number in 0..ShardNumber(new_shard_count.0).0 {
+            if shard_number % effective_old_shard_count == tenant_shard_id.shard_number.0 {
+                child_shards.push(TenantShardId {
+                    tenant_id: tenant_shard_id.tenant_id,
+                    shard_number: ShardNumber(shard_number),
+                    shard_count: new_shard_count,
+                })
+            }
+        }
+
+        let parent_shard_identity = tenant.shard_identity;
+        let parent_tenant_conf = tenant.get_tenant_conf();
+        let parent_generation = tenant.generation;
+
+        // TODO: write a unit test for this
+        tracing::info!(
+            "Shard {} splits into: {}",
+            tenant_shard_id.to_index(),
+            child_shards
+                .iter()
+                .map(|id| format!("{}", id.to_index()))
+                .join(",")
+        );
+
+        // Phase 1: Write out child shards' remote index files, in the parent tenant's current generation
+        tenant.split_prepare(&child_shards).await?;
+
+        self.resources.deletion_queue_client.flush_advisory();
+
+        // Phase 2: Put the parent shard to InProgress and grab a reference to the parent Tenant
+        drop(tenant);
+        let mut parent_slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let parent = match parent_slot_guard.get_old_value() {
+            Some(TenantSlot::Attached(t)) => t,
+            Some(TenantSlot::Secondary) => anyhow::bail!("Tenant location in secondary mode"),
+            Some(TenantSlot::InProgress(_)) => {
+                unreachable!()
+            }
+            None => {
+                // We don't actually need the parent shard to still be attached to do our work, but it's
+                // a weird enough situation that the caller probably didn't want us to continue working
+                // if they had detached the tenant they requested the split on.
+                anyhow::bail!("Detached parent shard in the middle of split!")
+            }
+        };
+
+        // TODO: hardlink layers from the parent into the child shard directories so that they don't immediately re-download
+        // TODO: erase the dentries from the parent
+
+        // Take a snapshot of where the parent's WAL ingest had got to: we will wait for
+        // child shards to reach this point.
+        let mut target_lsns = HashMap::new();
+        for timeline in parent.timelines.lock().unwrap().clone().values() {
+            target_lsns.insert(timeline.timeline_id, timeline.get_last_record_lsn());
+        }
+
+        // TODO: we should have the parent shard stop its WAL ingest here, it's a waste of resources
+        // and could slow down the children trying to catch up.
+
+        // Phase 3: Spawn the child shards
+        for child_shard in &child_shards {
+            let mut child_shard_identity = parent_shard_identity;
+            child_shard_identity.count = child_shard.shard_count;
+            child_shard_identity.number = child_shard.shard_number;
+
+            let child_location_conf = LocationConf {
+                mode: LocationMode::Attached(AttachedLocationConfig {
+                    generation: parent_generation,
+                    attach_mode: AttachmentMode::Single,
+                }),
+                shard: child_shard_identity,
+                tenant_conf: parent_tenant_conf,
+            };
+
+            self.upsert_location(*child_shard, child_location_conf, None, ctx)
+                .await?;
+        }
+
+        // Phase 4: wait for child chards WAL ingest to catch up to target LSN
+        for child_shard_id in &child_shards {
+            let child_shard = {
+                let locked = TENANTS.read().unwrap();
+                let peek_slot =
+                    tenant_map_peek_slot(&locked, child_shard_id, TenantSlotPeekMode::Read)?;
+                peek_slot.and_then(|s| s.get_attached()).cloned()
+            };
+            if let Some(t) = child_shard {
+                let timelines = t.timelines.lock().unwrap().clone();
+                for timeline in timelines.values() {
+                    let Some(target_lsn) = target_lsns.get(&timeline.timeline_id) else {
+                        continue;
+                    };
+
+                    tracing::info!(
+                        "Waiting for child shard {}/{} to reach target lsn {}...",
+                        child_shard_id,
+                        timeline.timeline_id,
+                        target_lsn
+                    );
+                    if let Err(e) = timeline.wait_lsn(*target_lsn, ctx).await {
+                        // Failure here might mean shutdown, in any case this part is an optimization
+                        // and we shouldn't hold up the split operation.
+                        tracing::warn!(
+                            "Failed to wait for timeline {} to reach lsn {target_lsn}: {e}",
+                            timeline.timeline_id
+                        );
+                    } else {
+                        tracing::info!(
+                            "Child shard {}/{} reached target lsn {}",
+                            child_shard_id,
+                            timeline.timeline_id,
+                            target_lsn
+                        );
+                    }
+                }
+            }
+        }
+
+        // Phase 5: Shut down the parent shard.
+        let (_guard, progress) = completion::channel();
+        match parent.shutdown(progress, false).await {
+            Ok(()) => {}
+            Err(other) => {
+                other.wait().await;
+            }
+        }
+        parent_slot_guard.drop_old_value()?;
+
+        // Phase 6: Release the InProgress on the parent shard
+        drop(parent_slot_guard);
+
+        Ok(child_shards)
     }
 }
 
@@ -2033,8 +2189,6 @@ async fn remove_tenant_from_memory<V, F>(
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
-    use utils::completion;
-
     let mut slot_guard =
         tenant_map_acquire_slot_impl(&tenant_shard_id, tenants, TenantSlotAcquireMode::MustExist)?;
 
