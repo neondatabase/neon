@@ -186,9 +186,7 @@ def test_backward_compatibility(
         else:
             raise
 
-    assert (
-        not breaking_changes_allowed
-    ), "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -247,9 +245,7 @@ def test_forward_compatibility(
         else:
             raise
 
-    assert (
-        not breaking_changes_allowed
-    ), "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
+    assert not breaking_changes_allowed, "Breaking changes are allowed by ALLOW_FORWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
