@@ -925,6 +925,9 @@ impl PageServerHandler {
                     // mapping is out of date.
                     tracing::info!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
                         timeline.get_shard_identity(), timeline.get_shard_identity().get_shard_number(&key).0, key);
+                    // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                    // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                    // and talk to a different pageserver.
                     return Err(PageStreamError::Reconnect(
                         "getpage@lsn request routed to wrong shard".into(),
                     ));
