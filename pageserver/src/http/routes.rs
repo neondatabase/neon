@@ -19,11 +19,14 @@ use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
 use pageserver_api::models::TenantShardLocation;
+use pageserver_api::models::TenantShardSplitRequest;
+use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
 };
+use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -1082,6 +1085,25 @@ async fn tenant_size_handler(
     )
 }
 
+async fn tenant_shard_split_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let req: TenantShardSplitRequest = json_request(&mut request).await?;
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let state = get_state(&request);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    let new_shards = state
+        .tenant_manager
+        .shard_split(tenant_shard_id, ShardCount(req.new_shard_count), &ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, TenantShardSplitResponse { new_shards })
+}
+
 async fn layer_map_info_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1958,6 +1980,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/config", |r| {
             api_handler(r, update_tenant_config_handler)
+        })
+        .put("/v1/tenant/:tenant_shard_id/shard_split", |r| {
+            api_handler(r, tenant_shard_split_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/config", |r| {
             api_handler(r, get_tenant_config_handler)

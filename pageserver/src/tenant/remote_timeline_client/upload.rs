@@ -25,7 +25,7 @@ use super::index::LayerFileMetadata;
 use tracing::info;
 
 /// Serializes and uploads the given index part data to the remote storage.
-pub(super) async fn upload_index_part<'a>(
+pub(crate) async fn upload_index_part<'a>(
     storage: &'a GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
