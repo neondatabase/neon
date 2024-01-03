@@ -336,7 +336,7 @@ const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 pub struct ShardIdentity {
     pub number: ShardNumber,
     pub count: ShardCount,
-    stripe_size: ShardStripeSize,
+    pub stripe_size: ShardStripeSize,
     layout: ShardLayout,
 }
 
