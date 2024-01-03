@@ -61,6 +61,7 @@ use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
@@ -281,6 +282,44 @@ struct PageServerHandler {
     /// For each query received over the connection,
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum PageStreamError {
+    /// We encountered an error that should prompt the client to reconnect:
+    /// in practice this means we drop the connection without sending a response.
+    #[error("Reconnect required: {0}")]
+    Reconnect(String),
+
+    /// We were instructed to shutdown while processing the query
+    #[error("Shutting down")]
+    Shutdown,
+
+    /// Something went wrong reading a page: this likely indicates a pageserver bug
+    #[error("Read error: {0}")]
+    Read(PageReconstructError),
+
+    /// Any other error: this will be returned to client as a response
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<PageReconstructError> for PageStreamError {
+    fn from(value: PageReconstructError) -> Self {
+        match value {
+            PageReconstructError::Cancelled => Self::Shutdown,
+            e => Self::Read(e),
+        }
+    }
+}
+
+impl From<GetActiveTimelineError> for PageStreamError {
+    fn from(value: GetActiveTimelineError) -> Self {
+        match value {
+            GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => Self::Shutdown,
+            e => Self::Other(anyhow::anyhow!(e)),
+        }
+    }
 }
 
 impl PageServerHandler {
@@ -740,7 +779,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -760,7 +799,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -780,7 +819,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -807,7 +846,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -826,7 +865,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let key = rel_block_to_key(req.rel, req.blkno);
         if timeline.get_shard_identity().is_key_local(&key) {
             self.do_handle_get_page_at_lsn_request(timeline, req, ctx)
@@ -849,24 +888,21 @@ impl PageServerHandler {
                 Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
                     // We already know this tenant exists in general, because we resolved it at
                     // start of connection.  Getting a NotFound here indicates that the shard containing
-                    // the requested page is not present on this node.
-
-                    // TODO: this should be some kind of structured error that the client will understand,
-                    // so that it can block until its config is updated: this error is expected in the case
-                    // that the Tenant's shards' placements are being updated and the client hasn't been
-                    // informed yet.
-                    //
-                    // https://github.com/neondatabase/neon/issues/6038
-                    tracing::warn!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
+                    // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                    // mapping is out of date.
+                    tracing::info!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
                         timeline.get_shard_identity(), timeline.get_shard_identity().get_shard_number(&key).0, key);
-                    return Err(anyhow::anyhow!("Request routed to wrong shard"));
+                    return Err(anyhow::anyhow!("Request routed to wrong shard").into());
                 }
                 Err(e) => return Err(e.into()),
             };
 
             // Take a GateGuard for the duration of this request.  If we were using our main Timeline object,
             // the GateGuard was already held over the whole connection.
-            let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown)?;
+            let _timeline_guard = timeline
+                .gate
+                .enter()
+                .map_err(|_| PageStreamError::Shutdown)?;
 
             self.do_handle_get_page_at_lsn_request(&timeline, req, ctx)
                 .await
