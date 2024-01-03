@@ -25,9 +25,10 @@ use crate::{
 
 use super::{
     heatmap::HeatMapLayer,
-    scheduler::{HasBarrier, JobGenerator, SchedulingResult, TenantBackgroundJobs, TenantScoped},
+    scheduler::{self, JobGenerator, SchedulingResult, TenantBackgroundJobs, Completion},
     SecondaryTenant,
 };
+
 use crate::tenant::{
     mgr::TenantManager,
     remote_timeline_client::{download::download_layer_file, remote_heatmap_path},
@@ -150,7 +151,7 @@ struct PendingDownload {
     period: Option<Duration>,
 }
 
-impl TenantScoped for PendingDownload {
+impl scheduler::PendingJob for PendingDownload {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         self.secondary_state.get_tenant_shard_id()
     }
@@ -160,7 +161,7 @@ struct RunningDownload {
     barrier: Barrier,
 }
 
-impl HasBarrier for RunningDownload {
+impl scheduler::RunningJob for RunningDownload {
     fn get_barrier(&self) -> Barrier {
         self.barrier.clone()
     }
@@ -171,15 +172,10 @@ struct CompleteDownload {
     completed_at: Instant,
 }
 
-impl TenantScoped for CompleteDownload {
+
+impl scheduler::Completion for CompleteDownload {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         self.secondary_state.get_tenant_shard_id()
-    }
-}
-
-impl TenantScoped for SecondaryTenant {
-    fn get_tenant_shard_id(&self) -> &TenantShardId {
-        self.get_tenant_shard_id()
     }
 }
 
@@ -338,7 +334,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             if let (Some(target_time), Some(period)) = (target_time, period) {
                 // Only track execution lag if this isn't our first download: otherwise, it is expected
                 // that execution will have taken longer than our configured interval, for example
-                // when starting up a pageserver and 
+                // when starting up a pageserver and
                 if last_download.is_some() {
                     // Elapsed time includes any scheduling lag as well as the execution of the job
                     let elapsed = Instant::now().duration_since(target_time);
