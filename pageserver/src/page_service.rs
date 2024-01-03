@@ -560,32 +560,40 @@ impl PageServerHandler {
                 }
             };
 
-            if let Err(e) = &response {
-                // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
-                // because wait_lsn etc will drop out
-                // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
-                // is_canceled(): [`Timeline::shutdown`]` has entered
-                if timeline.cancel.is_cancelled() || timeline.is_stopping() {
+            match response {
+                Err(PageStreamError::Shutdown) => {
                     // If we fail to fulfil a request during shutdown, which may be _because_ of
                     // shutdown, then do not send the error to the client.  Instead just drop the
                     // connection.
-                    span.in_scope(|| info!("dropped response during shutdown: {e:#}"));
+                    span.in_scope(|| info!("dropping connection due to shutdown"));
                     return Err(QueryError::Shutdown);
                 }
+                Err(e) if timeline.cancel.is_cancelled() || timeline.is_stopping() => {
+                    // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
+                    // shutdown error.
+                    //
+                    // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
+                    // because wait_lsn etc will drop out
+                    // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
+                    // is_canceled(): [`Timeline::shutdown`]` has entered
+                    span.in_scope(|| info!("dropped error response during shutdown: {e:#}"));
+                    return Err(QueryError::Shutdown);
+                }
+                r => {
+                    let response_msg = r.unwrap_or_else(|e| {
+                        // print the all details to the log with {:#}, but for the client the
+                        // error message is enough.  Do not log if shutting down, as the anyhow::Error
+                        // here includes cancellation which is not an error.
+                        span.in_scope(|| error!("error reading relation or page version: {:#}", e));
+                        PagestreamBeMessage::Error(PagestreamErrorResponse {
+                            message: e.to_string(),
+                        })
+                    });
+
+                    pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+                    self.flush_cancellable(pgb, &timeline.cancel).await?;
+                }
             }
-
-            let response = response.unwrap_or_else(|e| {
-                // print the all details to the log with {:#}, but for the client the
-                // error message is enough.  Do not log if shutting down, as the anyhow::Error
-                // here includes cancellation which is not an error.
-                span.in_scope(|| error!("error reading relation or page version: {:#}", e));
-                PagestreamBeMessage::Error(PagestreamErrorResponse {
-                    message: e.to_string(),
-                })
-            });
-
-            pgb.write_message_noflush(&BeMessage::CopyData(&response.serialize()))?;
-            self.flush_cancellable(pgb, &timeline.cancel).await?;
         }
         Ok(())
     }
