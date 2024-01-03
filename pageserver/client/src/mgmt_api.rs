@@ -193,7 +193,7 @@ impl Client {
         flush_ms: Option<std::time::Duration>,
     ) -> Result<()> {
         let req_body = TenantLocationConfigRequest {
-            tenant_id: tenant_shard_id.tenant_id,
+            tenant_id: tenant_shard_id,
             config,
         };
         let path = format!(
