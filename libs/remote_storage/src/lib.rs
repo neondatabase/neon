@@ -24,7 +24,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use bytes::Bytes;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncSeekExt, sync::Semaphore};
+use tokio::{sync::Semaphore};
 use toml_edit::Item;
 use tracing::info;
 
@@ -209,26 +209,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
 
     /// Copy a remote object inside a bucket from one path to another.
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
-        // this is an inefficient generic implementation
-
-        let download = self.download(from).await?;
-        let mut reader = tokio_util::io::StreamReader::new(download.download_stream);
-
-        let camino_file = camino_tempfile::tempfile()?;
-        let mut file = tokio::fs::File::from_std(camino_file);
-        tokio::io::copy(&mut reader, &mut file).await?;
-        drop(reader);
-
-        let data_size_bytes = file.metadata().await?.len() as usize;
-        file.seek(std::io::SeekFrom::Start(0)).await?;
-
-        const BUFFER_SIZE: usize = 32 * 1024;
-        let file_reader = tokio_util::io::ReaderStream::with_capacity(file, BUFFER_SIZE);
-
-        self.upload(file_reader, data_size_bytes, to, download.metadata)
-            .await
-    }
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
 }
 
 pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
