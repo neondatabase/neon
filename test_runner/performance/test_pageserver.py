@@ -58,9 +58,6 @@ def snapshotting_env(
         # Wait for the attachment service to start
         time.sleep(5)
 
-        for tenant in tenants:
-            env.attachment_service.attach_hook_issue(tenant, 1)
-
         env.pageserver.start()
     else:
         env = neon_env_builder.init_start()
@@ -128,6 +125,7 @@ def snapshotting_env(
             ps_http.tenant_attach(
                 tenant, config=tenant_config_mgmt_api, generation=template_tenant_gen + 1
             )
+            env.attachment_service.attach_hook_issue(tenant, env.pageserver.id)
 
     if save_snapshot and not snapshot_dir.exists():
         shutil.copytree(env.repo_dir, snapshot_dir)
