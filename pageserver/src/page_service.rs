@@ -1492,6 +1492,7 @@ enum GetActiveTimelineError {
 impl From<GetActiveTimelineError> for QueryError {
     fn from(e: GetActiveTimelineError) -> Self {
         match e {
+            GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => QueryError::Shutdown,
             GetActiveTimelineError::Tenant(e) => e.into(),
             GetActiveTimelineError::Timeline(e) => QueryError::Other(e),
         }
