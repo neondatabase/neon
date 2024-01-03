@@ -2,7 +2,6 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
 from typing import List, Tuple
 
@@ -50,15 +49,7 @@ def snapshotting_env(
         tenants = list({TenantId(t.name) for t in (snapshot_dir.glob("pageserver_*/tenants/*"))})
         template_timeline = env.initial_timeline
 
-        env.broker.try_start()
-
-        assert env.attachment_service is not None
-        env.attachment_service.start()
-
-        # Wait for the attachment service to start
-        time.sleep(5)
-
-        env.pageserver.start()
+        neon_env_builder.start()
     else:
         env = neon_env_builder.init_start()
 
