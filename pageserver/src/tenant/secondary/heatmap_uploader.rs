@@ -24,7 +24,7 @@ use rand::Rng;
 use remote_storage::GenericRemoteStorage;
 
 use super::{
-    scheduler::{HasBarrier, JobGenerator, SchedulingResult, TenantBackgroundJobs, TenantScoped},
+    scheduler::{self, JobGenerator, RunningJob, SchedulingResult, TenantBackgroundJobs},
     CommandRequest,
 };
 use tokio_util::sync::CancellationToken;
@@ -71,7 +71,7 @@ struct WriteInProgress {
     barrier: Barrier,
 }
 
-impl HasBarrier for WriteInProgress {
+impl RunningJob for WriteInProgress {
     fn get_barrier(&self) -> Barrier {
         self.barrier.clone()
     }
@@ -84,7 +84,7 @@ struct UploadPending {
     period: Option<Duration>,
 }
 
-impl TenantScoped for UploadPending {
+impl scheduler::PendingJob for UploadPending {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         self.tenant.get_tenant_shard_id()
     }
@@ -97,17 +97,12 @@ struct WriteComplete {
     next_upload: Option<Instant>,
 }
 
-impl TenantScoped for WriteComplete {
+impl scheduler::Completion for WriteComplete {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
 }
 
-impl TenantScoped for Tenant {
-    fn get_tenant_shard_id(&self) -> &TenantShardId {
-        self.get_tenant_shard_id()
-    }
-}
 
 /// The heatmap uploader keeps a little bit of per-tenant state, mainly to remember
 /// when we last did a write.  We only populate this after doing at least one

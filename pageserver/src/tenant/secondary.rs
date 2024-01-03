@@ -10,7 +10,6 @@ use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use self::{
     downloader::{downloader_task, SecondaryDetail},
     heatmap_uploader::heatmap_uploader_task,
-    scheduler::TenantScoped,
 };
 
 use super::{config::SecondaryLocationConfig, mgr::TenantManager};
@@ -28,7 +27,7 @@ enum UploadCommand {
     Upload(TenantShardId),
 }
 
-impl TenantScoped for UploadCommand {
+impl UploadCommand {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         match self {
             Self::Upload(id) => id,
@@ -36,7 +35,7 @@ impl TenantScoped for UploadCommand {
     }
 }
 
-impl TenantScoped for DownloadCommand {
+impl DownloadCommand {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         match self {
             Self::Download(id) => id,

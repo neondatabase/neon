@@ -40,10 +40,10 @@ const MIN_SCHEDULING_INTERVAL: Duration = Duration::from_secs(1);
 /// CMD: 'Command' type that the job generator will accept to create jobs on-demand
 pub(super) struct TenantBackgroundJobs<G, PJ, RJ, C, CMD>
 where
-    C: TenantScoped + Send,
-    PJ: TenantScoped,
-    RJ: HasBarrier,
     G: JobGenerator<PJ, RJ, C, CMD>,
+    C: Completion,
+    PJ: PendingJob,
+    RJ: RunningJob,
 {
     generator: G,
 
@@ -72,30 +72,12 @@ where
     _phantom: PhantomData<(PJ, RJ, C, CMD)>,
 }
 
-/// For types that logically belong to a particular tenant shard, and can
-/// provide its ID on demand.
-pub(super) trait TenantScoped {
-    fn get_tenant_shard_id(&self) -> &TenantShardId;
-}
-
-/// For types that contain a Barrier that may be waited on
-pub(super) trait HasBarrier {
-    fn get_barrier(&self) -> Barrier;
-}
-
-/// [`JobGenerator`] returns this to provide pending jobs, and hints about scheduling
-pub(super) struct SchedulingResult<PJ> {
-    pub(super) jobs: Vec<PJ>,
-    /// The job generator would like to be called again this soon
-    pub(super) want_interval: Option<Duration>,
-}
-
 #[async_trait::async_trait]
 pub(crate) trait JobGenerator<PJ, RJ, C, CMD>
 where
-    C: TenantScoped + Send,
-    PJ: TenantScoped,
-    RJ: HasBarrier,
+    C: Completion,
+    PJ: PendingJob,
+    RJ: RunningJob,
 {
     /// Called at each scheduling interval.  Return a list of jobs to run, most urgent first.
     ///
@@ -121,11 +103,33 @@ where
     fn on_command(&mut self, cmd: CMD) -> anyhow::Result<PJ>;
 }
 
+/// [`JobGenerator`] returns this to provide pending jobs, and hints about scheduling
+pub(super) struct SchedulingResult<PJ> {
+    pub(super) jobs: Vec<PJ>,
+    /// The job generator would like to be called again this soon
+    pub(super) want_interval: Option<Duration>,
+}
+
+/// See [`TenantBackgroundJobs`].
+pub(super) trait PendingJob {
+    fn get_tenant_shard_id(&self) -> &TenantShardId;
+}
+
+/// See [`TenantBackgroundJobs`].
+pub(super) trait Completion: Send + 'static {
+    fn get_tenant_shard_id(&self) -> &TenantShardId;
+}
+
+/// See [`TenantBackgroundJobs`].
+pub(super) trait RunningJob {
+    fn get_barrier(&self) -> Barrier;
+}
+
 impl<G, PJ, RJ, C, CMD> TenantBackgroundJobs<G, PJ, RJ, C, CMD>
 where
-    C: TenantScoped + Send + 'static,
-    PJ: TenantScoped,
-    RJ: HasBarrier,
+    C: Completion,
+    PJ: PendingJob,
+    RJ: RunningJob,
     G: JobGenerator<PJ, RJ, C, CMD>,
 {
     pub(super) fn new(generator: G, concurrency: usize) -> Self {
