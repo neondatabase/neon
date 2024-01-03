@@ -24,15 +24,12 @@ use rand::Rng;
 use remote_storage::GenericRemoteStorage;
 
 use super::{
-    scheduler::{
-        yielding_loop, HasBarrier, JobGenerator, SchedulingResult, TenantBackgroundJobs,
-        TenantScoped,
-    },
+    scheduler::{HasBarrier, JobGenerator, SchedulingResult, TenantBackgroundJobs, TenantScoped},
     CommandRequest,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, Instrument};
-use utils::{backoff, completion::Barrier};
+use utils::{backoff, completion::Barrier, yielding_loop::yielding_loop};
 
 use super::{heatmap::HeatMapTenant, UploadCommand};
 
