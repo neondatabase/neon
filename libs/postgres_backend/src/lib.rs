@@ -38,6 +38,9 @@ pub enum QueryError {
     /// Query handler indicated that client should reconnect
     #[error("Server requested reconnect")]
     Reconnect,
+    /// Query named an entity that was not found
+    #[error("Not found: {0}")]
+    NotFound(std::borrow::Cow<'static, str>),
     /// Authentication failure
     #[error("Unauthorized: {0}")]
     Unauthorized(std::borrow::Cow<'static, str>),
@@ -59,7 +62,7 @@ impl QueryError {
         match self {
             Self::Disconnected(_) | Self::SimulatedConnectionError | Self::Reconnect => b"08006", // connection failure
             Self::Shutdown => SQLSTATE_ADMIN_SHUTDOWN,
-            Self::Unauthorized(_) => SQLSTATE_INTERNAL_ERROR,
+            Self::Unauthorized(_) | Self::NotFound(_) => SQLSTATE_INTERNAL_ERROR,
             Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
         }
     }
@@ -984,6 +987,7 @@ pub fn short_error(e: &QueryError) -> String {
         QueryError::Disconnected(connection_error) => connection_error.to_string(),
         QueryError::Reconnect => "reconnect".to_string(),
         QueryError::Shutdown => "shutdown".to_string(),
+        QueryError::NotFound(_) => "not found".to_string(),
         QueryError::Unauthorized(_e) => "JWT authentication error".to_string(),
         QueryError::SimulatedConnectionError => "simulated connection error".to_string(),
         QueryError::Other(e) => format!("{e:#}"),
@@ -1010,6 +1014,9 @@ fn log_query_error(query: &str, e: &QueryError) {
         }
         QueryError::Shutdown => {
             info!("query handler for '{query}' cancelled during tenant shutdown")
+        }
+        QueryError::NotFound(reason) => {
+            info!("query handler for '{query}' entity not found: {reason}")
         }
         QueryError::Unauthorized(e) => {
             warn!("query handler for '{query}' failed with authentication error: {e}");
