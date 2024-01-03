@@ -301,13 +301,17 @@ enum PageStreamError {
     #[error("Read error: {0}")]
     Read(PageReconstructError),
 
+    /// Ran out of time waiting for an LSN
+    #[error("LSN timeout: {0}")]
+    LsnTimeout(String),
+
     /// Something went wrong reading a page: this likely indicates a pageserver bug
     #[error("Not found: {0}")]
     NotFound(std::borrow::Cow<'static, str>),
 
-    /// Any other error: this will be returned to client as a response
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    /// Request asked for something that doesn't make sense, like an invalid LSN
+    #[error("Bad request: {0}")]
+    BadRequest(std::borrow::Cow<'static, str>),
 }
 
 impl From<PageReconstructError> for PageStreamError {
@@ -474,7 +478,7 @@ impl PageServerHandler {
         // Check that the timeline exists
         let timeline = tenant
             .get_timeline(timeline_id, true)
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| QueryError::NotFound(format!("{e}").into()))?;
 
         // Avoid starting new requests if the timeline has already started shutting down,
         // and block timeline shutdown until this request is complete, or drops out due
@@ -580,7 +584,7 @@ impl PageServerHandler {
                 }
                 Err(e) if timeline.cancel.is_cancelled() || timeline.is_stopping() => {
                     // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
-                    // shutdown error.
+                    // shutdown error, this may be buried inside a PageReconstructError::Other for example.
                     //
                     // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
                     // because wait_lsn etc will drop out
@@ -750,7 +754,7 @@ impl PageServerHandler {
         latest: bool,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Lsn> {
+    ) -> Result<Lsn, PageStreamError> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
             // to the page server that there have been no modifications to the
@@ -773,7 +777,10 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn, ctx).await?;
+                timeline
+                    .wait_lsn(lsn, ctx)
+                    .await
+                    .map_err(|e| PageStreamError::LsnTimeout(format!("{e}")))?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -781,15 +788,22 @@ impl PageServerHandler {
             }
         } else {
             if lsn == Lsn(0) {
-                anyhow::bail!("invalid LSN(0) in request");
+                return Err(PageStreamError::BadRequest(
+                    "invalid LSN(0) in request".into(),
+                ));
             }
-            timeline.wait_lsn(lsn, ctx).await?;
+            timeline
+                .wait_lsn(lsn, ctx)
+                .await
+                .map_err(|e| PageStreamError::LsnTimeout(format!("{e}")))?;
         }
-        anyhow::ensure!(
-            lsn >= **latest_gc_cutoff_lsn,
-            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-            lsn, **latest_gc_cutoff_lsn
-        );
+
+        if lsn < **latest_gc_cutoff_lsn {
+            return Err(PageStreamError::BadRequest(format!(
+                "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+                lsn, **latest_gc_cutoff_lsn
+            ).into()));
+        }
         Ok(lsn)
     }
 
