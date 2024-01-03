@@ -25,6 +25,7 @@ use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, Qu
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
+use std::borrow::Cow;
 use std::io;
 use std::net::TcpListener;
 use std::pin::pin;
@@ -289,7 +290,7 @@ enum PageStreamError {
     /// We encountered an error that should prompt the client to reconnect:
     /// in practice this means we drop the connection without sending a response.
     #[error("Reconnect required: {0}")]
-    Reconnect(String),
+    Reconnect(Cow<'static, str>),
 
     /// We were instructed to shutdown while processing the query
     #[error("Shutting down")]
@@ -892,7 +893,9 @@ impl PageServerHandler {
                     // mapping is out of date.
                     tracing::info!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
                         timeline.get_shard_identity(), timeline.get_shard_identity().get_shard_number(&key).0, key);
-                    return Err(anyhow::anyhow!("Request routed to wrong shard").into());
+                    return Err(PageStreamError::Reconnect(
+                        "getpage@lsn request routed to wrong shard".into(),
+                    ));
                 }
                 Err(e) => return Err(e.into()),
             };
