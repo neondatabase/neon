@@ -75,6 +75,7 @@ pub mod defaults {
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
 
     pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
+    pub const DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY: usize = 1;
 
     ///
     /// Default built-in configuration file.
@@ -125,6 +126,7 @@ pub mod defaults {
 #gc_feedback = false
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
+#secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
 
 [remote_storage]
 
@@ -233,6 +235,10 @@ pub struct PageServerConf {
     /// How many heatmap uploads may be done concurrency: lower values implicitly deprioritize
     /// heatmap uploads vs. other remote storage operations.
     pub heatmap_upload_concurrency: usize,
+
+    /// How many remote storage downloads may be done for secondary tenants concurrently.  Implicitly
+    /// deprioritises secondary downloads vs. remote storage operations for attached tenants.
+    pub secondary_download_concurrency: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -314,6 +320,7 @@ struct PageServerConfigBuilder {
     control_plane_emergency_mode: BuilderValue<bool>,
 
     heatmap_upload_concurrency: BuilderValue<usize>,
+    secondary_download_concurrency: BuilderValue<usize>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -386,6 +393,7 @@ impl Default for PageServerConfigBuilder {
             control_plane_emergency_mode: Set(false),
 
             heatmap_upload_concurrency: Set(DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
+            secondary_download_concurrency: Set(DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
         }
     }
 }
@@ -534,6 +542,10 @@ impl PageServerConfigBuilder {
         self.heatmap_upload_concurrency = BuilderValue::Set(value)
     }
 
+    pub fn secondary_download_concurrency(&mut self, value: usize) {
+        self.secondary_download_concurrency = BuilderValue::Set(value)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_warmup = self
             .concurrent_tenant_warmup
@@ -636,6 +648,9 @@ impl PageServerConfigBuilder {
             heatmap_upload_concurrency: self
                 .heatmap_upload_concurrency
                 .ok_or(anyhow!("missing heatmap_upload_concurrency"))?,
+            secondary_download_concurrency: self
+                .secondary_download_concurrency
+                .ok_or(anyhow!("missing secondary_download_concurrency"))?,
         })
     }
 }
@@ -883,6 +898,9 @@ impl PageServerConf {
                 "heatmap_upload_concurrency" => {
                     builder.heatmap_upload_concurrency(parse_toml_u64(key, item)? as usize)
                 },
+                "secondary_download_concurrency" => {
+                    builder.secondary_download_concurrency(parse_toml_u64(key, item)? as usize)
+                },
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -954,6 +972,7 @@ impl PageServerConf {
             control_plane_api_token: None,
             control_plane_emergency_mode: false,
             heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
+            secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
         }
     }
 }
@@ -1182,7 +1201,8 @@ background_task_maximum_delay = '334 s'
                 control_plane_api: None,
                 control_plane_api_token: None,
                 control_plane_emergency_mode: false,
-                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
+                secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1243,7 +1263,8 @@ background_task_maximum_delay = '334 s'
                 control_plane_api: None,
                 control_plane_api_token: None,
                 control_plane_emergency_mode: false,
-                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
+                secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY
             },
             "Should be able to parse all basic config values correctly"
         );

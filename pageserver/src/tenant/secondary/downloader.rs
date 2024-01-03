@@ -66,8 +66,7 @@ pub(super) async fn downloader_task(
     background_jobs_can_start: Barrier,
     cancel: CancellationToken,
 ) {
-    // TODO: separate config for downloads
-    let concurrency = tenant_manager.get_conf().heatmap_upload_concurrency;
+    let concurrency = tenant_manager.get_conf().secondary_download_concurrency;
 
     let generator = SecondaryDownloader {
         tenant_manager,
