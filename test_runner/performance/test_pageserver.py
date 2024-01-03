@@ -31,7 +31,6 @@ def snapshotting_env(
     snapshot_dir = test_output_dir.parent / f"snapshot-{test_output_dir.name}"
     save_snapshot = os.getenv("CI", "false") != "true"
 
-    neon_env_builder.enable_generations = True
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # create our template tenant

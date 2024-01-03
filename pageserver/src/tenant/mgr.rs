@@ -514,10 +514,7 @@ pub async fn init_tenant_mgr(
             &ctx,
         ) {
             Ok(tenant) => {
-                tenants.insert(
-                    TenantShardId::unsharded(tenant.tenant_id()),
-                    TenantSlot::Attached(tenant),
-                );
+                tenants.insert(tenant_shard_id, TenantSlot::Attached(tenant));
             }
             Err(e) => {
                 error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to start tenant: {e:#}");
@@ -962,35 +959,27 @@ impl TenantManager {
         }
 
         let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+        let timelines_path = self.conf.timelines_path(&tenant_shard_id);
+
+        // Directory structure is the same for attached and secondary modes:
+        // create it if it doesn't exist.  Timeline load/creation expects the
+        // timelines/ subdir to already exist.
+        //
+        // Does not need to be fsync'd because local storage is just a cache.
+        tokio::fs::create_dir_all(&timelines_path)
+            .await
+            .with_context(|| format!("Creating {timelines_path}"))?;
+
+        // Before activating either secondary or attached mode, persist the
+        // configuration, so that on restart we will re-attach (or re-start
+        // secondary) on the tenant.
+        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
+            .await
+            .map_err(SetNewTenantConfigError::Persist)?;
 
         let new_slot = match &new_location_config.mode {
-            LocationMode::Secondary(_) => {
-                // Directory doesn't need to be fsync'd because if we crash it can
-                // safely be recreated next time this tenant location is configured.
-                tokio::fs::create_dir_all(&tenant_path)
-                    .await
-                    .with_context(|| format!("Creating {tenant_path}"))?;
-
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .map_err(SetNewTenantConfigError::Persist)?;
-
-                TenantSlot::Secondary
-            }
+            LocationMode::Secondary(_) => TenantSlot::Secondary,
             LocationMode::Attached(_attach_config) => {
-                let timelines_path = self.conf.timelines_path(&tenant_shard_id);
-
-                // Directory doesn't need to be fsync'd because we do not depend on
-                // it to exist after crashes: it may be recreated when tenant is
-                // re-attached, see https://github.com/neondatabase/neon/issues/5550
-                tokio::fs::create_dir_all(&tenant_path)
-                    .await
-                    .with_context(|| format!("Creating {timelines_path}"))?;
-
-                Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .map_err(SetNewTenantConfigError::Persist)?;
-
                 let shard_identity = new_location_config.shard;
                 let tenant = tenant_spawn(
                     self.conf,
@@ -1101,6 +1090,71 @@ impl TenantManager {
                 })
                 .collect(),
         }
+    }
+
+    pub(crate) async fn delete_tenant(
+        &self,
+        tenant_shard_id: TenantShardId,
+        activation_timeout: Duration,
+    ) -> Result<(), DeleteTenantError> {
+        // We acquire a SlotGuard during this function to protect against concurrent
+        // changes while the ::prepare phase of DeleteTenantFlow executes, but then
+        // have to return the Tenant to the map while the background deletion runs.
+        //
+        // TODO: refactor deletion to happen outside the lifetime of a Tenant.
+        // Currently, deletion requires a reference to the tenants map in order to
+        // keep the Tenant in the map until deletion is complete, and then remove
+        // it at the end.
+        //
+        // See https://github.com/neondatabase/neon/issues/5080
+
+        let slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+
+        // unwrap is safe because we used MustExist mode when acquiring
+        let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
+            TenantSlot::Attached(tenant) => tenant.clone(),
+            _ => {
+                // Express "not attached" as equivalent to "not found"
+                return Err(DeleteTenantError::NotAttached);
+            }
+        };
+
+        match tenant.current_state() {
+            TenantState::Broken { .. } | TenantState::Stopping { .. } => {
+                // If a tenant is broken or stopping, DeleteTenantFlow can
+                // handle it: broken tenants proceed to delete, stopping tenants
+                // are checked for deletion already in progress.
+            }
+            _ => {
+                tenant
+                    .wait_to_become_active(activation_timeout)
+                    .await
+                    .map_err(|e| match e {
+                        GetActiveTenantError::WillNotBecomeActive(_) => {
+                            DeleteTenantError::InvalidState(tenant.current_state())
+                        }
+                        GetActiveTenantError::Cancelled => DeleteTenantError::Cancelled,
+                        GetActiveTenantError::NotFound(_) => DeleteTenantError::NotAttached,
+                        GetActiveTenantError::WaitForActiveTimeout {
+                            latest_state: _latest_state,
+                            wait_time: _wait_time,
+                        } => DeleteTenantError::InvalidState(tenant.current_state()),
+                    })?;
+            }
+        }
+
+        let result = DeleteTenantFlow::run(
+            self.conf,
+            self.resources.remote_storage.clone(),
+            &TENANTS,
+            tenant,
+        )
+        .await;
+
+        // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
+        slot_guard.revert();
+        result
     }
 }
 
@@ -1277,41 +1331,6 @@ pub(crate) async fn get_active_tenant_with_timeout(
         .wait_to_become_active(deadline.duration_since(Instant::now()))
         .await?;
     Ok(tenant)
-}
-
-pub(crate) async fn delete_tenant(
-    conf: &'static PageServerConf,
-    remote_storage: Option<GenericRemoteStorage>,
-    tenant_shard_id: TenantShardId,
-) -> Result<(), DeleteTenantError> {
-    // We acquire a SlotGuard during this function to protect against concurrent
-    // changes while the ::prepare phase of DeleteTenantFlow executes, but then
-    // have to return the Tenant to the map while the background deletion runs.
-    //
-    // TODO: refactor deletion to happen outside the lifetime of a Tenant.
-    // Currently, deletion requires a reference to the tenants map in order to
-    // keep the Tenant in the map until deletion is complete, and then remove
-    // it at the end.
-    //
-    // See https://github.com/neondatabase/neon/issues/5080
-
-    // TODO(sharding): make delete API sharding-aware
-    let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
-
-    // unwrap is safe because we used MustExist mode when acquiring
-    let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
-        TenantSlot::Attached(tenant) => tenant.clone(),
-        _ => {
-            // Express "not attached" as equivalent to "not found"
-            return Err(DeleteTenantError::NotAttached);
-        }
-    };
-
-    let result = DeleteTenantFlow::run(conf, remote_storage, &TENANTS, tenant).await;
-
-    // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
-    slot_guard.revert();
-    result
 }
 
 #[derive(Debug, thiserror::Error)]

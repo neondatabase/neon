@@ -714,7 +714,7 @@ class PageserverHttpClient(requests.Session):
         )
         self.verbose_error(res)
 
-        assert res.status_code == 200
+        assert res.status_code in (200, 304)
 
     def evict_all_layers(self, tenant_id: TenantId, timeline_id: TimelineId):
         info = self.layer_map_info(tenant_id, timeline_id)

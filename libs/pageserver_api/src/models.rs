@@ -559,19 +559,6 @@ pub enum DownloadRemoteLayersTaskState {
     ShutDown,
 }
 
-pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
-
-/// Information for configuring a single fail point
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FailpointConfig {
-    /// Name of the fail point
-    pub name: String,
-    /// List of actions to take, using the format described in `fail::cfg`
-    ///
-    /// We also support `actions = "exit"` to cause the fail point to immediately exit.
-    pub actions: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,

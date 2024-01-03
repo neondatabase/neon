@@ -6,7 +6,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -32,6 +35,9 @@ use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
+
+pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
+pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -64,6 +70,10 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
+    // connection string to pgbouncer to change settings
+    pub pgbouncer_connstr: Option<String>,
+    // path to pgbouncer.ini to change settings
+    pub pgbouncer_ini_path: Option<String>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -496,6 +506,7 @@ impl ComputeNode {
             .stdout(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
+        SYNC_SAFEKEEPERS_PID.store(sync_handle.id(), Ordering::SeqCst);
 
         // `postgres --sync-safekeepers` will print all log output to stderr and
         // final LSN to stdout. So we pipe only stdout, while stderr will be automatically
@@ -503,6 +514,7 @@ impl ComputeNode {
         let sync_output = sync_handle
             .wait_with_output()
             .expect("postgres --sync-safekeepers failed");
+        SYNC_SAFEKEEPERS_PID.store(0, Ordering::SeqCst);
 
         if !sync_output.status.success() {
             anyhow::bail!(
@@ -657,6 +669,7 @@ impl ComputeNode {
             })
             .spawn()
             .expect("cannot start postgres process");
+        PG_PID.store(pg.id(), Ordering::SeqCst);
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
@@ -737,6 +750,31 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
+        if let Some(connstr) = &self.pgbouncer_connstr {
+            info!("tuning pgbouncer with connstr: {:?}", connstr);
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create rt");
+
+            // Spawn a thread to do the tuning,
+            // so that we don't block the main thread that starts Postgres.
+            let pgbouncer_settings = spec.pgbouncer_settings.clone();
+            let connstr_clone = connstr.clone();
+            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let _handle = thread::spawn(move || {
+                let res = rt.block_on(tune_pgbouncer(
+                    pgbouncer_settings,
+                    &connstr_clone,
+                    pgbouncer_ini_path,
+                ));
+                if let Err(err) = res {
+                    error!("error while tuning pgbouncer: {err:?}");
+                }
+            });
+        }
+
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
         let postgresql_conf_path = pgdata_path.join("postgresql.conf");
@@ -790,6 +828,32 @@ impl ComputeNode {
             pspec.tenant_id,
             pspec.timeline_id,
         );
+
+        // tune pgbouncer
+        if let Some(connstr) = &self.pgbouncer_connstr {
+            info!("tuning pgbouncer with connstr: {:?}", connstr);
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create rt");
+
+            // Spawn a thread to do the tuning,
+            // so that we don't block the main thread that starts Postgres.
+            let pgbouncer_settings = pspec.spec.pgbouncer_settings.clone();
+            let connstr_clone = connstr.clone();
+            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let _handle = thread::spawn(move || {
+                let res = rt.block_on(tune_pgbouncer(
+                    pgbouncer_settings,
+                    &connstr_clone,
+                    pgbouncer_ini_path,
+                ));
+                if let Err(err) = res {
+                    error!("error while tuning pgbouncer: {err:?}");
+                }
+            });
+        }
 
         info!(
             "start_compute spec.remote_extensions {:?}",

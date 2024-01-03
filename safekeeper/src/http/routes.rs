@@ -12,6 +12,8 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
+use utils::failpoint_support::failpoints_handler;
 
 use std::io::Write as _;
 use tokio::sync::mpsc;
@@ -444,6 +446,12 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .data(Arc::new(conf))
         .data(auth)
         .get("/v1/status", |r| request_span(r, status_handler))
+        .put("/v1/failpoints", |r| {
+            request_span(r, move |r| async {
+                let cancel = CancellationToken::new();
+                failpoints_handler(r, cancel).await
+            })
+        })
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", |r| {
             request_span(r, timeline_create_handler)

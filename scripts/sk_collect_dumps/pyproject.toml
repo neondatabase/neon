@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "sk-collect-dumps"
+version = "0.1.0"
+description = ""
+authors = ["Arseny Sher <sher-ars@yandex.ru>"]
+readme = "README.md"
+packages = [{include = "sk_collect_dumps"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+ansible = "^9.1.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

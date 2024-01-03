@@ -25,6 +25,7 @@ use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
+use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -65,9 +66,6 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
-
-// Imports only used for testing APIs
-use pageserver_api::models::ConfigureFailpointsRequest;
 
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
@@ -308,6 +306,7 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
             SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
+            Cancelled => ApiError::ShuttingDown,
         }
     }
 }
@@ -888,7 +887,9 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
+    state
+        .tenant_manager
+        .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard = %tenant_shard_id.shard_slug()
@@ -1292,34 +1293,6 @@ async fn handle_tenant_break(
     json_response(StatusCode::OK, ())
 }
 
-async fn failpoints_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    if !fail::has_failpoints() {
-        return Err(ApiError::BadRequest(anyhow!(
-            "Cannot manage failpoints because pageserver was compiled without failpoints support"
-        )));
-    }
-
-    let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
-    for fp in failpoints {
-        info!("cfg failpoint: {} {}", fp.name, fp.actions);
-
-        // We recognize one extra "action" that's not natively recognized
-        // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = crate::failpoint_support::apply_failpoint(&fp.name, &fp.actions);
-
-        if let Err(err_msg) = cfg_result {
-            return Err(ApiError::BadRequest(anyhow!(
-                "Failed to configure failpoints: {err_msg}"
-            )));
-        }
-    }
-
-    json_response(StatusCode::OK, ())
-}
-
 // Run GC immediately on given timeline.
 async fn timeline_gc_handler(
     mut request: Request<Body>,
@@ -1568,19 +1541,22 @@ async fn disk_usage_eviction_run(
     struct Config {
         /// How many bytes to evict before reporting that pressure is relieved.
         evict_bytes: u64,
+
+        #[serde(default)]
+        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
     struct Usage {
         // remains unchanged after instantiation of the struct
-        config: Config,
+        evict_bytes: u64,
         // updated by `add_available_bytes`
         freed_bytes: u64,
     }
 
     impl crate::disk_usage_eviction_task::Usage for Usage {
         fn has_pressure(&self) -> bool {
-            self.config.evict_bytes > self.freed_bytes
+            self.evict_bytes > self.freed_bytes
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {
@@ -1591,7 +1567,7 @@ async fn disk_usage_eviction_run(
     let config = json_request::<Config>(&mut r).await?;
 
     let usage = Usage {
-        config,
+        evict_bytes: config.evict_bytes,
         freed_bytes: 0,
     };
 
@@ -1606,7 +1582,11 @@ async fn disk_usage_eviction_run(
     let state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state, storage, usage, &cancel,
+        &state,
+        storage,
+        usage,
+        config.eviction_order,
+        &cancel,
     )
     .await;
 
