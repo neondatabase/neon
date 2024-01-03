@@ -179,7 +179,12 @@ where
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         tracing::info!("joining tasks");
-                        self.shutdown().await;
+                        // We do not simply drop the JoinSet, in order to have an orderly shutdown without cancellation.
+                        // It is the callers responsibility to make sure that the tasks they scheduled
+                        // respect an appropriate cancellation token, to shut down promptly.  It is only
+                        // safe to wait on joining these tasks because we can see the cancellation token
+                        // has been set.
+                        while let Some(_r) = self.tasks.join_next().await {}
                         tracing::info!("terminating on cancellation token.");
 
                         break;
@@ -352,12 +357,5 @@ where
         })
         .await
         .ok();
-    }
-
-    /// It is the callers responsibility to make sure that the tasks they scheduled
-    /// respect an appropriate cancellation token, to shut down promptly.
-    async fn shutdown(&mut self) {
-        // We do not simply drop the JoinSet, in order to have an orderly shutdown without cancellation.
-        while let Some(_r) = self.tasks.join_next().await {}
     }
 }
