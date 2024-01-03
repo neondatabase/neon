@@ -83,6 +83,10 @@ def snapshotting_env(
         # stop PS just for good measure
         env.pageserver.stop()
 
+        # we don't need safekeepers for this test
+        for sk in env.safekeepers:
+            sk.stop()
+
         # duplicate the tenant in remote storage
         src_timelines_dir: Path = remote_storage.tenant_path(template_tenant) / "timelines"
         assert src_timelines_dir.is_dir(), f"{src_timelines_dir} is not a directory"
