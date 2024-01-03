@@ -52,6 +52,7 @@ pub struct WalIngest<'a> {
     checkpoint_modified: bool,
 }
 
+#[derive(Debug, PartialEq)]
 enum IngestRecordOutcome {
     /// The record has been stored in the repository and last_record_lsn has been advanced.
     /// This is the common case.
@@ -599,11 +600,13 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v14::XlHeapDelete::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_UPDATE
                         || info == pg_constants::XLOG_HEAP_HOT_UPDATE
                     {
@@ -621,12 +624,14 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_LOCK {
                         let xlrec = v14::XlHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
                         // per comment in heap_redo:
                         // TRUNCATE is a no-op because the actions are already logged as
@@ -658,12 +663,14 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
                         let xlrec = v14::XlHeapLockUpdated::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP2_REWRITE
                         || info == pg_constants::XLOG_HEAP2_NEW_CID
                     {
@@ -683,7 +690,7 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::UnknownRecordType
                     }
                 } else {
-                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                    IngestRecordOutcome::UnknownRecordType
                 }
             }
             15 => {
@@ -696,11 +703,13 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v15::XlHeapDelete::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_UPDATE
                         || info == pg_constants::XLOG_HEAP_HOT_UPDATE
                     {
@@ -718,12 +727,14 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_LOCK {
                         let xlrec = v15::XlHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
                         // per comment in heap_redo:
                         // TRUNCATE is a no-op because the actions are already logged as
@@ -755,12 +766,14 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
                         let xlrec = v15::XlHeapLockUpdated::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP2_REWRITE
                         || info == pg_constants::XLOG_HEAP2_NEW_CID
                     {
@@ -780,7 +793,7 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::UnknownRecordType
                     }
                 } else {
-                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                    IngestRecordOutcome::UnknownRecordType
                 }
             }
             16 => {
@@ -793,11 +806,13 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_DELETE {
                         let xlrec = v16::XlHeapDelete::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_UPDATE
                         || info == pg_constants::XLOG_HEAP_HOT_UPDATE
                     {
@@ -815,12 +830,14 @@ impl<'a> WalIngest<'a> {
                             // set.
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_LOCK {
                         let xlrec = v16::XlHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
                         // per comment in heap_redo:
                         // TRUNCATE is a no-op because the actions are already logged as
@@ -852,12 +869,14 @@ impl<'a> WalIngest<'a> {
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
                         let xlrec = v16::XlHeapLockUpdated::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                        IngestRecordOutcome::Stored
                     } else if info == pg_constants::XLOG_HEAP2_REWRITE
                         || info == pg_constants::XLOG_HEAP2_NEW_CID
                     {
@@ -877,10 +896,12 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::UnknownRecordType
                     }
                 } else {
-                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                    IngestRecordOutcome::UnknownRecordType
                 }
             }
-            _ => {}
+            pg_version => {
+                bail!("unsupported PostgreSQL version {}", pg_version);
+            }
         };
 
         // Clear the VM bits if required.
