@@ -576,7 +576,7 @@ impl<'a> WalIngest<'a> {
         let mut old_heap_blkno: Option<u32> = None;
         let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
-        match self.timeline.pg_version {
+        let outcome = match self.timeline.pg_version {
             14 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -869,7 +869,7 @@ impl<'a> WalIngest<'a> {
                 }
             }
             _ => {}
-        }
+        };
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -906,6 +906,7 @@ impl<'a> WalIngest<'a> {
                 if new_vm_blk == old_vm_blk {
                     // An UPDATE record that needs to clear the bits for both old and the
                     // new page, both of which reside on the same VM page.
+                    assert_eq!(outcome, IngestRecordOutcome::Stored);
                     self.put_rel_wal_record(
                         modification,
                         vm_rel,
@@ -922,6 +923,7 @@ impl<'a> WalIngest<'a> {
                     // Clear VM bits for one heap page, or for two pages that reside on
                     // different VM pages.
                     if let Some(new_vm_blk) = new_vm_blk {
+                        assert_eq!(outcome, IngestRecordOutcome::Stored);
                         self.put_rel_wal_record(
                             modification,
                             vm_rel,
@@ -936,6 +938,7 @@ impl<'a> WalIngest<'a> {
                         .await?;
                     }
                     if let Some(old_vm_blk) = old_vm_blk {
+                        assert_eq!(outcome, IngestRecordOutcome::Stored);
                         self.put_rel_wal_record(
                             modification,
                             vm_rel,
@@ -949,11 +952,17 @@ impl<'a> WalIngest<'a> {
                         )
                         .await?;
                     }
+                    /* else if neither of the above */
+                    if new_vm_blk.is_none() && old_vm_blk.is_none() {
+                        assert_ne!(outcome, IngestRecordOutcome::Stored);
+                    }
                 }
+            } else {
+                assert_ne!(outcome, IngestRecordOutcome::Stored);
             }
         }
 
-        Ok(())
+        Ok(outcome)
     }
 
     async fn ingest_neonrmgr_record(
