@@ -410,33 +410,41 @@ class NeonBenchmarker:
             report=MetricReport.LOWER_IS_BETTER,
         )
 
-    def record_pagebench_results(self, name: str, results: Dict[str, Any]):
+    def record_pagebench_results(self, name: str, results: Dict[str, Any], duration: str):
         total = results["total"]
 
         metric = "request_count"
         self.record(
-            f"{name}.{metric}",
-            total[metric],
-            "",
+            metric_name=f"{name}.{metric}",
+            metric_value=total[metric],
+            unit="",
             report=MetricReport.HIGHER_IS_BETTER,
         )
 
         metric = "latency_mean"
         self.record(
-            f"{name}.{metric}",
-            humantime_to_ms(total[metric]),
-            "ms",
+            metric_name=f"{name}.{metric}",
+            metric_value=humantime_to_ms(total[metric]),
+            unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
 
         metric = "latency_percentiles"
         for k, v in total[metric].items():
             self.record(
-                f"{name}.{metric}.{k}",
-                humantime_to_ms(v),
-                "ms",
+                metric_name=f"{name}.{metric}.{k}",
+                metric_value=humantime_to_ms(v),
+                unit="ms",
                 report=MetricReport.LOWER_IS_BETTER,
             )
+
+        metric = "duration"
+        self.record(
+            metric_name=f"{name}.{metric}",
+            metric_value=humantime_to_ms(duration) / 1000,
+            unit="s",
+            report=MetricReport.LOWER_IS_BETTER,
+        )
 
 
 @pytest.fixture(scope="function")

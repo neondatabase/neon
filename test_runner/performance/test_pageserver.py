@@ -152,6 +152,7 @@ def test_getpage_throughput(
     ps_http = env.pageserver.http_client()
 
     # run the benchmark with one client per timeline, each doing 10k requests to random keys.
+    duration = "10s"
     cmd = [
         str(env.neon_binpath / "pagebench"),
         "get-page-latest-lsn",
@@ -160,7 +161,7 @@ def test_getpage_throughput(
         "--page-service-connstring",
         env.pageserver.connstr(password=None),
         "--runtime",
-        "10s",
+        duration,
         *[f"{tenant}/{template_timeline}" for tenant in tenants],
     ]
     log.info(f"command: {' '.join(cmd)}")
@@ -173,4 +174,4 @@ def test_getpage_throughput(
 
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
-    zenbenchmark.record_pagebench_results("get-page-latest-lsn", results)
+    zenbenchmark.record_pagebench_results("get-page-latest-lsn", results, duration)
