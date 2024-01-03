@@ -101,10 +101,12 @@ pub async fn handle_request(request: Request) -> Result<()> {
         // we can't have new backup_lsn greater than existing backup_lsn or start of the last segment
         let max_backup_lsn = backup_lsn.min(Lsn(last_segment * wal_seg_size as u64));
 
-        if max_backup_lsn < start_lsn {
-            // probably we have only one segment, it's okay to leave backup_lsn at the start
+        if max_backup_lsn <= start_lsn {
+            // probably we are starting from the first segment, which was not backed up yet.
+            // star_lsn can be in the middle of the segment
             start_lsn
         } else {
+            // we have some segments backed up, so we will assume all WAL below max_backup_lsn is backed up
             assert!(max_backup_lsn.segment_offset(wal_seg_size) == 0);
             max_backup_lsn
         }
