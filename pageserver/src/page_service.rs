@@ -568,6 +568,10 @@ impl PageServerHandler {
                     span.in_scope(|| info!("dropping connection due to shutdown"));
                     return Err(QueryError::Shutdown);
                 }
+                Err(PageStreamError::Reconnect(reason)) => {
+                    span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                    return Err(QueryError::Reconnect);
+                }
                 Err(e) if timeline.cancel.is_cancelled() || timeline.is_stopping() => {
                     // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
                     // shutdown error.
