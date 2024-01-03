@@ -170,7 +170,10 @@ impl Client {
         config: LocationConfig,
         flush_ms: Option<std::time::Duration>,
     ) -> Result<()> {
-        let req_body = TenantLocationConfigRequest { tenant_id, config };
+        let req_body = TenantLocationConfigRequest {
+            tenant_id: tenant_shard_id,
+            config,
+        };
         let path = format!(
             "{}/v1/tenant/{}/location_config",
             self.mgmt_api_endpoint, tenant_id
