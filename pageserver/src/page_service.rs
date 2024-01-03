@@ -62,6 +62,7 @@ use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
@@ -300,6 +301,10 @@ enum PageStreamError {
     #[error("Read error: {0}")]
     Read(PageReconstructError),
 
+    /// Something went wrong reading a page: this likely indicates a pageserver bug
+    #[error("Not found: {0}")]
+    NotFound(std::borrow::Cow<'static, str>),
+
     /// Any other error: this will be returned to client as a response
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -318,7 +323,8 @@ impl From<GetActiveTimelineError> for PageStreamError {
     fn from(value: GetActiveTimelineError) -> Self {
         match value {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => Self::Shutdown,
-            e => Self::Other(anyhow::anyhow!(e)),
+            GetActiveTimelineError::Tenant(e) => Self::NotFound(format!("{e}").into()),
+            GetActiveTimelineError::Timeline(e) => Self::NotFound(format!("{e}").into()),
         }
     }
 }
@@ -1062,9 +1068,7 @@ impl PageServerHandler {
         )
         .await
         .map_err(GetActiveTimelineError::Tenant)?;
-        let timeline = tenant
-            .get_timeline(timeline_id, true)
-            .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
+        let timeline = tenant.get_timeline(timeline_id, true)?;
         Ok(timeline)
     }
 }
@@ -1486,7 +1490,7 @@ enum GetActiveTimelineError {
     #[error(transparent)]
     Tenant(GetActiveTenantError),
     #[error(transparent)]
-    Timeline(anyhow::Error),
+    Timeline(#[from] GetTimelineError),
 }
 
 impl From<GetActiveTimelineError> for QueryError {
@@ -1494,7 +1498,7 @@ impl From<GetActiveTimelineError> for QueryError {
         match e {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => QueryError::Shutdown,
             GetActiveTimelineError::Tenant(e) => e.into(),
-            GetActiveTimelineError::Timeline(e) => QueryError::Other(e),
+            GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
         }
     }
 }
