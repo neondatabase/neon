@@ -280,7 +280,7 @@ where
             None => {
                 // Nothing is running, so we have nothing to wait for.  We may drop out: the
                 // main even loop will call us again after the next time it has run something.
-                return None;
+                None
             }
         }
     }
