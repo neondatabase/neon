@@ -103,7 +103,6 @@ impl scheduler::Completion for WriteComplete {
     }
 }
 
-
 /// The heatmap uploader keeps a little bit of per-tenant state, mainly to remember
 /// when we last did a write.  We only populate this after doing at least one
 /// write for a tenant -- this avoids holding state for tenants that have

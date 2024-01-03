@@ -25,7 +25,7 @@ use crate::{
 
 use super::{
     heatmap::HeatMapLayer,
-    scheduler::{self, JobGenerator, SchedulingResult, TenantBackgroundJobs, Completion},
+    scheduler::{self, Completion, JobGenerator, SchedulingResult, TenantBackgroundJobs},
     SecondaryTenant,
 };
 
@@ -171,7 +171,6 @@ struct CompleteDownload {
     secondary_state: Arc<SecondaryTenant>,
     completed_at: Instant,
 }
-
 
 impl scheduler::Completion for CompleteDownload {
     fn get_tenant_shard_id(&self) -> &TenantShardId {
