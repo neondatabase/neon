@@ -1,5 +1,5 @@
 use async_trait;
-use futures::{Future, FutureExt};
+use futures::Future;
 use std::{
     collections::HashMap,
     marker::PhantomData,
@@ -55,14 +55,7 @@ where
     /// before pushing more work into pending for the same tenant.
     running: HashMap<TenantShardId, RJ>,
 
-    tasks: JoinSet<()>,
-
-    /// Channel for our child tasks to send results to: we use a channel for results rather than
-    /// just getting task results via JoinSet because we need the channel's recv() "sleep until something
-    /// is available" semantic, rather than JoinSet::join_next()'s "sleep until next thing is available _or_ I'm empty"
-    /// behavior.
-    task_result_tx: tokio::sync::mpsc::UnboundedSender<C>,
-    task_result_rx: tokio::sync::mpsc::UnboundedReceiver<C>,
+    tasks: JoinSet<C>,
 
     concurrency: usize,
 
@@ -133,15 +126,11 @@ where
     G: JobGenerator<PJ, RJ, C, CMD>,
 {
     pub(super) fn new(generator: G, concurrency: usize) -> Self {
-        let (task_result_tx, task_result_rx) = tokio::sync::mpsc::unbounded_channel();
-
         Self {
             generator,
             pending: std::collections::VecDeque::new(),
             running: HashMap::new(),
             tasks: JoinSet::new(),
-            task_result_rx,
-            task_result_tx,
             concurrency,
             scheduling_interval: MAX_SCHEDULING_INTERVAL,
             _phantom: PhantomData,
@@ -219,10 +208,20 @@ where
                     },
                     _ = async {
                         let completion = self.process_next_completion().await;
-                        self.generator.on_completion(completion);
-                        if !cancel.is_cancelled() {
-                            self.spawn_pending();
+                        match completion {
+                            Some(c) => {
+                                self.generator.on_completion(c);
+                                if !cancel.is_cancelled() {
+                                    self.spawn_pending();
+                                }
+                            },
+                            None => {
+                                // Nothing is running, so just wait: expect that this future
+                                // will be dropped when something in the outer select! fires.
+                                cancel.cancelled().await;
+                            }
                         }
+
                      } => {}
                 }
             }
@@ -233,12 +232,7 @@ where
         let tenant_shard_id = *job.get_tenant_shard_id();
         let (in_progress, fut) = self.generator.spawn(job);
 
-        let result_tx = self.task_result_tx.clone();
-        self.tasks.spawn(async move {
-            let r = fut.await;
-            // ok() because we don't care if receiver is shutdown: it is okay to drop completion in this case
-            result_tx.send(r).ok();
-        });
+        self.tasks.spawn(fut);
 
         self.running.insert(tenant_shard_id, in_progress);
     }
@@ -266,20 +260,22 @@ where
     /// Wait until the next task completes, and handle its completion
     ///
     /// Cancellation: this method is cancel-safe.
-    async fn process_next_completion(&mut self) -> C {
-        match self.task_result_rx.recv().await {
+    async fn process_next_completion(&mut self) -> Option<C> {
+        match self.tasks.join_next().await {
             Some(r) => {
                 // We use a channel to drive completions, but also
                 // need to drain the JoinSet to avoid completed tasks
                 // accumulating.  These calls are 1:1 because every task
                 // we spawn into this joinset submits is result to the channel.
-                self.tasks.join_next().now_or_never();
+                let completion = r.expect("Panic in background task");
 
-                self.running.remove(r.get_tenant_shard_id());
-                r
+                self.running.remove(completion.get_tenant_shard_id());
+                Some(completion)
             }
             None => {
-                unreachable!("Result sender is stored on Self");
+                // Nothing is running, so we have nothing to wait for.  We may drop out: the
+                // main even loop will call us again after the next time it has run something.
+                return None;
             }
         }
     }
