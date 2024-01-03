@@ -515,12 +515,7 @@ fn key_is_shard0(key: &Key) -> bool {
     // relation pages are distributed to shards other than shard zero. Everything else gets
     // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
     // requests, and any request other than those for particular blocks in relations.
-    //
-    // In this condition:
-    // - is_rel_block_key includes only relations, i.e. excludes SLRU data and
-    // all metadata.
-    // - field6 is set to -1 for relation size pages.
-    !(is_rel_block_key(key) && key.field6 != 0xffffffff)
+    !is_rel_block_key(key)
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name
