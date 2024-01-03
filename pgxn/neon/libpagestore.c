@@ -35,7 +35,7 @@
 
 #define PageStoreTrace DEBUG5
 
-#define MIN_RECONNECT_INTERVAL_USEC 100
+#define MIN_RECONNECT_INTERVAL_USEC 1000
 #define MAX_RECONNECT_INTERVAL_USEC 1000000
 
 bool		connected = false;
