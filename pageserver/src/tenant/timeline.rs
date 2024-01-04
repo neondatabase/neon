@@ -4231,7 +4231,7 @@ impl Timeline {
                     .context("Failed to reconstruct a page image:")
                 {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::from(e)),
+                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
 
                 if img.len() == page_cache::PAGE_SZ {
