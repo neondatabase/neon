@@ -690,7 +690,7 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::UnknownRecordType
                     }
                 } else {
-                    IngestRecordOutcome::UnknownRecordType
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
             15 => {
@@ -793,7 +793,7 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::UnknownRecordType
                     }
                 } else {
-                    IngestRecordOutcome::UnknownRecordType
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
             16 => {
@@ -896,13 +896,21 @@ impl<'a> WalIngest<'a> {
                         IngestRecordOutcome::UnknownRecordType
                     }
                 } else {
-                    IngestRecordOutcome::UnknownRecordType
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
             pg_version => {
                 bail!("unsupported PostgreSQL version {}", pg_version);
             }
         };
+
+        match outcome {
+            IngestRecordOutcome::Stored | IngestRecordOutcome::Noop => {}
+            IngestRecordOutcome::UnknownRecordType | IngestRecordOutcome::UnexpectedRecordType => {
+                // TODO: get rid of this by returning a structured error instead of anyhow
+                unreachable!("we bail instead of producing such variants")
+            }
+        }
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
