@@ -10,6 +10,7 @@ use control_plane::attachment_service::{
     TenantCreateResponseShard, TenantLocateResponse, TenantLocateResponseShard,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
+use hyper::StatusCode;
 use pageserver_api::{
     control_api::{
         ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
@@ -443,7 +444,17 @@ impl Service {
             let shard_timeline_info = client
                 .timeline_create(tenant_shard_id, &create_req)
                 .await
-                .map_err(|e| ApiError::Conflict(format!("Failed to create timeline: {e}")))?;
+                .map_err(|e| match e {
+                    mgmt_api::Error::ApiError(status, msg)
+                        if status == StatusCode::INTERNAL_SERVER_ERROR
+                            || status == StatusCode::NOT_ACCEPTABLE =>
+                    {
+                        // TODO: handle more error codes, e.g. 503 should be passed through.  Make a general wrapper
+                        // for pass-through API calls.
+                        ApiError::InternalServerError(anyhow::anyhow!(msg))
+                    }
+                    _ => ApiError::Conflict(format!("Failed to create timeline: {e}")),
+                })?;
 
             if timeline_info.is_none() {
                 // If the caller specified an ancestor but no ancestor LSN, we are responsible for
