@@ -62,6 +62,7 @@ use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
@@ -303,7 +304,7 @@ enum PageStreamError {
 
     /// Ran out of time waiting for an LSN
     #[error("LSN timeout: {0}")]
-    LsnTimeout(String),
+    LsnTimeout(WaitLsnError),
 
     /// Something went wrong reading a page: this likely indicates a pageserver bug
     #[error("Not found: {0}")]
@@ -329,6 +330,16 @@ impl From<GetActiveTimelineError> for PageStreamError {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => Self::Shutdown,
             GetActiveTimelineError::Tenant(e) => Self::NotFound(format!("{e}").into()),
             GetActiveTimelineError::Timeline(e) => Self::NotFound(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<WaitLsnError> for PageStreamError {
+    fn from(value: WaitLsnError) -> Self {
+        match value {
+            e @ WaitLsnError::Timeout(_) => Self::LsnTimeout(e),
+            WaitLsnError::Shutdown => Self::Shutdown,
+            WaitLsnError::BadState => Self::Reconnect("Timeline is not active".into()),
         }
     }
 }
@@ -777,10 +788,7 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline
-                    .wait_lsn(lsn, ctx)
-                    .await
-                    .map_err(|e| PageStreamError::LsnTimeout(format!("{e}")))?;
+                timeline.wait_lsn(lsn, ctx).await?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -792,10 +800,7 @@ impl PageServerHandler {
                     "invalid LSN(0) in request".into(),
                 ));
             }
-            timeline
-                .wait_lsn(lsn, ctx)
-                .await
-                .map_err(|e| PageStreamError::LsnTimeout(format!("{e}")))?;
+            timeline.wait_lsn(lsn, ctx).await?;
         }
 
         if lsn < **latest_gc_cutoff_lsn {
