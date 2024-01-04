@@ -731,6 +731,11 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
 #[instrument(skip_all)]
 pub fn handle_migrations(client: &mut Client) -> Result<()> {
     info!("handle migrations");
+
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // !BE SURE TO ONLY ADD MIGRATIONS TO THE END OF THIS ARRAY. IF YOU DO NOT, VERY VERY BAD THINGS MAY HAPPEN!
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
     let migrations = [
         "ALTER ROLE neon_superuser BYPASSRLS",
         r#"
