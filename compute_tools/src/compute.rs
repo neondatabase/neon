@@ -765,7 +765,12 @@ impl ComputeNode {
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, connstr.as_str(), &mut client)?;
-        handle_grants(spec, &mut client, connstr.as_str())?;
+        handle_grants(
+            spec,
+            &mut client,
+            connstr.as_str(),
+            self.has_feature(ComputeFeature::AnonExtension),
+        )?;
         handle_extensions(spec, &mut client)?;
         handle_extension_neon(&mut client)?;
         create_availability_check_data(&mut client)?;
@@ -839,7 +844,12 @@ impl ComputeNode {
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-            handle_grants(&spec, &mut client, self.connstr.as_str())?;
+            handle_grants(
+                &spec,
+                &mut client,
+                self.connstr.as_str(),
+                self.has_feature(ComputeFeature::AnonExtension),
+            )?;
             handle_extensions(&spec, &mut client)?;
             handle_extension_neon(&mut client)?;
             // We can skip handle_migrations here because a new migration can only appear
