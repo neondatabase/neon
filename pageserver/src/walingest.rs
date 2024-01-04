@@ -785,21 +785,19 @@ impl WalIngest {
             }
             (new, old) => {
                 // Emit one record per VM block that needs updating.
-                for update in [new, old] {
-                    if let Some((heap_blkno, vm_blk)) = update {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                heap_blkno_1: Some(heap_blkno),
-                                heap_blkno_2: None,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    }
+                for (heap_blkno, vm_blk) in [new, old].into_iter().flatten() {
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        vm_blk,
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            heap_blkno_1: Some(heap_blkno),
+                            heap_blkno_2: None,
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
                 }
             }
         }

@@ -414,22 +414,20 @@ impl PostgresRedoManager {
                     "ClearVisibilityMapFlags record on unexpected rel {}",
                     rel
                 );
-                for update in [heap_blkno_1, heap_blkno_2] {
-                    if let Some(heap_blkno) = update {
-                        let heap_blkno = *heap_blkno;
-                        // Calculate the VM block and offset that corresponds to the heap block.
-                        let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
-                        let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
-                        let map_offset = pg_constants::HEAPBLK_TO_OFFSET(heap_blkno);
+                for heap_blkno in [heap_blkno_1, heap_blkno_2].into_iter().flatten() {
+                    let heap_blkno = *heap_blkno;
+                    // Calculate the VM block and offset that corresponds to the heap block.
+                    let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
+                    let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
+                    let map_offset = pg_constants::HEAPBLK_TO_OFFSET(heap_blkno);
 
-                        // Check that we're modifying the correct VM block.
-                        assert!(map_block == blknum);
+                    // Check that we're modifying the correct VM block.
+                    assert!(map_block == blknum);
 
-                        // equivalent to PageGetContents(page)
-                        let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+                    // equivalent to PageGetContents(page)
+                    let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
-                        map[map_byte as usize] &= !(flags << map_offset);
-                    }
+                    map[map_byte as usize] &= !(flags << map_offset);
                 }
             }
             // Non-relational WAL records are handled here, with custom code that has the
