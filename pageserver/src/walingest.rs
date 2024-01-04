@@ -746,9 +746,6 @@ impl WalIngest {
         };
 
         match (new, old) {
-            (None, None) => {
-                // Nothing to do
-            }
             (Some((new_heap_blkno, new_vm_blk)), Some((old_heap_blkno, old_vm_blk)))
                 if new_vm_blk == old_vm_blk =>
             {
@@ -759,8 +756,8 @@ impl WalIngest {
                     vm_rel,
                     new_vm_blk, // could also be old_vm_blk, they're the same
                     NeonWalRecord::ClearVisibilityMapFlags {
-                        new_heap_blkno: Some(new_heap_blkno),
-                        old_heap_blkno: Some(old_heap_blkno),
+                        heap_blkno_1: Some(new_heap_blkno),
+                        heap_blkno_2: Some(old_heap_blkno),
                         flags,
                     },
                     ctx,
@@ -769,33 +766,21 @@ impl WalIngest {
             }
             (new, old) => {
                 // Emit one record per VM block that needs updating.
-                if let Some((new_heap_blkno, new_vm_blk)) = new {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: Some(new_heap_blkno),
-                            old_heap_blkno: None,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
-                if let Some(Some((old_heap_blkno, old_vm_blk))) = old {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        old_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
-                            old_heap_blkno: Some(old_heap_blkno),
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
+                for update in [new, old] {
+                    if let Some((heap_blkno, vm_blk)) = update {
+                        self.put_rel_wal_record(
+                            modification,
+                            vm_rel,
+                            vm_blk,
+                            NeonWalRecord::ClearVisibilityMapFlags {
+                                heap_blkno_1: Some(heap_blkno),
+                                heap_blkno_2: None,
+                                flags,
+                            },
+                            ctx,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
