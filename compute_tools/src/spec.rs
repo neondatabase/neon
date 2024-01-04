@@ -740,27 +740,15 @@ DECLARE
 BEGIN
     FOR role_name IN SELECT rolname FROM pg_roles WHERE pg_has_role(rolname, 'neon_superuser', 'member')
     LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE ' || quote_ident(role_name) || ' INHERIT';
         EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' INHERIT';
     END LOOP;
 
     FOR role_name IN SELECT rolname FROM pg_roles
         WHERE
-            NOT pg_has_role(rolname, 'neon_superuser', 'member') AND
-            rolname NOT IN ('pg_read_all_data',
-                            'pg_write_all_data',
-                            'pg_read_all_settings',
-                            'pg_read_all_stats',
-                            'pg_stat_scan_tables',
-                            'pg_monitor',
-                            'pg_database_owner',
-                            'pg_signal_backend',
-                            'pg_read_server_files',
-                            'pg_write_server_files',
-                            'pg_execute_server_program',
-                            'pg_checkpoint',
-                            'pg_use_reserved_connections',
-                            'pg_create_subscription')
+            NOT pg_has_role(rolname, 'neon_superuser', 'member') AND NOT starts_with(rolname, 'pg_')
     LOOP
+        RAISE NOTICE 'EXECUTING ALTER ROLE ' || quote_ident(role_name) || ' NOBYPASSLRS';
         EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOBYPASSRLS';
     END LOOP;
 END $$;
@@ -770,26 +758,39 @@ END $$;
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
     client.simple_query(query)?;
 
-    query = "CREATE SEQUENCE IF NOT EXISTS neon_migration.migration_id START WITH 0 INCREMENT BY 1 MINVALUE 0";
+    query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (id serial PRIMARY KEY, value integer NOT NULL DEFAULT 0)";
     client.simple_query(query)?;
 
-    query = "GRANT USAGE, SELECT ON SEQUENCE neon_migration.migration_id TO cloud_admin";
+    query = "INSERT INTO neon_migration.migration_id VALUES (0) ON CONFLICT DO NOTHING";
     client.simple_query(query)?;
 
-    query = "SELECT last_value FROM neon_migration.migration_id";
+    query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
+    client.simple_query(query)?;
+
+    query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
+    client.simple_query(query)?;
+
+    query = "SELECT id FROM neon_migration.migration_id";
     let row = client.query_one(query, &[])?;
-    let mut current_migration: usize = row.get::<&str, i64>("last_value") as usize;
+    let mut current_migration: usize = row.get::<&str, i64>("id") as usize;
     let starting_migration_id = current_migration;
+
+    query = "BEGIN";
+    client.simple_query(query)?;
 
     while current_migration < migrations.len() {
         client.simple_query(migrations[current_migration])?;
         current_migration += 1;
     }
     let setval = format!(
-        "SELECT setval('neon_migration.migration_id', {})",
+        "UPDATE neon_migration.migration_id SET value={}",
         migrations.len()
     );
     client.simple_query(&setval)?;
+
+    query = "COMMIT";
+    client.simple_query(query)?;
+
     info!(
         "Ran {} migrations",
         (migrations.len() - starting_migration_id)
