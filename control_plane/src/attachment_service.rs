@@ -1,11 +1,11 @@
 use crate::{background_process, local_env::LocalEnv};
-use anyhow::anyhow;
 use camino::Utf8PathBuf;
-use hyper::{Method, StatusCode};
+use hyper::Method;
 use pageserver_api::{
     models::{ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo},
     shard::TenantShardId,
 };
+use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -288,25 +288,19 @@ impl AttachmentService {
             builder = builder.json(&body)
         }
         if let Some(jwt_token) = &self.jwt_token {
-            eprintln!("dispatch: using token {jwt_token}");
             builder = builder.header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {jwt_token}"),
             );
-        } else {
-            eprintln!("dispatch: no JWT token");
         }
 
         let response = builder.send().await?;
-        if response.status() != StatusCode::OK {
-            return Err(anyhow!(
-                "Unexpected status {} on {}",
-                response.status(),
-                path
-            ));
-        }
+        let response = response.error_from_body().await?;
 
-        Ok(response.json().await?)
+        Ok(response
+            .json()
+            .await
+            .map_err(pageserver_client::mgmt_api::Error::ReceiveBody)?)
     }
 
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
