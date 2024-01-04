@@ -20,7 +20,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*layer loading failed:.*",
+            ".*get_value_reconstruct_data for layer .*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
@@ -83,7 +83,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     # (We don't check layer file contents on startup, when loading the timeline)
     #
     # This will change when we implement checksums for layers
-    with pytest.raises(Exception, match="layer loading failed:") as err:
+    with pytest.raises(Exception, match="get_value_reconstruct_data for layer ") as err:
         pg2.start()
     log.info(
         f"As expected, compute startup failed for timeline {tenant2}/{timeline2} with corrupt layers: {err}"
@@ -114,7 +114,6 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
         [
             ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
             ".*Timeline got dropped without initializing, cleaning its files.*",
-            ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )
 
@@ -144,8 +143,13 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
 
-def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+# The "exit" case is for a reproducer of issue 6007: an unclean shutdown where we can't do local fs cleanups
+@pytest.mark.parametrize("exit_or_return", ["return", "exit"])
+def test_timeline_init_break_before_checkpoint_recreate(
+    neon_env_builder: NeonEnvBuilder, exit_or_return: str
+):
+    env = neon_env_builder.init_configs()
+    env.start()
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(
@@ -156,6 +160,7 @@ def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEn
         ]
     )
 
+    env.pageserver.tenant_create(env.initial_tenant)
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)
@@ -166,13 +171,17 @@ def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEn
     timeline_id = TimelineId("1080243c1f76fe3c5147266663c9860b")
 
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
-    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "return"))
-    with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
-        _ = env.neon_cli.create_timeline(
-            "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
-        )
+    failpoint = "before-checkpoint-new-timeline"
+    pattern = failpoint
+    if exit_or_return == "exit":
+        # in reality a read error happens, but there are automatic retries which now fail because pageserver is dead
+        pattern = "Connection aborted."
 
-    # Restart the page server
+    pageserver_http.configure_failpoints((failpoint, exit_or_return))
+    with pytest.raises(Exception, match=pattern):
+        _ = pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id)
+
+    # Restart the page server (with the failpoint disabled)
     env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
@@ -186,11 +195,9 @@ def test_timeline_init_break_before_checkpoint_recreate(neon_env_builder: NeonEn
         timeline_dirs == initial_timeline_dirs
     ), "pageserver should clean its temp timeline files on timeline creation failure"
 
-    # Disable the failpoint again
-    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "off"))
     # creating the branch should have worked now
-    new_timeline_id = env.neon_cli.create_timeline(
-        "test_timeline_init_break_before_checkpoint", tenant_id, timeline_id
+    new_timeline_id = TimelineId(
+        pageserver_http.timeline_create(env.pg_version, tenant_id, timeline_id)["timeline_id"]
     )
 
     assert timeline_id == new_timeline_id

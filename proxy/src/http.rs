@@ -13,7 +13,7 @@ pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::time::Instant;
 use tracing::trace;
 
-use crate::{proxy::CONSOLE_REQUEST_LATENCY, rate_limiter, url::ApiUrl};
+use crate::{metrics::CONSOLE_REQUEST_LATENCY, rate_limiter, url::ApiUrl};
 use reqwest_middleware::RequestBuilder;
 
 /// This is the preferred way to create new http clients,
@@ -95,7 +95,7 @@ impl Endpoint {
         let res = self.client.execute(request).await;
         CONSOLE_REQUEST_LATENCY
             .with_label_values(&[&path])
-            .observe(start.elapsed().as_micros() as f64);
+            .observe(start.elapsed().as_secs_f64());
         res
     }
 }

@@ -1,21 +1,24 @@
 //! Azure Blob Storage wrapper
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::{borrow::Cow, io::Cursor};
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
+use azure_core::RetryOptions;
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use bytes::Bytes;
+use futures::stream::Stream;
 use futures_util::StreamExt;
 use http_types::StatusCode;
-use tokio::io::AsyncRead;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
@@ -49,7 +52,8 @@ impl AzureBlobStorage {
             StorageCredentials::token_credential(Arc::new(token_credential))
         };
 
-        let builder = ClientBuilder::new(account, credentials);
+        // we have an outer retry
+        let builder = ClientBuilder::new(account, credentials).retry(RetryOptions::none());
 
         let client = builder.container_client(azure_config.container_name.to_owned());
 
@@ -113,12 +117,22 @@ impl AzureBlobStorage {
     ) -> Result<Download, DownloadError> {
         let mut response = builder.into_stream();
 
+        let mut etag = None;
+        let mut last_modified = None;
         let mut metadata = HashMap::new();
         // TODO give proper streaming response instead of buffering into RAM
         // https://github.com/neondatabase/neon/issues/5563
-        let mut buf = Vec::new();
+
+        let mut bufs = Vec::new();
         while let Some(part) = response.next().await {
             let part = part.map_err(to_download_error)?;
+            let etag_str: &str = part.blob.properties.etag.as_ref();
+            if etag.is_none() {
+                etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
+            }
+            if last_modified.is_none() {
+                last_modified = Some(part.blob.properties.last_modified.into());
+            }
             if let Some(blob_meta) = part.blob.metadata {
                 metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
             }
@@ -127,10 +141,12 @@ impl AzureBlobStorage {
                 .collect()
                 .await
                 .map_err(|e| DownloadError::Other(e.into()))?;
-            buf.extend_from_slice(&data.slice(..));
+            bufs.push(data);
         }
         Ok(Download {
-            download_stream: Box::pin(Cursor::new(buf)),
+            download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
+            etag,
+            last_modified,
             metadata: Some(StorageMetadata(metadata)),
         })
     }
@@ -217,9 +233,10 @@ impl RemoteStorage for AzureBlobStorage {
         }
         Ok(res)
     }
+
     async fn upload(
         &self,
-        mut from: impl AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -227,13 +244,12 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Put).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        // TODO FIX THIS UGLY HACK and don't buffer the entire object
-        // into RAM here, but use the streaming interface. For that,
-        // we'd have to change the interface though...
-        // https://github.com/neondatabase/neon/issues/5563
-        let mut buf = Vec::with_capacity(data_size_bytes);
-        tokio::io::copy(&mut from, &mut buf).await?;
-        let body = azure_core::Body::Bytes(buf.into());
+        let from: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>> =
+            Box::pin(from);
+
+        let from = NonSeekableStream::new(from, data_size_bytes);
+
+        let body = azure_core::Body::SeekableStream(Box::new(from));
 
         let mut builder = blob_client.put_block_blob(body);
 
@@ -266,17 +282,12 @@ impl RemoteStorage for AzureBlobStorage {
 
         let mut builder = blob_client.get();
 
-        if let Some(end_exclusive) = end_exclusive {
-            builder = builder.range(Range::new(start_inclusive, end_exclusive));
+        let range: Range = if let Some(end_exclusive) = end_exclusive {
+            (start_inclusive..end_exclusive).into()
         } else {
-            // Open ranges are not supported by the SDK so we work around
-            // by setting the upper limit extremely high (but high enough
-            // to still be representable by signed 64 bit integers).
-            // TODO remove workaround once the SDK adds open range support
-            // https://github.com/Azure/azure-sdk-for-rust/issues/1438
-            let end_exclusive = u64::MAX / 4;
-            builder = builder.range(Range::new(start_inclusive, end_exclusive));
-        }
+            (start_inclusive..).into()
+        };
+        builder = builder.range(range);
 
         self.download_for_builder(builder).await
     }
@@ -310,5 +321,155 @@ impl RemoteStorage for AzureBlobStorage {
             self.delete(path).await?;
         }
         Ok(())
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// Hack to work around not being able to stream once with azure sdk.
+    ///
+    /// Azure sdk clones streams around with the assumption that they are like
+    /// `Arc<tokio::fs::File>` (except not supporting tokio), however our streams are not like
+    /// that. For example for an `index_part.json` we just have a single chunk of [`Bytes`]
+    /// representing the whole serialized vec. It could be trivially cloneable and "semi-trivially"
+    /// seekable, but we can also just re-try the request easier.
+    #[project = NonSeekableStreamProj]
+    enum NonSeekableStream<S> {
+        /// A stream wrappers initial form.
+        ///
+        /// Mutex exists to allow moving when cloning. If the sdk changes to do less than 1
+        /// clone before first request, then this must be changed.
+        Initial {
+            inner: std::sync::Mutex<Option<tokio_util::compat::Compat<tokio_util::io::StreamReader<S, Bytes>>>>,
+            len: usize,
+        },
+        /// The actually readable variant, produced by cloning the Initial variant.
+        ///
+        /// The sdk currently always clones once, even without retry policy.
+        Actual {
+            #[pin]
+            inner: tokio_util::compat::Compat<tokio_util::io::StreamReader<S, Bytes>>,
+            len: usize,
+            read_any: bool,
+        },
+        /// Most likely unneeded, but left to make life easier, in case more clones are added.
+        Cloned {
+            len_was: usize,
+        }
+    }
+}
+
+impl<S> NonSeekableStream<S>
+where
+    S: Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+{
+    fn new(inner: S, len: usize) -> NonSeekableStream<S> {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let inner = tokio_util::io::StreamReader::new(inner).compat();
+        let inner = Some(inner);
+        let inner = std::sync::Mutex::new(inner);
+        NonSeekableStream::Initial { inner, len }
+    }
+}
+
+impl<S> std::fmt::Debug for NonSeekableStream<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initial { len, .. } => f.debug_struct("Initial").field("len", len).finish(),
+            Self::Actual { len, .. } => f.debug_struct("Actual").field("len", len).finish(),
+            Self::Cloned { len_was, .. } => f.debug_struct("Cloned").field("len", len_was).finish(),
+        }
+    }
+}
+
+impl<S> futures::io::AsyncRead for NonSeekableStream<S>
+where
+    S: Stream<Item = std::io::Result<Bytes>>,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.project() {
+            NonSeekableStreamProj::Actual {
+                inner, read_any, ..
+            } => {
+                *read_any = true;
+                inner.poll_read(cx, buf)
+            }
+            // NonSeekableStream::Initial does not support reading because it is just much easier
+            // to have the mutex in place where one does not poll the contents, or that's how it
+            // seemed originally. If there is a version upgrade which changes the cloning, then
+            // that support needs to be hacked in.
+            //
+            // including {self:?} into the message would be useful, but unsure how to unproject.
+            _ => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "cloned or initial values cannot be read",
+            ))),
+        }
+    }
+}
+
+impl<S> Clone for NonSeekableStream<S> {
+    /// Weird clone implementation exists to support the sdk doing cloning before issuing the first
+    /// request, see type documentation.
+    fn clone(&self) -> Self {
+        use NonSeekableStream::*;
+
+        match self {
+            Initial { inner, len } => {
+                if let Some(inner) = inner.lock().unwrap().take() {
+                    Actual {
+                        inner,
+                        len: *len,
+                        read_any: false,
+                    }
+                } else {
+                    Self::Cloned { len_was: *len }
+                }
+            }
+            Actual { len, .. } => Cloned { len_was: *len },
+            Cloned { len_was } => Cloned { len_was: *len_was },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> azure_core::SeekableStream for NonSeekableStream<S>
+where
+    S: Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync + 'static,
+{
+    async fn reset(&mut self) -> azure_core::error::Result<()> {
+        use NonSeekableStream::*;
+
+        let msg = match self {
+            Initial { inner, .. } => {
+                if inner.get_mut().unwrap().is_some() {
+                    return Ok(());
+                } else {
+                    "reset after first clone is not supported"
+                }
+            }
+            Actual { read_any, .. } if !*read_any => return Ok(()),
+            Actual { .. } => "reset after reading is not supported",
+            Cloned { .. } => "reset after second clone is not supported",
+        };
+        Err(azure_core::error::Error::new(
+            azure_core::error::ErrorKind::Io,
+            std::io::Error::new(std::io::ErrorKind::Other, msg),
+        ))
+    }
+
+    // Note: it is not documented if this should be the total or remaining length, total passes the
+    // tests.
+    fn len(&self) -> usize {
+        use NonSeekableStream::*;
+        match self {
+            Initial { len, .. } => *len,
+            Actual { len, .. } => *len,
+            Cloned { len_was, .. } => *len_was,
+        }
     }
 }

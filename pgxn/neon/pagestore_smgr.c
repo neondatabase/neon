@@ -47,24 +47,26 @@
 
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xlogdefs.h"
 #include "access/xloginsert.h"
 #include "access/xlog_internal.h"
-#include "access/xlogdefs.h"
+#include "access/xlogutils.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
 #include "executor/instrument.h"
-#include "pagestore_client.h"
-#include "postmaster/interrupt.h"
+#include "pgstat.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/interrupt.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
-#include "storage/smgr.h"
+#include "storage/fsm_internals.h"
 #include "storage/md.h"
-#include "pgstat.h"
+#include "storage/smgr.h"
+
+#include "pagestore_client.h"
 
 #if PG_VERSION_NUM >= 150000
-#include "access/xlogutils.h"
 #include "access/xlogrecovery.h"
 #endif
 
@@ -100,21 +102,24 @@ typedef enum
 	UNLOGGED_BUILD_PHASE_1,
 	UNLOGGED_BUILD_PHASE_2,
 	UNLOGGED_BUILD_NOT_PERMANENT
-}			UnloggedBuildPhase;
+} UnloggedBuildPhase;
 
 static SMgrRelation unlogged_build_rel = NULL;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
+static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
+static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
+
 /*
  * Prefetch implementation:
- * 
+ *
  * Prefetch is performed locally by each backend.
  *
  * There can be up to readahead_buffer_size active IO requests registered at
  * any time. Requests using smgr_prefetch are sent to the pageserver, but we
  * don't wait on the response. Requests using smgr_read are either read from
  * the buffer, or (if that's not possible) we wait on the response to arrive -
- * this also will allow us to receive other prefetched pages. 
+ * this also will allow us to receive other prefetched pages.
  * Each request is immediately written to the output buffer of the pageserver
  * connection, but may not be flushed if smgr_prefetch is used: pageserver
  * flushes sent requests on manual flush, or every neon.flush_output_after
@@ -138,7 +143,7 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
 /*
  * State machine:
- *        
+ *
  * not in hash : in hash
  *             :
  * UNUSED ------> REQUESTED --> RECEIVED
@@ -149,30 +154,34 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
  *   +----------------+------------+
  *             :
  */
-typedef enum PrefetchStatus {
-	PRFS_UNUSED = 0,	/* unused slot */
-	PRFS_REQUESTED,		/* request was written to the sendbuffer to PS, but not
-						 * necessarily flushed.
-						 * all fields except response valid */
-	PRFS_RECEIVED,		/* all fields valid */
-	PRFS_TAG_REMAINS,	/* only buftag and my_ring_index are still valid */
+typedef enum PrefetchStatus
+{
+	PRFS_UNUSED = 0,			/* unused slot */
+	PRFS_REQUESTED,				/* request was written to the sendbuffer to
+								 * PS, but not necessarily flushed. all fields
+								 * except response valid */
+	PRFS_RECEIVED,				/* all fields valid */
+	PRFS_TAG_REMAINS,			/* only buftag and my_ring_index are still
+								 * valid */
 } PrefetchStatus;
 
-typedef struct PrefetchRequest {
-	BufferTag	buftag; /* must be first entry in the struct */
+typedef struct PrefetchRequest
+{
+	BufferTag	buftag;			/* must be first entry in the struct */
 	XLogRecPtr	effective_request_lsn;
 	XLogRecPtr	actual_request_lsn;
-	NeonResponse *response; /* may be null */
+	NeonResponse *response;		/* may be null */
 	PrefetchStatus status;
 	uint64		my_ring_index;
 } PrefetchRequest;
 
 /* prefetch buffer lookup hash table */
 
-typedef struct PrfHashEntry {
+typedef struct PrfHashEntry
+{
 	PrefetchRequest *slot;
-	uint32 status;
-	uint32 hash;
+	uint32		status;
+	uint32		hash;
 } PrfHashEntry;
 
 #define SH_PREFIX			prfh
@@ -196,39 +205,45 @@ typedef struct PrfHashEntry {
 /*
  * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
  * It maintains a (ring) buffer of in-flight requests and responses.
- * 
+ *
  * We maintain several indexes into the ring buffer:
  * ring_unused >= ring_flush >= ring_receive >= ring_last >= 0
- * 
+ *
  * ring_unused points to the first unused slot of the buffer
  * ring_receive is the next request that is to be received
  * ring_last is the oldest received entry in the buffer
- * 
+ *
  * Apart from being an entry in the ring buffer of prefetch requests, each
  * PrefetchRequest that is not UNUSED is indexed in prf_hash by buftag.
  */
-typedef struct PrefetchState {
-	MemoryContext bufctx; /* context for prf_buffer[].response allocations */
-	MemoryContext errctx; /* context for prf_buffer[].response allocations */
-	MemoryContext hashctx; /* context for prf_buffer */
+typedef struct PrefetchState
+{
+	MemoryContext bufctx;		/* context for prf_buffer[].response
+								 * allocations */
+	MemoryContext errctx;		/* context for prf_buffer[].response
+								 * allocations */
+	MemoryContext hashctx;		/* context for prf_buffer */
 
 	/* buffer indexes */
-	uint64	ring_unused;		/* first unused slot */
-	uint64	ring_flush;			/* next request to flush */
-	uint64	ring_receive;		/* next slot that is to receive a response */
-	uint64	ring_last;			/* min slot with a response value */
+	uint64		ring_unused;	/* first unused slot */
+	uint64		ring_flush;		/* next request to flush */
+	uint64		ring_receive;	/* next slot that is to receive a response */
+	uint64		ring_last;		/* min slot with a response value */
 
 	/* metrics / statistics  */
-	int		n_responses_buffered;	/* count of PS responses not yet in buffers */
-	int		n_requests_inflight;	/* count of PS requests considered in flight */
-	int		n_unused;				/* count of buffers < unused, > last, that are also unused */
+	int			n_responses_buffered;	/* count of PS responses not yet in
+										 * buffers */
+	int			n_requests_inflight;	/* count of PS requests considered in
+										 * flight */
+	int			n_unused;		/* count of buffers < unused, > last, that are
+								 * also unused */
 
 	/* the buffers */
-	prfh_hash *prf_hash;
-	PrefetchRequest prf_buffer[]; /* prefetch buffers */
+	prfh_hash  *prf_hash;
+	PrefetchRequest prf_buffer[];	/* prefetch buffers */
 } PrefetchState;
 
-PrefetchState *MyPState;
+static PrefetchState *MyPState;
 
 #define GetPrfSlot(ring_index) ( \
 	( \
@@ -246,7 +261,7 @@ PrefetchState *MyPState;
 	) \
 )
 
-XLogRecPtr	prefetch_lsn = 0;
+static XLogRecPtr prefetch_lsn = 0;
 
 static bool compact_prefetch_buffers(void);
 static void consume_prefetch_responses(void);
@@ -263,10 +278,10 @@ static XLogRecPtr neon_get_request_lsn(bool *latest, NRelFileInfo rinfo,
 static bool
 compact_prefetch_buffers(void)
 {
-	uint64	empty_ring_index = MyPState->ring_last;
-	uint64	search_ring_index = MyPState->ring_receive;
-	int n_moved = 0;
-	
+	uint64		empty_ring_index = MyPState->ring_last;
+	uint64		search_ring_index = MyPState->ring_receive;
+	int			n_moved = 0;
+
 	if (MyPState->ring_receive == MyPState->ring_last)
 		return false;
 
@@ -281,15 +296,14 @@ compact_prefetch_buffers(void)
 	}
 
 	/*
-	 * Here we have established:
-	 *   slots < search_ring_index have an unknown state (not scanned)
-	 *   slots >= search_ring_index and <= empty_ring_index are unused
-	 *   slots > empty_ring_index are in use, or outside our buffer's range.
-	 * ... unless search_ring_index <= ring_last
-	 * 
+	 * Here we have established: slots < search_ring_index have an unknown
+	 * state (not scanned) slots >= search_ring_index and <= empty_ring_index
+	 * are unused slots > empty_ring_index are in use, or outside our buffer's
+	 * range. ... unless search_ring_index <= ring_last
+	 *
 	 * Therefore, there is a gap of at least one unused items between
-	 * search_ring_index and empty_ring_index (both inclusive), which grows as we hit
-	 * more unused items while moving backwards through the array.
+	 * search_ring_index and empty_ring_index (both inclusive), which grows as
+	 * we hit more unused items while moving backwards through the array.
 	 */
 
 	while (search_ring_index > MyPState->ring_last)
@@ -329,7 +343,10 @@ compact_prefetch_buffers(void)
 
 		/* empty the moved slot */
 		source_slot->status = PRFS_UNUSED;
-		source_slot->buftag = (BufferTag) {0};
+		source_slot->buftag = (BufferTag)
+		{
+			0
+		};
 		source_slot->response = NULL;
 		source_slot->my_ring_index = 0;
 		source_slot->effective_request_lsn = 0;
@@ -339,8 +356,8 @@ compact_prefetch_buffers(void)
 	}
 
 	/*
-	 * Only when we've moved slots we can expect trailing unused slots,
-	 * so only then we clean up trailing unused slots.
+	 * Only when we've moved slots we can expect trailing unused slots, so
+	 * only then we clean up trailing unused slots.
 	 */
 	if (n_moved > 0)
 	{
@@ -357,10 +374,9 @@ readahead_buffer_resize(int newsize, void *extra)
 	uint64		end,
 				nfree = newsize;
 	PrefetchState *newPState;
-	Size 		newprfs_size = offsetof(PrefetchState, prf_buffer) + (
-		sizeof(PrefetchRequest) * newsize
-	);
-	
+	Size		newprfs_size = offsetof(PrefetchState, prf_buffer) +
+		(sizeof(PrefetchRequest) * newsize);
+
 	/* don't try to re-initialize if we haven't initialized yet */
 	if (MyPState == NULL)
 		return;
@@ -387,12 +403,12 @@ readahead_buffer_resize(int newsize, void *extra)
 	newPState->ring_receive = newsize;
 	newPState->ring_flush = newsize;
 
-	/* 
+	/*
 	 * Copy over the prefetches.
-	 * 
+	 *
 	 * We populate the prefetch array from the end; to retain the most recent
-	 * prefetches, but this has the benefit of only needing to do one iteration
-	 * on the dataset, and trivial compaction.
+	 * prefetches, but this has the benefit of only needing to do one
+	 * iteration on the dataset, and trivial compaction.
 	 */
 	for (end = MyPState->ring_unused - 1;
 		 end >= MyPState->ring_last && end != UINT64_MAX && nfree != 0;
@@ -400,7 +416,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	{
 		PrefetchRequest *slot = GetPrfSlot(end);
 		PrefetchRequest *newslot;
-		bool	found;
+		bool		found;
 
 		if (slot->status == PRFS_UNUSED)
 			continue;
@@ -463,10 +479,11 @@ consume_prefetch_responses(void)
 static void
 prefetch_cleanup_trailing_unused(void)
 {
-	uint64	ring_index;
+	uint64		ring_index;
 	PrefetchRequest *slot;
 
-	while (MyPState->ring_last < MyPState->ring_receive) {
+	while (MyPState->ring_last < MyPState->ring_receive)
+	{
 		ring_index = MyPState->ring_last;
 		slot = GetPrfSlot(ring_index);
 
@@ -480,7 +497,7 @@ prefetch_cleanup_trailing_unused(void)
 /*
  * Wait for slot of ring_index to have received its response.
  * The caller is responsible for making sure the request buffer is flushed.
- * 
+ *
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
  */
@@ -512,7 +529,7 @@ prefetch_wait_for(uint64 ring_index)
 
 /*
  * Read the response of a prefetch request into its slot.
- * 
+ *
  * The caller is responsible for making sure that the request for this buffer
  * was flushed to the PageServer.
  *
@@ -552,7 +569,7 @@ prefetch_read(PrefetchRequest *slot)
 
 /*
  * Disconnect hook - drop prefetches when the connection drops
- * 
+ *
  * If we don't remove the failed prefetches, we'd be serving incorrect
  * data to the smgr.
  */
@@ -563,7 +580,7 @@ prefetch_on_ps_disconnect(void)
 	while (MyPState->ring_receive < MyPState->ring_unused)
 	{
 		PrefetchRequest *slot;
-		uint64 ring_index = MyPState->ring_receive;
+		uint64		ring_index = MyPState->ring_receive;
 
 		slot = GetPrfSlot(ring_index);
 
@@ -593,7 +610,7 @@ prefetch_set_unused(uint64 ring_index)
 	PrefetchRequest *slot = GetPrfSlot(ring_index);
 
 	if (ring_index < MyPState->ring_last)
-		return; /* Should already be unused */
+		return;					/* Should already be unused */
 
 	Assert(MyPState->ring_unused > ring_index);
 
@@ -624,7 +641,11 @@ prefetch_set_unused(uint64 ring_index)
 	/* run cleanup if we're holding back ring_last */
 	if (MyPState->ring_last == ring_index)
 		prefetch_cleanup_trailing_unused();
-	/* ... and try to store the buffered responses more compactly if > 12.5% of the buffer is gaps */
+
+	/*
+	 * ... and try to store the buffered responses more compactly if > 12.5%
+	 * of the buffer is gaps
+	 */
 	else if (ReceiveBufferNeedsCompaction())
 		compact_prefetch_buffers();
 }
@@ -632,7 +653,7 @@ prefetch_set_unused(uint64 ring_index)
 static void
 prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn)
 {
-	bool found;
+	bool		found;
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
 		.req.latest = false,
@@ -650,21 +671,22 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	}
 	else
 	{
-		XLogRecPtr lsn = neon_get_request_lsn(
-			&request.req.latest,
-			BufTagGetNRelFileInfo(slot->buftag),
-			slot->buftag.forkNum,
-			slot->buftag.blockNum
-		);
+		XLogRecPtr	lsn = neon_get_request_lsn(
+											   &request.req.latest,
+											   BufTagGetNRelFileInfo(slot->buftag),
+											   slot->buftag.forkNum,
+											   slot->buftag.blockNum
+			);
+
 		/*
-		 * Note: effective_request_lsn is potentially higher than the requested
-		 * LSN, but still correct:
-		 * 
+		 * Note: effective_request_lsn is potentially higher than the
+		 * requested LSN, but still correct:
+		 *
 		 * We know there are no changes between the actual requested LSN and
 		 * the value of effective_request_lsn: If there were, the page would
-		 * have been in cache and evicted between those LSN values, which
-		 * then would have had to result in a larger request LSN for this page.
-		 * 
+		 * have been in cache and evicted between those LSN values, which then
+		 * would have had to result in a larger request LSN for this page.
+		 *
 		 * It is possible that a concurrent backend loads the page, modifies
 		 * it and then evicts it again, but the LSN of that eviction cannot be
 		 * smaller than the current WAL insert/redo pointer, which is already
@@ -701,7 +723,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
  * prefetch_register_buffer() - register and prefetch buffer
  *
  * Register that we may want the contents of BufferTag in the near future.
- * 
+ *
  * If force_latest and force_lsn are not NULL, those values are sent to the
  * pageserver. If they are NULL, we utilize the lastWrittenLsn -infrastructure
  * to fill in these values manually.
@@ -713,14 +735,14 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 static uint64
 prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn)
 {
-	uint64	ring_index;
+	uint64		ring_index;
 	PrefetchRequest req;
 	PrefetchRequest *slot;
 	PrfHashEntry *entry;
 
 	/* use an intermediate PrefetchRequest struct to ensure correct alignment */
 	req.buftag = tag;
-  Retry:
+Retry:
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
 
 	if (entry != NULL)
@@ -740,7 +762,10 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		 */
 		if (force_latest && force_lsn)
 		{
-			/* if we want the latest version, any effective_request_lsn < request lsn is OK */
+			/*
+			 * if we want the latest version, any effective_request_lsn <
+			 * request lsn is OK
+			 */
 			if (*force_latest)
 			{
 				if (*force_lsn > slot->effective_request_lsn)
@@ -751,7 +776,11 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 				}
 
 			}
-			/* if we don't want the latest version, only accept requests with the exact same LSN */
+
+			/*
+			 * if we don't want the latest version, only accept requests with
+			 * the exact same LSN
+			 */
 			else
 			{
 				if (*force_lsn != slot->effective_request_lsn)
@@ -798,7 +827,8 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	 */
 	if (MyPState->ring_last + readahead_buffer_size - 1 == MyPState->ring_unused)
 	{
-		uint64 cleanup_index = MyPState->ring_last;
+		uint64		cleanup_index = MyPState->ring_last;
+
 		slot = GetPrfSlot(cleanup_index);
 
 		Assert(slot->status != PRFS_UNUSED);
@@ -813,7 +843,10 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		}
 		else
 		{
-			/* We have the slot for ring_last, so that must still be in progress */
+			/*
+			 * We have the slot for ring_last, so that must still be in
+			 * progress
+			 */
 			switch (slot->status)
 			{
 				case PRFS_REQUESTED:
@@ -832,8 +865,8 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	}
 
 	/*
-	 * The next buffer pointed to by `ring_unused` is now definitely empty,
-	 * so we can insert the new request to it.
+	 * The next buffer pointed to by `ring_unused` is now definitely empty, so
+	 * we can insert the new request to it.
 	 */
 	ring_index = MyPState->ring_unused;
 	slot = &MyPState->prf_buffer[((ring_index) % readahead_buffer_size)];
@@ -859,7 +892,10 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	{
 		if (!page_server->flush())
 		{
-			/* Prefetch set is reset in case of error, so we should try to register our request once again */
+			/*
+			 * Prefetch set is reset in case of error, so we should try to
+			 * register our request once again
+			 */
 			goto Retry;
 		}
 		MyPState->ring_flush = MyPState->ring_unused;
@@ -871,8 +907,10 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 static NeonResponse *
 page_server_request(void const *req)
 {
-	NeonResponse* resp;
-	do {
+	NeonResponse *resp;
+
+	do
+	{
 		while (!page_server->send((NeonRequest *) req) || !page_server->flush());
 		MyPState->ring_flush = MyPState->ring_unused;
 		consume_prefetch_responses();
@@ -884,7 +922,7 @@ page_server_request(void const *req)
 
 
 StringInfoData
-nm_pack_request(NeonRequest * msg)
+nm_pack_request(NeonRequest *msg)
 {
 	StringInfoData s;
 
@@ -1000,7 +1038,7 @@ nm_unpack_response(StringInfo s)
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
-				
+
 				Assert(msg_resp->tag == T_NeonGetPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
@@ -1056,7 +1094,7 @@ nm_unpack_response(StringInfo s)
 
 /* dump to json for debugging / error reporting purposes */
 char *
-nm_to_string(NeonMessage * msg)
+nm_to_string(NeonMessage *msg)
 {
 	StringInfoData s;
 
@@ -1185,7 +1223,7 @@ nm_to_string(NeonMessage * msg)
  * directly because it skips the logging if the LSN is new enough.
  */
 static XLogRecPtr
-log_newpage_copy(NRelFileInfo *rinfo, ForkNumber forkNum, BlockNumber blkno,
+log_newpage_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 Page page, bool page_std)
 {
 	PGAlignedBlock copied_buffer;
@@ -1208,11 +1246,10 @@ PageIsEmptyHeapPage(char *buffer)
 }
 
 static void
-neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 #if PG_MAJORVERSION_NUM < 16
-				 char *buffer, bool force)
+neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
 #else
-				 const char *buffer, bool force) 
+neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const char *buffer, bool force)
 #endif
 {
 	XLogRecPtr	lsn = PageGetLSN((Page) buffer);
@@ -1312,24 +1349,23 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 void
 neon_init(void)
 {
-	Size prfs_size;
+	Size		prfs_size;
 
 	if (MyPState != NULL)
 		return;
 
-	prfs_size = offsetof(PrefetchState, prf_buffer) + (
-		sizeof(PrefetchRequest) * readahead_buffer_size
-	);
+	prfs_size = offsetof(PrefetchState, prf_buffer) +
+		sizeof(PrefetchRequest) * readahead_buffer_size;
 
 	MyPState = MemoryContextAllocZero(TopMemoryContext, prfs_size);
-	
+
 	MyPState->n_unused = readahead_buffer_size;
 
 	MyPState->bufctx = SlabContextCreate(TopMemoryContext,
 										 "NeonSMGR/prefetch",
 										 SLAB_DEFAULT_BLOCK_SIZE * 17,
 										 PS_GETPAGERESPONSE_SIZE);
-	MyPState->errctx = AllocSetContextCreate(TopMemoryContext, 
+	MyPState->errctx = AllocSetContextCreate(TopMemoryContext,
 											 "NeonSMGR/errors",
 											 ALLOCSET_DEFAULT_SIZES);
 	MyPState->hashctx = AllocSetContextCreate(TopMemoryContext,
@@ -1338,6 +1374,9 @@ neon_init(void)
 
 	MyPState->prf_hash = prfh_create(MyPState->hashctx,
 									 readahead_buffer_size, NULL);
+
+	old_redo_read_buffer_filter = redo_read_buffer_filter;
+	redo_read_buffer_filter = neon_redo_read_buffer_filter;
 
 #ifdef DEBUG_COMPARE_LOCAL
 	mdinit();
@@ -1569,14 +1608,14 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	/*
 	 * Newly created relation is empty, remember that in the relsize cache.
 	 *
-	 * Note that in REDO, this is called to make sure the relation fork exists,
-	 * but it does not truncate the relation. So, we can only update the
-	 * relsize if it didn't exist before.
-	 * 
+	 * Note that in REDO, this is called to make sure the relation fork
+	 * exists, but it does not truncate the relation. So, we can only update
+	 * the relsize if it didn't exist before.
+	 *
 	 * Also, in redo, we must make sure to update the cached size of the
-	 * relation, as that is the primary source of truth for REDO's
-	 * file length considerations, and as file extension isn't (perfectly)
-	 * logged, we need to take care of that before we hit file size checks.
+	 * relation, as that is the primary source of truth for REDO's file length
+	 * considerations, and as file extension isn't (perfectly) logged, we need
+	 * to take care of that before we hit file size checks.
 	 *
 	 * FIXME: This is currently not just an optimization, but required for
 	 * correctness. Postgres can call smgrnblocks() on the newly-created
@@ -1652,7 +1691,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	XLogRecPtr	lsn;
-	BlockNumber	n_blocks = 0;
+	BlockNumber n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1693,9 +1732,10 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	/*
-	 * Usually Postgres doesn't extend relation on more than one page
-	 * (leaving holes). But this rule is violated in PG-15 where CreateAndCopyRelationData
-	 * call smgrextend for destination relation n using size of source relation
+	 * Usually Postgres doesn't extend relation on more than one page (leaving
+	 * holes). But this rule is violated in PG-15 where
+	 * CreateAndCopyRelationData call smgrextend for destination relation n
+	 * using size of source relation
 	 */
 	n_blocks = neon_nblocks(reln, forkNum);
 	while (n_blocks < blkno)
@@ -1716,11 +1756,13 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	if (IS_LOCAL_REL(reln))
 		mdextend(reln, forkNum, blkno, buffer, skipFsync);
 #endif
+
 	/*
-	 * smgr_extend is often called with an all-zeroes page, so lsn==InvalidXLogRecPtr.
-	 * An smgr_write() call will come for the buffer later, after it has been initialized
-	 * with the real page contents, and it is eventually evicted from the buffer cache.
-	 * But we need a valid LSN to the relation metadata update now.
+	 * smgr_extend is often called with an all-zeroes page, so
+	 * lsn==InvalidXLogRecPtr. An smgr_write() call will come for the buffer
+	 * later, after it has been initialized with the real page contents, and
+	 * it is eventually evicted from the buffer cache. But we need a valid LSN
+	 * to the relation metadata update now.
 	 */
 	if (lsn == InvalidXLogRecPtr)
 	{
@@ -1779,9 +1821,9 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if ((uint64) blocknum + nblocks >= (uint64) InvalidBlockNumber)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					errmsg("cannot extend file \"%s\" beyond %u blocks",
-						   relpath(reln->smgr_rlocator, forkNum),
-						   InvalidBlockNumber)));
+				 errmsg("cannot extend file \"%s\" beyond %u blocks",
+						relpath(reln->smgr_rlocator, forkNum),
+						InvalidBlockNumber)));
 
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
@@ -1863,12 +1905,12 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
-	BufferTag	tag;
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
+	BufferTag	tag;
 
 	switch (reln->smgr_relpersistence)
 	{
-		case 0: /* probably shouldn't happen, but ignore it */
+		case 0:					/* probably shouldn't happen, but ignore it */
 		case RELPERSISTENCE_PERMANENT:
 			break;
 
@@ -1883,10 +1925,9 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
 		return false;
 
-	tag = (BufferTag) {
-		.forkNum = forknum,
-		.blockNum = blocknum
-	};
+	tag.forkNum = forknum;
+	tag.blockNum = blocknum;
+
 	CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
 
 	ring_index = prefetch_register_buffer(tag, NULL, NULL);
@@ -1939,23 +1980,21 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
  * While function is defined in the neon extension it's used within neon_test_utils directly.
  * To avoid breaking tests in the runtime please keep function signature in sync.
  */
+void
 #if PG_MAJORVERSION_NUM < 16
-void PGDLLEXPORT
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 XLogRecPtr request_lsn, bool request_latest, char *buffer)
 #else
-void PGDLLEXPORT
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 XLogRecPtr request_lsn, bool request_latest, void *buffer)
 #endif
 {
 	NeonResponse *resp;
-	BufferTag	buftag;
 	uint64		ring_index;
 	PrfHashEntry *entry;
 	PrefetchRequest *slot;
-
-	buftag = (BufferTag) {
+	BufferTag	buftag =
+	{
 		.forkNum = forkNum,
 		.blockNum = blkno,
 	};
@@ -1964,12 +2003,11 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	/*
 	 * The redo process does not lock pages that it needs to replay but are
-	 * not in the shared buffers, so a concurrent process may request the
-	 * page after redo has decided it won't redo that page and updated the
-	 * LwLSN for that page.
-	 * If we're in hot standby we need to take care that we don't return
-	 * until after REDO has finished replaying up to that LwLSN, as the page
-	 * should have been locked up to that point.
+	 * not in the shared buffers, so a concurrent process may request the page
+	 * after redo has decided it won't redo that page and updated the LwLSN
+	 * for that page. If we're in hot standby we need to take care that we
+	 * don't return until after REDO has finished replaying up to that LwLSN,
+	 * as the page should have been locked up to that point.
 	 *
 	 * See also the description on neon_redo_read_buffer_filter below.
 	 *
@@ -1977,7 +2015,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	 * concurrent failed read IOs. Those IOs should never have a request_lsn
 	 * that is as large as the WAL record we're currently replaying, if it
 	 * weren't for the behaviour of the LwLsn cache that uses the highest
-	 * value of the LwLsn cache when the entry is not found. 
+	 * value of the LwLsn cache when the entry is not found.
 	 */
 	if (RecoveryInProgress() && !(MyBackendType == B_STARTUP))
 		XLogWaitForReplayOf(request_lsn);
@@ -1995,12 +2033,14 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			ring_index = slot->my_ring_index;
 			pgBufferUsage.prefetch.hits += 1;
 		}
-		else /* the current prefetch LSN is not large enough, so drop the prefetch */
+		else					/* the current prefetch LSN is not large
+								 * enough, so drop the prefetch */
 		{
 			/*
 			 * We can't drop cache for not-yet-received requested items. It is
-			 * unlikely this happens, but it can happen if prefetch distance is
-			 * large enough and a backend didn't consume all prefetch requests.
+			 * unlikely this happens, but it can happen if prefetch distance
+			 * is large enough and a backend didn't consume all prefetch
+			 * requests.
 			 */
 			if (slot->status == PRFS_REQUESTED)
 			{
@@ -2027,11 +2067,11 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		else
 		{
 			/*
-			 * Empty our reference to the prefetch buffer's hash entry.
-			 * When we wait for prefetches, the entry reference is invalidated by 
-			 * potential updates to the hash, and when we reconnect to the 
-			 * pageserver the prefetch we're waiting for may be dropped,
-			 * in which case we need to retry and take the branch above.
+			 * Empty our reference to the prefetch buffer's hash entry. When
+			 * we wait for prefetches, the entry reference is invalidated by
+			 * potential updates to the hash, and when we reconnect to the
+			 * pageserver the prefetch we're waiting for may be dropped, in
+			 * which case we need to retry and take the branch above.
 			 */
 			entry = NULL;
 		}
@@ -2079,11 +2119,10 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  *	neon_read() -- Read the specified block from a relation.
  */
 void
-neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #if PG_MAJORVERSION_NUM < 16
-		  char *buffer)
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, char *buffer)
 #else
-		  void *buffer)
+neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer)
 #endif
 {
 	bool		latest;
@@ -2218,11 +2257,10 @@ hexdump_page(char *page)
  *		use mdextend().
  */
 void
-neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 #if PG_MAJORVERSION_NUM < 16
-		   char *buffer, bool skipFsync)
+neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool skipFsync)
 #else
-		   const void *buffer, bool skipFsync)
+neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const void *buffer, bool skipFsync)
 #endif
 {
 	XLogRecPtr	lsn;
@@ -2722,9 +2760,90 @@ smgr_init_neon(void)
 }
 
 
+static void
+neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, XLogRecPtr end_recptr)
+{
+	BlockNumber relsize;
+
+	/* Extend the relation if we know its size */
+	if (get_cached_relsize(rinfo, forknum, &relsize))
+	{
+		if (relsize < blkno + 1)
+		{
+			update_cached_relsize(rinfo, forknum, blkno + 1);
+			SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
+		}
+	}
+	else
+	{
+		/*
+		 * Size was not cached. We populate the cache now, with the size of
+		 * the relation measured after this WAL record is applied.
+		 *
+		 * This length is later reused when we open the smgr to read the
+		 * block, which is fine and expected.
+		 */
+
+		NeonResponse *response;
+		NeonNblocksResponse *nbresponse;
+		NeonNblocksRequest request = {
+			.req = (NeonRequest) {
+				.lsn = end_recptr,
+				.latest = false,
+				.tag = T_NeonNblocksRequest,
+			},
+			.rinfo = rinfo,
+			.forknum = forknum,
+		};
+
+		response = page_server_request(&request);
+
+		Assert(response->tag == T_NeonNblocksResponse);
+		nbresponse = (NeonNblocksResponse *) response;
+
+		relsize = Max(nbresponse->n_blocks, blkno + 1);
+
+		set_cached_relsize(rinfo, forknum, relsize);
+		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
+
+		elog(SmgrTrace, "Set length to %d", relsize);
+	}
+}
+
+#define FSM_TREE_DEPTH	((SlotsPerFSMPage >= 1626) ? 3 : 4)
+
+/*
+ * TODO: May be it is better to make correspondent fgunctio from freespace.c public?
+ */
+static BlockNumber
+get_fsm_physical_block(BlockNumber heapblk)
+{
+	BlockNumber pages;
+	int			leafno;
+	int			l;
+
+	/*
+	 * Calculate the logical page number of the first leaf page below the
+	 * given page.
+	 */
+	leafno = heapblk / SlotsPerFSMPage;
+
+	/* Count upper level nodes required to address the leaf page */
+	pages = 0;
+	for (l = 0; l < FSM_TREE_DEPTH; l++)
+	{
+		pages += leafno + 1;
+		leafno /= SlotsPerFSMPage;
+	}
+
+	/* Turn the page count into 0-based block number */
+	return pages - 1;
+}
+
+
 /*
  * Return whether we can skip the redo for this block.
- * 
+ *
  * The conditions for skipping the IO are:
  *
  * - The block is not in the shared buffers, and
@@ -2757,19 +2876,18 @@ smgr_init_neon(void)
  * contents, where with REDO locking it would wait on block 1 and see
  * block 3 with post-REDO contents only.
  */
-bool
+static bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 {
 	XLogRecPtr	end_recptr = record->EndRecPtr;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
-	BlockNumber	blkno;
+	BlockNumber blkno;
 	BufferTag	tag;
 	uint32		hash;
 	LWLock	   *partitionLock;
 	Buffer		buffer;
 	bool		no_redo_needed;
-	BlockNumber relsize;
 
 	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
 		return true;
@@ -2783,8 +2901,8 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 	/*
 	 * Out of an abundance of caution, we always run redo on shared catalogs,
-	 * regardless of whether the block is stored in shared buffers.
-	 * See also this function's top comment.
+	 * regardless of whether the block is stored in shared buffers. See also
+	 * this function's top comment.
 	 */
 	if (!OidIsValid(NInfoGetDbOid(rinfo)))
 		return false;
@@ -2810,8 +2928,9 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	/* In both cases st lwlsn past this WAL record */
 	SetLastWrittenLSNForBlock(end_recptr, rinfo, forknum, blkno);
 
-	/* we don't have the buffer in memory, update lwLsn past this record,
-	 * also evict page fro file cache
+	/*
+	 * we don't have the buffer in memory, update lwLsn past this record, also
+	 * evict page fro file cache
 	 */
 	if (no_redo_needed)
 		lfc_evict(rinfo, forknum, blkno);
@@ -2819,49 +2938,10 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 	LWLockRelease(partitionLock);
 
-	/* Extend the relation if we know its size */
-	if (get_cached_relsize(rinfo, forknum, &relsize))
+	neon_extend_rel_size(rinfo, forknum, blkno, end_recptr);
+	if (forknum == MAIN_FORKNUM)
 	{
-		if (relsize < blkno + 1)
-		{
-			update_cached_relsize(rinfo, forknum, blkno + 1);
-			SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
-		}
+		neon_extend_rel_size(rinfo, FSM_FORKNUM, get_fsm_physical_block(blkno), end_recptr);
 	}
-	else
-	{
-		/*
-		 * Size was not cached. We populate the cache now, with the size of the
-		 * relation measured after this WAL record is applied.
-		 *
-		 * This length is later reused when we open the smgr to read the block,
-		 * which is fine and expected.
-		 */
-
-		NeonResponse *response;
-		NeonNblocksResponse *nbresponse;
-		NeonNblocksRequest request = {
-			.req = (NeonRequest) {
-				.lsn = end_recptr,
-				.latest = false,
-				.tag = T_NeonNblocksRequest,
-			},
-			.rinfo = rinfo,
-			.forknum = forknum,
-		};
-
-		response = page_server_request(&request);
-
-		Assert(response->tag == T_NeonNblocksResponse);
-		nbresponse = (NeonNblocksResponse *) response;
-
-		Assert(nbresponse->n_blocks > blkno);
-
-		set_cached_relsize(rinfo, forknum, nbresponse->n_blocks);
-		SetLastWrittenLSNForRelation(end_recptr, rinfo, forknum);
-
-		elog(SmgrTrace, "Set length to %d", nbresponse->n_blocks);
-	}
-
 	return no_redo_needed;
 }

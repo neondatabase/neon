@@ -27,13 +27,6 @@ extern void pg_init_walproposer(void);
 
 extern void pg_init_extension_server(void);
 
-/*
- * Returns true if we shouldn't do REDO on that block in record indicated by
- * block_id; false otherwise.
- */
-extern bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
-extern bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id);
-
 extern uint64 BackpressureThrottlingTime(void);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 

@@ -2,17 +2,18 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! a neon Timeline.
 //!
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{self, Poll};
 
 use anyhow::{bail, ensure, Context, Result};
+use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::{tokio::write::ZstdEncoder, zstd::CParameter, Level};
 use bytes::Bytes;
 use camino::Utf8Path;
 use futures::StreamExt;
 use nix::NixPath;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_tar::Archive;
 use tokio_tar::Builder;
 use tokio_tar::HeaderMode;
@@ -20,6 +21,7 @@ use tracing::*;
 use walkdir::WalkDir;
 
 use crate::context::RequestContext;
+use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::Timeline;
@@ -311,13 +313,16 @@ async fn import_wal(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
-        let mut modification = tline.begin_modification(endpoint);
+        let mut modification = tline.begin_modification(last_lsn);
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                WAL_INGEST.records_committed.inc();
+
+                modification.commit(ctx).await?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -447,13 +452,14 @@ pub async fn import_wal_from_tar(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
-        let mut modification = tline.begin_modification(end_lsn);
+        let mut modification = tline.begin_modification(last_lsn);
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
+                modification.commit(ctx).await?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);
@@ -628,70 +634,16 @@ async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> 
     Ok(Bytes::from(buf))
 }
 
-/// An in-memory buffer implementing `AsyncWrite`, inserting yields every now and then
-///
-/// The number of yields is bounded by above by the number of times poll_write is called,
-/// so calling it with 8 KB chunks and 8 MB chunks gives the same number of yields in total.
-/// This is an explicit choice as the `YieldingVec` is meant to give the async executor
-/// breathing room between units of CPU intensive preparation of buffers to be written.
-/// Once a write call is issued, the whole buffer has been prepared already, so there is no
-/// gain in splitting up the memcopy further.
-struct YieldingVec {
-    yield_budget: usize,
-    // the buffer written into
-    buf: Vec<u8>,
-}
+pub async fn create_tar_zst(pgdata_path: &Utf8Path, tmp_path: &Utf8Path) -> Result<(File, u64)> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(&tmp_path)
+        .await
+        .with_context(|| format!("tempfile creation {tmp_path}"))?;
 
-impl YieldingVec {
-    fn new() -> Self {
-        Self {
-            yield_budget: 0,
-            buf: Vec::new(),
-        }
-    }
-    // Whether we should yield for a read operation of given size
-    fn should_yield(&mut self, add_buf_len: usize) -> bool {
-        // Set this limit to a small value so that we are a
-        // good async citizen and yield repeatedly (but not
-        // too often for many small writes to cause many yields)
-        const YIELD_DIST: usize = 1024;
-
-        let target_buf_len = self.buf.len() + add_buf_len;
-        let ret = self.yield_budget / YIELD_DIST < target_buf_len / YIELD_DIST;
-        if self.yield_budget < target_buf_len {
-            self.yield_budget += add_buf_len;
-        }
-        ret
-    }
-}
-
-impl AsyncWrite for YieldingVec {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        if self.should_yield(buf.len()) {
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        self.get_mut().buf.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut task::Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut task::Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     let mut paths = Vec::new();
     for entry in WalkDir::new(pgdata_path) {
         let entry = entry?;
@@ -706,7 +658,7 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     // Do a sort to get a more consistent listing
     paths.sort_unstable();
     let zstd = ZstdEncoder::with_quality_and_params(
-        YieldingVec::new(),
+        file,
         Level::Default,
         &[CParameter::enable_long_distance_matching(true)],
     );
@@ -724,11 +676,22 @@ pub async fn create_tar_zst(pgdata_path: &Utf8Path) -> Result<Vec<u8>> {
     }
     let mut zstd = builder.into_inner().await?;
     zstd.shutdown().await?;
-    let compressed = zstd.into_inner();
-    let compressed_len = compressed.buf.len();
-    const INITDB_TAR_ZST_WARN_LIMIT: usize = 2_000_000;
+    let mut compressed = zstd.into_inner();
+    let compressed_len = compressed.metadata().await?.len();
+    const INITDB_TAR_ZST_WARN_LIMIT: u64 = 2 * 1024 * 1024;
     if compressed_len > INITDB_TAR_ZST_WARN_LIMIT {
         warn!("compressed {INITDB_PATH} size of {compressed_len} is above limit {INITDB_TAR_ZST_WARN_LIMIT}.");
     }
-    Ok(compressed.buf)
+    compressed.seek(SeekFrom::Start(0)).await?;
+    Ok((compressed, compressed_len))
+}
+
+pub async fn extract_tar_zst(
+    pgdata_path: &Utf8Path,
+    tar_zst: impl AsyncBufRead + Unpin,
+) -> Result<()> {
+    let tar = Box::pin(ZstdDecoder::new(tar_zst));
+    let mut archive = Archive::new(tar);
+    archive.unpack(pgdata_path).await?;
+    Ok(())
 }

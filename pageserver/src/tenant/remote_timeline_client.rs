@@ -180,7 +180,7 @@
 //! [`Tenant::timeline_init_and_sync`]: super::Tenant::timeline_init_and_sync
 //! [`Timeline::load_layer_map`]: super::Timeline::load_layer_map
 
-mod download;
+pub(crate) mod download;
 pub mod index;
 mod upload;
 
@@ -188,6 +188,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
+pub(crate) use download::download_initdb_tar_zst;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -195,10 +196,12 @@ pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
+use utils::timeout::{timeout_cancellable, TimeoutCancellableError};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use remote_storage::{DownloadError, GenericRemoteStorage, RemotePath};
 use std::ops::DerefMut;
@@ -252,6 +255,9 @@ pub(crate) const FAILED_REMOTE_OP_RETRIES: u32 = 10;
 pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
 pub(crate) const INITDB_PATH: &str = "initdb.tar.zst";
+
+/// Default buffer size when interfacing with [`tokio::fs::File`].
+pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -312,6 +318,47 @@ pub struct RemoteTimelineClient {
     storage_impl: GenericRemoteStorage,
 
     deletion_queue_client: DeletionQueueClient,
+
+    cancel: CancellationToken,
+}
+
+/// This timeout is intended to deal with hangs in lower layers, e.g. stuck TCP flows.  It is not
+/// intended to be snappy enough for prompt shutdown, as we have a CancellationToken for that.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to anyhow.
+///
+/// This is a convenience for the various upload functions.  In future
+/// the anyhow::Error result should be replaced with a more structured type that
+/// enables callers to avoid handling shutdown as an error.
+async fn upload_cancellable<F>(cancel: &CancellationToken, future: F) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    match timeout_cancellable(UPLOAD_TIMEOUT, cancel, future).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(TimeoutCancellableError::Timeout) => Err(anyhow::anyhow!("Timeout")),
+        Err(TimeoutCancellableError::Cancelled) => Err(anyhow::anyhow!("Shutting down")),
+    }
+}
+/// Wrapper for timeout_cancellable that flattens result and converts TimeoutCancellableError to DownloaDError.
+async fn download_cancellable<F, R>(
+    cancel: &CancellationToken,
+    future: F,
+) -> Result<R, DownloadError>
+where
+    F: std::future::Future<Output = Result<R, DownloadError>>,
+{
+    match timeout_cancellable(DOWNLOAD_TIMEOUT, cancel, future).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(e),
+        Err(TimeoutCancellableError::Timeout) => {
+            Err(DownloadError::Other(anyhow::anyhow!("Timed out")))
+        }
+        Err(TimeoutCancellableError::Cancelled) => Err(DownloadError::Cancelled),
+    }
 }
 
 impl RemoteTimelineClient {
@@ -347,6 +394,7 @@ impl RemoteTimelineClient {
                 &tenant_shard_id,
                 &timeline_id,
             )),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -497,6 +545,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerFileName,
         layer_metadata: &LayerFileMetadata,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
             let _unfinished_gauge_guard = self.metrics.call_begin(
@@ -513,6 +562,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                cancel,
             )
             .measure_remote_op(
                 self.tenant_shard_id.tenant_id,
@@ -768,8 +818,25 @@ impl RemoteTimelineClient {
     fn schedule_deletion_of_unlinked0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
+        mut with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
     ) {
+        // Filter out any layers which were not created by this tenant shard.  These are
+        // layers that originate from some ancestor shard after a split, and may still
+        // be referenced by other shards. We are free to delete them locally and remove
+        // them from our index (and would have already done so when we reach this point
+        // in the code), but we may not delete them remotely.
+        with_metadata.retain(|(name, meta)| {
+            let retain = meta.shard.shard_number == self.tenant_shard_id.shard_number
+                && meta.shard.shard_count == self.tenant_shard_id.shard_count;
+            if !retain {
+                tracing::debug!(
+                    "Skipping deletion of ancestor-shard layer {name}, from shard {}",
+                    meta.shard
+                );
+            }
+            retain
+        });
+
         for (name, meta) in &with_metadata {
             info!(
                 "scheduling deletion of layer {}{} (shard {})",
@@ -967,6 +1034,7 @@ impl RemoteTimelineClient {
                     &self.timeline_id,
                     self.generation,
                     &index_part_with_deleted_at,
+                    &self.cancel,
                 )
             },
             |_e| false,
@@ -976,8 +1044,7 @@ impl RemoteTimelineClient {
             // when executed as part of tenant deletion this happens in the background
             2,
             "persist_index_part_with_deleted_flag",
-            // TODO: use a cancellation token (https://github.com/neondatabase/neon/issues/5066)
-            backoff::Cancel::new(CancellationToken::new(), || unreachable!()),
+            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
         )
         .await?;
 
@@ -1077,7 +1144,17 @@ impl RemoteTimelineClient {
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| p!= &latest_index)
+            .filter(|p| {
+                if p == &latest_index {
+                    return false;
+                }
+                if let Some(name) = p.object_name() {
+                    if name == INITDB_PATH {
+                        return false;
+                    }
+                }
+                true
+            })
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
                     info!(%name, "deleting a file not referenced from index_part.json");
@@ -1209,7 +1286,7 @@ impl RemoteTimelineClient {
             task_mgr::spawn(
                 &self.runtime,
                 TaskKind::RemoteUploadTask,
-                Some(self.tenant_shard_id.tenant_id),
+                Some(self.tenant_shard_id),
                 Some(self.timeline_id),
                 "remote upload",
                 false,
@@ -1267,6 +1344,7 @@ impl RemoteTimelineClient {
                         path,
                         layer_metadata,
                         self.generation,
+                        &self.cancel,
                     )
                     .measure_remote_op(
                         self.tenant_shard_id.tenant_id,
@@ -1293,6 +1371,7 @@ impl RemoteTimelineClient {
                         &self.timeline_id,
                         self.generation,
                         index_part,
+                        &self.cancel,
                     )
                     .measure_remote_op(
                         self.tenant_shard_id.tenant_id,
@@ -1590,6 +1669,23 @@ impl RemoteTimelineClient {
             }
         }
     }
+
+    pub(crate) fn get_layers_metadata(
+        &self,
+        layers: Vec<LayerFileName>,
+    ) -> anyhow::Result<Vec<Option<LayerFileMetadata>>> {
+        let q = self.upload_queue.lock().unwrap();
+        let q = match &*q {
+            UploadQueue::Stopped(_) | UploadQueue::Uninitialized => {
+                anyhow::bail!("queue is in state {}", q.as_str())
+            }
+            UploadQueue::Initialized(inner) => inner,
+        };
+
+        let decorated = layers.into_iter().map(|l| q.latest_files.get(&l).cloned());
+
+        Ok(decorated.collect())
+    }
 }
 
 pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
@@ -1643,6 +1739,13 @@ pub fn remote_index_path(
         generation.get_suffix()
     ))
     .expect("Failed to construct path")
+}
+
+pub const HEATMAP_BASENAME: &str = "heatmap-v1.json";
+
+pub(crate) fn remote_heatmap_path(tenant_shard_id: &TenantShardId) -> RemotePath {
+    RemotePath::from_string(&format!("tenants/{tenant_shard_id}/{HEATMAP_BASENAME}"))
+        .expect("Failed to construct path")
 }
 
 /// Given the key of an index, parse out the generation part of the name
@@ -1790,6 +1893,7 @@ mod tests {
                     &self.harness.tenant_shard_id,
                     &TIMELINE_ID,
                 )),
+                cancel: CancellationToken::new(),
             })
         }
 
@@ -2105,15 +2209,6 @@ mod tests {
 
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
 
-        let timeline_path = test_state.harness.timeline_path(&TIMELINE_ID);
-        let remote_timeline_dir = test_state.harness.remote_fs_dir.join(
-            timeline_path
-                .strip_prefix(&test_state.harness.conf.workdir)
-                .unwrap(),
-        );
-
-        std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
-
         let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(
                 &test_state.harness.tenant_shard_id,
@@ -2122,6 +2217,10 @@ mod tests {
             )
             .get_path(),
         );
+
+        std::fs::create_dir_all(index_path.parent().unwrap())
+            .expect("creating test dir should work");
+
         eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();
         example_index_part

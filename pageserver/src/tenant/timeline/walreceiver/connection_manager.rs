@@ -138,7 +138,7 @@ pub(super) async fn connection_manager_loop_step(
                     Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
                     Err(status) => {
                         match status.code() {
-                            Code::Unknown if status.message().contains("stream closed because of a broken pipe") => {
+                            Code::Unknown if status.message().contains("stream closed because of a broken pipe") || status.message().contains("connection reset") => {
                                 // tonic's error handling doesn't provide a clear code for disconnections: we get
                                 // "h2 protocol error: error reading a body from connection: stream closed because of a broken pipe"
                                 info!("broker disconnected: {status}");
@@ -411,6 +411,7 @@ impl ConnectionManagerState {
 
         let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
+        let ingest_batch_size = self.conf.ingest_batch_size;
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
             TaskKind::WalReceiverConnectionHandler,
@@ -430,6 +431,7 @@ impl ConnectionManagerState {
                     connect_timeout,
                     ctx,
                     node_id,
+                    ingest_batch_size,
                 )
                 .await;
 
@@ -1345,6 +1347,7 @@ mod tests {
                 max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
                 auth_token: None,
                 availability_zone: None,
+                ingest_batch_size: 1,
             },
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),

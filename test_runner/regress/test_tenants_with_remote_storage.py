@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import List, Tuple
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -27,7 +26,6 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
@@ -60,10 +58,7 @@ async def all_tenants_workload(env: NeonEnv, tenants_endpoints):
     await asyncio.gather(*workers)
 
 
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
+def test_tenants_many(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     # FIXME: Is this expected?
@@ -122,10 +117,12 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    # FIXME: Are these expected?
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            # FIXME: Are these expected?
+            ".*No timelines to attach received.*",
+            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
+        ]
     )
 
     pageserver_http = env.pageserver.http_client()
@@ -218,22 +215,19 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
 def test_tenant_redownloads_truncated_file_on_startup(
     neon_env_builder: NeonEnvBuilder,
 ):
-    remote_storage_kind = RemoteStorageKind.LOCAL_FS
-
-    # since we now store the layer file length metadata, we notice on startup that a layer file is of wrong size, and proceed to redownload it.
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
+    # we store the layer file length metadata, we notice on startup that a layer file is of wrong size, and proceed to redownload it.
     env = neon_env_builder.init_start()
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    env.pageserver.allowed_errors.append(".*removing local file .* because .*")
-
-    # FIXME: Are these expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*removing local file .* because .*",
+            # FIXME: Are these expected?
+            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
+            ".*No timelines to attach received.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
 
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
@@ -297,8 +291,8 @@ def test_tenant_redownloads_truncated_file_on_startup(
     assert os.stat(path).st_size == expected_size, "truncated layer should had been re-downloaded"
 
     # the remote side of local_layer_truncated
-    remote_layer_path = (
-        env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / path.name
+    remote_layer_path = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, path.name
     )
 
     # if the upload ever was ongoing, this check would be racy, but at least one

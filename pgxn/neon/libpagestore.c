@@ -14,32 +14,29 @@
  */
 #include "postgres.h"
 
-#include "pagestore_client.h"
-#include "fmgr.h"
 #include "access/xlog.h"
-#include "access/xlogutils.h"
-#include "storage/buf_internals.h"
-#include "storage/lwlock.h"
-#include "storage/ipc.h"
-#include "storage/pg_shmem.h"
-#include "c.h"
-#include "postmaster/interrupt.h"
-
+#include "fmgr.h"
 #include "libpq-fe.h"
-#include "libpq/pqformat.h"
 #include "libpq/libpq.h"
-
+#include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/interrupt.h"
+#include "storage/buf_internals.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "utils/guc.h"
 
 #include "neon.h"
-#include "walproposer.h"
 #include "neon_utils.h"
+#include "pagestore_client.h"
+#include "walproposer.h"
 
 #define PageStoreTrace DEBUG5
 
-#define RECONNECT_INTERVAL_USEC 1000000
+#define MIN_RECONNECT_INTERVAL_USEC 1000
+#define MAX_RECONNECT_INTERVAL_USEC 1000000
 
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
@@ -62,16 +59,16 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int			n_reconnect_attempts = 0;
-int			max_reconnect_attempts = 60;
+static int n_reconnect_attempts = 0;
+static int max_reconnect_attempts = 60;
 
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
 typedef struct
 {
-    LWLockId lock;
-    pg_atomic_uint64 update_counter;
-    char pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
+	LWLockId	lock;
+	pg_atomic_uint64 update_counter;
+	char		pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 } PagestoreShmemState;
 
 #if PG_VERSION_NUM >= 150000
@@ -83,51 +80,49 @@ static PagestoreShmemState *pagestore_shared;
 static uint64 pagestore_local_counter = 0;
 static char local_pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 
-bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
-
 static bool pageserver_flush(void);
 static void pageserver_disconnect(void);
 
 static bool
 PagestoreShmemIsValid()
 {
-    return pagestore_shared && UsedShmemSegAddr;
+	return pagestore_shared && UsedShmemSegAddr;
 }
 
 static bool
 CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 {
-    return strlen(*newval) < MAX_PAGESERVER_CONNSTRING_SIZE;
+	return strlen(*newval) < MAX_PAGESERVER_CONNSTRING_SIZE;
 }
 
 static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
-    if(!PagestoreShmemIsValid())
-        return;
-    LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
-    strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
-    pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
-    LWLockRelease(pagestore_shared->lock);
+	if (!PagestoreShmemIsValid())
+		return;
+	LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
+	strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
+	pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
+	LWLockRelease(pagestore_shared->lock);
 }
 
 static bool
 CheckConnstringUpdated()
 {
-    if(!PagestoreShmemIsValid())
-        return false;
-    return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
+	if (!PagestoreShmemIsValid())
+		return false;
+	return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
 }
 
 static void
 ReloadConnstring()
 {
-    if(!PagestoreShmemIsValid())
-        return;
-    LWLockAcquire(pagestore_shared->lock, LW_SHARED);
-    strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
-    pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
-    LWLockRelease(pagestore_shared->lock);
+	if (!PagestoreShmemIsValid())
+		return;
+	LWLockAcquire(pagestore_shared->lock, LW_SHARED);
+	strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
+	pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
+	LWLockRelease(pagestore_shared->lock);
 }
 
 static bool
@@ -139,23 +134,43 @@ pageserver_connect(int elevel)
 	const char *values[3];
 	int			n;
 
+	static TimestampTz last_connect_time = 0;
+	static uint64_t delay_us = MIN_RECONNECT_INTERVAL_USEC;
+	TimestampTz now;
+        uint64_t us_since_last_connect;
+
 	Assert(!connected);
 
-        if(CheckConnstringUpdated())
-        {
-            ReloadConnstring();
-        }
+	if (CheckConnstringUpdated())
+	{
+		ReloadConnstring();
+	}
+
+	now = GetCurrentTimestamp();
+        us_since_last_connect = now - last_connect_time;
+	if (us_since_last_connect < delay_us)
+	{
+		pg_usleep(delay_us - us_since_last_connect);
+		delay_us *= 2;
+		if (delay_us > MAX_RECONNECT_INTERVAL_USEC)
+			delay_us = MAX_RECONNECT_INTERVAL_USEC;
+		last_connect_time = GetCurrentTimestamp();
+	}
+	else
+	{
+		delay_us = MIN_RECONNECT_INTERVAL_USEC;
+		last_connect_time = now;
+	}
 
 	/*
 	 * Connect using the connection string we got from the
 	 * neon.pageserver_connstring GUC. If the NEON_AUTH_TOKEN environment
 	 * variable was set, use that as the password.
 	 *
-	 * The connection options are parsed in the order they're given, so
-	 * when we set the password before the connection string, the
-	 * connection string can override the password from the env variable.
-	 * Seems useful, although we don't currently use that capability
-	 * anywhere.
+	 * The connection options are parsed in the order they're given, so when
+	 * we set the password before the connection string, the connection string
+	 * can override the password from the env variable. Seems useful, although
+	 * we don't currently use that capability anywhere.
 	 */
 	n = 0;
 	if (neon_auth_token)
@@ -198,9 +213,9 @@ pageserver_connect(int elevel)
 
 	pageserver_conn_wes = CreateWaitEventSet(TopMemoryContext, 3);
 	AddWaitEventToSet(pageserver_conn_wes, WL_LATCH_SET, PGINVALID_SOCKET,
-			  MyLatch, NULL);
+					  MyLatch, NULL);
 	AddWaitEventToSet(pageserver_conn_wes, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-			  NULL, NULL);
+					  NULL, NULL);
 	AddWaitEventToSet(pageserver_conn_wes, WL_SOCKET_READABLE, PQsocket(pageserver_conn), NULL, NULL);
 
 	while (PQisBusy(pageserver_conn))
@@ -265,6 +280,7 @@ retry:
 			if (!PQconsumeInput(pageserver_conn))
 			{
 				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
 				neon_log(LOG, "could not get response from pageserver: %s", msg);
 				pfree(msg);
 				return -1;
@@ -305,15 +321,15 @@ pageserver_disconnect(void)
 }
 
 static bool
-pageserver_send(NeonRequest * request)
+pageserver_send(NeonRequest *request)
 {
 	StringInfoData req_buff;
 
-        if(CheckConnstringUpdated())
-        {
-            pageserver_disconnect();
-            ReloadConnstring();
-        }
+	if (CheckConnstringUpdated())
+	{
+		pageserver_disconnect();
+		ReloadConnstring();
+	}
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
@@ -326,10 +342,12 @@ pageserver_send(NeonRequest * request)
 
 	/*
 	 * If pageserver is stopped, the connections from compute node are broken.
-	 * The compute node doesn't notice that immediately, but it will cause the next request to fail, usually on the next query.
-	 * That causes user-visible errors if pageserver is restarted, or the tenant is moved from one pageserver to another.
-	 * See https://github.com/neondatabase/neon/issues/1138
-	 * So try to reestablish connection in case of failure.
+	 * The compute node doesn't notice that immediately, but it will cause the
+	 * next request to fail, usually on the next query. That causes
+	 * user-visible errors if pageserver is restarted, or the tenant is moved
+	 * from one pageserver to another. See
+	 * https://github.com/neondatabase/neon/issues/1138 So try to reestablish
+	 * connection in case of failure.
 	 */
 	if (!connected)
 	{
@@ -337,7 +355,6 @@ pageserver_send(NeonRequest * request)
 		{
 			HandleMainLoopInterrupts();
 			n_reconnect_attempts += 1;
-			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
 		n_reconnect_attempts = 0;
 	}
@@ -353,6 +370,7 @@ pageserver_send(NeonRequest * request)
 	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
 		pageserver_disconnect();
 		neon_log(LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
 		pfree(msg);
@@ -410,7 +428,8 @@ pageserver_receive(void)
 		}
 		else if (rc == -2)
 		{
-			char* msg = pchomp(PQerrorMessage(pageserver_conn));
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
 			pageserver_disconnect();
 			neon_log(ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
 		}
@@ -444,6 +463,7 @@ pageserver_flush(void)
 		if (PQflush(pageserver_conn))
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
 			pageserver_disconnect();
 			neon_log(LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
 			pfree(msg);
@@ -471,46 +491,47 @@ check_neon_id(char **newval, void **extra, GucSource source)
 static Size
 PagestoreShmemSize(void)
 {
-    return sizeof(PagestoreShmemState);
+	return sizeof(PagestoreShmemState);
 }
 
 static bool
 PagestoreShmemInit(void)
 {
-    bool found;
-    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-    pagestore_shared = ShmemInitStruct("libpagestore shared state",
-                                       PagestoreShmemSize(),
-                                       &found);
-    if(!found)
-    {
-        pagestore_shared->lock = &(GetNamedLWLockTranche("neon_libpagestore")->lock);
-        pg_atomic_init_u64(&pagestore_shared->update_counter, 0);
-        AssignPageserverConnstring(page_server_connstring, NULL);
-    }
-    LWLockRelease(AddinShmemInitLock);
-    return found;
+	bool		found;
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	pagestore_shared = ShmemInitStruct("libpagestore shared state",
+									   PagestoreShmemSize(),
+									   &found);
+	if (!found)
+	{
+		pagestore_shared->lock = &(GetNamedLWLockTranche("neon_libpagestore")->lock);
+		pg_atomic_init_u64(&pagestore_shared->update_counter, 0);
+		AssignPageserverConnstring(page_server_connstring, NULL);
+	}
+	LWLockRelease(AddinShmemInitLock);
+	return found;
 }
 
 static void
 pagestore_shmem_startup_hook(void)
 {
-    if(prev_shmem_startup_hook)
-        prev_shmem_startup_hook();
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
 
-    PagestoreShmemInit();
+	PagestoreShmemInit();
 }
 
 static void
 pagestore_shmem_request(void)
 {
 #if PG_VERSION_NUM >= 150000
-    if(prev_shmem_request_hook)
-        prev_shmem_request_hook();
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
 #endif
 
-    RequestAddinShmemSpace(PagestoreShmemSize());
-    RequestNamedLWLockTranche("neon_libpagestore", 1);
+	RequestAddinShmemSpace(PagestoreShmemSize());
+	RequestNamedLWLockTranche("neon_libpagestore", 1);
 }
 
 static void
@@ -520,7 +541,7 @@ pagestore_prepare_shmem(void)
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = pagestore_shmem_request;
 #else
-        pagestore_shmem_request();
+	pagestore_shmem_request();
 #endif
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pagestore_shmem_startup_hook;
@@ -532,7 +553,7 @@ pagestore_prepare_shmem(void)
 void
 pg_init_libpagestore(void)
 {
-        pagestore_prepare_shmem();
+	pagestore_prepare_shmem();
 
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
@@ -607,7 +628,10 @@ pg_init_libpagestore(void)
 	neon_log(PageStoreTrace, "libpagestore already loaded");
 	page_server = &api;
 
-	/* Retrieve the auth token to use when connecting to pageserver and safekeepers */
+	/*
+	 * Retrieve the auth token to use when connecting to pageserver and
+	 * safekeepers
+	 */
 	neon_auth_token = getenv("NEON_AUTH_TOKEN");
 	if (neon_auth_token)
 		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
@@ -618,8 +642,6 @@ pg_init_libpagestore(void)
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
-		old_redo_read_buffer_filter = redo_read_buffer_filter;
-		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 
 	lfc_init();

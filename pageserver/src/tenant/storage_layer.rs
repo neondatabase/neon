@@ -4,7 +4,7 @@ pub mod delta_layer;
 mod filename;
 pub mod image_layer;
 mod inmemory_layer;
-mod layer;
+pub(crate) mod layer;
 mod layer_desc;
 
 use crate::context::{AccessStatsBehavior, RequestContext};

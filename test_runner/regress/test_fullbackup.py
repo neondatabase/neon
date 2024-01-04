@@ -20,6 +20,7 @@ def test_fullbackup(
     pg_bin: PgBin,
     port_distributor: PortDistributor,
     pg_distrib_dir: Path,
+    test_output_dir: Path,
 ):
     env = neon_env_builder.init_start()
 
@@ -49,10 +50,12 @@ def test_fullbackup(
     restored_dir_path = env.repo_dir / "restored_datadir"
     os.mkdir(restored_dir_path, 0o750)
     query = f"fullbackup {env.initial_tenant} {timeline} {lsn}"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query]
-    result_basepath = pg_bin.run_capture(cmd, env=psql_env)
-    tar_output_file = result_basepath + ".stdout"
-    subprocess_capture(env.repo_dir, ["tar", "-xf", tar_output_file, "-C", str(restored_dir_path)])
+    tar_output_file = test_output_dir / "fullbackup.tar"
+    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
+    pg_bin.run_capture(cmd, env=psql_env)
+    subprocess_capture(
+        env.repo_dir, ["tar", "-xf", str(tar_output_file), "-C", str(restored_dir_path)]
+    )
 
     # HACK
     # fullbackup returns neon specific pg_control and first WAL segment

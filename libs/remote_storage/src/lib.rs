@@ -14,13 +14,17 @@ mod local_fs;
 mod s3_bucket;
 mod simulate_failures;
 
-use std::{collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc, time::SystemTime,
+};
 
 use anyhow::{bail, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 
+use bytes::Bytes;
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::{io, sync::Semaphore};
+use tokio::sync::Semaphore;
 use toml_edit::Item;
 use tracing::info;
 
@@ -179,7 +183,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
@@ -205,8 +209,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
 }
 
+pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
 pub struct Download {
-    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send + Sync>>,
+    pub download_stream: DownloadStream,
+    /// The last time the file was modified (`last-modified` HTTP header)
+    pub last_modified: Option<SystemTime>,
+    /// A way to identify this specific version of the resource (`etag` HTTP header)
+    pub etag: Option<String>,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }
@@ -300,7 +309,7 @@ impl GenericRemoteStorage {
 
     pub async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -398,7 +407,7 @@ impl GenericRemoteStorage {
     /// this path is used for the remote object id conversion only.
     pub async fn upload_storage_object(
         &self,
-        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
     ) -> anyhow::Result<()> {

@@ -6,13 +6,20 @@ mod conn_pool;
 mod sql_over_http;
 mod websocket;
 
+pub use conn_pool::GlobalConnPoolOptions;
+
 use anyhow::bail;
 use hyper::StatusCode;
+use metrics::IntCounterPairGuard;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tokio_util::task::TaskTracker;
 
+use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
-use crate::proxy::{NUM_CLIENT_CONNECTION_CLOSED_COUNTER, NUM_CLIENT_CONNECTION_OPENED_COUNTER};
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
 use futures::StreamExt;
 use hyper::{
@@ -23,7 +30,7 @@ use hyper::{
     Body, Method, Request, Response,
 };
 
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::task::Poll;
 use std::{future::ready, sync::Arc};
 use tls_listener::TlsListener;
@@ -36,12 +43,18 @@ pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
     }
 
     let conn_pool = conn_pool::GlobalConnPool::new(config);
+
+    let conn_pool2 = Arc::clone(&conn_pool);
+    tokio::spawn(async move {
+        conn_pool2.gc_worker(StdRng::from_entropy()).await;
+    });
 
     // shutdown the connection pool
     tokio::spawn({
@@ -70,6 +83,9 @@ pub async fn task_main(
         incoming: addr_incoming,
     };
 
+    let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
+    ws_connections.close(); // allows `ws_connections.wait to complete`
+
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
             error!("failed to accept TLS connection for websockets: {err:?}");
@@ -86,6 +102,8 @@ pub async fn task_main(
             let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
+            let ws_connections = ws_connections.clone();
+            let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
             async move {
                 let peer_addr = match client_addr {
@@ -97,13 +115,23 @@ pub async fn task_main(
                     move |req: Request<Body>| {
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
+                        let ws_connections = ws_connections.clone();
+                        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
                         async move {
                             let cancel_map = Arc::new(CancelMap::default());
                             let session_id = uuid::Uuid::new_v4();
 
                             request_handler(
-                                req, config, conn_pool, cancel_map, session_id, sni_name, peer_addr,
+                                req,
+                                config,
+                                conn_pool,
+                                ws_connections,
+                                cancel_map,
+                                session_id,
+                                sni_name,
+                                peer_addr.ip(),
+                                endpoint_rate_limiter,
                             )
                             .instrument(info_span!(
                                 "serverless",
@@ -123,27 +151,25 @@ pub async fn task_main(
         .with_graceful_shutdown(cancellation_token.cancelled())
         .await?;
 
+    // await websocket connections
+    ws_connections.wait().await;
+
     Ok(())
 }
 
 struct MetricService<S> {
     inner: S,
+    _gauge: IntCounterPairGuard,
 }
 
 impl<S> MetricService<S> {
     fn new(inner: S) -> MetricService<S> {
-        NUM_CLIENT_CONNECTION_OPENED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
-        MetricService { inner }
-    }
-}
-
-impl<S> Drop for MetricService<S> {
-    fn drop(&mut self) {
-        NUM_CLIENT_CONNECTION_CLOSED_COUNTER
-            .with_label_values(&["http"])
-            .inc();
+        MetricService {
+            inner,
+            _gauge: NUM_CLIENT_CONNECTION_GAUGE
+                .with_label_values(&["http"])
+                .guard(),
+        }
     }
 }
 
@@ -164,14 +190,17 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
     conn_pool: Arc<conn_pool::GlobalConnPool>,
+    ws_connections: TaskTracker,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
     sni_hostname: Option<String>,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()
@@ -187,7 +216,7 @@ async fn request_handler(
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        tokio::spawn(
+        ws_connections.spawn(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     websocket,
@@ -196,6 +225,7 @@ async fn request_handler(
                     session_id,
                     host,
                     peer_addr,
+                    endpoint_rate_limiter,
                 )
                 .await
                 {
@@ -223,7 +253,7 @@ async fn request_handler(
             .header("Access-Control-Allow-Origin", "*")
             .header(
                 "Access-Control-Allow-Headers",
-                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In",
+                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In, Neon-Batch-Read-Only, Neon-Batch-Isolation-Level",
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code

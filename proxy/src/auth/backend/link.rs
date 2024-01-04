@@ -1,4 +1,3 @@
-use super::AuthSuccess;
 use crate::{
     auth, compute,
     console::{self, provider::NodeInfo},
@@ -57,7 +56,7 @@ pub fn new_psql_session_id() -> String {
 pub(super) async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<NodeInfo>> {
+) -> auth::Result<NodeInfo> {
     let psql_session_id = new_psql_session_id();
     let span = info_span!("link", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
@@ -102,12 +101,9 @@ pub(super) async fn authenticate(
         config.password(password.as_ref());
     }
 
-    Ok(AuthSuccess {
-        reported_auth_ok: true,
-        value: NodeInfo {
-            config,
-            aux: db_info.aux.into(),
-            allow_self_signed_compute: false, // caller may override
-        },
+    Ok(NodeInfo {
+        config,
+        aux: db_info.aux,
+        allow_self_signed_compute: false, // caller may override
     })
 }

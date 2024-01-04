@@ -1,9 +1,10 @@
 use crate::{
     auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
-    error::UserFacingError, proxy::is_neon_param,
+    error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE, proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
+use metrics::IntCounterPairGuard;
 use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
@@ -223,6 +224,8 @@ pub struct PostgresConnection {
     pub params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
     pub cancel_closure: CancelClosure,
+
+    _guage: IntCounterPairGuard,
 }
 
 impl ConnCfg {
@@ -231,6 +234,7 @@ impl ConnCfg {
         &self,
         allow_self_signed_compute: bool,
         timeout: Duration,
+        proto: &'static str,
     ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
 
@@ -264,6 +268,7 @@ impl ConnCfg {
             stream,
             params,
             cancel_closure,
+            _guage: NUM_DB_CONNECTIONS_GAUGE.with_label_values(&[proto]).guard(),
         };
 
         Ok(connection)
@@ -275,7 +280,7 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     #[allow(unstable_name_collisions)]
     let options: String = params
         .options_raw()?
-        .filter(|opt| parse_endpoint_param(opt).is_none() && !is_neon_param(opt))
+        .filter(|opt| parse_endpoint_param(opt).is_none() && neon_option(opt).is_none())
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 

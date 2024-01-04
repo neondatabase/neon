@@ -6,6 +6,7 @@ use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_S
 use dashmap::{mapref::entry::Entry, DashMap};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use std::{
     convert::Infallible,
     sync::{
@@ -29,8 +30,8 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
 pub struct Ids {
-    pub endpoint_id: String,
-    pub branch_id: String,
+    pub endpoint_id: SmolStr,
+    pub branch_id: SmolStr,
 }
 
 #[derive(Debug)]
@@ -290,8 +291,8 @@ mod tests {
 
         // register a new counter
         let counter = metrics.register(Ids {
-            endpoint_id: "e1".to_string(),
-            branch_id: "b1".to_string(),
+            endpoint_id: "e1".into(),
+            branch_id: "b1".into(),
         });
 
         // the counter should be observed despite 0 egress

@@ -1,10 +1,10 @@
-use super::{AuthSuccess, ComputeCredentials};
+use super::{ComputeCredentials, ComputeUserInfo};
 use crate::{
-    auth::{self, AuthFlow, ClientCredentials},
+    auth::{self, backend::ComputeCredentialKeys, AuthFlow},
     compute,
     config::AuthenticationConfig,
     console::AuthSecret,
-    proxy::LatencyTimer,
+    metrics::LatencyTimer,
     sasl,
     stream::{PqStream, Stream},
 };
@@ -12,14 +12,15 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
 pub(super) async fn authenticate(
-    creds: &ClientCredentials<'_>,
+    creds: ComputeUserInfo,
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
     latency_timer: &mut LatencyTimer,
     secret: AuthSecret,
-) -> auth::Result<AuthSuccess<ComputeCredentials>> {
+) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
     let flow = AuthFlow::new(client);
     let scram_keys = match secret {
+        #[cfg(feature = "testing")]
         AuthSecret::Md5(_) => {
             info!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
@@ -53,7 +54,7 @@ pub(super) async fn authenticate(
                 sasl::Outcome::Success(key) => key,
                 sasl::Outcome::Failure(reason) => {
                     info!("auth backend failed with an error: {reason}");
-                    return Err(auth::AuthError::auth_failed(creds.user));
+                    return Err(auth::AuthError::auth_failed(&*creds.inner.user));
                 }
             };
 
@@ -64,9 +65,9 @@ pub(super) async fn authenticate(
         }
     };
 
-    Ok(AuthSuccess {
-        reported_auth_ok: false,
-        value: ComputeCredentials::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
+    Ok(ComputeCredentials {
+        info: creds,
+        keys: ComputeCredentialKeys::AuthKeys(tokio_postgres::config::AuthKeys::ScramSha256(
             scram_keys,
         )),
     })

@@ -28,7 +28,7 @@
 //! Page cache maps from a cache key to a buffer slot.
 //! The cache key uniquely identifies the piece of data that is being cached.
 //!
-//! The cache key for **materialized pages** is  [`TenantId`], [`TimelineId`], [`Key`], and [`Lsn`].
+//! The cache key for **materialized pages** is  [`TenantShardId`], [`TimelineId`], [`Key`], and [`Lsn`].
 //! Use [`PageCache::memorize_materialized_page`] and [`PageCache::lookup_materialized_page`] for fill & access.
 //!
 //! The cache key for **immutable file** pages is [`FileId`] and a block number.
@@ -83,12 +83,14 @@ use std::{
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
-use utils::{
-    id::{TenantId, TimelineId},
-    lsn::Lsn,
-};
+use pageserver_api::shard::TenantShardId;
+use utils::{id::TimelineId, lsn::Lsn};
 
-use crate::{context::RequestContext, metrics::PageCacheSizeMetrics, repository::Key};
+use crate::{
+    context::RequestContext,
+    metrics::{page_cache_eviction_metrics, PageCacheSizeMetrics},
+    repository::Key,
+};
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
 const TEST_PAGE_CACHE_SIZE: usize = 50;
@@ -150,7 +152,13 @@ enum CacheKey {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct MaterializedPageHashKey {
-    tenant_id: TenantId,
+    /// Why is this TenantShardId rather than TenantId?
+    ///
+    /// Usually, the materialized value of a page@lsn is identical on any shard in the same tenant.  However, this
+    /// this not the case for certain internally-generated pages (e.g. relation sizes).  In future, we may make this
+    /// key smaller by omitting the shard, if we ensure that reads to such pages always skip the cache, or are
+    /// special-cased in some other way.
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     key: Key,
 }
@@ -374,7 +382,7 @@ impl PageCache {
     /// returned page.
     pub async fn lookup_materialized_page(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         key: &Key,
         lsn: Lsn,
@@ -391,7 +399,7 @@ impl PageCache {
 
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
-                tenant_id,
+                tenant_shard_id,
                 timeline_id,
                 key: *key,
             },
@@ -432,7 +440,7 @@ impl PageCache {
     ///
     pub async fn memorize_materialized_page(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         key: Key,
         lsn: Lsn,
@@ -440,7 +448,7 @@ impl PageCache {
     ) -> anyhow::Result<()> {
         let cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
-                tenant_id,
+                tenant_shard_id,
                 timeline_id,
                 key,
             },
@@ -897,8 +905,10 @@ impl PageCache {
                             // Note that just yielding to tokio during iteration without such
                             // priority boosting is likely counter-productive. We'd just give more opportunities
                             // for B to bump usage count, further starving A.
-                            crate::metrics::page_cache_errors_inc(
-                                crate::metrics::PageCacheErrorKind::EvictIterLimit,
+                            page_cache_eviction_metrics::observe(
+                                page_cache_eviction_metrics::Outcome::ItersExceeded {
+                                    iters: iters.try_into().unwrap(),
+                                },
                             );
                             anyhow::bail!("exceeded evict iter limit");
                         }
@@ -909,8 +919,18 @@ impl PageCache {
                     // remove mapping for old buffer
                     self.remove_mapping(old_key);
                     inner.key = None;
+                    page_cache_eviction_metrics::observe(
+                        page_cache_eviction_metrics::Outcome::FoundSlotEvicted {
+                            iters: iters.try_into().unwrap(),
+                        },
+                    );
+                } else {
+                    page_cache_eviction_metrics::observe(
+                        page_cache_eviction_metrics::Outcome::FoundSlotUnused {
+                            iters: iters.try_into().unwrap(),
+                        },
+                    );
                 }
-                crate::metrics::PAGE_CACHE_FIND_VICTIMS_ITERS_TOTAL.inc_by(iters as u64);
                 return Ok((slot_idx, inner));
             }
         }

@@ -60,14 +60,14 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         assert_client_authorized(env, invalid_tenant_http_client)
 
     # create tenant using management token
-    pageserver_http_client.tenant_create(TenantId.generate())
+    env.pageserver.tenant_create(TenantId.generate(), auth_token=pageserver_token)
 
     # fail to create tenant using tenant token
     with pytest.raises(
         PageserverApiException,
         match="Forbidden: JWT authentication error",
     ):
-        tenant_http_client.tenant_create(TenantId.generate())
+        env.pageserver.tenant_create(TenantId.generate(), auth_token=tenant_token)
 
 
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
@@ -92,8 +92,9 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
 def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.append(".*Authentication error: InvalidSignature.*")
-    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
+    env.pageserver.allowed_errors.extend(
+        [".*Authentication error: InvalidSignature.*", ".*Unauthorized: malformed jwt token.*"]
+    )
 
     pageserver_token_old = env.auth_keys.generate_pageserver_token()
     pageserver_http_client_old = env.pageserver.http_client(pageserver_token_old)
@@ -145,9 +146,9 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
 def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.append(".*Authentication error: InvalidSignature.*")
-    env.pageserver.allowed_errors.append(".*Unauthorized: malformed jwt token.*")
-
+    env.pageserver.allowed_errors.extend(
+        [".*Authentication error: InvalidSignature.*", ".*Unauthorized: malformed jwt token.*"]
+    )
     pageserver_token_old = env.auth_keys.generate_pageserver_token()
     pageserver_http_client_old = env.pageserver.http_client(pageserver_token_old)
 

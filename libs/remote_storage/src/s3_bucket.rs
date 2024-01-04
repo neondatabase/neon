@@ -4,13 +4,19 @@
 //! allowing multiple api users to independently work with the same S3 bucket, if
 //! their bucket prefixes are both specified and different.
 
-use std::{borrow::Cow, sync::Arc};
+use std::{
+    borrow::Cow,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use anyhow::Context;
+use anyhow::Context as _;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
     meta::credentials::CredentialsProviderChain,
+    profile::ProfileFileCredentialsProvider,
     provider_config::ProviderConfig,
     retry::{RetryConfigBuilder, RetryMode},
     web_identity_token::WebIdentityTokenCredentialsProvider,
@@ -28,11 +34,10 @@ use aws_smithy_async::rt::sleep::TokioSleep;
 
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use bytes::Bytes;
+use futures::stream::Stream;
 use hyper::Body;
 use scopeguard::ScopeGuard;
-use tokio::io::{self, AsyncRead};
-use tokio_util::io::ReaderStream;
-use tracing::debug;
 
 use super::StorageMetadata;
 use crate::{
@@ -63,12 +68,14 @@ struct GetObjectRequest {
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
-        debug!(
+        tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
             aws_config.bucket_name
         );
 
         let region = Some(Region::new(aws_config.bucket_region.clone()));
+
+        let provider_conf = ProviderConfig::without_region().with_region(region.clone());
 
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
@@ -76,14 +83,21 @@ impl S3Bucket {
                 "env",
                 EnvironmentVariableCredentialsProvider::new(),
             )
+            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+            .or_else(
+                "profile-sso",
+                ProfileFileCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
             // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
             // needed to access remote extensions bucket
-            .or_else("token", {
-                let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+            .or_else(
+                "token",
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
-                    .build()
-            })
+                    .build(),
+            )
             // uses imds v2
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
@@ -214,58 +228,99 @@ impl S3Bucket {
 
         let started_at = ScopeGuard::into_inner(started_at);
 
-        if get_object.is_err() {
-            metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
-                kind,
-                AttemptOutcome::Err,
-                started_at,
-            );
-        }
-
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
+                let etag = object_output.e_tag.clone();
+                let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
+
+                let body = object_output.body;
+                let body = ByteStreamAsStream::from(body);
+                let body = PermitCarrying::new(permit, body);
+                let body = TimedDownload::new(started_at, body);
+
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(TimedDownload::new(
-                        started_at,
-                        RatelimitedAsyncRead::new(permit, object_output.body.into_async_read()),
-                    ))),
+                    etag,
+                    last_modified,
+                    download_stream: Box::pin(body),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
                 Err(DownloadError::NotFound)
             }
-            Err(e) => Err(DownloadError::Other(
-                anyhow::Error::new(e).context("download s3 object"),
-            )),
+            Err(e) => {
+                metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("download s3 object"),
+                ))
+            }
         }
     }
 }
 
 pin_project_lite::pin_project! {
+    struct ByteStreamAsStream {
+        #[pin]
+        inner: aws_smithy_types::byte_stream::ByteStream
+    }
+}
+
+impl From<aws_smithy_types::byte_stream::ByteStream> for ByteStreamAsStream {
+    fn from(inner: aws_smithy_types::byte_stream::ByteStream) -> Self {
+        ByteStreamAsStream { inner }
+    }
+}
+
+impl Stream for ByteStreamAsStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // this does the std::io::ErrorKind::Other conversion
+        self.project().inner.poll_next(cx).map_err(|x| x.into())
+    }
+
+    // cannot implement size_hint because inner.size_hint is remaining size in bytes, which makes
+    // sense and Stream::size_hint does not really
+}
+
+pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct RatelimitedAsyncRead<S> {
+    struct PermitCarrying<S> {
         permit: tokio::sync::OwnedSemaphorePermit,
         #[pin]
         inner: S,
     }
 }
 
-impl<S: AsyncRead> RatelimitedAsyncRead<S> {
+impl<S> PermitCarrying<S> {
     fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        RatelimitedAsyncRead { permit, inner }
+        Self { permit, inner }
     }
 }
 
-impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_read(cx, buf)
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for PermitCarrying<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -285,7 +340,7 @@ pin_project_lite::pin_project! {
     }
 }
 
-impl<S: AsyncRead> TimedDownload<S> {
+impl<S> TimedDownload<S> {
     fn new(started_at: std::time::Instant, inner: S) -> Self {
         TimedDownload {
             started_at,
@@ -295,25 +350,26 @@ impl<S: AsyncRead> TimedDownload<S> {
     }
 }
 
-impl<S: AsyncRead> AsyncRead for TimedDownload<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use std::task::ready;
+
         let this = self.project();
-        let before = buf.filled().len();
-        let read = std::task::ready!(this.inner.poll_read(cx, buf));
 
-        let read_eof = buf.filled().len() == before;
-
-        match read {
-            Ok(()) if read_eof => *this.outcome = AttemptOutcome::Ok,
-            Ok(()) => { /* still in progress */ }
-            Err(_) => *this.outcome = AttemptOutcome::Err,
+        let res = ready!(this.inner.poll_next(cx));
+        match &res {
+            Some(Ok(_)) => {}
+            Some(Err(_)) => *this.outcome = metrics::AttemptOutcome::Err,
+            None => *this.outcome = metrics::AttemptOutcome::Ok,
         }
 
-        std::task::Poll::Ready(read)
+        Poll::Ready(res)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -378,7 +434,7 @@ impl RemoteStorage for S3Bucket {
             let empty = Vec::new();
             let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
 
-            tracing::info!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+            tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
 
             for object in keys {
                 let object_path = object.key().expect("response does not contain a key");
@@ -403,7 +459,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
@@ -413,7 +469,7 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(ReaderStream::new(from));
+        let body = Body::wrap_stream(from);
         let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
 
         let res = self

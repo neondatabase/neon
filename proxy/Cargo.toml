@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+testing = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -57,6 +61,7 @@ thiserror.workspace = true
 tls-listener.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
+tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
@@ -69,12 +74,12 @@ webpki-roots.workspace = true
 x509-parser.workspace = true
 native-tls.workspace = true
 postgres-native-tls.workspace = true
+postgres-protocol.workspace = true
+smol_str.workspace = true
 
 workspace_hack.workspace = true
-tokio-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
-postgres-protocol.workspace = true

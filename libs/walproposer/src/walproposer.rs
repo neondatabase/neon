@@ -6,8 +6,8 @@ use utils::id::TenantTimelineId;
 use crate::{
     api_bindings::{create_api, take_vec_u8, Level},
     bindings::{
-        Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate, WalProposerFree,
-        WalProposerStart,
+        NeonWALReadResult, Safekeeper, WalProposer, WalProposerConfig, WalProposerCreate,
+        WalProposerFree, WalProposerStart,
     },
 };
 
@@ -86,19 +86,19 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn recovery_download(&self, _sk: &mut Safekeeper, _startpos: u64, _endpos: u64) -> bool {
+    fn recovery_download(&self, _wp: &mut WalProposer, _sk: &mut Safekeeper) -> bool {
         todo!()
     }
 
-    fn wal_read(&self, _sk: &mut Safekeeper, _buf: &mut [u8], _startpos: u64) {
+    fn wal_reader_allocate(&self, _sk: &mut Safekeeper) -> NeonWALReadResult {
         todo!()
     }
 
-    fn wal_reader_allocate(&self, _sk: &mut Safekeeper) {
+    fn wal_read(&self, _sk: &mut Safekeeper, _buf: &mut [u8], _startpos: u64) -> NeonWALReadResult {
         todo!()
     }
 
-    fn free_event_set(&self, _wp: &mut WalProposer) {
+    fn wal_reader_events(&self, _sk: &mut Safekeeper) -> u32 {
         todo!()
     }
 
@@ -110,7 +110,15 @@ pub trait ApiImpl {
         todo!()
     }
 
+    fn active_state_update_event_set(&self, _sk: &mut Safekeeper) {
+        todo!()
+    }
+
     fn add_safekeeper_event_set(&self, _sk: &mut Safekeeper, _events_mask: u32) {
+        todo!()
+    }
+
+    fn rm_safekeeper_event_set(&self, _sk: &mut Safekeeper) {
         todo!()
     }
 
@@ -131,10 +139,6 @@ pub trait ApiImpl {
     }
 
     fn process_safekeeper_feedback(&self, _wp: &mut WalProposer, _commit_lsn: u64) {
-        todo!()
-    }
-
-    fn confirm_wal_streamed(&self, _wp: &mut WalProposer, _lsn: u64) {
         todo!()
     }
 
@@ -240,6 +244,7 @@ impl Drop for Wrapper {
 
 #[cfg(test)]
 mod tests {
+    use core::panic;
     use std::{
         cell::Cell,
         sync::{atomic::AtomicUsize, mpsc::sync_channel},
@@ -247,7 +252,7 @@ mod tests {
 
     use utils::id::TenantTimelineId;
 
-    use crate::{api_bindings::Level, walproposer::Wrapper};
+    use crate::{api_bindings::Level, bindings::NeonWALReadResult, walproposer::Wrapper};
 
     use super::ApiImpl;
 
@@ -355,12 +360,17 @@ mod tests {
             true
         }
 
-        fn wal_reader_allocate(&self, _: &mut crate::bindings::Safekeeper) {
-            println!("wal_reader_allocate")
+        fn recovery_download(
+            &self,
+            _wp: &mut crate::bindings::WalProposer,
+            _sk: &mut crate::bindings::Safekeeper,
+        ) -> bool {
+            true
         }
 
-        fn free_event_set(&self, _: &mut crate::bindings::WalProposer) {
-            println!("free_event_set")
+        fn wal_reader_allocate(&self, _: &mut crate::bindings::Safekeeper) -> NeonWALReadResult {
+            println!("wal_reader_allocate");
+            crate::bindings::NeonWALReadResult_NEON_WALREAD_SUCCESS
         }
 
         fn init_event_set(&self, _: &mut crate::bindings::WalProposer) {
@@ -381,6 +391,13 @@ mod tests {
                 sk as *mut crate::bindings::Safekeeper, event_mask
             );
             self.wait_events.set(WaitEventsData { sk, event_mask });
+        }
+
+        fn rm_safekeeper_event_set(&self, sk: &mut crate::bindings::Safekeeper) {
+            println!(
+                "rm_safekeeper_event_set, sk={:?}",
+                sk as *mut crate::bindings::Safekeeper
+            );
         }
 
         fn wait_event_set(
@@ -408,7 +425,7 @@ mod tests {
         }
 
         fn log_internal(&self, _wp: &mut crate::bindings::WalProposer, level: Level, msg: &str) {
-            println!("walprop_log[{}] {}", level, msg);
+            println!("wp_log[{}] {}", level, msg);
         }
 
         fn after_election(&self, _wp: &mut crate::bindings::WalProposer) {
@@ -436,9 +453,9 @@ mod tests {
                 event_mask: 0,
             }),
             expected_messages: vec![
-                // Greeting(ProposerGreeting { protocol_version: 2, pg_version: 160000, proposer_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], system_id: 0, timeline_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tenant_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tli: 1, wal_seg_size: 16777216 })
+                // Greeting(ProposerGreeting { protocol_version: 2, pg_version: 160001, proposer_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], system_id: 0, timeline_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tenant_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tli: 1, wal_seg_size: 16777216 })
                 vec![
-                    103, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 113, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    103, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 113, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 158, 76, 143, 54, 6, 60, 108, 110,
                     147, 188, 32, 214, 90, 130, 15, 61, 158, 76, 143, 54, 6, 60, 108, 110, 147,
                     188, 32, 214, 90, 130, 15, 61, 1, 0, 0, 0, 0, 0, 0, 1,
@@ -478,7 +495,7 @@ mod tests {
         // walproposer will panic when it finishes sync_safekeepers
         std::panic::catch_unwind(|| wp.start()).unwrap_err();
         // validate the resulting LSN
-        assert_eq!(receiver.recv()?, 1337);
+        assert_eq!(receiver.try_recv(), Ok(1337));
         Ok(())
         // drop() will free up resources here
     }

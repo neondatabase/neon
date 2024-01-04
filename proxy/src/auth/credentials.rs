@@ -1,16 +1,13 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param,
-    error::UserFacingError,
-    proxy::{neon_options, NUM_CONNECTION_ACCEPTED_BY_SNI},
+    auth::password_hack::parse_endpoint_param, error::UserFacingError,
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::neon_options_str,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{
-    collections::HashSet,
-    net::{IpAddr, SocketAddr},
-};
+use smol_str::SmolStr;
+use std::{collections::HashSet, net::IpAddr};
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -24,7 +21,7 @@ pub enum ClientCredsParseError {
          SNI ('{}') and project option ('{}').",
         .domain, .option,
     )]
-    InconsistentProjectNames { domain: String, option: String },
+    InconsistentProjectNames { domain: SmolStr, option: SmolStr },
 
     #[error(
         "Common name inferred from SNI ('{}') is not known",
@@ -33,7 +30,7 @@ pub enum ClientCredsParseError {
     UnknownCommonName { cn: String },
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphen.")]
-    MalformedProjectName(String),
+    MalformedProjectName(SmolStr),
 }
 
 impl UserFacingError for ClientCredsParseError {}
@@ -41,34 +38,34 @@ impl UserFacingError for ClientCredsParseError {}
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientCredentials<'a> {
-    pub user: &'a str,
+pub struct ClientCredentials {
+    pub user: SmolStr,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
-    pub project: Option<String>,
+    pub project: Option<SmolStr>,
 
-    pub cache_key: String,
-    pub peer_addr: SocketAddr,
+    pub cache_key: SmolStr,
+    pub peer_addr: IpAddr,
 }
 
-impl ClientCredentials<'_> {
+impl ClientCredentials {
     #[inline]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
     }
 }
 
-impl<'a> ClientCredentials<'a> {
+impl ClientCredentials {
     pub fn parse(
-        params: &'a StartupMessageParams,
+        params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<HashSet<String>>,
-        peer_addr: SocketAddr,
+        peer_addr: IpAddr,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
         // Some parameters are stored in the startup message.
         let get_param = |key| params.get(key).ok_or(MissingKey(key));
-        let user = get_param("user")?;
+        let user = get_param("user")?.into();
 
         // Project name might be passed via PG's command-line options.
         let project_option = params
@@ -82,7 +79,7 @@ impl<'a> ClientCredentials<'a> {
                     .at_most_one()
                     .ok()?
             })
-            .map(|name| name.to_string());
+            .map(|name| name.into());
 
         let project_from_domain = if let Some(sni_str) = sni {
             if let Some(cn) = common_names {
@@ -121,7 +118,7 @@ impl<'a> ClientCredentials<'a> {
         }
         .transpose()?;
 
-        info!(user, project = project.as_deref(), "credentials");
+        info!(%user, project = project.as_deref(), "credentials");
         if sni.is_some() {
             info!("Connection with sni");
             NUM_CONNECTION_ACCEPTED_BY_SNI
@@ -142,8 +139,9 @@ impl<'a> ClientCredentials<'a> {
         let cache_key = format!(
             "{}{}",
             project.as_deref().unwrap_or(""),
-            neon_options(params).unwrap_or("".to_string())
-        );
+            neon_options_str(params)
+        )
+        .into();
 
         Ok(Self {
             user,
@@ -206,10 +204,10 @@ fn project_name_valid(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '-')
 }
 
-fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<String> {
+fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<SmolStr> {
     sni.strip_suffix(common_name)?
         .strip_suffix('.')
-        .map(str::to_owned)
+        .map(SmolStr::from)
 }
 
 #[cfg(test)]
@@ -221,7 +219,7 @@ mod tests {
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
@@ -236,7 +234,7 @@ mod tests {
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
@@ -251,7 +249,7 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
@@ -267,7 +265,7 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
@@ -282,7 +280,7 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
@@ -300,7 +298,7 @@ mod tests {
             ),
         ]);
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert!(creds.project.is_none());
@@ -315,7 +313,7 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
         ]);
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert!(creds.project.is_none());
@@ -330,7 +328,7 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
@@ -344,13 +342,13 @@ mod tests {
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
@@ -365,7 +363,7 @@ mod tests {
         let sni = Some("second.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let err = ClientCredentials::parse(&options, sni, common_names, peer_addr)
             .expect_err("should fail");
         match err {
@@ -384,7 +382,7 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let err = ClientCredentials::parse(&options, sni, common_names, peer_addr)
             .expect_err("should fail");
         match err {
@@ -404,13 +402,10 @@ mod tests {
 
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+        let peer_addr = IpAddr::from([127, 0, 0, 1]);
         let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
         assert_eq!(creds.project.as_deref(), Some("project"));
-        assert_eq!(
-            creds.cache_key,
-            "projectneon_endpoint_type:read_write neon_lsn:0/2"
-        );
+        assert_eq!(creds.cache_key, "projectendpoint_type:read_write lsn:0/2");
 
         Ok(())
     }

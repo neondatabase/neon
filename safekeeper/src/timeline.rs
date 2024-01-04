@@ -182,8 +182,9 @@ impl SharedState {
     }
 
     /// Mark timeline active/inactive and return whether s3 offloading requires
-    /// start/stop action.
-    fn update_status(
+    /// start/stop action. If timeline is deactivated, control file is persisted
+    /// as maintenance task does that only for active timelines.
+    async fn update_status(
         &mut self,
         num_computes: usize,
         remote_consistent_lsn: Lsn,
@@ -191,7 +192,15 @@ impl SharedState {
     ) -> bool {
         let is_active = self.is_active(num_computes, remote_consistent_lsn);
         if self.active != is_active {
-            info!("timeline {} active={} now", ttid, is_active);
+            info!(
+                "timeline {} active={} now, remote_consistent_lsn={}, commit_lsn={}",
+                ttid, is_active, remote_consistent_lsn, self.sk.inmem.commit_lsn
+            );
+            if !is_active {
+                if let Err(e) = self.sk.persist_inmem(remote_consistent_lsn).await {
+                    warn!("control file save in update_status failed: {:?}", e);
+                }
+            }
         }
         self.active = is_active;
         self.is_wal_backup_action_pending(num_computes)
@@ -438,7 +447,7 @@ impl Timeline {
         fs::create_dir_all(&self.timeline_dir).await?;
 
         // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.persist().await {
+        if let Err(e) = shared_state.sk.persist_inmem(Lsn::INVALID).await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
             self.cancel(shared_state);
 
@@ -511,12 +520,14 @@ impl Timeline {
         self.mutex.lock().await
     }
 
-    fn update_status(&self, shared_state: &mut SharedState) -> bool {
-        shared_state.update_status(
-            self.walreceivers.get_num(),
-            self.get_walsenders().get_remote_consistent_lsn(),
-            self.ttid,
-        )
+    async fn update_status(&self, shared_state: &mut SharedState) -> bool {
+        shared_state
+            .update_status(
+                self.walreceivers.get_num(),
+                self.get_walsenders().get_remote_consistent_lsn(),
+                self.ttid,
+            )
+            .await
     }
 
     /// Update timeline status and kick wal backup launcher to stop/start offloading if needed.
@@ -526,7 +537,7 @@ impl Timeline {
         }
         let is_wal_backup_action_pending: bool = {
             let mut shared_state = self.write_shared_state().await;
-            self.update_status(&mut shared_state)
+            self.update_status(&mut shared_state).await
         };
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
@@ -683,7 +694,7 @@ impl Timeline {
             shared_state.sk.record_safekeeper_info(&sk_info).await?;
             let peer_info = PeerInfo::from_sk_info(&sk_info, Instant::now());
             shared_state.peers_info.upsert(&peer_info);
-            is_wal_backup_action_pending = self.update_status(&mut shared_state);
+            is_wal_backup_action_pending = self.update_status(&mut shared_state).await;
             commit_lsn = shared_state.sk.inmem.commit_lsn;
         }
         self.commit_lsn_watch_tx.send(commit_lsn)?;
@@ -828,7 +839,7 @@ impl Timeline {
         self.write_shared_state()
             .await
             .sk
-            .maybe_persist_control_file(remote_consistent_lsn)
+            .maybe_persist_inmem_control_file(remote_consistent_lsn)
             .await
     }
 

@@ -17,6 +17,27 @@ class LabelledQuery:
     query: str
 
 
+# This must run before all tests in this module
+# create extension pg_stat_statements if it does not exist
+# and TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
+# Theoretically this could be in a module or session scope fixture,
+# however the code depends on other fixtures that have function scope
+@pytest.mark.skipif(
+    os.getenv("TEST_OLAP_COLLECT_PG_STAT_STATEMENTS", "false").lower() == "false",
+    reason="Skipping - Creating extension pg_stat_statements",
+)
+@pytest.mark.remote_cluster
+def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
+    log.info("Creating extension pg_stat_statements")
+    query = LabelledQuery(
+        "Q_CREATE_EXTENSION", r"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
+    )
+    run_psql(remote_compare, query, times=1, explain=False)
+    log.info("Reset pg_stat_statements")
+    query = LabelledQuery("Q_RESET", r"SELECT pg_stat_statements_reset();")
+    run_psql(remote_compare, query, times=1, explain=False)
+
+
 # A list of queries to run.
 # Please do not alter the label for the query, as it is used to identify it.
 # Labels for ClickBench queries match the labels in ClickBench reports
@@ -78,6 +99,8 @@ QUERIES: Tuple[LabelledQuery, ...] = (
     # fmt: on
 )
 
+EXPLAIN_STRING: str = "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS, SETTINGS, FORMAT JSON)"
+
 
 def get_scale() -> List[str]:
     # We parametrize each tpc-h and clickbench test with scale
@@ -88,7 +111,10 @@ def get_scale() -> List[str]:
     return [scale]
 
 
-def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> None:
+# run the query times times plus once with EXPLAIN VERBOSE if explain is requestd
+def run_psql(
+    env: RemoteCompare, labelled_query: LabelledQuery, times: int, explain: bool = False
+) -> None:
     # prepare connstr:
     # - cut out password from connstr to pass it via env
     # - add options to connstr
@@ -108,6 +134,13 @@ def run_psql(env: RemoteCompare, labelled_query: LabelledQuery, times: int) -> N
         log.info(f"Run {run}/{times}")
         with env.zenbenchmark.record_duration(f"{label}/{run}"):
             env.pg_bin.run_capture(["psql", connstr, "-c", query], env=environ)
+    if explain:
+        log.info(f"Explaining query {label}")
+        run += 1
+        with env.zenbenchmark.record_duration(f"{label}/EXPLAIN"):
+            env.pg_bin.run_capture(
+                ["psql", connstr, "-c", f"{EXPLAIN_STRING} {query}"], env=environ
+            )
 
 
 @pytest.mark.parametrize("scale", get_scale())
@@ -118,10 +151,13 @@ def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare, scale: 
     An OLAP-style ClickHouse benchmark
 
     Based on https://github.com/ClickHouse/ClickBench/tree/c00135ca5b6a0d86fedcdbf998fdaa8ed85c1c3b/aurora-postgresql
-    The DB prepared manually in advance
+    The DB prepared manually in advance.
+    Important: after intial data load, run `VACUUM (DISABLE_PAGE_SKIPPING, FREEZE, ANALYZE) hits;`
+    to ensure that Postgres optimizer chooses the same plans as RDS and Aurora.
     """
+    explain: bool = os.getenv("TEST_OLAP_COLLECT_EXPLAIN", "false").lower() == "true"
 
-    run_psql(remote_compare, query, times=3)
+    run_psql(remote_compare, query, times=3, explain=explain)
 
 
 def tpch_queuies() -> Tuple[ParameterSet, ...]:
@@ -195,3 +231,16 @@ def test_user_examples(remote_compare: RemoteCompare):
         """,
     )
     run_psql(remote_compare, query, times=3)
+
+
+# This must run after all tests in this module
+# Collect pg_stat_statements after running the tests if TEST_OLAP_COLLECT_PG_STAT_STATEMENTS is set to true (default false)
+@pytest.mark.skipif(
+    os.getenv("TEST_OLAP_COLLECT_PG_STAT_STATEMENTS", "false").lower() == "false",
+    reason="Skipping - Collecting pg_stat_statements",
+)
+@pytest.mark.remote_cluster
+def test_clickbench_collect_pg_stat_statements(remote_compare: RemoteCompare):
+    log.info("Collecting pg_stat_statements")
+    query = LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
+    run_psql(remote_compare, query, times=1, explain=False)

@@ -312,7 +312,18 @@ impl ListWriter {
                 for (tenant_shard_id, tenant_list) in &mut deletion_list.tenants {
                     if let Some(attached_gen) = attached_tenants.get(tenant_shard_id) {
                         if attached_gen.previous() == tenant_list.generation {
+                            info!(
+                                seq=%s, tenant_id=%tenant_shard_id.tenant_id,
+                                shard_id=%tenant_shard_id.shard_slug(),
+                                old_gen=?tenant_list.generation, new_gen=?attached_gen,
+                                "Updating gen on recovered list");
                             tenant_list.generation = *attached_gen;
+                        } else {
+                            info!(
+                                seq=%s, tenant_id=%tenant_shard_id.tenant_id,
+                                shard_id=%tenant_shard_id.shard_slug(),
+                                old_gen=?tenant_list.generation, new_gen=?attached_gen,
+                                "Encountered stale generation on recovered list");
                         }
                     }
                 }

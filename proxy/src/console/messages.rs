@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use smol_str::SmolStr;
 use std::fmt;
 
 /// Generic error response with human-readable description.
@@ -88,11 +89,11 @@ impl fmt::Debug for DatabaseInfo {
 
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct MetricsAuxInfo {
-    pub endpoint_id: Box<str>,
-    pub project_id: Box<str>,
-    pub branch_id: Box<str>,
+    pub endpoint_id: SmolStr,
+    pub project_id: SmolStr,
+    pub branch_id: SmolStr,
 }
 
 impl MetricsAuxInfo {

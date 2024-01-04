@@ -1,6 +1,6 @@
 ARG PG_VERSION
 ARG REPOSITORY=neondatabase
-ARG IMAGE=rust
+ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
 
@@ -48,7 +48,29 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control && \
+    # We need to grant EXECUTE on pg_stat_statements_reset() to neon_superuser.
+    # In vanilla postgres this function is limited to Postgres role superuser.
+    # In neon we have neon_superuser role that is not a superuser but replaces superuser in some cases.
+    # We could add the additional grant statements to the postgres repository but it would be hard to maintain, 
+    # whenever we need to pick up a new postgres version and we want to limit the changes in our postgres fork,
+    # so we do it here.
+    old_list="pg_stat_statements--1.0--1.1.sql pg_stat_statements--1.1--1.2.sql pg_stat_statements--1.2--1.3.sql pg_stat_statements--1.3--1.4.sql pg_stat_statements--1.4--1.5.sql pg_stat_statements--1.4.sql pg_stat_statements--1.5--1.6.sql"; \
+    # the first loop is for pg_stat_statement extension version <= 1.6
+    for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
+        filename=$(basename "$file"); \
+        if echo "$old_list" | grep -q -F "$filename"; then \
+            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser;' >> $file; \
+        fi; \
+    done; \
+    # the second loop is for pg_stat_statement extension versions >= 1.7, 
+    # where pg_stat_statement_reset() got 3 additional arguments
+    for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
+        filename=$(basename "$file"); \
+        if ! echo "$old_list" | grep -q -F "$filename"; then \
+            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
+        fi; \
+    done      
 
 #########################################################################################
 #
@@ -393,7 +415,9 @@ RUN case "${PG_VERSION}" in \
         export TIMESCALEDB_CHECKSUM=6fca72a6ed0f6d32d2b3523951ede73dc5f9b0077b38450a029a5f411fdb8c73 \
         ;; \
       *) \
-        echo "TimescaleDB not supported on this PostgreSQL version. See https://github.com/timescale/timescaledb/issues/5752" && exit 0;; \
+        export TIMESCALEDB_VERSION=2.13.0 \
+        export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
+        ;; \
     esac && \
     apt-get update && \
     apt-get install -y cmake && \
@@ -569,6 +593,23 @@ RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4
 
 #########################################################################################
 #
+# Layer "pg-semver-pg-build"
+# compile pg_semver extension
+#
+#########################################################################################
+FROM build-deps AS pg-semver-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH "/usr/local/pgsql/bin/:$PATH"
+RUN wget https://github.com/theory/pg-semver/archive/refs/tags/v0.32.1.tar.gz -O pg_semver.tar.gz && \
+    echo "fbdaf7512026d62eec03fad8687c15ed509b6ba395bff140acd63d2e4fbe25d7 pg_semver.tar.gz" | sha256sum --check && \
+    mkdir pg_semver-src && cd pg_semver-src && tar xvzf ../pg_semver.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/semver.control
+
+#########################################################################################
+#
 # Layer "pg-embedding-pg-build"
 # compile pg_embedding extension
 #
@@ -729,8 +770,7 @@ RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.
     echo "b516653575541cf221b99cf3f8be9b6821f6dbcfc125675c85f35090f824f00e wal2json_2_5.tar.gz" | sha256sum --check && \
     mkdir wal2json-src && cd wal2json-src && tar xvzf ../wal2json_2_5.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
-    make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/wal2json.control
+    make -j $(getconf _NPROCESSORS_ONLN) install
 
 #########################################################################################
 #
@@ -767,6 +807,7 @@ COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
 COPY pgxn/ pgxn/

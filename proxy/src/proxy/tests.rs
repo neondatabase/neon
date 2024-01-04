@@ -2,11 +2,13 @@
 
 mod mitm;
 
+use super::connect_compute::ConnectMechanism;
+use super::retry::ShouldRetry;
 use super::*;
-use crate::auth::backend::TestBackend;
-use crate::auth::ClientCredentials;
+use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
 use crate::console::{CachedNodeInfo, NodeInfo};
+use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
@@ -109,8 +111,9 @@ fn generate_tls_config<'a>(
 trait TestAuth: Sized {
     async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
         self,
-        _stream: &mut PqStream<Stream<S>>,
+        stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
+        stream.write_message_noflush(&Be::AuthenticationOk)?;
         Ok(())
     }
 }
@@ -168,7 +171,6 @@ async fn dummy_proxy(
     auth.authenticate(&mut stream).await?;
 
     stream
-        .write_message_noflush(&Be::AuthenticationOk)?
         .write_message_noflush(&Be::CLIENT_ENCODING)?
         .write_message(&Be::ReadyForQuery)
         .await?;
@@ -424,7 +426,7 @@ impl ConnectMechanism for TestConnectMechanism {
     async fn connect_once(
         &self,
         _node_info: &console::CachedNodeInfo,
-        _timeout: time::Duration,
+        _timeout: std::time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
@@ -485,14 +487,14 @@ fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> (
     CachedNodeInfo,
-    console::ConsoleReqExtra<'static>,
-    auth::BackendType<'_, ClientCredentials<'static>>,
+    console::ConsoleReqExtra,
+    auth::BackendType<'_, ComputeUserInfo>,
 ) {
     let cache = helper_create_cached_node_info();
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
-        application_name: Some("TEST"),
-        options: None,
+        application_name: "TEST".into(),
+        options: vec![],
     };
     let creds = auth::BackendType::Test(mechanism);
     (cache, extra, creds)

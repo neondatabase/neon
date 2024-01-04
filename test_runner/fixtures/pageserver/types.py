@@ -6,9 +6,8 @@ from fixtures.types import KEY_MAX, KEY_MIN, Key, Lsn
 
 @dataclass
 class IndexLayerMetadata:
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]):
-        return {}
+    file_size: int
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -139,7 +138,7 @@ class IndexPartDump:
     def from_json(cls, d: Dict[str, Any]) -> "IndexPartDump":
         return IndexPartDump(
             layer_metadata={
-                parse_layer_file_name(n): IndexLayerMetadata.from_json(v)
+                parse_layer_file_name(n): IndexLayerMetadata(v["file_size"], v["generation"])
                 for n, v in d["layer_metadata"].items()
             },
             disk_consistent_lsn=Lsn(d["disk_consistent_lsn"]),

@@ -15,13 +15,17 @@ use anyhow::Context;
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
+use aws_config::profile::ProfileFileCredentialsProvider;
+use aws_config::retry::RetryConfig;
 use aws_config::sso::SsoCredentialsProvider;
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::Region;
+use aws_sdk_s3::config::{AsyncSleep, Region, SharedAsyncSleep};
 use aws_sdk_s3::{Client, Config};
+use aws_smithy_async::rt::sleep::TokioSleep;
 
 use clap::ValueEnum;
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
+use pageserver_api::shard::TenantShardId;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::io::IsTerminal;
@@ -29,7 +33,7 @@ use tokio::io::AsyncReadExt;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use utils::id::{TenantId, TenantTimelineId};
+use utils::id::TimelineId;
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -42,6 +46,35 @@ pub struct S3Target {
     /// with extra parts.
     pub prefix_in_bucket: String,
     pub delimiter: String,
+}
+
+/// Convenience for referring to timelines within a particular shard: more ergonomic
+/// than using a 2-tuple.
+///
+/// This is the shard-aware equivalent of TenantTimelineId.  It's defined here rather
+/// than somewhere more broadly exposed, because this kind of thing is rarely needed
+/// in the pageserver, as all timeline objects existing in the scope of a particular
+/// tenant: the scrubber is different in that it handles collections of data referring to many
+/// TenantShardTimelineIds in on place.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct TenantShardTimelineId {
+    tenant_shard_id: TenantShardId,
+    timeline_id: TimelineId,
+}
+
+impl TenantShardTimelineId {
+    fn new(tenant_shard_id: TenantShardId, timeline_id: TimelineId) -> Self {
+        Self {
+            tenant_shard_id,
+            timeline_id,
+        }
+    }
+}
+
+impl Display for TenantShardTimelineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.tenant_shard_id, self.timeline_id)
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +119,9 @@ impl S3Target {
         if new_self.prefix_in_bucket.is_empty() {
             new_self.prefix_in_bucket = format!("/{}/", new_segment);
         } else {
-            let _ = new_self.prefix_in_bucket.pop();
+            if new_self.prefix_in_bucket.ends_with('/') {
+                new_self.prefix_in_bucket.pop();
+            }
             new_self.prefix_in_bucket =
                 [&new_self.prefix_in_bucket, new_segment, ""].join(&new_self.delimiter);
         }
@@ -108,19 +143,19 @@ impl RootTarget {
         }
     }
 
-    pub fn tenant_root(&self, tenant_id: &TenantId) -> S3Target {
+    pub fn tenant_root(&self, tenant_id: &TenantShardId) -> S3Target {
         self.tenants_root().with_sub_segment(&tenant_id.to_string())
     }
 
-    pub fn timelines_root(&self, tenant_id: &TenantId) -> S3Target {
+    pub fn timelines_root(&self, tenant_id: &TenantShardId) -> S3Target {
         match self {
             Self::Pageserver(_) => self.tenant_root(tenant_id).with_sub_segment("timelines"),
             Self::Safekeeper(_) => self.tenant_root(tenant_id),
         }
     }
 
-    pub fn timeline_root(&self, id: &TenantTimelineId) -> S3Target {
-        self.timelines_root(&id.tenant_id)
+    pub fn timeline_root(&self, id: &TenantShardTimelineId) -> S3Target {
+        self.timelines_root(&id.tenant_shard_id)
             .with_sub_segment(&id.timeline_id.to_string())
     }
 
@@ -223,6 +258,11 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         let chain = CredentialsProviderChain::first_try(
             "env",
             EnvironmentVariableCredentialsProvider::new(),
+        )
+        // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+        .or_else(
+            "profile-sso",
+            ProfileFileCredentialsProvider::builder().build(),
         );
 
         // Use SSO if we were given an account ID
@@ -233,7 +273,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
                     .account_id(sso_account)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
-                    .region(Region::from_static("eu-central-1"))
+                    .region(bucket_region.clone())
                     .build(),
             ),
             None => chain,
@@ -245,9 +285,13 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         )
     };
 
+    let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
+
     let mut builder = Config::builder()
         .behavior_version(BehaviorVersion::v2023_11_09())
         .region(bucket_region)
+        .retry_config(RetryConfig::adaptive().with_max_attempts(3))
+        .sleep_impl(SharedAsyncSleep::from(sleep_impl))
         .credentials_provider(credentials_provider);
 
     if let Ok(endpoint) = env::var("AWS_ENDPOINT_URL") {

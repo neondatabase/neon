@@ -18,7 +18,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.utils import timeline_delete_wait_completed
-from fixtures.remote_storage import RemoteStorageKind, available_remote_storages
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
@@ -281,19 +281,15 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
         assert post_detach_samples == set()
 
 
-# Check that empty tenants work with or without the remote storage
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
-def test_pageserver_with_empty_tenants(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-
+def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
+            ".*load failed.*list timelines directory.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*load failed.*list timelines directory.*")
 
     client = env.pageserver.http_client()
 

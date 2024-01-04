@@ -52,7 +52,16 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
         TenantId(t["id"]) for t in ps_http.tenant_list()
     ], "tenant should not be attached after negative test"
 
-    env.pageserver.allowed_errors.append(".*Error processing HTTP request: Bad request")
+    env.pageserver.allowed_errors.extend(
+        [
+            # This fixture detaches the tenant, and tests using it will tend to re-attach it
+            # shortly after. There may be un-processed deletion_queue validations from the
+            # initial attachment
+            ".*Dropped remote consistent LSN updates.*",
+            # This fixture is for tests that will intentionally generate 400 responses
+            ".*Error processing HTTP request: Bad request",
+        ]
+    )
 
     def log_contains_bad_request():
         env.pageserver.log_contains(".*Error processing HTTP request: Bad request")
@@ -100,7 +109,6 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
 
     env = negative_env.neon_env
     tenant_id = negative_env.tenant_id
-    ps_http = env.pageserver.http_client()
 
     config_with_unknown_keys = {
         "compaction_period": "1h",
@@ -108,16 +116,16 @@ def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
     }
 
     with pytest.raises(PageserverApiException) as e:
-        ps_http.tenant_attach(tenant_id, config=config_with_unknown_keys)
+        env.pageserver.tenant_attach(tenant_id, config=config_with_unknown_keys)
     assert e.type == PageserverApiException
     assert e.value.status_code == 400
 
 
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_empty_body(positive_env: NeonEnv, content_type: Optional[str]):
+def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
     """
-    For backwards-compatibility: if we send an empty body,
-    the request should be accepted and the config should be the default config.
+    When the 'config' body attribute is omitted, the request should be accepted
+    and the tenant should use the default configuration
     """
     env = positive_env
     ps_http = env.pageserver.http_client()
@@ -128,9 +136,11 @@ def test_empty_body(positive_env: NeonEnv, content_type: Optional[str]):
     ps_http.tenant_detach(tenant_id)
     assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()]
 
+    body = {"generation": env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)}
+
     ps_http.post(
         f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
-        data=b"",
+        json=body,
         headers=None if content_type else {"Content-Type": "application/json"},
     ).raise_for_status()
 
@@ -159,6 +169,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
+        "heatmap_period": "10m",
         "image_creation_threshold": 7,
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",
@@ -191,7 +202,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
     }, "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
 
     ps_http.tenant_detach(tenant_id)
-    ps_http.tenant_attach(tenant_id, config=fully_custom_config)
+    env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
 
     assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
     assert set(ps_http.tenant_config(tenant_id).effective_config.keys()) == set(

@@ -30,6 +30,7 @@ use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
 };
 
+use pageserver_api::shard::TenantShardId;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::ops::ControlFlow;
@@ -41,7 +42,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
-use utils::id::TenantTimelineId;
+use utils::id::TimelineId;
 
 use self::connection_manager::ConnectionManagerStatus;
 
@@ -57,10 +58,12 @@ pub struct WalReceiverConf {
     pub max_lsn_wal_lag: NonZeroU64,
     pub auth_token: Option<Arc<String>>,
     pub availability_zone: Option<String>,
+    pub ingest_batch_size: u64,
 }
 
 pub struct WalReceiver {
-    timeline: TenantTimelineId,
+    tenant_shard_id: TenantShardId,
+    timeline_id: TimelineId,
     manager_status: Arc<std::sync::RwLock<Option<ConnectionManagerStatus>>>,
 }
 
@@ -71,7 +74,7 @@ impl WalReceiver {
         mut broker_client: BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Self {
-        let tenant_id = timeline.tenant_shard_id.tenant_id;
+        let tenant_shard_id = timeline.tenant_shard_id;
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
@@ -81,9 +84,9 @@ impl WalReceiver {
         task_mgr::spawn(
             WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
-            Some(tenant_id),
+            Some(timeline.tenant_shard_id),
             Some(timeline_id),
-            &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
+            &format!("walreceiver for timeline {tenant_shard_id}/{timeline_id}"),
             false,
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
@@ -117,11 +120,12 @@ impl WalReceiver {
                 *loop_status.write().unwrap() = None;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_id, timeline_id = %timeline_id))
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
         );
 
         Self {
-            timeline: TenantTimelineId::new(tenant_id, timeline_id),
+            tenant_shard_id,
+            timeline_id,
             manager_status,
         }
     }
@@ -129,8 +133,8 @@ impl WalReceiver {
     pub async fn stop(self) {
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
-            Some(self.timeline.tenant_id),
-            Some(self.timeline.timeline_id),
+            Some(self.tenant_shard_id),
+            Some(self.timeline_id),
         )
         .await;
     }

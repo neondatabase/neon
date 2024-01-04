@@ -1,5 +1,6 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
+use crate::key::{is_rel_block_key, Key};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use thiserror;
@@ -72,19 +73,37 @@ impl TenantShardId {
         )
     }
 
-    pub fn shard_slug(&self) -> String {
-        format!("{:02x}{:02x}", self.shard_number.0, self.shard_count.0)
+    pub fn shard_slug(&self) -> impl std::fmt::Display + '_ {
+        ShardSlug(self)
+    }
+
+    /// Convenience for code that has special behavior on the 0th shard.
+    pub fn is_zero(&self) -> bool {
+        self.shard_number == ShardNumber(0)
+    }
+
+    pub fn is_unsharded(&self) -> bool {
+        self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+    }
+}
+
+/// Formatting helper
+struct ShardSlug<'a>(&'a TenantShardId);
+
+impl<'a> std::fmt::Display for ShardSlug<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}{:02x}",
+            self.0.shard_number.0, self.0.shard_count.0
+        )
     }
 }
 
 impl std::fmt::Display for TenantShardId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.shard_count != ShardCount(0) {
-            write!(
-                f,
-                "{}-{:02x}{:02x}",
-                self.tenant_id, self.shard_number.0, self.shard_count.0
-            )
+            write!(f, "{}-{}", self.tenant_id, self.shard_slug())
         } else {
             // Legacy case (shard_count == 0) -- format as just the tenant id.  Note that this
             // is distinct from the normal single shard case (shard count == 1).
@@ -144,7 +163,7 @@ impl From<[u8; 18]> for TenantShardId {
 /// shard we're dealing with, but do not need to know the full ShardIdentity (because
 /// we won't be doing any page->shard mapping), and do not need to know the fully qualified
 /// TenantShardId.
-#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Eq, PartialEq, PartialOrd, Ord, Clone, Copy, Hash)]
 pub struct ShardIndex {
     pub shard_number: ShardNumber,
     pub shard_count: ShardCount,
@@ -302,6 +321,8 @@ pub struct ShardStripeSize(pub u32);
 pub struct ShardLayout(u8);
 
 const LAYOUT_V1: ShardLayout = ShardLayout(1);
+/// ShardIdentity uses a magic layout value to indicate if it is unusable
+const LAYOUT_BROKEN: ShardLayout = ShardLayout(255);
 
 /// Default stripe size in pages: 256MiB divided by 8kiB page size.
 const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
@@ -310,10 +331,10 @@ const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 /// to resolve a key to a shard, and then check whether that shard is ==self.
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShardIdentity {
-    pub layout: ShardLayout,
     pub number: ShardNumber,
     pub count: ShardCount,
-    pub stripe_size: ShardStripeSize,
+    stripe_size: ShardStripeSize,
+    layout: ShardLayout,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
@@ -335,6 +356,22 @@ impl ShardIdentity {
             number: ShardNumber(0),
             count: ShardCount(0),
             layout: LAYOUT_V1,
+            stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+
+    /// A broken instance of this type is only used for `TenantState::Broken` tenants,
+    /// which are constructed in code paths that don't have access to proper configuration.
+    ///
+    /// A ShardIdentity in this state may not be used for anything, and should not be persisted.
+    /// Enforcement is via assertions, to avoid making our interface fallible for this
+    /// edge case: it is the Tenant's responsibility to avoid trying to do any I/O when in a broken
+    /// state, and by extension to avoid trying to do any page->shard resolution.
+    pub fn broken(number: ShardNumber, count: ShardCount) -> Self {
+        Self {
+            number,
+            count,
+            layout: LAYOUT_BROKEN,
             stripe_size: DEFAULT_STRIPE_SIZE,
         }
     }
@@ -364,6 +401,54 @@ impl ShardIdentity {
                 stripe_size,
             })
         }
+    }
+
+    fn is_broken(&self) -> bool {
+        self.layout == LAYOUT_BROKEN
+    }
+
+    pub fn get_shard_number(&self, key: &Key) -> ShardNumber {
+        assert!(!self.is_broken());
+        key_to_shard_number(self.count, self.stripe_size, key)
+    }
+
+    /// Return true if the key should be ingested by this shard
+    pub fn is_key_local(&self, key: &Key) -> bool {
+        assert!(!self.is_broken());
+        if self.count < ShardCount(2) || (key_is_shard0(key) && self.number == ShardNumber(0)) {
+            true
+        } else {
+            key_to_shard_number(self.count, self.stripe_size, key) == self.number
+        }
+    }
+
+    /// Return true if the key should be discarded if found in this shard's
+    /// data store, e.g. during compaction after a split
+    pub fn is_key_disposable(&self, key: &Key) -> bool {
+        if key_is_shard0(key) {
+            // Q: Why can't we dispose of shard0 content if we're not shard 0?
+            // A: because the WAL ingestion logic currently ingests some shard 0
+            //    content on all shards, even though it's only read on shard 0.  If we
+            //    dropped it, then subsequent WAL ingest to these keys would encounter
+            //    an error.
+            false
+        } else {
+            !self.is_key_local(key)
+        }
+    }
+
+    pub fn shard_slug(&self) -> String {
+        if self.count > ShardCount(0) {
+            format!("-{:02x}{:02x}", self.number.0, self.count.0)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Convenience for checking if this identity is the 0th shard in a tenant,
+    /// for special cases on shard 0 such as ingesting relation sizes.
+    pub fn is_zero(&self) -> bool {
+        self.number == ShardNumber(0)
     }
 }
 
@@ -436,6 +521,65 @@ impl<'de> Deserialize<'de> for ShardIndex {
             )
         }
     }
+}
+
+/// Whether this key is always held on shard 0 (e.g. shard 0 holds all SLRU keys
+/// in order to be able to serve basebackup requests without peer communication).
+fn key_is_shard0(key: &Key) -> bool {
+    // To decide what to shard out to shards >0, we apply a simple rule that only
+    // relation pages are distributed to shards other than shard zero. Everything else gets
+    // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
+    // requests, and any request other than those for particular blocks in relations.
+    //
+    // In this condition:
+    // - is_rel_block_key includes only relations, i.e. excludes SLRU data and
+    // all metadata.
+    // - field6 is set to -1 for relation size pages.
+    !(is_rel_block_key(key) && key.field6 != 0xffffffff)
+}
+
+/// Provide the same result as the function in postgres `hashfn.h` with the same name
+fn murmurhash32(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h
+}
+
+/// Provide the same result as the function in postgres `hashfn.h` with the same name
+fn hash_combine(mut a: u32, mut b: u32) -> u32 {
+    b = b.wrapping_add(0x9e3779b9);
+    b = b.wrapping_add(a << 6);
+    b = b.wrapping_add(a >> 2);
+
+    a ^= b;
+    a
+}
+
+/// Where a Key is to be distributed across shards, select the shard.  This function
+/// does not account for keys that should be broadcast across shards.
+///
+/// The hashing in this function must exactly match what we do in postgres smgr
+/// code.  The resulting distribution of pages is intended to preserve locality within
+/// `stripe_size` ranges of contiguous block numbers in the same relation, while otherwise
+/// distributing data pseudo-randomly.
+///
+/// The mapping of key to shard is not stable across changes to ShardCount: this is intentional
+/// and will be handled at higher levels when shards are split.
+fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Key) -> ShardNumber {
+    // Fast path for un-sharded tenants or broadcast keys
+    if count < ShardCount(2) || key_is_shard0(key) {
+        return ShardNumber(0);
+    }
+
+    // relNode
+    let mut hash = murmurhash32(key.field4);
+    // blockNum/stripe size
+    hash = hash_combine(hash, murmurhash32(key.field6 / stripe_size.0));
+
+    ShardNumber((hash % count.0 as u32) as u8)
 }
 
 #[cfg(test)]
@@ -608,5 +752,30 @@ mod tests {
         assert_eq!(example, decoded);
 
         Ok(())
+    }
+
+    // These are only smoke tests to spot check that our implementation doesn't
+    // deviate from a few examples values: not aiming to validate the overall
+    // hashing algorithm.
+    #[test]
+    fn murmur_hash() {
+        assert_eq!(murmurhash32(0), 0);
+
+        assert_eq!(hash_combine(0xb1ff3b40, 0), 0xfb7923c9);
+    }
+
+    #[test]
+    fn shard_mapping() {
+        let key = Key {
+            field1: 0x00,
+            field2: 0x67f,
+            field3: 0x5,
+            field4: 0x400c,
+            field5: 0x00,
+            field6: 0x7d06,
+        };
+
+        let shard = key_to_shard_number(ShardCount(10), DEFAULT_STRIPE_SIZE, &key);
+        assert_eq!(shard, ShardNumber(8));
     }
 }

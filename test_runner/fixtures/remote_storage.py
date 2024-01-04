@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import boto3
+import toml
 from mypy_boto3_s3 import S3Client
 
 from fixtures.log_helper import log
-from fixtures.pageserver.types import LayerFileName
 from fixtures.types import TenantId, TimelineId
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
+TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
 
 
 @enum.unique
@@ -88,20 +89,63 @@ class LocalFsStorage:
     def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
-    def layer_path(
-        self, tenant_id: TenantId, timeline_id: TimelineId, layer_file_name: LayerFileName
-    ):
-        return self.timeline_path(tenant_id, timeline_id) / layer_file_name.to_str()
+    def timeline_latest_generation(self, tenant_id, timeline_id):
+        timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
+        index_parts = [f for f in timeline_files if f.startswith("index_part")]
+
+        def parse_gen(filename):
+            log.info(f"parsing index_part '{filename}'")
+            parts = filename.split("-")
+            if len(parts) == 2:
+                return int(parts[1], 16)
+            else:
+                return None
+
+        generations = sorted([parse_gen(f) for f in index_parts])
+        if len(generations) == 0:
+            raise RuntimeError(f"No index_part found for {tenant_id}/{timeline_id}")
+        return generations[-1]
 
     def index_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
-        return self.timeline_path(tenant_id, timeline_id) / TIMELINE_INDEX_PART_FILE_NAME
+        latest_gen = self.timeline_latest_generation(tenant_id, timeline_id)
+        if latest_gen is None:
+            filename = TIMELINE_INDEX_PART_FILE_NAME
+        else:
+            filename = f"{TIMELINE_INDEX_PART_FILE_NAME}-{latest_gen:08x}"
+
+        return self.timeline_path(tenant_id, timeline_id) / filename
+
+    def remote_layer_path(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        local_name: str,
+        generation: Optional[int] = None,
+    ):
+        if generation is None:
+            generation = self.timeline_latest_generation(tenant_id, timeline_id)
+
+        assert generation is not None, "Cannot calculate remote layer path without generation"
+
+        filename = f"{local_name}-{generation:08x}"
+        return self.timeline_path(tenant_id, timeline_id) / filename
 
     def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
         with self.index_path(tenant_id, timeline_id).open("r") as f:
             return json.load(f)
 
+    def heatmap_path(self, tenant_id: TenantId) -> Path:
+        return self.tenant_path(tenant_id) / TENANT_HEATMAP_FILE_NAME
+
+    def heatmap_content(self, tenant_id):
+        with self.heatmap_path(tenant_id).open("r") as f:
+            return json.load(f)
+
     def to_toml_inline_table(self) -> str:
-        return f"local_path='{self.root}'"
+        rv = {
+            "local_path": str(self.root),
+        }
+        return toml.TomlEncoder().dump_inline_table(rv)
 
     def cleanup(self):
         # no cleanup is done here, because there's NeonEnvBuilder.cleanup_local_storage which will remove everything, including localfs files
@@ -142,18 +186,18 @@ class S3Storage:
         )
 
     def to_toml_inline_table(self) -> str:
-        s = [
-            f"bucket_name='{self.bucket_name}'",
-            f"bucket_region='{self.bucket_region}'",
-        ]
+        rv = {
+            "bucket_name": self.bucket_name,
+            "bucket_region": self.bucket_region,
+        }
 
         if self.prefix_in_bucket is not None:
-            s.append(f"prefix_in_bucket='{self.prefix_in_bucket}'")
+            rv["prefix_in_bucket"] = self.prefix_in_bucket
 
         if self.endpoint is not None:
-            s.append(f"endpoint='{self.endpoint}'")
+            rv["endpoint"] = self.endpoint
 
-        return ",".join(s)
+        return toml.TomlEncoder().dump_inline_table(rv)
 
     def do_cleanup(self):
         if not self.cleanup:
@@ -340,9 +384,16 @@ def s3_storage() -> RemoteStorageKind:
         return RemoteStorageKind.MOCK_S3
 
 
+def default_remote_storage() -> RemoteStorageKind:
+    """
+    The remote storage kind used in tests that do not specify a preference
+    """
+    return RemoteStorageKind.LOCAL_FS
+
+
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
     if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
         raise Exception("invalid remote storage type")
 
-    return f"{{{remote_storage.to_toml_inline_table()}}}"
+    return remote_storage.to_toml_inline_table()

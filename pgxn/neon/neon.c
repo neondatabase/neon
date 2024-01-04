@@ -48,9 +48,11 @@ _PG_init(void)
 
 	pg_init_extension_server();
 
-	// Important: This must happen after other parts of the extension
-	// are loaded, otherwise any settings to GUCs that were set before
-	// the extension was loaded will be removed.
+	/*
+	 * Important: This must happen after other parts of the extension are
+	 * loaded, otherwise any settings to GUCs that were set before the
+	 * extension was loaded will be removed.
+	 */
 	EmitWarningsOnPlaceholders("neon");
 }
 

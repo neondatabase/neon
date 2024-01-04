@@ -15,7 +15,7 @@ mod signature;
 #[cfg(any(test, doc))]
 mod password;
 
-pub use exchange::Exchange;
+pub use exchange::{exchange, Exchange};
 pub use key::ScramKey;
 pub use secret::ServerSecret;
 

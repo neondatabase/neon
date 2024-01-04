@@ -5,6 +5,7 @@ use const_format::formatcp;
 /// Public API types
 pub mod control_api;
 pub mod key;
+pub mod keyspace;
 pub mod models;
 pub mod reltag;
 pub mod shard;

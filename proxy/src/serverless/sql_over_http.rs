@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -29,7 +29,7 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::config::HttpConfig;
-use crate::proxy::{NUM_CONNECTIONS_ACCEPTED_COUNTER, NUM_CONNECTIONS_CLOSED_COUNTER};
+use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -182,16 +182,16 @@ fn get_conn_info(
 
     for (key, value) in pairs {
         if key == "options" {
-            options = Some(value.to_string());
+            options = Some(value.into());
             break;
         }
     }
 
     Ok(ConnInfo {
-        username: username.to_owned(),
-        dbname: dbname.to_owned(),
-        hostname: hostname.to_owned(),
-        password: password.to_owned(),
+        username: username.into(),
+        dbname: dbname.into(),
+        hostname: hostname.into(),
+        password: password.into(),
         options,
     })
 }
@@ -202,11 +202,11 @@ pub async fn handle(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
     config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        config.timeout,
+        config.request_timeout,
         handle_inner(
             config,
             request,
@@ -278,7 +278,7 @@ pub async fn handle(
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                config.timeout.as_secs()
+                config.request_timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -301,14 +301,11 @@ async fn handle_inner(
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
     session_id: uuid::Uuid,
-    peer_addr: SocketAddr,
+    peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
-    NUM_CONNECTIONS_ACCEPTED_COUNTER
+    let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
-        .inc();
-    scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.with_label_values(&["http"]).inc();
-    }
+        .guard();
 
     //
     // Determine the destination and connection params
@@ -323,7 +320,8 @@ async fn handle_inner(
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
-    let allow_pool = !config.pool_opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    let allow_pool =
+        !config.pool_options.opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level, read only and deferrable
 
@@ -362,7 +360,7 @@ async fn handle_inner(
     let payload: Payload = serde_json::from_slice(&body)?;
 
     let mut client = conn_pool
-        .get(&conn_info, !allow_pool, session_id, peer_addr)
+        .get(conn_info, !allow_pool, session_id, peer_addr)
         .await?;
 
     let mut response = Response::builder()

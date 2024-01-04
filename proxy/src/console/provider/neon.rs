@@ -3,18 +3,15 @@
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, CachedRoleSecret, ConsoleReqExtra,
+    NodeInfo,
 };
-use crate::{
-    auth::ClientCredentials,
-    compute, http,
-    proxy::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
-    scram,
-};
+use crate::metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
+use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -52,8 +49,8 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
@@ -64,9 +61,9 @@ impl Api {
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(creds.project().expect("impossible"))),
-                    ("role", Some(creds.user)),
+                    ("application_name", extra.application_name.as_str()),
+                    ("project", creds.endpoint.as_str()),
+                    ("role", creds.inner.user.as_str()),
                 ])
                 .build()?;
 
@@ -105,24 +102,28 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let project = creds.project().expect("impossible");
         let request_id = uuid::Uuid::new_v4().to_string();
         async {
-            let request = self
+            let mut request_builder = self
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", extra.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name),
-                    ("project", Some(project)),
-                    ("options", extra.options),
-                ])
-                .build()?;
+                    ("application_name", extra.application_name.as_str()),
+                    ("project", creds.endpoint.as_str()),
+                ]);
+
+            request_builder = if extra.options.is_empty() {
+                request_builder
+            } else {
+                request_builder.query(&extra.options_as_deep_object())
+            };
+            let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
@@ -140,11 +141,11 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(&host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
-                aux: body.aux.into(),
+                aux: body.aux,
                 allow_self_signed_compute: false,
             };
 
@@ -159,21 +160,33 @@ impl Api {
 #[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
-        self.do_get_auth_info(extra, creds).await
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        let ep = creds.endpoint.clone();
+        let user = creds.inner.user.clone();
+        if let Some(role_secret) = self.caches.role_secret.get(&(ep.clone(), user.clone())) {
+            return Ok(role_secret);
+        }
+        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let (_, secret) = self
+            .caches
+            .role_secret
+            .insert((ep.clone(), user), auth_info.secret.clone());
+        self.caches
+            .allowed_ips
+            .insert(ep, Arc::new(auth_info.allowed_ips));
+        Ok(secret)
     }
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        let key: &str = creds.project().expect("impossible");
-        if let Some(allowed_ips) = self.caches.allowed_ips.get(key) {
+        if let Some(allowed_ips) = self.caches.allowed_ips.get(&creds.endpoint) {
             ALLOWED_IPS_BY_CACHE_OUTCOME
                 .with_label_values(&["hit"])
                 .inc();
@@ -182,20 +195,24 @@ impl super::Api for Api {
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
             .inc();
-        let allowed_ips = Arc::new(self.do_get_auth_info(extra, creds).await?.allowed_ips);
+        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let allowed_ips = Arc::new(auth_info.allowed_ips);
+        let ep = creds.endpoint.clone();
+        let user = creds.inner.user.clone();
         self.caches
-            .allowed_ips
-            .insert(key.into(), allowed_ips.clone());
+            .role_secret
+            .insert((ep.clone(), user), auth_info.secret);
+        self.caches.allowed_ips.insert(ep, allowed_ips.clone());
         Ok(allowed_ips)
     }
 
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key: &str = &creds.cache_key;
+        let key: &str = &creds.inner.cache_key;
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
@@ -252,9 +269,10 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     Err(ApiError::Console { status, text })
 }
 
-fn parse_host_port(input: &str) -> Option<(String, u16)> {
-    let parsed: SocketAddr = input.parse().ok()?;
-    Some((parsed.ip().to_string(), parsed.port()))
+fn parse_host_port(input: &str) -> Option<(&str, u16)> {
+    let (host, port) = input.rsplit_once(':')?;
+    let ipv6_brackets: &[_] = &['[', ']'];
+    Some((host.trim_matches(ipv6_brackets), port.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -262,9 +280,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_host_port() {
+    fn test_parse_host_port_v4() {
         let (host, port) = parse_host_port("127.0.0.1:5432").expect("failed to parse");
         assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_parse_host_port_v6() {
+        let (host, port) = parse_host_port("[2001:db8::1]:5432").expect("failed to parse");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_parse_host_port_url() {
+        let (host, port) = parse_host_port("compute-foo-bar-1234.default.svc.cluster.local:5432")
+            .expect("failed to parse");
+        assert_eq!(host, "compute-foo-bar-1234.default.svc.cluster.local");
         assert_eq!(port, 5432);
     }
 }

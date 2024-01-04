@@ -42,7 +42,6 @@
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -75,6 +74,45 @@ pub struct DiskUsageEvictionTaskConfig {
     pub period: Duration,
     #[cfg(feature = "testing")]
     pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
+    /// Select sorting for evicted layers
+    #[serde(default)]
+    pub eviction_order: EvictionOrder,
+}
+
+/// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
+/// partitioning.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "args")]
+pub enum EvictionOrder {
+    /// Order the layers to be evicted by how recently they have been accessed in absolute
+    /// time.
+    ///
+    /// This strategy is unfair when some tenants grow faster than others towards the slower
+    /// growing.
+    #[default]
+    AbsoluteAccessed,
+
+    /// Order the layers to be evicted by how recently they have been accessed relatively within
+    /// the set of resident layers of a tenant.
+    ///
+    /// This strategy will evict layers more fairly but is untested.
+    RelativeAccessed {
+        #[serde(default)]
+        highest_layer_count_loses_first: bool,
+    },
+}
+
+impl EvictionOrder {
+    /// Return true, if with [`Self::RelativeAccessed`] order the tenants with the highest layer
+    /// counts should be the first ones to have their layers evicted.
+    fn highest_layer_count_loses_first(&self) -> bool {
+        match self {
+            EvictionOrder::AbsoluteAccessed => false,
+            EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first,
+            } => *highest_layer_count_loses_first,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -125,7 +163,7 @@ pub fn launch_disk_usage_global_eviction_task(
 async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
-    _storage: &GenericRemoteStorage,
+    storage: &GenericRemoteStorage,
     tenants_dir: &Utf8Path,
     cancel: CancellationToken,
 ) {
@@ -149,8 +187,14 @@ async fn disk_usage_eviction_task(
         let start = Instant::now();
 
         async {
-            let res =
-                disk_usage_eviction_task_iteration(state, task_config, tenants_dir, &cancel).await;
+            let res = disk_usage_eviction_task_iteration(
+                state,
+                task_config,
+                storage,
+                tenants_dir,
+                &cancel,
+            )
+            .await;
 
             match res {
                 Ok(()) => {}
@@ -181,12 +225,20 @@ pub trait Usage: Clone + Copy + std::fmt::Debug {
 async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
+    storage: &GenericRemoteStorage,
     tenants_dir: &Utf8Path,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
-    let res = disk_usage_eviction_task_iteration_impl(state, usage_pre, cancel).await;
+    let res = disk_usage_eviction_task_iteration_impl(
+        state,
+        storage,
+        usage_pre,
+        task_config.eviction_order,
+        cancel,
+    )
+    .await;
     match res {
         Ok(outcome) => {
             debug!(?outcome, "disk_usage_eviction_iteration finished");
@@ -268,9 +320,11 @@ struct LayerCount {
     count: usize,
 }
 
-pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
+pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     state: &State,
+    _storage: &GenericRemoteStorage,
     usage_pre: U,
+    eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
     // use tokio's mutex to get a Sync guard (instead of std::sync::Mutex)
@@ -290,7 +344,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let candidates = match collect_eviction_candidates(cancel).await? {
+    let candidates = match collect_eviction_candidates(eviction_order, cancel).await? {
         EvictionCandidates::Cancelled => {
             return Ok(IterationOutcome::Cancelled);
         }
@@ -300,16 +354,16 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // Debug-log the list of candidates
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
+        let nth = i + 1;
         let desc = candidate.layer.layer_desc();
+        let total_candidates = candidates.len();
+        let size = desc.file_size;
+        let rel = candidate.relative_last_activity;
         debug!(
-            "cand {}/{}: size={}, no_access_for={}us, partition={:?}, {}/{}/{}",
-            i + 1,
-            candidates.len(),
-            desc.file_size,
+            "cand {nth}/{total_candidates}: size={size}, rel_last_activity={rel}, no_access_for={}us, partition={partition:?}, {}/{}/{}",
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
-            partition,
             desc.tenant_shard_id,
             desc.timeline_id,
             candidate.layer,
@@ -321,16 +375,16 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // Walk through the list of candidates, until we have accumulated enough layers to get
     // us back under the pressure threshold. 'usage_planned' is updated so that it tracks
     // how much disk space would be used after evicting all the layers up to the current
-    // point in the list. The layers are collected in 'batched', grouped per timeline.
+    // point in the list.
     //
     // If we get far enough in the list that we start to evict layers that are below
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
-    let mut batched: HashMap<_, Vec<_>> = HashMap::new();
     let mut warned = None;
     let mut usage_planned = usage_pre;
-    let mut max_batch_size = 0;
-    for (i, (partition, candidate)) in candidates.into_iter().enumerate() {
+    let mut evicted_amount = 0;
+
+    for (i, (partition, candidate)) in candidates.iter().enumerate() {
         if !usage_planned.has_pressure() {
             debug!(
                 no_candidates_evicted = i,
@@ -339,25 +393,13 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             break;
         }
 
-        if partition == MinResidentSizePartition::Below && warned.is_none() {
+        if partition == &MinResidentSizePartition::Below && warned.is_none() {
             warn!(?usage_pre, ?usage_planned, candidate_no=i, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
             warned = Some(usage_planned);
         }
 
         usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
-
-        // FIXME: batching makes no sense anymore because of no layermap locking, should just spawn
-        // tasks to evict all seen layers until we have evicted enough
-
-        let batch = batched.entry(TimelineKey(candidate.timeline)).or_default();
-
-        // semaphore will later be used to limit eviction concurrency, and we can express at
-        // most u32 number of permits. unlikely we would have u32::MAX layers to be evicted,
-        // but fail gracefully by not making batches larger.
-        if batch.len() < u32::MAX as usize {
-            batch.push(candidate.layer);
-            max_batch_size = max_batch_size.max(batch.len());
-        }
+        evicted_amount += 1;
     }
 
     let usage_planned = match warned {
@@ -372,100 +414,79 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     };
     debug!(?usage_planned, "usage planned");
 
-    // phase2: evict victims batched by timeline
+    // phase2: evict layers
 
     let mut js = tokio::task::JoinSet::new();
+    let limit = 1000;
 
-    // ratelimit to 1k files or any higher max batch size
-    let limit = Arc::new(tokio::sync::Semaphore::new(1000.max(max_batch_size)));
+    let mut evicted = candidates.into_iter().take(evicted_amount).fuse();
+    let mut consumed_all = false;
 
-    for (timeline, batch) in batched {
-        let tenant_shard_id = timeline.tenant_shard_id;
-        let timeline_id = timeline.timeline_id;
-        let batch_size =
-            u32::try_from(batch.len()).expect("batch size limited to u32::MAX during partitioning");
+    // After the evictions, `usage_assumed` is the post-eviction usage,
+    // according to internal accounting.
+    let mut usage_assumed = usage_pre;
+    let mut evictions_failed = LayerCount::default();
 
-        // I dislike naming of `available_permits` but it means current total amount of permits
-        // because permits can be added
-        assert!(batch_size as usize <= limit.available_permits());
+    let evict_layers = async move {
+        loop {
+            let next = if js.len() >= limit || consumed_all {
+                js.join_next().await
+            } else if !js.is_empty() {
+                // opportunistically consume ready result, one per each new evicted
+                futures::future::FutureExt::now_or_never(js.join_next()).and_then(|x| x)
+            } else {
+                None
+            };
 
-        debug!(%timeline_id, "evicting batch for timeline");
-
-        let evict = {
-            let limit = limit.clone();
-            let cancel = cancel.clone();
-            async move {
-                let mut evicted_bytes = 0;
-                let mut evictions_failed = LayerCount::default();
-
-                let Ok(_permit) = limit.acquire_many_owned(batch_size).await else {
-                    // semaphore closing means cancelled
-                    return (evicted_bytes, evictions_failed);
-                };
-
-                let results = timeline.evict_layers(&batch).await;
-
-                match results {
-                    Ok(results) => {
-                        assert_eq!(results.len(), batch.len());
-                        for (result, layer) in results.into_iter().zip(batch.iter()) {
-                            let file_size = layer.layer_desc().file_size;
-                            match result {
-                                Some(Ok(())) => {
-                                    evicted_bytes += file_size;
-                                }
-                                Some(Err(EvictionError::NotFound | EvictionError::Downloaded)) => {
-                                    evictions_failed.file_sizes += file_size;
-                                    evictions_failed.count += 1;
-                                }
-                                None => {
-                                    assert!(cancel.is_cancelled());
-                                }
-                            }
-                        }
+            if let Some(next) = next {
+                match next {
+                    Ok(Ok(file_size)) => {
+                        usage_assumed.add_available_bytes(file_size);
                     }
-                    Err(e) => {
-                        warn!("failed to evict batch: {:#}", e);
+                    Ok(Err((file_size, EvictionError::NotFound | EvictionError::Downloaded))) => {
+                        evictions_failed.file_sizes += file_size;
+                        evictions_failed.count += 1;
                     }
+                    Err(je) if je.is_cancelled() => unreachable!("not used"),
+                    Err(je) if je.is_panic() => { /* already logged */ }
+                    Err(je) => tracing::error!("unknown JoinError: {je:?}"),
                 }
-                (evicted_bytes, evictions_failed)
             }
-        }
-        .instrument(tracing::info_span!("evict_batch", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id, batch_size));
 
-        js.spawn(evict);
-
-        // spwaning multiple thousands of these is essentially blocking, so give already spawned a
-        // chance of making progress
-        tokio::task::yield_now().await;
-    }
-
-    let join_all = async move {
-        // After the evictions, `usage_assumed` is the post-eviction usage,
-        // according to internal accounting.
-        let mut usage_assumed = usage_pre;
-        let mut evictions_failed = LayerCount::default();
-
-        while let Some(res) = js.join_next().await {
-            match res {
-                Ok((evicted_bytes, failed)) => {
-                    usage_assumed.add_available_bytes(evicted_bytes);
-                    evictions_failed.file_sizes += failed.file_sizes;
-                    evictions_failed.count += failed.count;
-                }
-                Err(je) if je.is_cancelled() => unreachable!("not used"),
-                Err(je) if je.is_panic() => { /* already logged */ }
-                Err(je) => tracing::error!("unknown JoinError: {je:?}"),
+            if consumed_all && js.is_empty() {
+                break;
             }
+
+            // calling again when consumed_all is fine as evicted is fused.
+            let Some((_partition, candidate)) = evicted.next() else {
+                consumed_all = true;
+                continue;
+            };
+
+            js.spawn(async move {
+                let rtc = candidate.timeline.remote_client.as_ref().expect(
+                    "holding the witness, all timelines must have a remote timeline client",
+                );
+                let file_size = candidate.layer.layer_desc().file_size;
+                candidate
+                    .layer
+                    .evict_and_wait(rtc)
+                    .await
+                    .map(|()| file_size)
+                    .map_err(|e| (file_size, e))
+            });
+
+            tokio::task::yield_now().await;
         }
+
         (usage_assumed, evictions_failed)
     };
 
     let (usage_assumed, evictions_failed) = tokio::select! {
-        tuple = join_all => { tuple },
+        tuple = evict_layers => { tuple },
         _ = cancel.cancelled() => {
-            // close the semaphore to stop any pending acquires
-            limit.close();
+            // dropping joinset will abort all pending evict_and_waits and that is fine, our
+            // requests will still stand
             return Ok(IterationOutcome::Cancelled);
         }
     };
@@ -485,6 +506,7 @@ struct EvictionCandidate {
     timeline: Arc<Timeline>,
     layer: Layer,
     last_activity_ts: SystemTime,
+    relative_last_activity: finite_f32::FiniteF32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -504,24 +526,24 @@ enum EvictionCandidates {
 /// order. A caller that evicts in that order, until pressure is relieved, implements
 /// the eviction policy outlined in the module comment.
 ///
-/// # Example
+/// # Example with EvictionOrder::AbsoluteAccessed
 ///
 /// Imagine that there are two tenants, A and B, with five layers each, a-e.
 /// Each layer has size 100, and both tenant's min_resident_size is 150.
 /// The eviction order would be
 ///
 /// ```text
-/// partition last_activity_ts    tenant/layer
-/// Above     18:30               A/c
-/// Above     19:00               A/b
-/// Above     18:29               B/c
-/// Above     19:05               B/b
-/// Above     20:00               B/a
-/// Above     20:03               A/a
-/// Below     20:30               A/d
-/// Below     20:40               B/d
-/// Below     20:45               B/e
-/// Below     20:58               A/e
+/// partition last_activity_ts tenant/layer
+/// Above     18:30            A/c
+/// Above     19:00            A/b
+/// Above     18:29            B/c
+/// Above     19:05            B/b
+/// Above     20:00            B/a
+/// Above     20:03            A/a
+/// Below     20:30            A/d
+/// Below     20:40            B/d
+/// Below     20:45            B/e
+/// Below     20:58            A/e
 /// ```
 ///
 /// Now, if we need to evict 300 bytes to relieve pressure, we'd evict `A/c, A/b, B/c`.
@@ -531,7 +553,77 @@ enum EvictionCandidates {
 /// `A/c, A/b, B/c, B/b, B/a, A/a, A/d, B/d, B/e`, reaching into the `Below` partition
 /// after exhauting the `Above` partition.
 /// So, we did not respect each tenant's min_resident_size.
+///
+/// # Example with EvictionOrder::RelativeAccessed
+///
+/// ```text
+/// partition relative_age last_activity_ts tenant/layer
+/// Above     0/4          18:30            A/c
+/// Above     0/4          18:29            B/c
+/// Above     1/4          19:00            A/b
+/// Above     1/4          19:05            B/b
+/// Above     2/4          20:00            B/a
+/// Above     2/4          20:03            A/a
+/// Below     3/4          20:30            A/d
+/// Below     3/4          20:40            B/d
+/// Below     4/4          20:45            B/e
+/// Below     4/4          20:58            A/e
+/// ```
+///
+/// With tenants having the same number of layers the picture does not change much. The same with
+/// A having many more layers **resident** (not all of them listed):
+///
+/// ```text
+/// Above       0/100      18:30            A/c
+/// Above       0/4        18:29            B/c
+/// Above       1/100      19:00            A/b
+/// Above       2/100      20:03            A/a
+/// Above       3/100      20:03            A/nth_3
+/// Above       4/100      20:03            A/nth_4
+///             ...
+/// Above       1/4        19:05            B/b
+/// Above      25/100      20:04            A/nth_25
+///             ...
+/// Above       2/4        20:00            B/a
+/// Above      50/100      20:10            A/nth_50
+///             ...
+/// Below       3/4        20:40            B/d
+/// Below      99/100      20:30            A/nth_99
+/// Below       4/4        20:45            B/e
+/// Below     100/100      20:58            A/nth_100
+/// ```
+///
+/// Now it's easier to see that because A has grown fast it has more layers to get evicted. What is
+/// difficult to see is what happens on the next round assuming the evicting 23 from the above list
+/// relieves the pressure (22 A layers gone, 1 B layers gone) but a new fast growing tenant C has
+/// appeared:
+///
+/// ```text
+/// Above       0/87       20:04            A/nth_23
+/// Above       0/3        19:05            B/b
+/// Above       0/50       20:59            C/nth_0
+/// Above       1/87       20:04            A/nth_24
+/// Above       1/50       21:00            C/nth_1
+/// Above       2/87       20:04            A/nth_25
+///             ...
+/// Above      16/50       21:02            C/nth_16
+/// Above       1/3        20:00            B/a
+/// Above      27/87       20:10            A/nth_50
+///             ...
+/// Below       2/3        20:40            B/d
+/// Below      49/50       21:05            C/nth_49
+/// Below      86/87       20:30            A/nth_99
+/// Below       3/3        20:45            B/e
+/// Below      50/50       21:05            C/nth_50
+/// Below      87/87       20:58            A/nth_100
+/// ```
+///
+/// Now relieving pressure with 23 layers would cost:
+/// - tenant A 14 layers
+/// - tenant B 1 layer
+/// - tenant C 8 layers
 async fn collect_eviction_candidates(
+    eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
     // get a snapshot of the list of tenants
@@ -617,12 +709,63 @@ async fn collect_eviction_candidates(
         tenant_candidates
             .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
-        for (timeline, layer_info) in tenant_candidates.into_iter() {
+
+        // keeping the -1 or not decides if every tenant should lose their least recently accessed
+        // layer OR if this should happen in the order of having highest layer count:
+        let fudge = if eviction_order.highest_layer_count_loses_first() {
+            // relative_age vs. tenant layer count:
+            // - 0.1..=1.0 (10 layers)
+            // - 0.01..=1.0 (100 layers)
+            // - 0.001..=1.0 (1000 layers)
+            //
+            // leading to evicting less of the smallest tenants.
+            0
+        } else {
+            // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
+            // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
+            // be that less than 10k layer evictions is enough, so we would not need to evict from
+            // all tenants.
+            //
+            // as the tenant ordering is now deterministic this could hit the same tenants
+            // disproportionetly on multiple invocations. alternative could be to remember how many
+            // layers did we evict last time from this tenant, and inject that as an additional
+            // fudge here.
+            1
+        };
+
+        let total = tenant_candidates
+            .len()
+            .checked_sub(fudge)
+            .filter(|&x| x > 0)
+            // support 0 or 1 resident layer tenants as well
+            .unwrap_or(1);
+        let divider = total as f32;
+
+        for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
             let file_size = layer_info.file_size();
+
+            // as we iterate this reverse sorted list, the most recently accessed layer will always
+            // be 1.0; this is for us to evict it last.
+            let relative_last_activity = if matches!(
+                eviction_order,
+                EvictionOrder::RelativeAccessed { .. }
+            ) {
+                // another possibility: use buckets, like (256.0 * relative_last_activity) as u8 or
+                // similarly for u16. unsure how it would help.
+                finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
+                    .unwrap_or_else(|val| {
+                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={i}, total={total}: {val}");
+                        finite_f32::FiniteF32::ZERO
+                    })
+            } else {
+                finite_f32::FiniteF32::ZERO
+            };
+
             let candidate = EvictionCandidate {
                 timeline,
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
+                relative_last_activity,
             };
             let partition = if cumsum > min_resident_size as i128 {
                 MinResidentSizePartition::Above
@@ -636,8 +779,19 @@ async fn collect_eviction_candidates(
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
-    candidates
-        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
+
+    match eviction_order {
+        EvictionOrder::AbsoluteAccessed => {
+            candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.last_activity_ts)
+            });
+        }
+        EvictionOrder::RelativeAccessed { .. } => {
+            candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.relative_last_activity)
+            });
+        }
+    }
 
     Ok(EvictionCandidates::Finished(candidates))
 }
@@ -663,6 +817,66 @@ impl std::ops::Deref for TimelineKey {
 
     fn deref(&self) -> &Self::Target {
         self.0.as_ref()
+    }
+}
+
+/// A totally ordered f32 subset we can use with sorting functions.
+mod finite_f32 {
+
+    /// A totally ordered f32 subset we can use with sorting functions.
+    #[derive(Clone, Copy, PartialEq)]
+    pub struct FiniteF32(f32);
+
+    impl std::fmt::Debug for FiniteF32 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Debug::fmt(&self.0, f)
+        }
+    }
+
+    impl std::fmt::Display for FiniteF32 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Display::fmt(&self.0, f)
+        }
+    }
+
+    impl std::cmp::Eq for FiniteF32 {}
+
+    impl std::cmp::PartialOrd for FiniteF32 {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl std::cmp::Ord for FiniteF32 {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.total_cmp(&other.0)
+        }
+    }
+
+    impl TryFrom<f32> for FiniteF32 {
+        type Error = f32;
+
+        fn try_from(value: f32) -> Result<Self, Self::Error> {
+            if value.is_finite() {
+                Ok(FiniteF32(value))
+            } else {
+                Err(value)
+            }
+        }
+    }
+
+    impl FiniteF32 {
+        pub const ZERO: FiniteF32 = FiniteF32(0.0);
+
+        pub fn try_from_normalized(value: f32) -> Result<Self, f32> {
+            if (0.0..=1.0).contains(&value) {
+                // -0.0 is within the range, make sure it is assumed 0.0..=1.0
+                let value = value.abs();
+                Ok(FiniteF32(value))
+            } else {
+                Err(value)
+            }
+        }
     }
 }
 
@@ -747,6 +961,7 @@ mod filesystem_level_usage {
 
     #[test]
     fn max_usage_pct_pressure() {
+        use super::EvictionOrder;
         use super::Usage as _;
         use std::time::Duration;
         use utils::serde_percent::Percent;
@@ -758,6 +973,7 @@ mod filesystem_level_usage {
                 period: Duration::MAX,
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
+                eviction_order: EvictionOrder::default(),
             },
             total_bytes: 100_000,
             avail_bytes: 0,

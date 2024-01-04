@@ -2,21 +2,23 @@ use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use camino::Utf8Path;
-use once_cell::sync::OnceCell;
 use remote_storage::{
-    AzureConfig, Download, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    AzureConfig, GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind,
 };
 use test_context::{test_context, AsyncTestContext};
-use tokio::task::JoinSet;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-static LOGGING_DONE: OnceCell<()> = OnceCell::new();
+mod common;
+
+use common::{
+    cleanup, download_to_vec, ensure_logging_ready, upload_remote_data, upload_simple_remote_data,
+    upload_stream, wrap_stream,
+};
 
 const ENABLE_REAL_AZURE_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_AZURE_REMOTE_STORAGE";
 
@@ -28,7 +30,7 @@ const BASE_PREFIX: &str = "test";
 /// If real Azure tests are disabled, the test passes, skipping any real test run: currently, there's no way to mark the test ignored in runtime with the
 /// deafult test framework, see https://github.com/rust-lang/rust/issues/68007 for details.
 ///
-/// First, the test creates a set of Azure blobs with keys `/${random_prefix_part}/${base_prefix_str}/sub_prefix_${i}/blob_${i}` in [`upload_azure_data`]
+/// First, the test creates a set of Azure blobs with keys `/${random_prefix_part}/${base_prefix_str}/sub_prefix_${i}/blob_${i}` in [`upload_remote_data`]
 /// where
 /// * `random_prefix_part` is set for the entire Azure client during the Azure client creation in [`create_azure_client`], to avoid multiple test runs interference
 /// * `base_prefix_str` is a common prefix to use in the client requests: we would want to ensure that the client is able to list nested prefixes inside the bucket
@@ -95,7 +97,7 @@ async fn azure_pagination_should_work(
 /// Uses real Azure and requires [`ENABLE_REAL_AZURE_REMOTE_STORAGE_ENV_VAR_NAME`] and related Azure cred env vars specified. Test will skip real code and pass if env vars not set.
 /// See `Azure_pagination_should_work` for more information.
 ///
-/// First, create a set of Azure objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_azure_data`]
+/// First, create a set of Azure objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_remote_data`]
 /// Then performs the following queries:
 ///    1. `list_files(None)`. This should return all files `random_prefix/folder{j}/blob_{i}.txt`
 ///    2. `list_files("folder1")`.  This  should return all files `random_prefix/folder1/blob_{i}.txt`
@@ -180,23 +182,14 @@ async fn azure_delete_objects_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Resu
     let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
-    let data1 = "remote blob data1".as_bytes();
-    let data1_len = data1.len();
-    let data2 = "remote blob data2".as_bytes();
-    let data2_len = data2.len();
-    let data3 = "remote blob data3".as_bytes();
-    let data3_len = data3.len();
-    ctx.client
-        .upload(std::io::Cursor::new(data1), data1_len, &path1, None)
-        .await?;
+    let (data, len) = upload_stream("remote blob data1".as_bytes().into());
+    ctx.client.upload(data, len, &path1, None).await?;
 
-    ctx.client
-        .upload(std::io::Cursor::new(data2), data2_len, &path2, None)
-        .await?;
+    let (data, len) = upload_stream("remote blob data2".as_bytes().into());
+    ctx.client.upload(data, len, &path2, None).await?;
 
-    ctx.client
-        .upload(std::io::Cursor::new(data3), data3_len, &path3, None)
-        .await?;
+    let (data, len) = upload_stream("remote blob data3".as_bytes().into());
+    ctx.client.upload(data, len, &path3, None).await?;
 
     ctx.client.delete_objects(&[path1, path2]).await?;
 
@@ -219,53 +212,47 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
     let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))
         .with_context(|| "RemotePath conversion")?;
 
-    let data = "remote blob data here".as_bytes();
-    let data_len = data.len() as u64;
+    let orig = bytes::Bytes::from_static("remote blob data here".as_bytes());
 
-    ctx.client
-        .upload(std::io::Cursor::new(data), data.len(), &path, None)
-        .await?;
+    let (data, len) = wrap_stream(orig.clone());
 
-    async fn download_and_compare(mut dl: Download) -> anyhow::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        tokio::io::copy(&mut dl.download_stream, &mut buf).await?;
-        Ok(buf)
-    }
+    ctx.client.upload(data, len, &path, None).await?;
+
     // Normal download request
     let dl = ctx.client.download(&path).await?;
-    let buf = download_and_compare(dl).await?;
-    assert_eq!(buf, data);
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
 
     // Full range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, Some(data_len))
+        .download_byte_range(&path, 0, Some(len as u64))
         .await?;
-    let buf = download_and_compare(dl).await?;
-    assert_eq!(buf, data);
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
 
     // partial range (end specified)
     let dl = ctx.client.download_byte_range(&path, 4, Some(10)).await?;
-    let buf = download_and_compare(dl).await?;
-    assert_eq!(buf, data[4..10]);
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig[4..10]);
 
     // partial range (end beyond real end)
     let dl = ctx
         .client
-        .download_byte_range(&path, 8, Some(data_len * 100))
+        .download_byte_range(&path, 8, Some(len as u64 * 100))
         .await?;
-    let buf = download_and_compare(dl).await?;
-    assert_eq!(buf, data[8..]);
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig[8..]);
 
     // Partial range (end unspecified)
     let dl = ctx.client.download_byte_range(&path, 4, None).await?;
-    let buf = download_and_compare(dl).await?;
-    assert_eq!(buf, data[4..]);
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig[4..]);
 
     // Full range (end unspecified)
     let dl = ctx.client.download_byte_range(&path, 0, None).await?;
-    let buf = download_and_compare(dl).await?;
-    assert_eq!(buf, data);
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
 
     debug!("Cleanup: deleting file at path {path:?}");
     ctx.client
@@ -274,17 +261,6 @@ async fn azure_upload_download_works(ctx: &mut MaybeEnabledAzure) -> anyhow::Res
         .with_context(|| format!("{path:?} removal"))?;
 
     Ok(())
-}
-
-fn ensure_logging_ready() {
-    LOGGING_DONE.get_or_init(|| {
-        utils::logging::init(
-            utils::logging::LogFormat::Test,
-            utils::logging::TracingErrorLayerEnablement::Disabled,
-            utils::logging::Output::Stdout,
-        )
-        .expect("logging init failed");
-    });
 }
 
 struct EnabledAzure {
@@ -356,7 +332,7 @@ impl AsyncTestContext for MaybeEnabledAzureWithTestBlobs {
 
         let enabled = EnabledAzure::setup(Some(max_keys_in_list_response)).await;
 
-        match upload_azure_data(&enabled.client, enabled.base_prefix, upload_tasks_count).await {
+        match upload_remote_data(&enabled.client, enabled.base_prefix, upload_tasks_count).await {
             ControlFlow::Continue(uploads) => {
                 info!("Remote objects created successfully");
 
@@ -418,7 +394,7 @@ impl AsyncTestContext for MaybeEnabledAzureWithSimpleTestBlobs {
 
         let enabled = EnabledAzure::setup(Some(max_keys_in_list_response)).await;
 
-        match upload_simple_azure_data(&enabled.client, upload_tasks_count).await {
+        match upload_simple_remote_data(&enabled.client, upload_tasks_count).await {
             ControlFlow::Continue(uploads) => {
                 info!("Remote objects created successfully");
 
@@ -481,144 +457,4 @@ fn create_azure_client(
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,
     ))
-}
-
-struct Uploads {
-    prefixes: HashSet<RemotePath>,
-    blobs: HashSet<RemotePath>,
-}
-
-async fn upload_azure_data(
-    client: &Arc<GenericRemoteStorage>,
-    base_prefix_str: &'static str,
-    upload_tasks_count: usize,
-) -> ControlFlow<Uploads, Uploads> {
-    info!("Creating {upload_tasks_count} Azure files");
-    let mut upload_tasks = JoinSet::new();
-    for i in 1..upload_tasks_count + 1 {
-        let task_client = Arc::clone(client);
-        upload_tasks.spawn(async move {
-            let prefix = format!("{base_prefix_str}/sub_prefix_{i}/");
-            let blob_prefix = RemotePath::new(Utf8Path::new(&prefix))
-                .with_context(|| format!("{prefix:?} to RemotePath conversion"))?;
-            let blob_path = blob_prefix.join(Utf8Path::new(&format!("blob_{i}")));
-            debug!("Creating remote item {i} at path {blob_path:?}");
-
-            let data = format!("remote blob data {i}").into_bytes();
-            let data_len = data.len();
-            task_client
-                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
-                .await?;
-
-            Ok::<_, anyhow::Error>((blob_prefix, blob_path))
-        });
-    }
-
-    let mut upload_tasks_failed = false;
-    let mut uploaded_prefixes = HashSet::with_capacity(upload_tasks_count);
-    let mut uploaded_blobs = HashSet::with_capacity(upload_tasks_count);
-    while let Some(task_run_result) = upload_tasks.join_next().await {
-        match task_run_result
-            .context("task join failed")
-            .and_then(|task_result| task_result.context("upload task failed"))
-        {
-            Ok((upload_prefix, upload_path)) => {
-                uploaded_prefixes.insert(upload_prefix);
-                uploaded_blobs.insert(upload_path);
-            }
-            Err(e) => {
-                error!("Upload task failed: {e:?}");
-                upload_tasks_failed = true;
-            }
-        }
-    }
-
-    let uploads = Uploads {
-        prefixes: uploaded_prefixes,
-        blobs: uploaded_blobs,
-    };
-    if upload_tasks_failed {
-        ControlFlow::Break(uploads)
-    } else {
-        ControlFlow::Continue(uploads)
-    }
-}
-
-async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<RemotePath>) {
-    info!(
-        "Removing {} objects from the remote storage during cleanup",
-        objects_to_delete.len()
-    );
-    let mut delete_tasks = JoinSet::new();
-    for object_to_delete in objects_to_delete {
-        let task_client = Arc::clone(client);
-        delete_tasks.spawn(async move {
-            debug!("Deleting remote item at path {object_to_delete:?}");
-            task_client
-                .delete(&object_to_delete)
-                .await
-                .with_context(|| format!("{object_to_delete:?} removal"))
-        });
-    }
-
-    while let Some(task_run_result) = delete_tasks.join_next().await {
-        match task_run_result {
-            Ok(task_result) => match task_result {
-                Ok(()) => {}
-                Err(e) => error!("Delete task failed: {e:?}"),
-            },
-            Err(join_err) => error!("Delete task did not finish correctly: {join_err}"),
-        }
-    }
-}
-
-// Uploads files `folder{j}/blob{i}.txt`. See test description for more details.
-async fn upload_simple_azure_data(
-    client: &Arc<GenericRemoteStorage>,
-    upload_tasks_count: usize,
-) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
-    info!("Creating {upload_tasks_count} Azure files");
-    let mut upload_tasks = JoinSet::new();
-    for i in 1..upload_tasks_count + 1 {
-        let task_client = Arc::clone(client);
-        upload_tasks.spawn(async move {
-            let blob_path = PathBuf::from(format!("folder{}/blob_{}.txt", i / 7, i));
-            let blob_path = RemotePath::new(
-                Utf8Path::from_path(blob_path.as_path()).expect("must be valid blob path"),
-            )
-            .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
-            debug!("Creating remote item {i} at path {blob_path:?}");
-
-            let data = format!("remote blob data {i}").into_bytes();
-            let data_len = data.len();
-            task_client
-                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
-                .await?;
-
-            Ok::<_, anyhow::Error>(blob_path)
-        });
-    }
-
-    let mut upload_tasks_failed = false;
-    let mut uploaded_blobs = HashSet::with_capacity(upload_tasks_count);
-    while let Some(task_run_result) = upload_tasks.join_next().await {
-        match task_run_result
-            .context("task join failed")
-            .and_then(|task_result| task_result.context("upload task failed"))
-        {
-            Ok(upload_path) => {
-                uploaded_blobs.insert(upload_path);
-            }
-            Err(e) => {
-                error!("Upload task failed: {e:?}");
-                upload_tasks_failed = true;
-            }
-        }
-    }
-
-    if upload_tasks_failed {
-        ControlFlow::Break(uploaded_blobs)
-    } else {
-        ControlFlow::Continue(uploaded_blobs)
-    }
 }

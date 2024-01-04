@@ -26,6 +26,13 @@ pub struct ComputeSpec {
     // but we don't use it for anything. Serde will ignore missing fields when
     // deserializing it.
     pub operation_uuid: Option<String>,
+
+    /// Compute features to enable. These feature flags are provided, when we
+    /// know all the details about client's compute, so they cannot be used
+    /// to change `Empty` compute behavior.
+    #[serde(default)]
+    pub features: Vec<ComputeFeature>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
@@ -66,6 +73,21 @@ pub struct ComputeSpec {
 
     // information about available remote extensions
     pub remote_extensions: Option<RemoteExtSpec>,
+
+    pub pgbouncer_settings: Option<HashMap<String, String>>,
+}
+
+/// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeFeature {
+    // XXX: Add more feature flags here.
+
+    // This is a special feature flag that is used to represent unknown feature flags.
+    // Basically all unknown to enum flags are represented as this one. See unit test
+    // `parse_unknown_features()` for more details.
+    #[serde(other)]
+    UnknownFeature,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -187,8 +209,6 @@ pub struct DeltaOp {
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
-    pub replication: Option<bool>,
-    pub bypassrls: Option<bool>,
     pub options: GenericOptions,
 }
 
@@ -229,7 +249,10 @@ mod tests {
     #[test]
     fn parse_spec_file() {
         let file = File::open("tests/cluster_spec.json").unwrap();
-        let _spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+
+        // Features list defaults to empty vector.
+        assert!(spec.features.is_empty());
     }
 
     #[test]
@@ -240,5 +263,23 @@ mod tests {
         let ob = json.as_object_mut().unwrap();
         ob.insert("unknown_field_123123123".into(), "hello".into());
         let _spec: ComputeSpec = serde_json::from_value(json).unwrap();
+    }
+
+    #[test]
+    fn parse_unknown_features() {
+        // Test that unknown feature flags do not cause any errors.
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let mut json: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let ob = json.as_object_mut().unwrap();
+
+        // Add unknown feature flags.
+        let features = vec!["foo_bar_feature", "baz_feature"];
+        ob.insert("features".into(), features.into());
+
+        let spec: ComputeSpec = serde_json::from_value(json).unwrap();
+
+        assert!(spec.features.len() == 2);
+        assert!(spec.features.contains(&ComputeFeature::UnknownFeature));
+        assert_eq!(spec.features, vec![ComputeFeature::UnknownFeature; 2]);
     }
 }

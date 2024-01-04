@@ -22,6 +22,7 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
+use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
@@ -34,15 +35,11 @@ use std::process::{Child, ChildStdin, ChildStdout, Command};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
+use utils::{bin_ser::BeSer, lsn::Lsn, nonblock::set_nonblock};
 
 #[cfg(feature = "testing")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-#[cfg(feature = "testing")]
-use pageserver_api::shard::TenantShardId;
 
 use crate::config::PageServerConf;
 use crate::metrics::{
@@ -93,7 +90,7 @@ struct ProcessOutput {
 /// records.
 ///
 pub struct PostgresRedoManager {
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
     redo_process: RwLock<Option<Arc<WalRedoProcess>>>,
@@ -124,7 +121,9 @@ impl PostgresRedoManager {
     /// The WAL redo is handled by a separate thread, so this just sends a request
     /// to the thread and waits for response.
     ///
-    /// CANCEL SAFETY: NOT CANCEL SAFE.
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn request_redo(
         &self,
         key: Key,
@@ -157,7 +156,6 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                     )
-                    .await
                 };
                 img = Some(result?);
 
@@ -178,7 +176,6 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
             )
-            .await
         }
     }
 }
@@ -187,10 +184,13 @@ impl PostgresRedoManager {
     ///
     /// Create a new PostgresRedoManager.
     ///
-    pub fn new(conf: &'static PageServerConf, tenant_id: TenantId) -> PostgresRedoManager {
+    pub fn new(
+        conf: &'static PageServerConf,
+        tenant_shard_id: TenantShardId,
+    ) -> PostgresRedoManager {
         // The actual process is launched lazily, on first request.
         PostgresRedoManager {
-            tenant_id,
+            tenant_shard_id,
             conf,
             last_redo_at: std::sync::Mutex::default(),
             redo_process: RwLock::new(None),
@@ -216,7 +216,7 @@ impl PostgresRedoManager {
     /// Process one request for WAL redo using wal-redo postgres
     ///
     #[allow(clippy::too_many_arguments)]
-    async fn apply_batch_postgres(
+    fn apply_batch_postgres(
         &self,
         key: Key,
         lsn: Lsn,
@@ -245,8 +245,12 @@ impl PostgresRedoManager {
                                 let timer =
                                     WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.start_timer();
                                 let proc = Arc::new(
-                                    WalRedoProcess::launch(self.conf, self.tenant_id, pg_version)
-                                        .context("launch walredo process")?,
+                                    WalRedoProcess::launch(
+                                        self.conf,
+                                        self.tenant_shard_id,
+                                        pg_version,
+                                    )
+                                    .context("launch walredo process")?,
                                 );
                                 timer.observe_duration();
                                 *proc_guard = Some(Arc::clone(&proc));
@@ -332,12 +336,7 @@ impl PostgresRedoManager {
                 // than we can SIGKILL & `wait` for them to exit. By doing it the way we do here,
                 // we limit this risk of run-away to at most $num_runtimes * $num_executor_threads.
                 // This probably needs revisiting at some later point.
-                let mut wait_done = proc.stderr_logger_task_done.clone();
                 drop(proc);
-                wait_done
-                    .wait_for(|v| *v)
-                    .await
-                    .expect("we use scopeguard to ensure we always send `true` to the channel before dropping the sender");
             } else if n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
             }
@@ -644,13 +643,11 @@ impl<C: CommandExt> CloseFileDescriptors for C {
 struct WalRedoProcess {
     #[allow(dead_code)]
     conf: &'static PageServerConf,
-    tenant_id: TenantId,
+    tenant_shard_id: TenantShardId,
     // Some() on construction, only becomes None on Drop.
     child: Option<NoLeakChild>,
     stdout: Mutex<ProcessOutput>,
     stdin: Mutex<ProcessInput>,
-    stderr_logger_cancel: CancellationToken,
-    stderr_logger_task_done: tokio::sync::watch::Receiver<bool>,
     /// Counter to separate same sized walredo inputs failing at the same millisecond.
     #[cfg(feature = "testing")]
     dump_sequence: AtomicUsize,
@@ -660,10 +657,10 @@ impl WalRedoProcess {
     //
     // Start postgres binary in special WAL redo mode.
     //
-    #[instrument(skip_all,fields(tenant_id=%tenant_id, pg_version=pg_version))]
+    #[instrument(skip_all,fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), pg_version=pg_version))]
     fn launch(
         conf: &'static PageServerConf,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         pg_version: u32,
     ) -> anyhow::Result<Self> {
         let pg_bin_dir_path = conf.pg_bin_dir(pg_version).context("pg_bin_dir")?; // TODO these should be infallible.
@@ -688,7 +685,7 @@ impl WalRedoProcess {
             // as close-on-exec by default, but that's not enough, since we use
             // libraries that directly call libc open without setting that flag.
             .close_fds()
-            .spawn_no_leak_child(tenant_id)
+            .spawn_no_leak_child(tenant_shard_id)
             .context("spawn process")?;
         WAL_REDO_PROCESS_COUNTERS.started.inc();
         let mut child = scopeguard::guard(child, |child| {
@@ -699,6 +696,8 @@ impl WalRedoProcess {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
+        let stderr = tokio::process::ChildStderr::from_std(stderr)
+            .context("convert to tokio::ChildStderr")?;
         macro_rules! set_nonblock_or_log_err {
             ($file:ident) => {{
                 let res = set_nonblock($file.as_raw_fd());
@@ -710,73 +709,49 @@ impl WalRedoProcess {
         }
         set_nonblock_or_log_err!(stdin)?;
         set_nonblock_or_log_err!(stdout)?;
-        set_nonblock_or_log_err!(stderr)?;
-
-        let mut stderr = tokio::io::unix::AsyncFd::new(stderr).context("AsyncFd::with_interest")?;
 
         // all fallible operations post-spawn are complete, so get rid of the guard
         let child = scopeguard::ScopeGuard::into_inner(child);
 
-        let stderr_logger_cancel = CancellationToken::new();
-        let (stderr_logger_task_done_tx, stderr_logger_task_done_rx) =
-            tokio::sync::watch::channel(false);
-        tokio::spawn({
-            let stderr_logger_cancel = stderr_logger_cancel.clone();
+        tokio::spawn(
             async move {
                 scopeguard::defer! {
                     debug!("wal-redo-postgres stderr_logger_task finished");
-                    let _ = stderr_logger_task_done_tx.send(true);
+                    crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_finished.inc();
                 }
                 debug!("wal-redo-postgres stderr_logger_task started");
-                loop {
-                    // NB: we purposefully don't do a select! for the cancellation here.
-                    // The cancellation would likely cause us to miss stderr messages.
-                    // We can rely on this to return from .await because when we SIGKILL
-                    // the child, the writing end of the stderr pipe gets closed.
-                    match stderr.readable_mut().await {
-                        Ok(mut guard) => {
-                            let mut errbuf = [0; 16384];
-                            let res = guard.try_io(|fd| {
-                                use std::io::Read;
-                                fd.get_mut().read(&mut errbuf)
-                            });
-                            match res {
-                                Ok(Ok(0)) => {
-                                    // it closed the stderr pipe
-                                    break;
-                                }
-                                Ok(Ok(n)) => {
-                                    // The message might not be split correctly into lines here. But this is
-                                    // good enough, the important thing is to get the message to the log.
-                                    let output = String::from_utf8_lossy(&errbuf[0..n]).to_string();
-                                    error!(output, "received output");
-                                },
-                                Ok(Err(e)) => {
-                                    error!(error = ?e, "read() error, waiting for cancellation");
-                                    stderr_logger_cancel.cancelled().await;
-                                    error!(error = ?e, "read() error, cancellation complete");
-                                    break;
-                                }
-                                Err(e) => {
-                                    let _e: tokio::io::unix::TryIoError = e;
-                                    // the read() returned WouldBlock, that's expected
-                                }
-                            }
+                crate::metrics::WAL_REDO_PROCESS_COUNTERS.active_stderr_logger_tasks_started.inc();
+
+                use tokio::io::AsyncBufReadExt;
+                let mut stderr_lines = tokio::io::BufReader::new(stderr);
+                let mut buf = Vec::new();
+                let res = loop {
+                    buf.clear();
+                    // TODO we don't trust the process to cap its stderr length.
+                    // Currently it can do unbounded Vec allocation.
+                    match stderr_lines.read_until(b'\n', &mut buf).await {
+                        Ok(0) => break Ok(()), // eof
+                        Ok(num_bytes) => {
+                            let output = String::from_utf8_lossy(&buf[..num_bytes]);
+                            error!(%output, "received output");
                         }
                         Err(e) => {
-                            error!(error = ?e, "read() error, waiting for cancellation");
-                            stderr_logger_cancel.cancelled().await;
-                            error!(error = ?e, "read() error, cancellation complete");
-                            break;
+                            break Err(e);
                         }
                     }
+                };
+                match res {
+                    Ok(()) => (),
+                    Err(e) => {
+                        error!(error=?e, "failed to read from walredo stderr");
+                    }
                 }
-            }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), tenant_id = %tenant_id, %pg_version))
-        });
+            }.instrument(tracing::info_span!(parent: None, "wal-redo-postgres-stderr", pid = child.id(), tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %pg_version))
+        );
 
         Ok(Self {
             conf,
-            tenant_id,
+            tenant_shard_id,
             child: Some(child),
             stdin: Mutex::new(ProcessInput {
                 stdin,
@@ -787,8 +762,6 @@ impl WalRedoProcess {
                 pending_responses: VecDeque::new(),
                 n_processed_responses: 0,
             }),
-            stderr_logger_cancel,
-            stderr_logger_task_done: stderr_logger_task_done_rx,
             #[cfg(feature = "testing")]
             dump_sequence: AtomicUsize::default(),
         })
@@ -804,7 +777,7 @@ impl WalRedoProcess {
     // Apply given WAL records ('records') over an old page image. Returns
     // new page image.
     //
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, pid=%self.id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), pid=%self.id()))]
     fn apply_wal_records(
         &self,
         tag: BufferTag,
@@ -998,11 +971,7 @@ impl WalRedoProcess {
         // these files will be collected to an allure report
         let filename = format!("walredo-{millis}-{}-{seq}.walredo", writebuf.len());
 
-        // TODO(sharding): update this call when WalRedoProcess gets a TenantShardId.
-        let path = self
-            .conf
-            .tenant_path(&TenantShardId::unsharded(self.tenant_id))
-            .join(&filename);
+        let path = self.conf.tenant_path(&self.tenant_shard_id).join(&filename);
 
         let res = std::fs::OpenOptions::new()
             .write(true)
@@ -1029,7 +998,6 @@ impl Drop for WalRedoProcess {
             .take()
             .expect("we only do this once")
             .kill_and_wait(WalRedoKillCause::WalRedoProcessDrop);
-        self.stderr_logger_cancel.cancel();
         // no way to wait for stderr_logger_task from Drop because that is async only
     }
 }
@@ -1037,7 +1005,7 @@ impl Drop for WalRedoProcess {
 /// Wrapper type around `std::process::Child` which guarantees that the child
 /// will be killed and waited-for by this process before being dropped.
 struct NoLeakChild {
-    tenant_id: TenantId,
+    tenant_id: TenantShardId,
     child: Option<Child>,
 }
 
@@ -1056,7 +1024,7 @@ impl DerefMut for NoLeakChild {
 }
 
 impl NoLeakChild {
-    fn spawn(tenant_id: TenantId, command: &mut Command) -> io::Result<Self> {
+    fn spawn(tenant_id: TenantShardId, command: &mut Command) -> io::Result<Self> {
         let child = command.spawn()?;
         Ok(NoLeakChild {
             tenant_id,
@@ -1111,7 +1079,7 @@ impl Drop for NoLeakChild {
             Some(child) => child,
             None => return,
         };
-        let tenant_id = self.tenant_id;
+        let tenant_shard_id = self.tenant_id;
         // Offload the kill+wait of the child process into the background.
         // If someone stops the runtime, we'll leak the child process.
         // We can ignore that case because we only stop the runtime on pageserver exit.
@@ -1119,7 +1087,11 @@ impl Drop for NoLeakChild {
             tokio::task::spawn_blocking(move || {
                 // Intentionally don't inherit the tracing context from whoever is dropping us.
                 // This thread here is going to outlive of our dropper.
-                let span = tracing::info_span!("walredo", %tenant_id);
+                let span = tracing::info_span!(
+                    "walredo",
+                    tenant_id = %tenant_shard_id.tenant_id,
+                    shard_id = %tenant_shard_id.shard_slug()
+                );
                 let _entered = span.enter();
                 Self::kill_and_wait_impl(child, WalRedoKillCause::NoLeakChildDrop);
             })
@@ -1129,11 +1101,11 @@ impl Drop for NoLeakChild {
 }
 
 trait NoLeakChildCommandExt {
-    fn spawn_no_leak_child(&mut self, tenant_id: TenantId) -> io::Result<NoLeakChild>;
+    fn spawn_no_leak_child(&mut self, tenant_id: TenantShardId) -> io::Result<NoLeakChild>;
 }
 
 impl NoLeakChildCommandExt for Command {
-    fn spawn_no_leak_child(&mut self, tenant_id: TenantId) -> io::Result<NoLeakChild> {
+    fn spawn_no_leak_child(&mut self, tenant_id: TenantShardId) -> io::Result<NoLeakChild> {
         NoLeakChild::spawn(tenant_id, self)
     }
 }
@@ -1188,6 +1160,7 @@ mod tests {
     use crate::repository::Key;
     use crate::{config::PageServerConf, walrecord::NeonWalRecord};
     use bytes::Bytes;
+    use pageserver_api::shard::TenantShardId;
     use std::str::FromStr;
     use utils::{id::TenantId, lsn::Lsn};
 
@@ -1297,9 +1270,9 @@ mod tests {
             let repo_dir = camino_tempfile::tempdir()?;
             let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
             let conf = Box::leak(Box::new(conf));
-            let tenant_id = TenantId::generate();
+            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
 
-            let manager = PostgresRedoManager::new(conf, tenant_id);
+            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
 
             Ok(RedoHarness {
                 _repo_dir: repo_dir,

@@ -11,8 +11,9 @@ use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::repository::*;
 use crate::walrecord::NeonWalRecord;
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes};
+use pageserver_api::key::is_rel_block_key;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -146,6 +147,7 @@ impl Timeline {
     {
         DatadirModification {
             tline: self,
+            pending_lsns: Vec::new(),
             pending_updates: HashMap::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
@@ -162,7 +164,7 @@ impl Timeline {
         &self,
         tag: RelTag,
         blknum: BlockNumber,
-        lsn: Lsn,
+        version: Version<'_>,
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
@@ -172,17 +174,20 @@ impl Timeline {
             ));
         }
 
-        let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
+        let nblocks = self.get_rel_size(tag, version, latest, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
-                tag, blknum, lsn, nblocks
+                tag,
+                blknum,
+                version.get_lsn(),
+                nblocks
             );
             return Ok(ZERO_PAGE.clone());
         }
 
         let key = rel_block_to_key(tag, blknum);
-        self.get(key, lsn, ctx).await
+        version.get(self, key, ctx).await
     }
 
     // Get size of a database in blocks
@@ -190,16 +195,16 @@ impl Timeline {
         &self,
         spcnode: Oid,
         dbnode: Oid,
-        lsn: Lsn,
+        version: Version<'_>,
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
 
-        let rels = self.list_rels(spcnode, dbnode, lsn, ctx).await?;
+        let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, lsn, latest, ctx).await?;
+            let n_blocks = self.get_rel_size(rel, version, latest, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -209,7 +214,7 @@ impl Timeline {
     pub async fn get_rel_size(
         &self,
         tag: RelTag,
-        lsn: Lsn,
+        version: Version<'_>,
         latest: bool,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
@@ -219,12 +224,12 @@ impl Timeline {
             ));
         }
 
-        if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(nblocks);
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, lsn, latest, ctx).await?
+            && !self.get_rel_exists(tag, version, latest, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -234,7 +239,7 @@ impl Timeline {
         }
 
         let key = rel_size_to_key(tag);
-        let mut buf = self.get(key, lsn, ctx).await?;
+        let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
 
         if latest {
@@ -245,7 +250,7 @@ impl Timeline {
             // latest=true, then it can not cause cache corruption, because with latest=true
             // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
             // associated with most recent value of LSN.
-            self.update_cached_rel_size(tag, lsn, nblocks);
+            self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
         }
         Ok(nblocks)
     }
@@ -254,7 +259,7 @@ impl Timeline {
     pub async fn get_rel_exists(
         &self,
         tag: RelTag,
-        lsn: Lsn,
+        version: Version<'_>,
         _latest: bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
@@ -265,12 +270,12 @@ impl Timeline {
         }
 
         // first try to lookup relation in cache
-        if let Some(_nblocks) = self.get_cached_rel_size(&tag, lsn) {
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(true);
         }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -282,16 +287,20 @@ impl Timeline {
     }
 
     /// Get a list of all existing relations in given tablespace and database.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn list_rels(
         &self,
         spcnode: Oid,
         dbnode: Oid,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
         // fetch directory listing
         let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
 
         match RelDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -327,11 +336,11 @@ impl Timeline {
         &self,
         kind: SlruKind,
         segno: u32,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         let key = slru_segment_size_to_key(kind, segno);
-        let mut buf = self.get(key, lsn, ctx).await?;
+        let mut buf = version.get(self, key, ctx).await?;
         Ok(buf.get_u32_le())
     }
 
@@ -340,12 +349,12 @@ impl Timeline {
         &self,
         kind: SlruKind,
         segno: u32,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         // fetch directory listing
         let key = slru_dir_to_key(kind);
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
 
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => {
@@ -496,11 +505,11 @@ impl Timeline {
         mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
     ) -> Result<T, PageReconstructError> {
         for segno in self
-            .list_slru_segments(SlruKind::Clog, probe_lsn, ctx)
+            .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
             .await?
         {
             let nblocks = self
-                .get_slru_segment_size(SlruKind::Clog, segno, probe_lsn, ctx)
+                .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
                 .await?;
             for blknum in (0..nblocks).rev() {
                 let clog_page = self
@@ -526,13 +535,13 @@ impl Timeline {
     pub async fn list_slru_segments(
         &self,
         kind: SlruKind,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<u32>, PageReconstructError> {
         // fetch directory entry
         let key = slru_dir_to_key(kind);
 
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
         match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
             Ok(dir) => Ok(dir.segments),
             Err(e) => Err(PageReconstructError::from(e)),
@@ -543,12 +552,12 @@ impl Timeline {
         &self,
         spcnode: Oid,
         dbnode: Oid,
-        lsn: Lsn,
+        version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         let key = relmap_file_key(spcnode, dbnode);
 
-        let buf = self.get(key, lsn, ctx).await?;
+        let buf = version.get(self, key, ctx).await?;
         Ok(buf)
     }
 
@@ -630,6 +639,10 @@ impl Timeline {
     ///
     /// Only relation blocks are counted currently. That excludes metadata,
     /// SLRUs, twophase files etc.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
@@ -643,7 +656,10 @@ impl Timeline {
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            for rel in self.list_rels(*spcnode, *dbnode, lsn, ctx).await? {
+            for rel in self
+                .list_rels(*spcnode, *dbnode, Version::Lsn(lsn), ctx)
+                .await?
+            {
                 if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
@@ -683,7 +699,7 @@ impl Timeline {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, lsn, ctx)
+                .list_rels(spcnode, dbnode, Version::Lsn(lsn), ctx)
                 .await?
                 .into_iter()
                 .collect();
@@ -790,18 +806,39 @@ pub struct DatadirModification<'a> {
     /// in the state in 'tline' yet.
     pub tline: &'a Timeline,
 
-    /// Lsn assigned by begin_modification
-    pub lsn: Lsn,
+    /// Current LSN of the modification
+    lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
-    pending_updates: HashMap<Key, Value>,
-    pending_deletions: Vec<Range<Key>>,
+    pending_lsns: Vec<Lsn>,
+    pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
+    pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 }
 
 impl<'a> DatadirModification<'a> {
+    /// Get the current lsn
+    pub(crate) fn get_lsn(&self) -> Lsn {
+        self.lsn
+    }
+
+    /// Set the current lsn
+    pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
+        ensure!(
+            lsn >= self.lsn,
+            "setting an older lsn {} than {} is not allowed",
+            lsn,
+            self.lsn
+        );
+        if lsn > self.lsn {
+            self.pending_lsns.push(self.lsn);
+            self.lsn = lsn;
+        }
+        Ok(())
+    }
+
     /// Initialize a completely new repository.
     ///
     /// This inserts the directory metadata entries that are assumed to
@@ -813,10 +850,7 @@ impl<'a> DatadirModification<'a> {
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
         // Create AuxFilesDirectory
-        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-            files: HashMap::new(),
-        })?;
-        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+        self.init_aux_dir()?;
 
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
@@ -924,10 +958,7 @@ impl<'a> DatadirModification<'a> {
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // Create AuxFilesDirectory as well
-            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-                files: HashMap::new(),
-            })?;
-            self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+            self.init_aux_dir()?;
         }
         if r.is_none() {
             // Create RelDirectory
@@ -981,11 +1012,9 @@ impl<'a> DatadirModification<'a> {
         dbnode: Oid,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let req_lsn = self.tline.get_last_record_lsn();
-
         let total_blocks = self
             .tline
-            .get_db_size(spcnode, dbnode, req_lsn, true, ctx)
+            .get_db_size(spcnode, dbnode, Version::Modified(self), true, ctx)
             .await?;
 
         // Remove entry from dbdir
@@ -1074,8 +1103,11 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
-        let last_lsn = self.tline.get_last_record_lsn();
-        if self.tline.get_rel_exists(rel, last_lsn, true, ctx).await? {
+        if self
+            .tline
+            .get_rel_exists(rel, Version::Modified(self), true, ctx)
+            .await?
+        {
             let size_key = rel_size_to_key(rel);
             // Fetch the old size first
             let old_size = self.get(size_key, ctx).await?.get_u32_le();
@@ -1252,6 +1284,14 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
+            files: HashMap::new(),
+        })?;
+        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
+        Ok(())
+    }
+
     pub async fn put_file(
         &mut self,
         path: &str,
@@ -1312,17 +1352,23 @@ impl<'a> DatadirModification<'a> {
         let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut retained_pending_updates = HashMap::new();
-        for (key, value) in self.pending_updates.drain() {
-            if is_rel_block_key(key) || is_slru_block_key(key) {
-                // This bails out on first error without modifying pending_updates.
-                // That's Ok, cf this function's doc comment.
-                writer.put(key, self.lsn, &value, ctx).await?;
-            } else {
-                retained_pending_updates.insert(key, value);
+        let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
+        for (key, values) in self.pending_updates.drain() {
+            for (lsn, value) in values {
+                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                    // This bails out on first error without modifying pending_updates.
+                    // That's Ok, cf this function's doc comment.
+                    writer.put(key, lsn, &value, ctx).await?;
+                } else {
+                    retained_pending_updates
+                        .entry(key)
+                        .or_default()
+                        .push((lsn, value));
+                }
             }
         }
-        self.pending_updates.extend(retained_pending_updates);
+
+        self.pending_updates = retained_pending_updates;
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1339,18 +1385,28 @@ impl<'a> DatadirModification<'a> {
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let writer = self.tline.writer().await;
-        let lsn = self.lsn;
+
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
-        for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value, ctx).await?;
-        }
-        for key_range in self.pending_deletions.drain(..) {
-            writer.delete(key_range, lsn).await?;
+        if !self.pending_updates.is_empty() {
+            writer.put_batch(&self.pending_updates, ctx).await?;
+            self.pending_updates.clear();
         }
 
-        writer.finish_write(lsn);
+        if !self.pending_deletions.is_empty() {
+            writer.delete_batch(&self.pending_deletions).await?;
+            self.pending_deletions.clear();
+        }
+
+        self.pending_lsns.push(self.lsn);
+        for pending_lsn in self.pending_lsns.drain(..) {
+            // Ideally, we should be able to call writer.finish_write() only once
+            // with the highest LSN. However, the last_record_lsn variable in the
+            // timeline keeps track of the latest LSN and the immediate previous LSN
+            // so we need to record every LSN to not leave a gap between them.
+            writer.finish_write(pending_lsn);
+        }
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1359,40 +1415,86 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.pending_updates.len() + self.pending_deletions.len()
+    }
+
     // Internal helper functions to batch the modifications
 
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
-        // Have we already updated the same key? Read the pending updated
+        // Have we already updated the same key? Read the latest pending updated
         // version in that case.
         //
         // Note: we don't check pending_deletions. It is an error to request a
         // value that has been removed, deletion only avoids leaking storage.
-        if let Some(value) = self.pending_updates.get(&key) {
-            if let Value::Image(img) = value {
-                Ok(img.clone())
-            } else {
-                // Currently, we never need to read back a WAL record that we
-                // inserted in the same "transaction". All the metadata updates
-                // work directly with Images, and we never need to read actual
-                // data pages. We could handle this if we had to, by calling
-                // the walredo manager, but let's keep it simple for now.
-                Err(PageReconstructError::from(anyhow::anyhow!(
-                    "unexpected pending WAL record"
-                )))
+        if let Some(values) = self.pending_updates.get(&key) {
+            if let Some((_, value)) = values.last() {
+                return if let Value::Image(img) = value {
+                    Ok(img.clone())
+                } else {
+                    // Currently, we never need to read back a WAL record that we
+                    // inserted in the same "transaction". All the metadata updates
+                    // work directly with Images, and we never need to read actual
+                    // data pages. We could handle this if we had to, by calling
+                    // the walredo manager, but let's keep it simple for now.
+                    Err(PageReconstructError::from(anyhow::anyhow!(
+                        "unexpected pending WAL record"
+                    )))
+                };
             }
-        } else {
-            let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
-            self.tline.get(key, lsn, ctx).await
         }
+        let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+        self.tline.get(key, lsn, ctx).await
     }
 
     fn put(&mut self, key: Key, val: Value) {
-        self.pending_updates.insert(key, val);
+        let values = self.pending_updates.entry(key).or_default();
+        // Replace the previous value if it exists at the same lsn
+        if let Some((last_lsn, last_value)) = values.last_mut() {
+            if *last_lsn == self.lsn {
+                *last_value = val;
+                return;
+            }
+        }
+        values.push((self.lsn, val));
     }
 
     fn delete(&mut self, key_range: Range<Key>) {
         trace!("DELETE {}-{}", key_range.start, key_range.end);
-        self.pending_deletions.push(key_range);
+        self.pending_deletions.push((key_range, self.lsn));
+    }
+}
+
+/// This struct facilitates accessing either a committed key from the timeline at a
+/// specific LSN, or the latest uncommitted key from a pending modification.
+/// During WAL ingestion, the records from multiple LSNs may be batched in the same
+/// modification before being flushed to the timeline. Hence, the routines in WalIngest
+/// need to look up the keys in the modification first before looking them up in the
+/// timeline to not miss the latest updates.
+#[derive(Clone, Copy)]
+pub enum Version<'a> {
+    Lsn(Lsn),
+    Modified(&'a DatadirModification<'a>),
+}
+
+impl<'a> Version<'a> {
+    async fn get(
+        &self,
+        timeline: &Timeline,
+        key: Key,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        match self {
+            Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
+            Version::Modified(modification) => modification.get(key, ctx).await,
+        }
+    }
+
+    fn get_lsn(&self) -> Lsn {
+        match self {
+            Version::Lsn(lsn) => *lsn,
+            Version::Modified(modification) => modification.lsn,
+        }
     }
 }
 
@@ -1570,7 +1672,7 @@ fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
     }
 }
 
-fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
+pub(crate) fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x00,
         field2: rel.spcnode,
@@ -1754,6 +1856,14 @@ const AUX_FILES_KEY: Key = Key {
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
+// AUX_FILES currently stores only data for logical replication (slots etc), and
+// we don't preserve these on a branch because safekeepers can't follow timeline
+// switch (and generally it likely should be optional), so ignore these.
+pub fn is_inherited_key(key: Key) -> bool {
+    key != AUX_FILES_KEY
+}
+
+/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
 pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
     Ok(match key.field1 {
         0x00 => (
@@ -1768,11 +1878,6 @@ pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
         _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
     })
 }
-
-fn is_rel_block_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0
-}
-
 pub fn is_rel_fsm_block_key(key: Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
 }

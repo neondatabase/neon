@@ -44,6 +44,7 @@ pub(crate) enum BackgroundLoopKind {
     Eviction,
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
+    InitialLogicalSizeCalculation,
 }
 
 impl BackgroundLoopKind {
@@ -53,31 +54,18 @@ impl BackgroundLoopKind {
     }
 }
 
-pub(crate) enum RateLimitError {
-    Cancelled,
-}
-
-pub(crate) async fn concurrent_background_tasks_rate_limit(
+/// Cancellation safe.
+pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
-    cancel: &CancellationToken,
-) -> Result<impl Drop, RateLimitError> {
-    crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_START_COUNT
+) -> impl Drop {
+    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
         .with_label_values(&[loop_kind.as_static_str()])
-        .inc();
-    scopeguard::defer!(
-        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_FINISH_COUNT.with_label_values(&[loop_kind.as_static_str()]).inc();
-    );
-    tokio::select! {
-        permit = CONCURRENT_BACKGROUND_TASKS.acquire() => {
-            match permit {
-                Ok(permit) => Ok(permit),
-                Err(_closed) => unreachable!("we never close the semaphore"),
-            }
-        },
-        _ = cancel.cancelled() => {
-            Err(RateLimitError::Cancelled)
-        }
+        .guard();
+
+    match CONCURRENT_BACKGROUND_TASKS.acquire().await {
+        Ok(permit) => permit,
+        Err(_closed) => unreachable!("we never close the semaphore"),
     }
 }
 
@@ -86,13 +74,13 @@ pub fn start_background_loops(
     tenant: &Arc<Tenant>,
     background_jobs_can_start: Option<&completion::Barrier>,
 ) {
-    let tenant_id = tenant.tenant_shard_id.tenant_id;
+    let tenant_shard_id = tenant.tenant_shard_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
-        Some(tenant_id),
+        Some(tenant_shard_id),
         None,
-        &format!("compactor for tenant {tenant_id}"),
+        &format!("compactor for tenant {tenant_shard_id}"),
         false,
         {
             let tenant = Arc::clone(tenant);
@@ -104,7 +92,7 @@ pub fn start_background_loops(
                     _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
                 };
                 compaction_loop(tenant, cancel)
-                    .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
+                    .instrument(info_span!("compaction_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }
@@ -113,9 +101,9 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
-        Some(tenant_id),
+        Some(tenant_shard_id),
         None,
-        &format!("garbage collector for tenant {tenant_id}"),
+        &format!("garbage collector for tenant {tenant_shard_id}"),
         false,
         {
             let tenant = Arc::clone(tenant);
@@ -127,7 +115,7 @@ pub fn start_background_loops(
                     _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
                 };
                 gc_loop(tenant, cancel)
-                    .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
+                    .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
                     .await;
                 Ok(())
             }

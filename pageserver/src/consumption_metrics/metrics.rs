@@ -1,5 +1,4 @@
-use crate::context::RequestContext;
-use anyhow::Context;
+use crate::{context::RequestContext, tenant::timeline::logical_size::CurrentLogicalSize};
 use chrono::{DateTime, Utc};
 use consumption_metrics::EventType;
 use futures::stream::StreamExt;
@@ -198,12 +197,12 @@ pub(super) async fn collect_all_metrics(
     };
 
     let tenants = futures::stream::iter(tenants).filter_map(|(id, state)| async move {
-        if state != TenantState::Active {
+        if state != TenantState::Active || !id.is_zero() {
             None
         } else {
             crate::tenant::mgr::get_tenant(id, true)
                 .ok()
-                .map(|tenant| (id, tenant))
+                .map(|tenant| (id.tenant_id, tenant))
         }
     });
 
@@ -352,13 +351,16 @@ impl TimelineSnapshot {
 
             let current_exact_logical_size = {
                 let span = tracing::info_span!("collect_metrics_iteration", tenant_id = %t.tenant_shard_id.tenant_id, timeline_id = %t.timeline_id);
-                let res = span
-                    .in_scope(|| t.get_current_logical_size(ctx))
-                    .context("get_current_logical_size");
-                match res? {
+                let size = span.in_scope(|| {
+                    t.get_current_logical_size(
+                        crate::tenant::timeline::GetLogicalSizePriority::Background,
+                        ctx,
+                    )
+                });
+                match size {
                     // Only send timeline logical size when it is fully calculated.
-                    (size, is_exact) if is_exact => Some(size),
-                    (_, _) => None,
+                    CurrentLogicalSize::Exact(ref size) => Some(size.into()),
+                    CurrentLogicalSize::Approximate(_) => None,
                 }
             };
 

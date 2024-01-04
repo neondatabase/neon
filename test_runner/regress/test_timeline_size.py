@@ -1,3 +1,4 @@
+import concurrent.futures
 import math
 import queue
 import random
@@ -24,6 +25,7 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
+    wait_tenant_status_404,
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
@@ -146,6 +148,72 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
         time.sleep(polling_interval)
 
 
+def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_quota_on_startup")
+
+    wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
+
+    endpoint_main = env.endpoints.create(
+        "test_timeline_size_quota_on_startup",
+        # Set small limit for the test
+        config_lines=["neon.max_cluster_size=30MB"],
+    )
+    endpoint_main.start()
+
+    log.info("postgres is running on 'test_timeline_size_quota_on_startup' branch")
+
+    with closing(endpoint_main.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE foo (t text)")
+
+            # Insert many rows. This query must fail because of space limit
+            try:
+                for _i in range(5000):
+                    cur.execute(
+                        """
+                        INSERT INTO foo
+                            SELECT 'long string to consume some space' || g
+                            FROM generate_series(1, 100) g
+                    """
+                    )
+
+                # If we get here, the timeline size limit failed
+                log.error("Query unexpectedly succeeded")
+                raise AssertionError()
+
+            except psycopg2.errors.DiskFull as err:
+                log.info(f"Query expectedly failed with: {err}")
+
+    # Restart endpoint that reached the limit to ensure that it doesn't fail on startup
+    # i.e. the size limit is not enforced during startup.
+    endpoint_main.stop()
+    # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
+    # which is needed for neon.pg_cluster_size() to work
+    endpoint_main.respec(skip_pg_catalog_updates=False)
+    endpoint_main.start()
+
+    # ensure that the limit is enforced after startup
+    with closing(endpoint_main.connect()) as conn:
+        with conn.cursor() as cur:
+            # This query must fail because of space limit
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO foo
+                        SELECT 'long string to consume some space' || g
+                        FROM generate_series(1, 100000) g
+                """
+                )
+                # If we get here, the timeline size limit failed
+                log.error("Query unexpectedly succeeded")
+                raise AssertionError()
+
+            except psycopg2.errors.DiskFull as err:
+                log.info(f"Query expectedly failed with: {err}")
+
+
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -234,7 +302,8 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
 
     # load in some data
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
@@ -666,3 +735,191 @@ def wait_for_timeline_size_init(
     raise Exception(
         f"timed out while waiting for current_logical_size of a timeline to reach its non-incremental value, details: {timeline_details}"
     )
+
+
+def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
+    """
+    Tenants warmuping up opportunistically will wait for one another's logical size calculations to complete
+    before proceeding.  However, they skip this if a client is actively trying to access them.
+
+    This test is not purely about logical sizes, but logical size calculation is the phase that we
+    use as a proxy for "warming up" in this test: it happens within the semaphore guard used
+    to limit concurrent tenant warm-up.
+    """
+
+    # We will run with the limit set to 1, so that once we have one tenant stuck
+    # in a pausable failpoint, the rest are prevented from proceeding through warmup.
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # Create some tenants
+    n_tenants = 10
+    tenant_ids = {env.initial_tenant}
+    for _i in range(0, n_tenants - 1):
+        tenant_id = TenantId.generate()
+        env.pageserver.tenant_create(tenant_id)
+
+        # Empty tenants are not subject to waiting for logical size calculations, because
+        # those hapen on timeline level
+        timeline_id = TimelineId.generate()
+        env.neon_cli.create_timeline(
+            new_branch_name="main", tenant_id=tenant_id, timeline_id=timeline_id
+        )
+
+        tenant_ids.add(tenant_id)
+
+    # Restart pageserver with logical size calculations paused
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
+    )
+
+    def get_tenant_states():
+        states = {}
+        log.info(f"Tenant ids: {tenant_ids}")
+        for tenant_id in tenant_ids:
+            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
+            states[tenant_id] = tenant["state"]["slug"]
+        log.info(f"Tenant states: {states}")
+        return states
+
+    def at_least_one_active():
+        assert "Active" in set(get_tenant_states().values())
+
+    # One tenant should activate, then get stuck in their logical size calculation
+    wait_until(10, 1, at_least_one_active)
+
+    # Wait some walltime to gain confidence that other tenants really are stuck and not proceeding to activate
+    time.sleep(5)
+
+    # We should see one tenant win the activation race, and enter logical size calculation.  The rest
+    # will stay in Attaching state, waiting for the "warmup_limit" semaphore
+    expect_activated = 1
+    states = get_tenant_states()
+    assert len([s for s in states.values() if s == "Active"]) == expect_activated
+    assert len([s for s in states.values() if s == "Attaching"]) == n_tenants - expect_activated
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
+    )
+
+    # This is zero, and subsequent checks are expect_activated - 1, because this counter does not
+    # count how may tenants are Active, it counts how many have finished warmup.  The first tenant
+    # that reached Active is still stuck in its local size calculation, and has therefore not finished warmup.
+    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == 0
+
+    # If a client accesses one of the blocked tenants, it should skip waiting for warmup and
+    # go active as fast as it can.
+    stuck_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+
+    endpoint = env.endpoints.create_start(branch_name="main", tenant_id=stuck_tenant_id)
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10) g",
+        ]
+    )
+    endpoint.stop()
+
+    # That one that we successfully accessed is now Active
+    expect_activated += 1
+    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
+        == expect_activated - 1
+    )
+
+    # The ones we didn't touch are still in Attaching
+    assert (
+        len([s for s in get_tenant_states().values() if s == "Attaching"])
+        == n_tenants - expect_activated
+    )
+
+    # Timeline creation operations also wake up Attaching tenants
+    stuck_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+    pageserver_http.timeline_create(env.pg_version, stuck_tenant_id, TimelineId.generate())
+    expect_activated += 1
+    assert pageserver_http.tenant_status(tenant_id=stuck_tenant_id)["state"]["slug"] == "Active"
+    assert (
+        len([s for s in get_tenant_states().values() if s == "Attaching"])
+        == n_tenants - expect_activated
+    )
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total")
+        == expect_activated - 1
+    )
+
+    # When we unblock logical size calculation, all tenants should proceed to active state via
+    # the warmup route.
+    pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
+
+    def all_active():
+        assert all(s == "Active" for s in get_tenant_states().values())
+
+    wait_until(10, 1, all_active)
+
+    # Final control check: restarting with no failpoints at all results in all tenants coming active
+    # without being prompted by client I/O
+    env.pageserver.stop()
+    env.pageserver.start()
+    wait_until(10, 1, all_active)
+
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
+    )
+    assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == n_tenants
+
+    # Check that tenant deletion proactively wakes tenants: this is done separately to the main
+    # body of the test because it will disrupt tenant counts
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
+    )
+
+    wait_until(10, 1, at_least_one_active)
+    delete_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+
+    # Deleting a stuck tenant should prompt it to go active
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        log.info("Starting background delete")
+
+        def delete_tenant():
+            env.pageserver.http_client().tenant_delete(delete_tenant_id)
+
+        background_delete = executor.submit(delete_tenant)
+
+        # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
+        # logical size is paused in a failpoint.  So instead we will use a log observation to check that
+        # on-demand activation was triggered by the tenant deletion
+        log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000}}: Activating tenant \\(on-demand\\).*"
+
+        def activated_on_demand():
+            assert env.pageserver.log_contains(log_match) is not None
+
+        log.info(f"Waiting for activation message '{log_match}'")
+        try:
+            wait_until(10, 1, activated_on_demand)
+        finally:
+            log.info("Clearing failpoint")
+            pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
+
+        # Deletion should complete successfully now that failpoint is unblocked
+        log.info("Joining background delete")
+        background_delete.result(timeout=10)
+
+        # Poll for deletion to complete
+        wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
+        tenant_ids.remove(delete_tenant_id)
+
+    # Check that all the stuck tenants proceed to active (apart from the one that deletes)
+    wait_until(10, 1, all_active)
+    assert len(get_tenant_states()) == n_tenants - 1

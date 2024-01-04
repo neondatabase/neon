@@ -4,9 +4,10 @@
 //! UPDATE (Mon Aug  8 13:20:34 UTC 2022): the payload format has been simplified.
 
 use bstr::ByteSlice;
+use smol_str::SmolStr;
 
 pub struct PasswordHackPayload {
-    pub endpoint: String,
+    pub endpoint: SmolStr,
     pub password: Vec<u8>,
 }
 
@@ -18,7 +19,7 @@ impl PasswordHackPayload {
             if let Some((endpoint, password)) = bytes.split_once_str(sep) {
                 let endpoint = endpoint.to_str().ok()?;
                 return Some(Self {
-                    endpoint: parse_endpoint_param(endpoint)?.to_owned(),
+                    endpoint: parse_endpoint_param(endpoint)?.into(),
                     password: password.to_owned(),
                 });
             }

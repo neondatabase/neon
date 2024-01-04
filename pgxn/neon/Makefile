@@ -9,6 +9,7 @@ OBJS = \
 	libpagestore.o \
 	neon.o \
 	neon_utils.o \
+	neon_walreader.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \
@@ -40,6 +41,17 @@ walproposer-lib: libwalproposer.a;
 libwalproposer.a: $(WALPROP_OBJS)
 	rm -f $@
 	$(AR) $(AROPT) $@ $^
+
+# needs vars:
+# FIND_TYPEDEF pointing to find_typedef
+# INDENT pointing to pg_bsd_indent
+# PGINDENT_SCRIPT pointing to pgindent (be careful with PGINDENT var name:
+#   pgindent will pick it up as pg_bsd_indent path).
+.PHONY: pgindent
+pgindent:
+	+@ echo top_srcdir=$(top_srcdir) top_builddir=$(top_builddir) srcdir=$(srcdir)
+	$(FIND_TYPEDEF) . > neon.typedefs
+	INDENT=$(INDENT) $(PGINDENT_SCRIPT) --typedefs neon.typedefs $(srcdir)/*.c $(srcdir)/*.h
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

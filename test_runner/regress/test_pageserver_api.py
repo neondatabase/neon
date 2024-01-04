@@ -8,7 +8,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 
@@ -62,7 +61,10 @@ def test_pageserver_init_node_id(
     assert "has node id already, it cannot be overridden" in bad_update.stderr
 
 
-def check_client(pg_version: PgVersion, client: PageserverHttpClient, initial_tenant: TenantId):
+def check_client(env: NeonEnv, client: PageserverHttpClient):
+    pg_version = env.pg_version
+    initial_tenant = env.initial_tenant
+
     client.check_status()
 
     # check initial tenant is there
@@ -70,7 +72,9 @@ def check_client(pg_version: PgVersion, client: PageserverHttpClient, initial_te
 
     # create new tenant and check it is also there
     tenant_id = TenantId.generate()
-    client.tenant_create(tenant_id)
+    client.tenant_create(
+        tenant_id, generation=env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)
+    )
     assert tenant_id in {TenantId(t["id"]) for t in client.tenant_list()}
 
     timelines = client.timeline_list(tenant_id)
@@ -181,7 +185,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        check_client(env.pg_version, client, env.initial_tenant)
+        check_client(env, client)
 
 
 def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
@@ -191,4 +195,4 @@ def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilde
     pageserver_token = env.auth_keys.generate_pageserver_token()
 
     with env.pageserver.http_client(auth_token=pageserver_token) as client:
-        check_client(env.pg_version, client, env.initial_tenant)
+        check_client(env, client)

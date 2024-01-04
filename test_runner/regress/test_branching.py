@@ -1,8 +1,7 @@
 import random
 import threading
 import time
-from queue import SimpleQueue
-from typing import Any, Dict, List, Union
+from typing import List
 
 import pytest
 from fixtures.log_helper import log
@@ -148,17 +147,17 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     env = neon_env_builder.init_configs()
     env.start()
 
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading",
+        ]
     )
     ps_http = env.pageserver.http_client()
 
     # pause all uploads
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     initial_branch = "initial_branch"
 
@@ -200,7 +199,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
     # pause all uploads
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     def start_creating_timeline():
         with pytest.raises(RequestException):
@@ -239,92 +238,6 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
         t.join()
 
 
-def test_competing_branchings_from_loading_race_to_ok_or_err(neon_env_builder: NeonEnvBuilder):
-    """
-    If the activate only after upload is used, then retries could become competing.
-    """
-
-    env = neon_env_builder.init_configs()
-    env.start()
-
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*Error processing HTTP request: InternalServerError\\(Timeline .*/.* already exists in pageserver's memory"
-    )
-    ps_http = env.pageserver.http_client()
-
-    # pause all uploads
-    ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
-    ps_http.tenant_create(env.initial_tenant)
-
-    def start_creating_timeline():
-        ps_http.timeline_create(
-            env.pg_version, env.initial_tenant, env.initial_timeline, timeout=60
-        )
-
-    create_root = threading.Thread(target=start_creating_timeline)
-
-    branch_id = TimelineId.generate()
-
-    queue: SimpleQueue[Union[Dict[Any, Any], Exception]] = SimpleQueue()
-    barrier = threading.Barrier(3)
-
-    def try_branch():
-        barrier.wait()
-        barrier.wait()
-        try:
-            ret = ps_http.timeline_create(
-                env.pg_version,
-                env.initial_tenant,
-                branch_id,
-                ancestor_timeline_id=env.initial_timeline,
-                timeout=5,
-            )
-            queue.put(ret)
-        except Exception as e:
-            queue.put(e)
-
-    threads = [threading.Thread(target=try_branch) for _ in range(2)]
-
-    try:
-        create_root.start()
-
-        for t in threads:
-            t.start()
-
-        wait_until_paused(env, "before-upload-index-pausable")
-
-        barrier.wait()
-        ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
-        barrier.wait()
-
-        # now both requests race to branch, only one can win because they take gc_cs, Tenant::timelines or marker files
-        first = queue.get()
-        second = queue.get()
-
-        log.info(first)
-        log.info(second)
-
-        (succeeded, failed) = (first, second) if isinstance(second, Exception) else (second, first)
-        assert isinstance(failed, Exception)
-        assert isinstance(succeeded, Dict)
-
-        # there's multiple valid status codes:
-        # - Timeline x/y already exists
-        # - whatever 409 response says, but that is a subclass of PageserverApiException
-        assert isinstance(failed, PageserverApiException)
-        assert succeeded["state"] == "Active"
-    finally:
-        # we might still have the failpoint active
-        env.pageserver.stop(immediate=True)
-
-        for t in threads:
-            t.join()
-        create_root.join()
-
-
 def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: NeonEnvBuilder):
     """
     Check that a timeline is deleted locally on subsequent restart if it never successfully uploaded during creation.
@@ -343,8 +256,7 @@ def test_non_uploaded_root_timeline_is_deleted_after_restart(neon_env_builder: N
     )
     ps_http = env.pageserver.http_client()
 
-    # pause all uploads
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
 
     # Create a timeline whose creation will succeed.  The tenant will need at least one
     # timeline to be loadable.
@@ -397,7 +309,7 @@ def test_non_uploaded_branch_is_deleted_after_restart(neon_env_builder: NeonEnvB
     )
     ps_http = env.pageserver.http_client()
 
-    ps_http.tenant_create(env.initial_tenant)
+    env.pageserver.tenant_create(env.initial_tenant)
     ps_http.timeline_create(env.pg_version, env.initial_tenant, env.initial_timeline)
 
     # pause all uploads

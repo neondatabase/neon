@@ -59,7 +59,7 @@
 
 #define DropRelationAllLocalBuffers DropRelFileNodeAllLocalBuffers
 
-#else /* major version >= 16 */
+#else							/* major version >= 16 */
 
 #define USE_RELFILELOCATOR
 
@@ -109,4 +109,4 @@
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif
 
-#endif //NEON_PGVERSIONCOMPAT_H
+#endif							/* NEON_PGVERSIONCOMPAT_H */

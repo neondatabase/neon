@@ -46,6 +46,8 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
+
+    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,6 +336,11 @@ pub struct TenantConf {
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
     pub gc_feedback: bool,
+
+    /// If non-zero, the period between uploads of a heatmap from attached tenants.  This
+    /// may be disabled if a Tenant will not have secondary locations: only secondary
+    /// locations will use the heatmap uploaded by attached locations.
+    pub heatmap_period: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -414,6 +421,11 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub gc_feedback: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub heatmap_period: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +494,7 @@ impl TenantConfOpt {
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
+            heatmap_period: self.heatmap_period.unwrap_or(global_conf.heatmap_period),
         }
     }
 }
@@ -519,6 +532,7 @@ impl Default for TenantConf {
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
             gc_feedback: false,
+            heatmap_period: Duration::ZERO,
         }
     }
 }

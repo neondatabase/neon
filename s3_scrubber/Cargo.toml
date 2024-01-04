@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 aws-sdk-s3.workspace = true
+aws-smithy-async.workspace = true
 either.workspace = true
 tokio-rustls.workspace = true
 anyhow.workspace = true
@@ -31,6 +32,7 @@ reqwest = { workspace = true, default-features = false, features = ["rustls-tls"
 aws-config = { workspace = true, default-features = false, features = ["rustls", "sso"] }
 
 pageserver = { path = "../pageserver" }
+pageserver_api = { path = "../libs/pageserver_api" }
 remote_storage = { path = "../libs/remote_storage" }
 
 tracing.workspace = true
@@ -38,3 +40,5 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 tracing-appender = "0.2"
 histogram = "0.7"
+
+futures.workspace = true

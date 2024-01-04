@@ -1,3 +1,6 @@
+//! Links with walproposer, pgcommon, pgport and runs bindgen on walproposer.h
+//! to generate Rust bindings for it.
+
 use std::{env, path::PathBuf, process::Command};
 
 use anyhow::{anyhow, Context};

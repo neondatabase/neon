@@ -9,9 +9,7 @@ from fixtures.utils import wait_until
 
 # Test restarting page server, while safekeeper and compute node keep
 # running.
-@pytest.mark.parametrize("generations", [True, False])
-def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool):
-    neon_env_builder.enable_generations = generations
+def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 
@@ -106,7 +104,6 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder, generations: bool)
         # Initial tenant load should reflect the delay we injected
         ("initial_tenant_load", lambda t, p: t >= (tenant_load_delay_ms / 1000.0) and t >= p),
         # Subsequent steps should occur in expected order
-        ("initial_logical_sizes", lambda t, p: t > 0 and t >= p),
         ("background_jobs_can_start", lambda t, p: t > 0 and t >= p),
         ("complete", lambda t, p: t > 0 and t >= p),
     ]

@@ -8,6 +8,7 @@ use std::{net::SocketAddr, sync::Arc};
 use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
+use proxy::proxy::run_until_cancelled;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -20,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
 
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, info, Instrument};
 
 project_git_version!(GIT_VERSION);
 
@@ -151,63 +152,39 @@ async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
-    let mut connections = tokio::task::JoinSet::new();
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                let (socket, peer_addr) = accept_result?;
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
 
-                let session_id = uuid::Uuid::new_v4();
-                let tls_config = Arc::clone(&tls_config);
-                let dest_suffix = Arc::clone(&dest_suffix);
+        let session_id = uuid::Uuid::new_v4();
+        let tls_config = Arc::clone(&tls_config);
+        let dest_suffix = Arc::clone(&dest_suffix);
 
-                connections.spawn(
-                    async move {
-                        socket
-                            .set_nodelay(true)
-                            .context("failed to set socket option")?;
+        connections.spawn(
+            async move {
+                socket
+                    .set_nodelay(true)
+                    .context("failed to set socket option")?;
 
-                        info!(%peer_addr, "serving");
-                        handle_client(dest_suffix, tls_config, tls_server_end_point, socket).await
-                    }
-                    .unwrap_or_else(|e| {
-                        // Acknowledge that the task has finished with an error.
-                        error!("per-client task finished with an error: {e:#}");
-                    })
-                    .instrument(tracing::info_span!("handle_client", ?session_id))
-                );
+                info!(%peer_addr, "serving");
+                handle_client(dest_suffix, tls_config, tls_server_end_point, socket).await
             }
-            // Don't modify this unless you read https://docs.rs/tokio/latest/tokio/macro.select.html carefully.
-            // If this future completes and the pattern doesn't match, this branch is disabled for this call to `select!`.
-            // This only counts for this loop and it will be enabled again on next `select!`.
-            //
-            // Prior code had this as `Some(Err(e))` which _looks_ equivalent to the current setup, but it's not.
-            // When `connections.join_next()` returned `Some(Ok(()))` (which we expect), it would disable the join_next and it would
-            // not get called again, even if there are more connections to remove.
-            Some(res) = connections.join_next() => {
-                if let Err(e) = res {
-                    if !e.is_panic() && !e.is_cancelled() {
-                        warn!("unexpected error from joined connection task: {e:?}");
-                    }
-                }
-            }
-            _ = cancellation_token.cancelled() => {
-                drop(listener);
-                break;
-            }
-        }
+            .unwrap_or_else(|e| {
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
+            })
+            .instrument(tracing::info_span!("handle_client", ?session_id)),
+        );
     }
 
-    // Drain connections
-    info!("waiting for all client connections to finish");
-    while let Some(res) = connections.join_next().await {
-        if let Err(e) = res {
-            if !e.is_panic() && !e.is_cancelled() {
-                warn!("unexpected error from joined connection task: {e:?}");
-            }
-        }
-    }
+    connections.close();
+    drop(listener);
+
+    connections.wait().await;
+
     info!("all client connections have finished");
     Ok(())
 }
@@ -284,5 +261,5 @@ async fn handle_client(
     let client = tokio::net::TcpStream::connect(destination).await?;
 
     let metrics_aux: MetricsAuxInfo = Default::default();
-    proxy::proxy::proxy_pass(tls_stream, client, &metrics_aux).await
+    proxy::proxy::proxy_pass(tls_stream, client, metrics_aux).await
 }

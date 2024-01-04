@@ -13,18 +13,15 @@
 #ifndef pageserver_h
 #define pageserver_h
 
-#include "postgres.h"
 #include "neon_pgversioncompat.h"
 
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
-#include "storage/block.h"
-#include "storage/smgr.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
+#include "storage/block.h"
+#include "storage/smgr.h"
 #include "utils/memutils.h"
-
-#include "pg_config.h"
 
 typedef enum
 {
@@ -40,13 +37,13 @@ typedef enum
 	T_NeonGetPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
-}			NeonMessageTag;
+} NeonMessageTag;
 
 /* base struct for c-style inheritance */
 typedef struct
 {
 	NeonMessageTag tag;
-}			NeonMessage;
+} NeonMessage;
 
 #define messageTag(m) (((const NeonMessage *)(m))->tag)
 
@@ -67,27 +64,27 @@ typedef struct
 	NeonMessageTag tag;
 	bool		latest;			/* if true, request latest page version */
 	XLogRecPtr	lsn;			/* request page version @ this LSN */
-}			NeonRequest;
+} NeonRequest;
 
 typedef struct
 {
 	NeonRequest req;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
-}			NeonExistsRequest;
+} NeonExistsRequest;
 
 typedef struct
 {
 	NeonRequest req;
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
-}			NeonNblocksRequest;
+} NeonNblocksRequest;
 
 typedef struct
 {
 	NeonRequest req;
 	Oid			dbNode;
-}			NeonDbSizeRequest;
+} NeonDbSizeRequest;
 
 typedef struct
 {
@@ -95,31 +92,31 @@ typedef struct
 	NRelFileInfo rinfo;
 	ForkNumber	forknum;
 	BlockNumber blkno;
-}			NeonGetPageRequest;
+} NeonGetPageRequest;
 
 /* supertype of all the Neon*Response structs below */
 typedef struct
 {
 	NeonMessageTag tag;
-}			NeonResponse;
+} NeonResponse;
 
 typedef struct
 {
 	NeonMessageTag tag;
 	bool		exists;
-}			NeonExistsResponse;
+} NeonExistsResponse;
 
 typedef struct
 {
 	NeonMessageTag tag;
 	uint32		n_blocks;
-}			NeonNblocksResponse;
+} NeonNblocksResponse;
 
 typedef struct
 {
 	NeonMessageTag tag;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
-}			NeonGetPageResponse;
+} NeonGetPageResponse;
 
 #define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
 
@@ -127,18 +124,18 @@ typedef struct
 {
 	NeonMessageTag tag;
 	int64		db_size;
-}			NeonDbSizeResponse;
+} NeonDbSizeResponse;
 
 typedef struct
 {
 	NeonMessageTag tag;
 	char		message[FLEXIBLE_ARRAY_MEMBER]; /* null-terminated error
 												 * message */
-}			NeonErrorResponse;
+} NeonErrorResponse;
 
-extern StringInfoData nm_pack_request(NeonRequest * msg);
-extern NeonResponse * nm_unpack_response(StringInfo s);
-extern char *nm_to_string(NeonMessage * msg);
+extern StringInfoData nm_pack_request(NeonRequest *msg);
+extern NeonResponse *nm_unpack_response(StringInfo s);
+extern char *nm_to_string(NeonMessage *msg);
 
 /*
  * API
@@ -146,23 +143,20 @@ extern char *nm_to_string(NeonMessage * msg);
 
 typedef struct
 {
-	bool		(*send) (NeonRequest * request);
+	bool		(*send) (NeonRequest *request);
 	NeonResponse *(*receive) (void);
 	bool		(*flush) (void);
-}			page_server_api;
+} page_server_api;
 
 extern void prefetch_on_ps_disconnect(void);
 
-extern page_server_api * page_server;
+extern page_server_api *page_server;
 
 extern char *page_server_connstring;
-extern int flush_every_n_requests;
-extern int readahead_buffer_size;
-extern bool seqscan_prefetch_enabled;
-extern int seqscan_prefetch_distance;
+extern int	flush_every_n_requests;
+extern int	readahead_buffer_size;
 extern char *neon_timeline;
 extern char *neon_tenant;
-extern bool wal_redo;
 extern int32 max_cluster_size;
 
 extern const f_smgr *smgr_neon(BackendId backend, NRelFileInfo rinfo);
@@ -194,14 +188,14 @@ extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-							 XLogRecPtr request_lsn, bool request_latest, char *buffer);
+										 XLogRecPtr request_lsn, bool request_latest, char *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, char *buffer, bool skipFsync);
 #else
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  void *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-							 XLogRecPtr request_lsn, bool request_latest, void *buffer);
+										 XLogRecPtr request_lsn, bool request_latest, void *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, const void *buffer, bool skipFsync);
 #endif

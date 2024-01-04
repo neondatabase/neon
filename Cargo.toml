@@ -5,6 +5,8 @@ members = [
     "control_plane",
     "pageserver",
     "pageserver/ctl",
+    "pageserver/client",
+    "pageserver/pagebench",
     "proxy",
     "safekeeper",
     "storage_broker",
@@ -38,10 +40,10 @@ license = "Apache-2.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
-azure_core = "0.16"
-azure_identity = "0.16"
-azure_storage = "0.16"
-azure_storage_blobs = "0.16"
+azure_core = "0.18"
+azure_identity = "0.18"
+azure_storage = "0.18"
+azure_storage_blobs = "0.18"
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
@@ -78,6 +80,7 @@ futures-util = "0.3"
 git-version = "0.3"
 hashbrown = "0.13"
 hashlink = "0.8.1"
+hdrhistogram = "7.5.2"
 hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
@@ -90,7 +93,7 @@ hyper-tungstenite = "0.11"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
-jsonwebtoken = "8"
+jsonwebtoken = "9"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
@@ -109,7 +112,7 @@ pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
-regex = "1.4"
+regex = "1.10.2"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_19"] }
 reqwest-middleware = "0.2.0"
@@ -132,6 +135,7 @@ serde_assert = "0.5.0"
 sha2 = "0.10.2"
 signal-hook = "0.3"
 smallvec = "1.11"
+smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
@@ -148,7 +152,7 @@ tokio-postgres-rustls = "0.10.0"
 tokio-rustls = "0.24"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
@@ -181,6 +185,7 @@ compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
+pageserver_client = { path = "./pageserver/client" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }

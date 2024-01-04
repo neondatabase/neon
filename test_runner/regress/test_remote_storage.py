@@ -23,7 +23,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import (
-    TIMELINE_INDEX_PART_FILE_NAME,
     LocalFsStorage,
     RemoteStorageKind,
     available_remote_storages,
@@ -61,8 +60,6 @@ def test_remote_storage_backup_and_restore(
 
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    neon_env_builder.enable_generations = generations
-
     # Exercise retry code path by making all uploads and downloads fail for the
     # first time. The retries print INFO-messages to the log; we will check
     # that they are present after the test.
@@ -74,19 +71,20 @@ def test_remote_storage_backup_and_restore(
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            # FIXME: Is this expected?
+            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
+            ".*No timelines to attach received.*",
+            ".*Failed to get local tenant state.*",
+            # FIXME retry downloads without throwing errors
+            ".*failed to load remote timeline.*",
+            # we have a bunch of pytest.raises for these below
+            ".*tenant .*? already exists, state:.*",
+            ".*tenant directory already exists.*",
+            ".*simulated failure of remote operation.*",
+        ]
     )
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
-
-    env.pageserver.allowed_errors.append(".*Failed to get local tenant state.*")
-    # FIXME retry downloads without throwing errors
-    env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
-    # we have a bunch of pytest.raises for these below
-    env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
@@ -350,6 +348,13 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
+    # We are about to forcibly drop local dirs.  Attachment service will increment generation in re-attach before
+    # we later increment when actually attaching it again, leading to skipping a generation and potentially getting
+    # these warnings if there was a durable but un-executed deletion list at time of restart.
+    env.pageserver.allowed_errors.extend(
+        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
+    )
+
     dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
@@ -603,7 +608,12 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     remote_timeline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
 
-    assert not list(remote_timeline_path.iterdir())
+    filtered = [
+        path
+        for path in remote_timeline_path.iterdir()
+        if not (path.name.endswith("initdb.tar.zst"))
+    ]
+    assert len(filtered) == 0
 
     # timeline deletion should kill ongoing uploads, so, the metric will be gone
     assert get_queued_count(file_kind="index", op_kind="upload") is None
@@ -643,7 +653,7 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
     ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
 
     client.tenant_detach(env.initial_tenant)
-    client.tenant_attach(env.initial_tenant)
+    env.pageserver.tenant_attach(env.initial_tenant)
     wait_until_tenant_state(client, env.initial_tenant, "Active", 5)
 
     timelines_after_detach = set(
@@ -753,10 +763,11 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         # this is because creating a timeline always awaits for the uploads to complete
         assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
-        assert (
-            new_branch_on_remote_storage / TIMELINE_INDEX_PART_FILE_NAME
+        assert env.pageserver_remote_storage.index_path(
+            env.initial_tenant, new_branch_timeline_id
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
+        barrier.abort()
         create_thread.join()
 
 
@@ -835,7 +846,7 @@ def test_compaction_waits_for_upload(
     ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
 
     def layer_deletes_completed():
-        m = client.get_metric_value("pageserver_layer_gcs_count_total", {"state": "completed"})
+        m = client.get_metric_value("pageserver_layer_completed_deletes_total")
         if m is None:
             return 0
         return int(m)

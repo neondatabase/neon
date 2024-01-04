@@ -140,3 +140,41 @@ impl Key {
         })
     }
 }
+
+pub fn is_rel_block_key(key: &Key) -> bool {
+    key.field1 == 0x00 && key.field4 != 0
+}
+
+impl std::str::FromStr for Key {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::from_hex(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use crate::key::Key;
+
+    use rand::Rng;
+    use rand::SeedableRng;
+
+    #[test]
+    fn display_fromstr_bijection() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let key = Key {
+            field1: rng.gen(),
+            field2: rng.gen(),
+            field3: rng.gen(),
+            field4: rng.gen(),
+            field5: rng.gen(),
+            field6: rng.gen(),
+        };
+
+        assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());
+    }
+}

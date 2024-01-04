@@ -227,7 +227,7 @@ async fn handle_configure_request(
 
         let parsed_spec = match ParsedSpec::try_from(spec) {
             Ok(ps) => ps,
-            Err(msg) => return Err((msg, StatusCode::PRECONDITION_FAILED)),
+            Err(msg) => return Err((msg, StatusCode::BAD_REQUEST)),
         };
 
         // XXX: wrap state update under lock in code blocks. Otherwise,

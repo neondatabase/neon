@@ -142,6 +142,10 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -214,7 +218,7 @@ jobs:
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
@@ -238,6 +242,20 @@ jobs:
       options: --init
 
     steps:
+      - name: Fix git ownership
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
+
       - name: Checkout
         uses: actions/checkout@v4
         with:

@@ -30,18 +30,32 @@ async fn warn_if_stuck<Fut: std::future::Future>(
 
     let mut fut = std::pin::pin!(fut);
 
-    loop {
+    let mut warned = false;
+    let ret = loop {
         match tokio::time::timeout(warn_period, &mut fut).await {
-            Ok(ret) => return ret,
+            Ok(ret) => break ret,
             Err(_) => {
                 tracing::warn!(
                     gate = name,
                     elapsed_ms = started.elapsed().as_millis(),
                     "still waiting, taking longer than expected..."
                 );
+                warned = true;
             }
         }
+    };
+
+    // If we emitted a warning for slowness, also emit a message when we complete, so that
+    // someone debugging a shutdown can know for sure whether we have moved past this operation.
+    if warned {
+        tracing::info!(
+            gate = name,
+            elapsed_ms = started.elapsed().as_millis(),
+            "completed, after taking longer than expected"
+        )
     }
+
+    ret
 }
 
 #[derive(Debug)]

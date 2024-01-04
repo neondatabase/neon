@@ -6,7 +6,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -22,7 +25,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeMode, ComputeSpec};
+use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
 
 use remote_storage::{DownloadError, RemotePath};
@@ -32,6 +35,9 @@ use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
+
+pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
+pub static PG_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -64,6 +70,10 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub build_tag: String,
+    // connection string to pgbouncer to change settings
+    pub pgbouncer_connstr: Option<String>,
+    // path to pgbouncer.ini to change settings
+    pub pgbouncer_ini_path: Option<String>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -252,7 +262,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                     IF NOT EXISTS (
                         SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
                     THEN
-                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION IN ROLE pg_read_all_data, pg_write_all_data;
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN REPLICATION BYPASSRLS IN ROLE pg_read_all_data, pg_write_all_data;
                         IF array_length(roles, 1) IS NOT NULL THEN
                             EXECUTE format('GRANT neon_superuser TO %s',
                                            array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
@@ -277,6 +287,17 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
 }
 
 impl ComputeNode {
+    /// Check that compute node has corresponding feature enabled.
+    pub fn has_feature(&self, feature: ComputeFeature) -> bool {
+        let state = self.state.lock().unwrap();
+
+        if let Some(s) = state.pspec.as_ref() {
+            s.spec.features.contains(&feature)
+        } else {
+            false
+        }
+    }
+
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
         state.status = status;
@@ -485,6 +506,7 @@ impl ComputeNode {
             .stdout(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
+        SYNC_SAFEKEEPERS_PID.store(sync_handle.id(), Ordering::SeqCst);
 
         // `postgres --sync-safekeepers` will print all log output to stderr and
         // final LSN to stdout. So we pipe only stdout, while stderr will be automatically
@@ -492,6 +514,7 @@ impl ComputeNode {
         let sync_output = sync_handle
             .wait_with_output()
             .expect("postgres --sync-safekeepers failed");
+        SYNC_SAFEKEEPERS_PID.store(0, Ordering::SeqCst);
 
         if !sync_output.status.success() {
             anyhow::bail!(
@@ -646,6 +669,7 @@ impl ComputeNode {
             })
             .spawn()
             .expect("cannot start postgres process");
+        PG_PID.store(pg.id(), Ordering::SeqCst);
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
@@ -726,9 +750,39 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
+        if let Some(connstr) = &self.pgbouncer_connstr {
+            info!("tuning pgbouncer with connstr: {:?}", connstr);
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create rt");
+
+            // Spawn a thread to do the tuning,
+            // so that we don't block the main thread that starts Postgres.
+            let pgbouncer_settings = spec.pgbouncer_settings.clone();
+            let connstr_clone = connstr.clone();
+            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let _handle = thread::spawn(move || {
+                let res = rt.block_on(tune_pgbouncer(
+                    pgbouncer_settings,
+                    &connstr_clone,
+                    pgbouncer_ini_path,
+                ));
+                if let Err(err) = res {
+                    error!("error while tuning pgbouncer: {err:?}");
+                }
+            });
+        }
+
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
+        let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+        config::write_postgres_conf(&postgresql_conf_path, &spec, None)?;
+        // temporarily reset max_cluster_size in config
+        // to avoid the possibility of hitting the limit, while we are reconfiguring:
+        // creating new extensions, roles, etc...
+        config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
         self.pg_reload_conf()?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
@@ -748,6 +802,10 @@ impl ComputeNode {
 
         // 'Close' connection
         drop(client);
+
+        // reset max_cluster_size in config back to original value and reload config
+        config::compute_ctl_temp_override_remove(pgdata_path)?;
+        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -770,6 +828,32 @@ impl ComputeNode {
             pspec.tenant_id,
             pspec.timeline_id,
         );
+
+        // tune pgbouncer
+        if let Some(connstr) = &self.pgbouncer_connstr {
+            info!("tuning pgbouncer with connstr: {:?}", connstr);
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create rt");
+
+            // Spawn a thread to do the tuning,
+            // so that we don't block the main thread that starts Postgres.
+            let pgbouncer_settings = pspec.spec.pgbouncer_settings.clone();
+            let connstr_clone = connstr.clone();
+            let pgbouncer_ini_path = self.pgbouncer_ini_path.clone();
+            let _handle = thread::spawn(move || {
+                let res = rt.block_on(tune_pgbouncer(
+                    pgbouncer_settings,
+                    &connstr_clone,
+                    pgbouncer_ini_path,
+                ));
+                if let Err(err) = res {
+                    error!("error while tuning pgbouncer: {err:?}");
+                }
+            });
+        }
 
         info!(
             "start_compute spec.remote_extensions {:?}",
@@ -809,7 +893,17 @@ impl ComputeNode {
 
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
+            let pgdata_path = Path::new(&self.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
+            config::compute_ctl_temp_override_create(pgdata_path, "neon.max_cluster_size=-1")?;
+            self.pg_reload_conf()?;
+
             self.apply_config(&compute_state)?;
+
+            config::compute_ctl_temp_override_remove(pgdata_path)?;
+            self.pg_reload_conf()?;
         }
 
         let startup_end_time = Utc::now();

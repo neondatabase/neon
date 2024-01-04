@@ -266,9 +266,7 @@ class NeonPageserverHttpClient(requests.Session):
     def tenant_create(self, new_tenant_id: uuid.UUID, ok_if_exists):
         res = self.post(
             f"http://{self.host}:{self.port}/v1/tenant",
-            json={
-                "new_tenant_id": new_tenant_id.hex,
-            },
+            json={"new_tenant_id": new_tenant_id.hex, "generation": 1},
         )
 
         if res.status_code == 409:

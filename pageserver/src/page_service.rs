@@ -53,21 +53,23 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
+use crate::pgdatadir_mapping::{rel_block_to_key, Version};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::ShardSelector;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-// How long we may block waiting for a [`TenantSlot::InProgress`]` and/or a [`Tenant`] which
+// How long we may wait for a [`TenantSlot::InProgress`]` and/or a [`Tenant`] which
 // is not yet in state [`TenantState::Active`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 /// Read the end of a tar archive.
 ///
@@ -399,16 +401,19 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        // TODO(sharding): enumerate local tenant shards for this tenant, and select the one
-        // that should serve this request.
-
-        // Make request tracer if needed
+        // Note that since one connection may contain getpage requests that target different
+        // shards (e.g. during splitting when the compute is not yet aware of the split), the tenant
+        // that we look up here may not be the one that serves all the actual requests: we will double
+        // check the mapping of key->shard later before calling into Timeline for getpage requests.
         let tenant = mgr::get_active_tenant_with_timeout(
             tenant_id,
+            ShardSelector::First,
             ACTIVE_TENANT_TIMEOUT,
             &task_mgr::shutdown_token(),
         )
         .await?;
+
+        // Make request tracer if needed
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path =
@@ -566,6 +571,7 @@ impl PageServerHandler {
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(
             tenant_id,
+            ShardSelector::Zero,
             ACTIVE_TENANT_TIMEOUT,
             &task_mgr::shutdown_token(),
         )
@@ -628,7 +634,7 @@ impl PageServerHandler {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         let timeline = self
-            .get_active_tenant_timeline(tenant_id, timeline_id)
+            .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         let last_record_lsn = timeline.get_last_record_lsn();
         if last_record_lsn != start_lsn {
@@ -741,7 +747,7 @@ impl PageServerHandler {
                 .await?;
 
         let exists = timeline
-            .get_rel_exists(req.rel, lsn, req.latest, ctx)
+            .get_rel_exists(req.rel, Version::Lsn(lsn), req.latest, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
@@ -760,7 +766,9 @@ impl PageServerHandler {
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
                 .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest, ctx).await?;
+        let n_blocks = timeline
+            .get_rel_size(req.rel, Version::Lsn(lsn), req.latest, ctx)
+            .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
@@ -779,7 +787,13 @@ impl PageServerHandler {
                 .await?;
 
         let total_blocks = timeline
-            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest, ctx)
+            .get_db_size(
+                DEFAULTTABLESPACE_OID,
+                req.dbnode,
+                Version::Lsn(lsn),
+                req.latest,
+                ctx,
+            )
             .await?;
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
@@ -788,7 +802,7 @@ impl PageServerHandler {
         }))
     }
 
-    async fn handle_get_page_at_lsn_request(
+    async fn do_handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
@@ -798,22 +812,65 @@ impl PageServerHandler {
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
                 .await?;
-        /*
-        // Add a 1s delay to some requests. The delay helps the requests to
-        // hit the race condition from github issue #1047 more easily.
-        use rand::Rng;
-        if rand::thread_rng().gen::<u8>() < 5 {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-        }
-        */
-
         let page = timeline
-            .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest, ctx)
+            .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), req.latest, ctx)
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
+    }
+
+    async fn handle_get_page_at_lsn_request(
+        &self,
+        timeline: &Timeline,
+        req: &PagestreamGetPageRequest,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
+        let key = rel_block_to_key(req.rel, req.blkno);
+        if timeline.get_shard_identity().is_key_local(&key) {
+            self.do_handle_get_page_at_lsn_request(timeline, req, ctx)
+                .await
+        } else {
+            // The Tenant shard we looked up at connection start does not hold this particular
+            // key: look for other shards in this tenant.  This scenario occurs if a pageserver
+            // has multiple shards for the same tenant.
+            //
+            // TODO: optimize this (https://github.com/neondatabase/neon/pull/6037)
+            let timeline = match self
+                .get_active_tenant_timeline(
+                    timeline.tenant_shard_id.tenant_id,
+                    timeline.timeline_id,
+                    ShardSelector::Page(key),
+                )
+                .await
+            {
+                Ok(t) => t,
+                Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
+                    // We already know this tenant exists in general, because we resolved it at
+                    // start of connection.  Getting a NotFound here indicates that the shard containing
+                    // the requested page is not present on this node.
+
+                    // TODO: this should be some kind of structured error that the client will understand,
+                    // so that it can block until its config is updated: this error is expected in the case
+                    // that the Tenant's shards' placements are being updated and the client hasn't been
+                    // informed yet.
+                    //
+                    // https://github.com/neondatabase/neon/issues/6038
+                    tracing::warn!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
+                        timeline.get_shard_identity(), timeline.get_shard_identity().get_shard_number(&key).0, key);
+                    return Err(anyhow::anyhow!("Request routed to wrong shard"));
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            // Take a GateGuard for the duration of this request.  If we were using our main Timeline object,
+            // the GateGuard was already held over the whole connection.
+            let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown)?;
+
+            self.do_handle_get_page_at_lsn_request(&timeline, req, ctx)
+                .await
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -838,7 +895,7 @@ impl PageServerHandler {
 
         // check that the timeline exists
         let timeline = self
-            .get_active_tenant_timeline(tenant_id, timeline_id)
+            .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
             .await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -944,9 +1001,11 @@ impl PageServerHandler {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        selector: ShardSelector,
     ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
         let tenant = get_active_tenant_with_timeout(
             tenant_id,
+            selector,
             ACTIVE_TENANT_TIMEOUT,
             &task_mgr::shutdown_token(),
         )
@@ -1120,7 +1179,7 @@ where
 
             self.check_permission(Some(tenant_id))?;
             let timeline = self
-                .get_active_tenant_timeline(tenant_id, timeline_id)
+                .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
                 .await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
@@ -1307,6 +1366,7 @@ where
 
             let tenant = get_active_tenant_with_timeout(
                 tenant_id,
+                ShardSelector::Zero,
                 ACTIVE_TENANT_TIMEOUT,
                 &task_mgr::shutdown_token(),
             )

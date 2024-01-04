@@ -1,14 +1,16 @@
+#[cfg(feature = "testing")]
 pub mod mock;
 pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
-    auth::ClientCredentials,
+    auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
     compute, scram,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
+use smol_str::SmolStr;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -20,7 +22,7 @@ pub mod errors {
     use crate::{
         error::{io_error, UserFacingError},
         http,
-        proxy::ShouldRetry,
+        proxy::retry::ShouldRetry,
     };
     use thiserror::Error;
 
@@ -195,16 +197,29 @@ pub mod errors {
 }
 
 /// Extra query params we'd like to pass to the console.
-pub struct ConsoleReqExtra<'a> {
+pub struct ConsoleReqExtra {
     /// A unique identifier for a connection.
     pub session_id: uuid::Uuid,
     /// Name of client application, if set.
-    pub application_name: Option<&'a str>,
-    pub options: Option<&'a str>,
+    pub application_name: String,
+    pub options: Vec<(String, String)>,
+}
+
+impl ConsoleReqExtra {
+    // https://swagger.io/docs/specification/serialization/ DeepObject format
+    // paramName[prop1]=value1&paramName[prop2]=value2&....
+    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
+        self.options
+            .iter()
+            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
+            .collect()
+    }
 }
 
 /// Auth secret which is managed by the cloud.
+#[derive(Clone)]
 pub enum AuthSecret {
+    #[cfg(feature = "testing")]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
 
@@ -229,7 +244,7 @@ pub struct NodeInfo {
     pub config: compute::ConnCfg,
 
     /// Labels for proxy's metrics.
-    pub aux: Arc<MetricsAuxInfo>,
+    pub aux: MetricsAuxInfo,
 
     /// Whether we should accept self-signed certificates (for testing)
     pub allow_self_signed_compute: bool,
@@ -237,30 +252,32 @@ pub struct NodeInfo {
 
 pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
 pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
-pub type AllowedIpsCache = TimedLru<Arc<str>, Arc<Vec<String>>>;
+pub type AllowedIpsCache = TimedLru<SmolStr, Arc<Vec<String>>>;
+pub type RoleSecretCache = TimedLru<(SmolStr, SmolStr), Option<AuthSecret>>;
+pub type CachedRoleSecret = timed_lru::Cached<&'static RoleSecretCache>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
 #[async_trait]
 pub trait Api {
     /// Get the client's auth secret for authentication.
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
-    ) -> Result<AuthInfo, errors::GetAuthInfoError>;
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 
@@ -269,7 +286,9 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub node_info: NodeInfoCache,
     /// Cache for the `get_allowed_ips`. TODO(anna): use notifications listener instead.
-    pub allowed_ips: TimedLru<Arc<str>, Arc<Vec<String>>>,
+    pub allowed_ips: AllowedIpsCache,
+    /// Cache for the `get_role_secret`. TODO(anna): use notifications listener instead.
+    pub role_secret: RoleSecretCache,
 }
 
 /// Various caches for [`console`](super).

@@ -11,6 +11,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     VanillaPostgres,
 )
+from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import LocalFsStorage
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -125,3 +126,32 @@ def test_wal_restore_initdb(
         )
         log.info(f"original lsn: {original_lsn}, restored lsn: {restored_lsn}")
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
+
+
+def test_wal_restore_http(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("create table t as select generate_series(1,300000)")
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    ps_client = env.pageserver.http_client()
+
+    # shut down the endpoint and delete the timeline from the pageserver
+    endpoint.stop()
+
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+
+    timeline_delete_wait_completed(ps_client, tenant_id, timeline_id)
+
+    # issue the restoration command
+    ps_client.timeline_create(
+        tenant_id=tenant_id,
+        new_timeline_id=timeline_id,
+        existing_initdb_timeline_id=timeline_id,
+        pg_version=env.pg_version,
+    )
+
+    # the table is back now!
+    restored = env.endpoints.create_start("main")
+    assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]

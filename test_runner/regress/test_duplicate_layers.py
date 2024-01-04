@@ -112,7 +112,9 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
     assert l1_found is not None, "failed to find L1 locally"
 
-    uploaded = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id) / l1_found.name
+    uploaded = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, l1_found.name
+    )
     assert not uploaded.exists(), "to-be-overwritten should not yet be uploaded"
 
     env.pageserver.start()
@@ -139,4 +141,7 @@ def test_actually_duplicated_l1(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin)
 
     wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
 
+    uploaded = env.pageserver_remote_storage.remote_layer_path(
+        tenant_id, timeline_id, l1_found.name
+    )
     assert uploaded.exists(), "the L1 is uploaded"

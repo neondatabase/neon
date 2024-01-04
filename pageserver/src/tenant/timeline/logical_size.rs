@@ -1,11 +1,10 @@
 use anyhow::Context;
-use once_cell::sync::OnceCell;
 
-use tokio::sync::Semaphore;
+use once_cell::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 use utils::lsn::Lsn;
 
-use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 
 /// Internal structure to hold all data needed for logical size calculation.
 ///
@@ -23,10 +22,20 @@ pub(super) struct LogicalSize {
     ///
     /// NOTE: size at a given LSN is constant, but after a restart we will calculate
     /// the initial size at a different LSN.
-    pub initial_logical_size: OnceCell<u64>,
+    pub initial_logical_size: OnceCell<(
+        u64,
+        crate::metrics::initial_logical_size::FinishedCalculationGuard,
+    )>,
 
-    /// Semaphore to track ongoing calculation of `initial_logical_size`.
-    pub initial_size_computation: Arc<tokio::sync::Semaphore>,
+    /// Cancellation for the best-effort logical size calculation.
+    ///
+    /// The token is kept in a once-cell so that we can error out if a higher priority
+    /// request comes in *before* we have started the normal logical size calculation.
+    pub(crate) cancel_wait_for_background_loop_concurrency_limit_semaphore:
+        OnceCell<CancellationToken>,
+
+    /// Once the initial logical size is initialized, this is notified.
+    pub(crate) initialized: tokio::sync::Semaphore,
 
     /// Latest Lsn that has its size uncalculated, could be absent for freshly created timelines.
     pub initial_part_end: Option<Lsn>,
@@ -52,25 +61,57 @@ pub(super) struct LogicalSize {
     /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
     /// to modify this, it will also keep the prometheus metric in sync.
     pub size_added_after_initial: AtomicI64,
+
+    /// For [`crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE`].
+    pub(super) did_return_approximate_to_walreceiver: AtomicBool,
 }
 
 /// Normalized current size, that the data in pageserver occupies.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum CurrentLogicalSize {
+pub(crate) enum CurrentLogicalSize {
     /// The size is not yet calculated to the end, this is an intermediate result,
     /// constructed from walreceiver increments and normalized: logical data could delete some objects, hence be negative,
     /// yet total logical size cannot be below 0.
-    Approximate(u64),
+    Approximate(Approximate),
     // Fully calculated logical size, only other future walreceiver increments are changing it, and those changes are
     // available for observation without any calculations.
-    Exact(u64),
+    Exact(Exact),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Accuracy {
+    Approximate,
+    Exact,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Approximate(u64);
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Exact(u64);
+
+impl From<&Approximate> for u64 {
+    fn from(value: &Approximate) -> Self {
+        value.0
+    }
+}
+
+impl From<&Exact> for u64 {
+    fn from(val: &Exact) -> Self {
+        val.0
+    }
 }
 
 impl CurrentLogicalSize {
-    pub(super) fn size(&self) -> u64 {
-        *match self {
-            Self::Approximate(size) => size,
-            Self::Exact(size) => size,
+    pub(crate) fn size_dont_care_about_accuracy(&self) -> u64 {
+        match self {
+            Self::Approximate(size) => size.into(),
+            Self::Exact(size) => size.into(),
+        }
+    }
+    pub(crate) fn accuracy(&self) -> Accuracy {
+        match self {
+            Self::Approximate(_) => Accuracy::Approximate,
+            Self::Exact(_) => Accuracy::Exact,
         }
     }
 }
@@ -78,36 +119,44 @@ impl CurrentLogicalSize {
 impl LogicalSize {
     pub(super) fn empty_initial() -> Self {
         Self {
-            initial_logical_size: OnceCell::with_value(0),
-            //  initial_logical_size already computed, so, don't admit any calculations
-            initial_size_computation: Arc::new(Semaphore::new(0)),
+            initial_logical_size: OnceCell::with_value((0, {
+                crate::metrics::initial_logical_size::START_CALCULATION
+                    .first(crate::metrics::initial_logical_size::StartCircumstances::EmptyInitial)
+                    .calculation_result_saved()
+            })),
+            cancel_wait_for_background_loop_concurrency_limit_semaphore: OnceCell::new(),
             initial_part_end: None,
             size_added_after_initial: AtomicI64::new(0),
+            did_return_approximate_to_walreceiver: AtomicBool::new(false),
+            initialized: tokio::sync::Semaphore::new(0),
         }
     }
 
     pub(super) fn deferred_initial(compute_to: Lsn) -> Self {
         Self {
             initial_logical_size: OnceCell::new(),
-            initial_size_computation: Arc::new(Semaphore::new(1)),
+            cancel_wait_for_background_loop_concurrency_limit_semaphore: OnceCell::new(),
             initial_part_end: Some(compute_to),
             size_added_after_initial: AtomicI64::new(0),
+            did_return_approximate_to_walreceiver: AtomicBool::new(false),
+            initialized: tokio::sync::Semaphore::new(0),
         }
     }
 
-    pub(super) fn current_size(&self) -> anyhow::Result<CurrentLogicalSize> {
+    pub(super) fn current_size(&self) -> CurrentLogicalSize {
         let size_increment: i64 = self.size_added_after_initial.load(AtomicOrdering::Acquire);
         //                  ^^^ keep this type explicit so that the casts in this function break if
         //                  we change the type.
         match self.initial_logical_size.get() {
-            Some(initial_size) => {
-                initial_size.checked_add_signed(size_increment)
+            Some((initial_size, _)) => {
+                CurrentLogicalSize::Exact(Exact(initial_size.checked_add_signed(size_increment)
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                    .map(CurrentLogicalSize::Exact)
+                    .unwrap()))
             }
             None => {
+
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
-                Ok(CurrentLogicalSize::Approximate(non_negative_size_increment))
+                CurrentLogicalSize::Approximate(Approximate(non_negative_size_increment))
             }
         }
     }
@@ -121,7 +170,7 @@ impl LogicalSize {
     /// available for re-use. This doesn't contain the incremental part.
     pub(super) fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
         match self.initial_part_end {
-            Some(v) if v == lsn => self.initial_logical_size.get().copied(),
+            Some(v) if v == lsn => self.initial_logical_size.get().map(|(s, _)| *s),
             _ => None,
         }
     }

@@ -6,7 +6,8 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUrl};
+use crate::console::provider::CachedRoleSecret;
+use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
@@ -47,7 +48,7 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        creds: &ClientCredentials<'_>,
+        creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let (secret, allowed_ips) = async {
             // Perhaps we could persist this connection, but then we'd have to
@@ -60,7 +61,7 @@ impl Api {
             let secret = match get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
-                &[&creds.user],
+                &[&&*creds.inner.user],
                 "rolpassword",
             )
             .await?
@@ -71,14 +72,14 @@ impl Api {
                     secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
                 }
                 None => {
-                    warn!("user '{}' does not exist", creds.user);
+                    warn!("user '{}' does not exist", creds.inner.user);
                     None
                 }
             };
             let allowed_ips = match get_execute_postgres_query(
                 &client,
                 "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
-                &[&creds.project.clone().unwrap_or_default().as_str()],
+                &[&creds.endpoint.as_str()],
                 "allowed_ips",
             )
             .await?
@@ -142,18 +143,20 @@ async fn get_execute_postgres_query(
 #[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
-    async fn get_auth_info(
+    async fn get_role_secret(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
-    ) -> Result<AuthInfo, GetAuthInfoError> {
-        self.do_get_auth_info(creds).await
+        _extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
+    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
+        Ok(CachedRoleSecret::new_uncached(
+            self.do_get_auth_info(creds).await?.secret,
+        ))
     }
 
     async fn get_allowed_ips(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials,
+        _extra: &ConsoleReqExtra,
+        creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
     }
@@ -161,8 +164,8 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _extra: &ConsoleReqExtra<'_>,
-        _creds: &ClientCredentials,
+        _extra: &ConsoleReqExtra,
+        _creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)

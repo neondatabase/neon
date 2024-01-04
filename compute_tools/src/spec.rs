@@ -118,19 +118,6 @@ pub fn get_spec_from_control_plane(
     spec
 }
 
-/// It takes cluster specification and does the following:
-/// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.
-/// - Update `pg_hba.conf` to allow external connections.
-pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
-    // File `postgresql.conf` is no longer included into `basebackup`, so just
-    // always write all config into it creating new file.
-    config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec, None)?;
-
-    update_pg_hba(pgdata_path)?;
-
-    Ok(())
-}
-
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
     // XXX: consider making it a part of spec.json
@@ -265,8 +252,6 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         let action = if let Some(r) = pg_role {
             if (r.encrypted_password.is_none() && role.encrypted_password.is_some())
                 || (r.encrypted_password.is_some() && role.encrypted_password.is_none())
-                || !r.bypassrls.unwrap_or(false)
-                || !r.replication.unwrap_or(false)
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
@@ -298,14 +283,22 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
         match action {
             RoleAction::None => {}
             RoleAction::Update => {
-                let mut query: String =
-                    format!("ALTER ROLE {} BYPASSRLS REPLICATION", name.pg_quote());
+                // This can be run on /every/ role! Not just ones created through the console.
+                // This means that if you add some funny ALTER here that adds a permission,
+                // this will get run even on user-created roles! This will result in different
+                // behavior before and after a spec gets reapplied. The below ALTER as it stands
+                // now only grants LOGIN and changes the password. Please do not allow this branch
+                // to do anything silly.
+                let mut query: String = format!("ALTER ROLE {} ", name.pg_quote());
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
             RoleAction::Create => {
+                // This branch only runs when roles are created through the console, so it is
+                // safe to add more permissions here. BYPASSRLS and REPLICATION are inherited
+                // from neon_superuser.
                 let mut query: String = format!(
-                    "CREATE ROLE {} CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
+                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
                 info!("role create query: '{}'", &query);
@@ -377,32 +370,48 @@ pub fn handle_role_deletions(spec: &ComputeSpec, connstr: &str, client: &mut Cli
     Ok(())
 }
 
+fn reassign_owned_objects_in_one_db(
+    conf: Config,
+    role_name: &PgIdent,
+    db_owner: &PgIdent,
+) -> Result<()> {
+    let mut client = conf.connect(NoTls)?;
+
+    // This will reassign all dependent objects to the db owner
+    let reassign_query = format!(
+        "REASSIGN OWNED BY {} TO {}",
+        role_name.pg_quote(),
+        db_owner.pg_quote()
+    );
+    info!(
+        "reassigning objects owned by '{}' in db '{}' to '{}'",
+        role_name,
+        conf.get_dbname().unwrap_or(""),
+        db_owner
+    );
+    client.simple_query(&reassign_query)?;
+
+    // This now will only drop privileges of the role
+    let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
+    client.simple_query(&drop_query)?;
+    Ok(())
+}
+
 // Reassign all owned objects in all databases to the owner of the database.
 fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent) -> Result<()> {
     for db in &spec.cluster.databases {
         if db.owner != *role_name {
             let mut conf = Config::from_str(connstr)?;
             conf.dbname(&db.name);
-
-            let mut client = conf.connect(NoTls)?;
-
-            // This will reassign all dependent objects to the db owner
-            let reassign_query = format!(
-                "REASSIGN OWNED BY {} TO {}",
-                role_name.pg_quote(),
-                db.owner.pg_quote()
-            );
-            info!(
-                "reassigning objects owned by '{}' in db '{}' to '{}'",
-                role_name, &db.name, &db.owner
-            );
-            client.simple_query(&reassign_query)?;
-
-            // This now will only drop privileges of the role
-            let drop_query = format!("DROP OWNED BY {}", role_name.pg_quote());
-            client.simple_query(&drop_query)?;
+            reassign_owned_objects_in_one_db(conf, role_name, &db.owner)?;
         }
     }
+
+    // Also handle case when there are no databases in the spec.
+    // In this case we need to reassign objects in the default database.
+    let conf = Config::from_str(connstr)?;
+    let db_owner = PgIdent::from_str("cloud_admin")?;
+    reassign_owned_objects_in_one_db(conf, role_name, &db_owner)?;
 
     Ok(())
 }
