@@ -403,8 +403,8 @@ impl PostgresRedoManager {
                 anyhow::bail!("tried to pass postgres wal record to neon WAL redo");
             }
             NeonWalRecord::ClearVisibilityMapFlags {
-                new_heap_blkno,
-                old_heap_blkno,
+                heap_blkno_1,
+                heap_blkno_2,
                 flags,
             } => {
                 // sanity check that this is modifying the correct relation
@@ -414,7 +414,8 @@ impl PostgresRedoManager {
                     "ClearVisibilityMapFlags record on unexpected rel {}",
                     rel
                 );
-                if let Some(heap_blkno) = *new_heap_blkno {
+                for heap_blkno in [heap_blkno_1, heap_blkno_2].into_iter().flatten() {
+                    let heap_blkno = *heap_blkno;
                     // Calculate the VM block and offset that corresponds to the heap block.
                     let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
                     let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
@@ -424,19 +425,6 @@ impl PostgresRedoManager {
                     assert!(map_block == blknum);
 
                     // equivalent to PageGetContents(page)
-                    let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
-
-                    map[map_byte as usize] &= !(flags << map_offset);
-                }
-
-                // Repeat for 'old_heap_blkno', if any
-                if let Some(heap_blkno) = *old_heap_blkno {
-                    let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
-                    let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
-                    let map_offset = pg_constants::HEAPBLK_TO_OFFSET(heap_blkno);
-
-                    assert!(map_block == blknum);
-
                     let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                     map[map_byte as usize] &= !(flags << map_offset);

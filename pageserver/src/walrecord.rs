@@ -21,10 +21,13 @@ pub enum NeonWalRecord {
     /// Native PostgreSQL WAL record
     Postgres { will_init: bool, rec: Bytes },
 
-    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
+    /// Clear the bits specified in `flags` in the heap visibility map for the given heap blocks.
+    ///
+    /// For example, for `{ heap_blkno_1: None, heap_blkno_2: Some(23), flags: 0b0010_0000}`
+    /// redo will apply `&=0b0010_0000` on heap block 23's visibility map bitmask.
     ClearVisibilityMapFlags {
-        new_heap_blkno: Option<u32>,
-        old_heap_blkno: Option<u32>,
+        heap_blkno_1: Option<u32>,
+        heap_blkno_2: Option<u32>,
         flags: u8,
     },
     /// Mark transaction IDs as committed on a CLOG page
