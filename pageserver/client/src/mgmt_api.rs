@@ -1,5 +1,5 @@
 use pageserver_api::{models::*, shard::TenantShardId};
-use reqwest::{IntoUrl, Method};
+use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
@@ -22,8 +22,8 @@ pub enum Error {
     #[error("receive error body: {0}")]
     ReceiveErrorBody(String),
 
-    #[error("pageserver API: {0}")]
-    ApiError(String),
+    #[error("pageserver API: {1}")]
+    ApiError(StatusCode, String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,7 +43,7 @@ impl ResponseErrorMessageExt for reqwest::Response {
 
         let url = self.url().to_owned();
         Err(match self.json::<HttpErrorBody>().await {
-            Ok(HttpErrorBody { msg }) => Error::ApiError(msg),
+            Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
             Err(_) => {
                 Error::ReceiveErrorBody(format!("Http error ({}) at {}.", status.as_u16(), url))
             }
@@ -169,11 +169,8 @@ impl Client {
             "{}/v1/tenant/{}/secondary/download",
             self.mgmt_api_endpoint, tenant_id
         );
-        self.request(Method::POST, &uri, ())
-            .await?
-            .error_for_status()
-            .map(|_| ())
-            .map_err(|e| Error::ApiError(format!("{}", e)))
+        self.request(Method::POST, &uri, ()).await?;
+        Ok(())
     }
 
     pub async fn location_config(
