@@ -306,7 +306,8 @@ enum PageStreamError {
     #[error("LSN timeout: {0}")]
     LsnTimeout(WaitLsnError),
 
-    /// Something went wrong reading a page: this likely indicates a pageserver bug
+    /// The entity required to serve the request (tenant or timeline) is not found,
+    /// or is not found in a suitable state to serve a request.
     #[error("Not found: {0}")]
     NotFound(std::borrow::Cow<'static, str>),
 
