@@ -10,6 +10,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.types import TenantId, TimelineId
 
 
@@ -126,7 +127,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
     pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "return"))
     with pytest.raises(Exception, match="before-checkpoint-new-timeline"):
-        _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
+        _ = pageserver_http.timeline_create(PgVersion.NOT_SET, tenant_id, TimelineId.generate())
 
     # Restart the page server
     env.pageserver.restart(immediate=True)
@@ -216,7 +217,7 @@ def test_timeline_create_break_after_uninit_mark(neon_env_builder: NeonEnvBuilde
     # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
     pageserver_http.configure_failpoints(("after-timeline-uninit-mark-creation", "return"))
     with pytest.raises(Exception, match="after-timeline-uninit-mark-creation"):
-        _ = env.neon_cli.create_timeline("test_timeline_create_break_after_uninit_mark", tenant_id)
+        _ = pageserver_http.timeline_create(PgVersion.NOT_SET, tenant_id, TimelineId.generate())
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     # "New" timeline is not present in the list, allowing pageserver to retry the same request
