@@ -383,8 +383,10 @@ impl WalIngest {
                     if self.checkpoint.nextOid != next_oid {
                         self.checkpoint.nextOid = next_oid;
                         self.checkpoint_modified = true;
+                        IngestRecordOutcome::Stored
+                    } else {
+                        IngestRecordOutcome::Noop
                     }
-                    IngestRecordOutcome::Noop // TODO review
                 } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
                     || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
                 {
@@ -404,8 +406,10 @@ impl WalIngest {
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
                         self.checkpoint_modified = true;
+                        IngestRecordOutcome::Stored
+                    } else {
+                        IngestRecordOutcome::Noop
                     }
-                    IngestRecordOutcome::Noop
                 } else if info == pg_constants::XLOG_FPI || info == pg_constants::XLOG_FPI_FOR_HINT
                 {
                     // These records are importan for us, bu they are handled by
