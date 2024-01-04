@@ -321,7 +321,7 @@ mod tests {
     };
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
-    use tokio::{sync::mpsc, task::yield_now, time};
+    use tokio::{sync::mpsc, time};
 
     use super::{worker_inner, ParquetConfig, RequestData};
 
@@ -523,7 +523,7 @@ mod tests {
         tmpdir.close().unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn verify_parquet_regular_upload() {
         let tmpdir = camino_tempfile::tempdir().unwrap();
 
@@ -535,8 +535,6 @@ mod tests {
             test_remote_failures: 2,
         };
 
-        time::pause();
-
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         tokio::spawn(async move {
@@ -544,11 +542,8 @@ mod tests {
                 let mut s = random_stream(3000);
                 while let Some(r) = s.next().await {
                     tx.send(r).unwrap();
-                    yield_now().await;
                 }
-                let sleep = time::sleep(time::Duration::from_secs(61));
-                time::advance(time::Duration::from_secs(61)).await;
-                sleep.await
+                time::sleep(time::Duration::from_secs(70)).await
             }
         });
 
