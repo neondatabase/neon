@@ -716,21 +716,11 @@ impl WalIngest {
             relnode: decoded.blocks[0].rnode_relnode,
         };
 
-        // Clear the VM bits if required.
-        match (new_heap_blkno, old_heap_blkno) {
-            (Some(new_heap_blkno), Some(old_heap_blkno)) => {
-                let mut new_vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(new_heap_blkno);
-                let mut old_vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(old_heap_blkno);
-                // Clear VM bits for one heap page, or for two pages that reside on
-                // different VM pages.
-                //
-                // Sometimes, Postgres seems to create heap WAL records with the
-                // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-                // not set. In fact, it's possible that the VM page does not exist at all.
-                // In that case, we don't want to store a record to clear the VM bit;
-                // replaying it would fail to find the previous image of the page, because
-                // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-                // record if it doesn't.
+        let new = new_heap_blkno.map(|x| (x, pg_constants::HEAPBLK_TO_MAPBLOCK(x)));
+        let old = old_heap_blkno.map(|x| (x, pg_constants::HEAPBLK_TO_MAPBLOCK(x)));
+
+        match (new, old) {
+            (Some((new_heap_blkno, new_vm_blk)), Some((old_heap_blkno, old_vm_blk))) => {
                 let vm_size = get_relsize(modification, vm_rel, ctx).await?;
                 match (new_vm_blk >= vm_size, old_vm_blk >= vm_size) {
                     (true, true) => {}
@@ -807,16 +797,7 @@ impl WalIngest {
                     }
                 }
             }
-            (Some(new_heap_blkno), None) => 'clause: {
-                let new_vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(new_heap_blkno);
-
-                // Sometimes, Postgres seems to create heap WAL records with the
-                // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-                // not set. In fact, it's possible that the VM page does not exist at all.
-                // In that case, we don't want to store a record to clear the VM bit;
-                // replaying it would fail to find the previous image of the page, because
-                // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-                // record if it doesn't.
+            (Some((new_heap_blkno, new_vm_blk)), None) => 'clause: {
                 let vm_size = get_relsize(modification, vm_rel, ctx).await?;
                 if new_vm_blk >= vm_size {
                     break 'clause;
@@ -834,16 +815,7 @@ impl WalIngest {
                 )
                 .await?;
             }
-            (None, Some(old_heap_blkno)) => 'clause: {
-                let old_vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(old_heap_blkno);
-
-                // Sometimes, Postgres seems to create heap WAL records with the
-                // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-                // not set. In fact, it's possible that the VM page does not exist at all.
-                // In that case, we don't want to store a record to clear the VM bit;
-                // replaying it would fail to find the previous image of the page, because
-                // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-                // record if it doesn't.
+            (None, Some((old_heap_blkno, old_vm_blk))) => 'clause: {
                 let vm_size = get_relsize(modification, vm_rel, ctx).await?;
                 if old_vm_blk >= vm_size {
                     break 'clause;
