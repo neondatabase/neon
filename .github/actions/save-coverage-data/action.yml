@@ -4,6 +4,10 @@ description: 'Compresses and uploads the coverage data as an artifact'
 runs:
   using: "composite"
   steps:
+    - name: List coverage files
+      shell: bash -euxo pipefail {0}
+      run: find /tmp/coverage -type f
+
     - name: Merge coverage data
       shell: bash -euxo pipefail {0}
       run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
