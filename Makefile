@@ -23,7 +23,7 @@ endif
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
-	PG_CONFIGURE_OPTS += --with-libseccomp
+	NO_PG_CONFIGURE_OPTS += --with-libseccomp # libseccomp needs additional adjustments
 else ifeq ($(UNAME_S),Darwin)
 	# macOS with brew-installed openssl requires explicit paths
 	# It can be configured with OPENSSL_PREFIX variable
@@ -80,6 +80,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 	(cd $(POSTGRES_INSTALL_DIR)/build/$* && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure \
 		CFLAGS='$(PG_CFLAGS)' \
+		CPPFLAGS='-fsanitize=address -fsanitize=undefined -fno-sanitize-recover -fno-sanitize=function -Wno-cast-function-type-strict' \
+		LDFLAGS='-fsanitize=address -fsanitize=undefined -static-libsan' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$* > configure.log)
 
