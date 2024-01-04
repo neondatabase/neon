@@ -374,7 +374,7 @@ pub struct GcInfo {
 
 /// An error happened in a get() operation.
 #[derive(thiserror::Error, Debug)]
-pub enum PageReconstructError {
+pub(crate) enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
@@ -480,7 +480,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get(
+    pub(crate) async fn get(
         &self,
         key: Key,
         lsn: Lsn,
@@ -628,7 +628,7 @@ impl Timeline {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    pub async fn wait_lsn(
+    pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
         _ctx: &RequestContext, /* Prepare for use by cancellation */
