@@ -47,7 +47,7 @@ use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::SpawnMode;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
@@ -112,14 +112,6 @@ impl State {
             deletion_queue_client,
             secondary_controller,
         })
-    }
-
-    fn tenant_resources(&self) -> TenantSharedResources {
-        TenantSharedResources {
-            broker_client: self.broker_client.clone(),
-            remote_storage: self.remote_storage.clone(),
-            deletion_queue_client: self.deletion_queue_client.clone(),
-        }
     }
 }
 
@@ -681,16 +673,19 @@ async fn tenant_attach_handler(
         )));
     }
 
-    mgr::attach_tenant(
-        state.conf,
-        tenant_id,
-        generation,
-        tenant_conf,
-        state.tenant_resources(),
-        &ctx,
-    )
-    .instrument(info_span!("tenant_attach", %tenant_id))
-    .await?;
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    state
+        .tenant_manager
+        .upsert_location(
+            tenant_shard_id,
+            location_conf,
+            None,
+            SpawnMode::Normal,
+            &ctx,
+        )
+        .await
+        .map_err(ApiError::BadRequest)?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -1177,7 +1172,7 @@ async fn tenant_create_handler(
         .await
     {
         // This shouldn't happen because we just created the tenant directory
-        // in tenant::mgr::create_tenant, and there aren't any remote timelines
+        // in upsert_location, and there aren't any remote timelines
         // to load, so, nothing can really fail during load.
         // Don't do cleanup because we don't know how we got here.
         // The tenant will likely be in `Broken` state and subsequent

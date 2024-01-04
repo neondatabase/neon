@@ -35,7 +35,7 @@ use crate::tenant::config::{
 };
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
-use crate::tenant::{create_tenant_files, AttachedTenantConf, SpawnMode, Tenant, TenantState};
+use crate::tenant::{AttachedTenantConf, SpawnMode, Tenant, TenantState};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME, TEMP_FILE_SUFFIX};
 
 use utils::crashsafe::path_with_suffix_extension;
@@ -1614,55 +1614,6 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, 
             TenantSlot::InProgress(_) => None,
         })
         .collect())
-}
-
-/// Execute Attach mgmt API command.
-///
-/// Downloading all the tenant data is performed in the background, this merely
-/// spawns the background task and returns quickly.
-pub(crate) async fn attach_tenant(
-    conf: &'static PageServerConf,
-    tenant_id: TenantId,
-    generation: Generation,
-    tenant_conf: TenantConfOpt,
-    resources: TenantSharedResources,
-    ctx: &RequestContext,
-) -> Result<(), TenantMapInsertError> {
-    // This is a legacy API (replaced by `/location_conf`).  It does not support sharding
-    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-
-    let slot_guard =
-        tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
-    let tenant_dir = create_tenant_files(conf, &location_conf, &tenant_shard_id).await?;
-    // TODO: tenant directory remains on disk if we bail out from here on.
-    //       See https://github.com/neondatabase/neon/issues/4233
-
-    let shard_identity = location_conf.shard;
-    let attached_tenant = tenant_spawn(
-        conf,
-        tenant_shard_id,
-        &tenant_dir,
-        resources,
-        AttachedTenantConf::try_from(location_conf)?,
-        shard_identity,
-        None,
-        &TENANTS,
-        SpawnMode::Normal,
-        ctx,
-    )?;
-    // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-    //      See https://github.com/neondatabase/neon/issues/4233
-
-    let attached_tenant_id = attached_tenant.tenant_id();
-    if tenant_id != attached_tenant_id {
-        return Err(TenantMapInsertError::Other(anyhow::anyhow!(
-            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
-        )));
-    }
-
-    slot_guard.upsert(TenantSlot::Attached(attached_tenant))?;
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
