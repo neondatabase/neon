@@ -152,6 +152,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
+            PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }

@@ -25,6 +25,7 @@ use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, Qu
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
+use std::borrow::Cow;
 use std::io;
 use std::net::TcpListener;
 use std::pin::pin;
@@ -61,6 +62,9 @@ use crate::tenant::mgr;
 use crate::tenant::mgr::get_active_tenant_with_timeout;
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::ShardSelector;
+use crate::tenant::timeline::WaitLsnError;
+use crate::tenant::GetTimelineError;
+use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::trace::Tracer;
 
@@ -283,6 +287,64 @@ struct PageServerHandler {
     connection_ctx: RequestContext,
 }
 
+#[derive(thiserror::Error, Debug)]
+enum PageStreamError {
+    /// We encountered an error that should prompt the client to reconnect:
+    /// in practice this means we drop the connection without sending a response.
+    #[error("Reconnect required: {0}")]
+    Reconnect(Cow<'static, str>),
+
+    /// We were instructed to shutdown while processing the query
+    #[error("Shutting down")]
+    Shutdown,
+
+    /// Something went wrong reading a page: this likely indicates a pageserver bug
+    #[error("Read error: {0}")]
+    Read(PageReconstructError),
+
+    /// Ran out of time waiting for an LSN
+    #[error("LSN timeout: {0}")]
+    LsnTimeout(WaitLsnError),
+
+    /// The entity required to serve the request (tenant or timeline) is not found,
+    /// or is not found in a suitable state to serve a request.
+    #[error("Not found: {0}")]
+    NotFound(std::borrow::Cow<'static, str>),
+
+    /// Request asked for something that doesn't make sense, like an invalid LSN
+    #[error("Bad request: {0}")]
+    BadRequest(std::borrow::Cow<'static, str>),
+}
+
+impl From<PageReconstructError> for PageStreamError {
+    fn from(value: PageReconstructError) -> Self {
+        match value {
+            PageReconstructError::Cancelled => Self::Shutdown,
+            e => Self::Read(e),
+        }
+    }
+}
+
+impl From<GetActiveTimelineError> for PageStreamError {
+    fn from(value: GetActiveTimelineError) -> Self {
+        match value {
+            GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => Self::Shutdown,
+            GetActiveTimelineError::Tenant(e) => Self::NotFound(format!("{e}").into()),
+            GetActiveTimelineError::Timeline(e) => Self::NotFound(format!("{e}").into()),
+        }
+    }
+}
+
+impl From<WaitLsnError> for PageStreamError {
+    fn from(value: WaitLsnError) -> Self {
+        match value {
+            e @ WaitLsnError::Timeout(_) => Self::LsnTimeout(e),
+            WaitLsnError::Shutdown => Self::Shutdown,
+            WaitLsnError::BadState => Self::Reconnect("Timeline is not active".into()),
+        }
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
@@ -428,7 +490,7 @@ impl PageServerHandler {
         // Check that the timeline exists
         let timeline = tenant
             .get_timeline(timeline_id, true)
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| QueryError::NotFound(format!("{e}").into()))?;
 
         // Avoid starting new requests if the timeline has already started shutting down,
         // and block timeline shutdown until this request is complete, or drops out due
@@ -520,32 +582,44 @@ impl PageServerHandler {
                 }
             };
 
-            if let Err(e) = &response {
-                // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
-                // because wait_lsn etc will drop out
-                // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
-                // is_canceled(): [`Timeline::shutdown`]` has entered
-                if timeline.cancel.is_cancelled() || timeline.is_stopping() {
+            match response {
+                Err(PageStreamError::Shutdown) => {
                     // If we fail to fulfil a request during shutdown, which may be _because_ of
                     // shutdown, then do not send the error to the client.  Instead just drop the
                     // connection.
-                    span.in_scope(|| info!("dropped response during shutdown: {e:#}"));
+                    span.in_scope(|| info!("dropping connection due to shutdown"));
                     return Err(QueryError::Shutdown);
                 }
+                Err(PageStreamError::Reconnect(reason)) => {
+                    span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                    return Err(QueryError::Reconnect);
+                }
+                Err(e) if timeline.cancel.is_cancelled() || timeline.is_stopping() => {
+                    // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
+                    // shutdown error, this may be buried inside a PageReconstructError::Other for example.
+                    //
+                    // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
+                    // because wait_lsn etc will drop out
+                    // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
+                    // is_canceled(): [`Timeline::shutdown`]` has entered
+                    span.in_scope(|| info!("dropped error response during shutdown: {e:#}"));
+                    return Err(QueryError::Shutdown);
+                }
+                r => {
+                    let response_msg = r.unwrap_or_else(|e| {
+                        // print the all details to the log with {:#}, but for the client the
+                        // error message is enough.  Do not log if shutting down, as the anyhow::Error
+                        // here includes cancellation which is not an error.
+                        span.in_scope(|| error!("error reading relation or page version: {:#}", e));
+                        PagestreamBeMessage::Error(PagestreamErrorResponse {
+                            message: e.to_string(),
+                        })
+                    });
+
+                    pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+                    self.flush_cancellable(pgb, &timeline.cancel).await?;
+                }
             }
-
-            let response = response.unwrap_or_else(|e| {
-                // print the all details to the log with {:#}, but for the client the
-                // error message is enough.  Do not log if shutting down, as the anyhow::Error
-                // here includes cancellation which is not an error.
-                span.in_scope(|| error!("error reading relation or page version: {:#}", e));
-                PagestreamBeMessage::Error(PagestreamErrorResponse {
-                    message: e.to_string(),
-                })
-            });
-
-            pgb.write_message_noflush(&BeMessage::CopyData(&response.serialize()))?;
-            self.flush_cancellable(pgb, &timeline.cancel).await?;
         }
         Ok(())
     }
@@ -692,7 +766,7 @@ impl PageServerHandler {
         latest: bool,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Lsn> {
+    ) -> Result<Lsn, PageStreamError> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
             // to the page server that there have been no modifications to the
@@ -723,15 +797,19 @@ impl PageServerHandler {
             }
         } else {
             if lsn == Lsn(0) {
-                anyhow::bail!("invalid LSN(0) in request");
+                return Err(PageStreamError::BadRequest(
+                    "invalid LSN(0) in request".into(),
+                ));
             }
             timeline.wait_lsn(lsn, ctx).await?;
         }
-        anyhow::ensure!(
-            lsn >= **latest_gc_cutoff_lsn,
-            "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-            lsn, **latest_gc_cutoff_lsn
-        );
+
+        if lsn < **latest_gc_cutoff_lsn {
+            return Err(PageStreamError::BadRequest(format!(
+                "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+                lsn, **latest_gc_cutoff_lsn
+            ).into()));
+        }
         Ok(lsn)
     }
 
@@ -740,7 +818,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -760,7 +838,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -780,7 +858,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -807,7 +885,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -826,7 +904,7 @@ impl PageServerHandler {
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
-    ) -> anyhow::Result<PagestreamBeMessage> {
+    ) -> Result<PagestreamBeMessage, PageStreamError> {
         let key = rel_block_to_key(req.rel, req.blkno);
         if timeline.get_shard_identity().is_key_local(&key) {
             self.do_handle_get_page_at_lsn_request(timeline, req, ctx)
@@ -849,24 +927,26 @@ impl PageServerHandler {
                 Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
                     // We already know this tenant exists in general, because we resolved it at
                     // start of connection.  Getting a NotFound here indicates that the shard containing
-                    // the requested page is not present on this node.
-
-                    // TODO: this should be some kind of structured error that the client will understand,
-                    // so that it can block until its config is updated: this error is expected in the case
-                    // that the Tenant's shards' placements are being updated and the client hasn't been
-                    // informed yet.
-                    //
-                    // https://github.com/neondatabase/neon/issues/6038
-                    tracing::warn!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
+                    // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                    // mapping is out of date.
+                    tracing::info!("Page request routed to wrong shard: my identity {:?}, should go to shard {}, key {}",
                         timeline.get_shard_identity(), timeline.get_shard_identity().get_shard_number(&key).0, key);
-                    return Err(anyhow::anyhow!("Request routed to wrong shard"));
+                    // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                    // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                    // and talk to a different pageserver.
+                    return Err(PageStreamError::Reconnect(
+                        "getpage@lsn request routed to wrong shard".into(),
+                    ));
                 }
                 Err(e) => return Err(e.into()),
             };
 
             // Take a GateGuard for the duration of this request.  If we were using our main Timeline object,
             // the GateGuard was already held over the whole connection.
-            let _timeline_guard = timeline.gate.enter().map_err(|_| QueryError::Shutdown)?;
+            let _timeline_guard = timeline
+                .gate
+                .enter()
+                .map_err(|_| PageStreamError::Shutdown)?;
 
             self.do_handle_get_page_at_lsn_request(&timeline, req, ctx)
                 .await
@@ -1011,9 +1091,7 @@ impl PageServerHandler {
         )
         .await
         .map_err(GetActiveTimelineError::Tenant)?;
-        let timeline = tenant
-            .get_timeline(timeline_id, true)
-            .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
+        let timeline = tenant.get_timeline(timeline_id, true)?;
         Ok(timeline)
     }
 }
@@ -1435,14 +1513,15 @@ enum GetActiveTimelineError {
     #[error(transparent)]
     Tenant(GetActiveTenantError),
     #[error(transparent)]
-    Timeline(anyhow::Error),
+    Timeline(#[from] GetTimelineError),
 }
 
 impl From<GetActiveTimelineError> for QueryError {
     fn from(e: GetActiveTimelineError) -> Self {
         match e {
+            GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => QueryError::Shutdown,
             GetActiveTimelineError::Tenant(e) => e.into(),
-            GetActiveTimelineError::Timeline(e) => QueryError::Other(e),
+            GetActiveTimelineError::Timeline(e) => QueryError::NotFound(format!("{e}").into()),
         }
     }
 }
