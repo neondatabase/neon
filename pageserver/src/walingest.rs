@@ -113,6 +113,7 @@ impl<'a> WalIngest<'a> {
             self.checkpoint_modified = true;
         }
 
+        #[allow(clippy::if_same_then_else)]
         let outcome = match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
@@ -589,6 +590,7 @@ impl<'a> WalIngest<'a> {
         let mut old_heap_blkno: Option<u32> = None;
         let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
+        #[allow(clippy::if_same_then_else)]
         let outcome = match self.timeline.pg_version {
             14 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
