@@ -747,19 +747,18 @@ impl WalIngest {
             (None, None) => {
                 // Nothing to do
             }
-            (Some(x), Some(y)) if x == y => {
+            (Some((new_heap_blkno, new_vm_blk)), Some((old_heap_blkno, old_vm_blk)))
+                if new_vm_blk == old_vm_blk =>
+            {
                 // An UPDATE record that needs to clear the bits for both old and the
                 // new page, both of which reside on the same VM page.
-                //
-                // Save some space by only putting one wal record.
-                let (heap_blk, vm_blk) = x; // could be x or y, doesn't matter
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
-                    vm_blk,
+                    new_vm_blk, // could also be old_vm_blk, they're the same
                     NeonWalRecord::ClearVisibilityMapFlags {
-                        new_heap_blkno: Some(heap_blk),
-                        old_heap_blkno: Some(heap_blk),
+                        new_heap_blkno: Some(new_heap_blkno),
+                        old_heap_blkno: Some(old_heap_blkno),
                         flags,
                     },
                     ctx,
