@@ -165,7 +165,7 @@ impl RemoteStorage for UnreliableWrapper {
 
     async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
         // copy is equivalent to download + upload
-        self.attempt(RemoteOp::Download(to.clone()))?;
+        self.attempt(RemoteOp::Download(from.clone()))?;
         self.attempt(RemoteOp::Upload(to.clone()))?;
         self.inner.copy_object(from, to).await
     }

@@ -103,7 +103,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
 
         if max_backup_lsn <= start_lsn {
             // probably we are starting from the first segment, which was not backed up yet.
-            // star_lsn can be in the middle of the segment
+            // note that start_lsn can be in the middle of the segment
             start_lsn
         } else {
             // we have some segments backed up, so we will assume all WAL below max_backup_lsn is backed up

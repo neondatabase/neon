@@ -324,7 +324,9 @@ impl RemoteStorage for AzureBlobStorage {
     }
 
     async fn copy(&self, _from: &RemotePath, _to: &RemotePath) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("copy for azure blob storage is not implemented"))
+        Err(anyhow::anyhow!(
+            "copy for azure blob storage is not implemented"
+        ))
     }
 }
 

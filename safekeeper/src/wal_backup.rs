@@ -537,8 +537,8 @@ pub async fn copy_s3_segments(
     wal_seg_size: usize,
     src_ttid: &TenantTimelineId,
     dst_ttid: &TenantTimelineId,
-    from_segment: u64,
-    to_segment: u64,
+    from_segment: XLogSegNo,
+    to_segment: XLogSegNo,
 ) -> Result<()> {
     const SEGMENTS_PROGRESS_REPORT_INTERVAL: u64 = 1024;
 
