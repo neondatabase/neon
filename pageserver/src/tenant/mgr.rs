@@ -754,45 +754,6 @@ async fn shutdown_all_tenants0(tenants: &std::sync::RwLock<TenantsMap>) {
     // caller will log how long we took
 }
 
-pub(crate) async fn create_tenant(
-    conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
-    tenant_shard_id: TenantShardId,
-    generation: Generation,
-    resources: TenantSharedResources,
-    ctx: &RequestContext,
-) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
-    info!("Creating tenant at location {location_conf:?}");
-
-    let slot_guard =
-        tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustNotExist)?;
-    let tenant_path = super::create_tenant_files(conf, &location_conf, &tenant_shard_id).await?;
-
-    let shard_identity = location_conf.shard;
-    let created_tenant = tenant_spawn(
-        conf,
-        tenant_shard_id,
-        &tenant_path,
-        resources,
-        AttachedTenantConf::try_from(location_conf)?,
-        shard_identity,
-        None,
-        &TENANTS,
-        SpawnMode::Create,
-        ctx,
-    )?;
-    // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-    //      See https://github.com/neondatabase/neon/issues/4233
-
-    let created_tenant_id = created_tenant.tenant_id();
-    debug_assert_eq!(created_tenant_id, tenant_shard_id.tenant_id);
-
-    slot_guard.upsert(TenantSlot::Attached(created_tenant.clone()))?;
-
-    Ok(created_tenant)
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SetNewTenantConfigError {
     #[error(transparent)]
@@ -888,8 +849,9 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         new_location_config: LocationConf,
         flush: Option<Duration>,
+        spawn_mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<Option<Arc<Tenant>>, anyhow::Error> {
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
 
@@ -956,7 +918,7 @@ impl TenantManager {
                             Ok(Err(e)) => {
                                 return Err(e);
                             }
-                            Ok(Ok(_)) => return Ok(()),
+                            Ok(Ok(_)) => return Ok(Some(tenant)),
                             Err(_) => {
                                 tracing::warn!(
                                 timeout_ms = flush_timeout.as_millis(),
@@ -967,14 +929,14 @@ impl TenantManager {
                     }
                 }
 
-                return Ok(());
+                return Ok((Some(tenant)));
             }
             Some(FastPathModified::Secondary(_secondary_tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
                     .await
                     .map_err(SetNewTenantConfigError::Persist)?;
 
-                return Ok(());
+                return Ok(None);
             }
             None => {
                 // Proceed with the general case procedure, where we will shutdown & remove any existing
@@ -1066,7 +1028,7 @@ impl TenantManager {
                     shard_identity,
                     None,
                     self.tenants,
-                    SpawnMode::Normal,
+                    spawn_mode,
                     ctx,
                 )?;
 
@@ -1074,9 +1036,15 @@ impl TenantManager {
             }
         };
 
+        let attached_tenant = if let TenantSlot::Attached(tenant) = &new_slot {
+            Some(tenant.clone())
+        } else {
+            None
+        };
+
         slot_guard.upsert(new_slot)?;
 
-        Ok(())
+        Ok(attached_tenant)
     }
 
     /// Resetting a tenant is equivalent to detaching it, then attaching it again with the same

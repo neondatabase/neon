@@ -46,6 +46,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
+use crate::tenant::SpawnMode;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
@@ -1148,16 +1149,26 @@ async fn tenant_create_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let new_tenant = mgr::create_tenant(
-        state.conf,
-        tenant_conf,
-        target_tenant_id,
-        generation,
-        state.tenant_resources(),
-        &ctx,
-    )
-    .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
-    .await?;
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+
+    let new_tenant = state
+        .tenant_manager
+        .upsert_location(
+            target_tenant_id,
+            location_conf,
+            None,
+            SpawnMode::Create,
+            &ctx,
+        )
+        .await
+        .map_err(ApiError::BadRequest)?;
+
+    let Some(new_tenant) = new_tenant else {
+        // This should never happen: indicates a bug in upsert_location
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Upsert succeeded but didn't return tenant!"
+        )));
+    };
 
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
@@ -1267,7 +1278,13 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, flush, &ctx)
+        .upsert_location(
+            tenant_shard_id,
+            location_conf,
+            flush,
+            tenant::SpawnMode::Normal,
+            &ctx,
+        )
         .await
         // TODO: badrequest assumes the caller was asking for something unreasonable, but in
         // principle we might have hit something like concurrent API calls to the same tenant,
