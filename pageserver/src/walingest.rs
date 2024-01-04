@@ -817,8 +817,8 @@ impl WalIngest {
                     }
                 }
             }
-            (Some(_), None) => {
-                let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            (Some(new_heap_blkno), None) => 'clause: {
+                let new_vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(new_heap_blkno);
 
                 // Sometimes, Postgres seems to create heap WAL records with the
                 // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
@@ -828,28 +828,24 @@ impl WalIngest {
                 // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
                 // record if it doesn't.
                 let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-                if let Some(blknum) = new_vm_blk {
-                    if blknum >= vm_size {
-                        new_vm_blk = None;
-                    }
+                if new_vm_blk >= vm_size {
+                    break 'clause;
                 }
-                if let Some(new_vm_blk) = new_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno: None,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
+                self.put_rel_wal_record(
+                    modification,
+                    vm_rel,
+                    new_vm_blk,
+                    NeonWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno: Some(new_heap_blkno),
+                        old_heap_blkno: None,
+                        flags,
+                    },
+                    ctx,
+                )
+                .await?;
             }
-            (None, Some(_)) => {
-                let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            (None, Some(old_heap_blkno)) => 'clause: {
+                let old_vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(old_heap_blkno);
 
                 // Sometimes, Postgres seems to create heap WAL records with the
                 // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
@@ -859,29 +855,24 @@ impl WalIngest {
                 // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
                 // record if it doesn't.
                 let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-                if let Some(blknum) = old_vm_blk {
-                    if blknum >= vm_size {
-                        old_vm_blk = None;
-                    }
+                if old_vm_blk >= vm_size {
+                    break 'clause;
                 }
-                if let Some(old_vm_blk) = old_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        old_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
-                            old_heap_blkno,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
+                self.put_rel_wal_record(
+                    modification,
+                    vm_rel,
+                    old_vm_blk,
+                    NeonWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno: None,
+                        old_heap_blkno: Some(old_heap_blkno),
+                        flags,
+                    },
+                    ctx,
+                )
+                .await?;
             }
             (None, None) => {}
         }
-        if new_heap_blkno.is_some() || old_heap_blkno.is_some() {}
 
         Ok(())
     }
