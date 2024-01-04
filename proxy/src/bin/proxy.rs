@@ -7,6 +7,7 @@ use proxy::console;
 use proxy::console::provider::AllowedIpsCache;
 use proxy::console::provider::NodeInfoCache;
 use proxy::console::provider::RoleSecretCache;
+use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
@@ -136,6 +137,9 @@ struct ProxyCliArgs {
     /// disable ip check for http requests. If it is too time consuming, it could be turned off.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_ip_check_for_http: bool,
+
+    #[clap(flatten)]
+    parquet_upload: ParquetUploadArgs,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -224,7 +228,10 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    client_tasks.spawn(proxy::context::parquet::worker(cancellation_token.clone()));
+    client_tasks.spawn(proxy::context::parquet::worker(
+        cancellation_token.clone(),
+        args.parquet_upload,
+    ));
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
