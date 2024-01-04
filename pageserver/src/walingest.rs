@@ -719,89 +719,75 @@ impl WalIngest {
         let new = new_heap_blkno.map(|x| (x, pg_constants::HEAPBLK_TO_MAPBLOCK(x)));
         let old = old_heap_blkno.map(|x| (x, pg_constants::HEAPBLK_TO_MAPBLOCK(x)));
 
+        // Sometimes, Postgres seems to create heap WAL records with the
+        // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
+        // not set. In fact, it's possible that the VM page does not exist at all.
+        // In that case, we don't want to store a record to clear the VM bit;
+        // replaying it would fail to find the previous image of the page, because
+        // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
+        // record if it doesn't.
+        let (new, old) = {
+            let vm_size = if new.or(old).is_some() {
+                Some(get_relsize(modification, vm_rel, ctx).await?)
+            } else {
+                None
+            };
+            let filter = |(heap_blk, vm_blk)| {
+                let vm_size = vm_size.expect("we set it to Some() if new or old is Some()");
+                if vm_blk >= vm_size {
+                    None
+                } else {
+                    Some((heap_blk, vm_blk))
+                }
+            };
+            (new.and_then(filter), old.and_then(filter))
+        };
+
         match (new, old) {
             (Some((new_heap_blkno, new_vm_blk)), Some((old_heap_blkno, old_vm_blk))) => {
-                let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-                match (new_vm_blk >= vm_size, old_vm_blk >= vm_size) {
-                    (true, true) => {}
-                    (false, false) => {
-                        if new_vm_blk == old_vm_blk {
-                            // An UPDATE record that needs to clear the bits for both old and the
-                            // new page, both of which reside on the same VM page.
-                            self.put_rel_wal_record(
-                                modification,
-                                vm_rel,
-                                new_vm_blk,
-                                NeonWalRecord::ClearVisibilityMapFlags {
-                                    new_heap_blkno: Some(new_heap_blkno),
-                                    old_heap_blkno: Some(old_heap_blkno),
-                                    flags,
-                                },
-                                ctx,
-                            )
-                            .await?;
-                        } else {
-                            self.put_rel_wal_record(
-                                modification,
-                                vm_rel,
-                                new_vm_blk,
-                                NeonWalRecord::ClearVisibilityMapFlags {
-                                    new_heap_blkno: Some(new_heap_blkno),
-                                    old_heap_blkno: None,
-                                    flags,
-                                },
-                                ctx,
-                            )
-                            .await?;
-                            self.put_rel_wal_record(
-                                modification,
-                                vm_rel,
-                                old_vm_blk,
-                                NeonWalRecord::ClearVisibilityMapFlags {
-                                    new_heap_blkno: None,
-                                    old_heap_blkno: Some(old_heap_blkno),
-                                    flags,
-                                },
-                                ctx,
-                            )
-                            .await?;
-                        }
-                    }
-                    (true, false) => {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            old_vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno: None,
-                                old_heap_blkno: Some(old_heap_blkno),
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    }
-                    (false, true) => {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            new_vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno: Some(new_heap_blkno),
-                                old_heap_blkno: None,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    }
+                if new_vm_blk == old_vm_blk {
+                    // An UPDATE record that needs to clear the bits for both old and the
+                    // new page, both of which reside on the same VM page.
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        new_vm_blk,
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno: Some(new_heap_blkno),
+                            old_heap_blkno: Some(old_heap_blkno),
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
+                } else {
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        new_vm_blk,
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno: Some(new_heap_blkno),
+                            old_heap_blkno: None,
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        old_vm_blk,
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno: None,
+                            old_heap_blkno: Some(old_heap_blkno),
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
                 }
             }
-            (Some((new_heap_blkno, new_vm_blk)), None) => 'clause: {
-                let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-                if new_vm_blk >= vm_size {
-                    break 'clause;
-                }
+            (Some((new_heap_blkno, new_vm_blk)), None) => {
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
@@ -815,11 +801,7 @@ impl WalIngest {
                 )
                 .await?;
             }
-            (None, Some((old_heap_blkno, old_vm_blk))) => 'clause: {
-                let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-                if old_vm_blk >= vm_size {
-                    break 'clause;
-                }
+            (None, Some((old_heap_blkno, old_vm_blk))) => {
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
