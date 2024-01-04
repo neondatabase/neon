@@ -160,7 +160,7 @@ impl Timeline {
     //------------------------------------------------------------------------------
 
     /// Look up given page version.
-    pub async fn get_rel_page_at_lsn(
+    pub(crate) async fn get_rel_page_at_lsn(
         &self,
         tag: RelTag,
         blknum: BlockNumber,
@@ -191,7 +191,7 @@ impl Timeline {
     }
 
     // Get size of a database in blocks
-    pub async fn get_db_size(
+    pub(crate) async fn get_db_size(
         &self,
         spcnode: Oid,
         dbnode: Oid,
@@ -211,7 +211,7 @@ impl Timeline {
     }
 
     /// Get size of a relation file
-    pub async fn get_rel_size(
+    pub(crate) async fn get_rel_size(
         &self,
         tag: RelTag,
         version: Version<'_>,
@@ -256,7 +256,7 @@ impl Timeline {
     }
 
     /// Does relation exist?
-    pub async fn get_rel_exists(
+    pub(crate) async fn get_rel_exists(
         &self,
         tag: RelTag,
         version: Version<'_>,
@@ -291,7 +291,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn list_rels(
+    pub(crate) async fn list_rels(
         &self,
         spcnode: Oid,
         dbnode: Oid,
@@ -319,7 +319,7 @@ impl Timeline {
     }
 
     /// Look up given SLRU page version.
-    pub async fn get_slru_page_at_lsn(
+    pub(crate) async fn get_slru_page_at_lsn(
         &self,
         kind: SlruKind,
         segno: u32,
@@ -332,7 +332,7 @@ impl Timeline {
     }
 
     /// Get size of an SLRU segment
-    pub async fn get_slru_segment_size(
+    pub(crate) async fn get_slru_segment_size(
         &self,
         kind: SlruKind,
         segno: u32,
@@ -345,7 +345,7 @@ impl Timeline {
     }
 
     /// Get size of an SLRU segment
-    pub async fn get_slru_segment_exists(
+    pub(crate) async fn get_slru_segment_exists(
         &self,
         kind: SlruKind,
         segno: u32,
@@ -372,7 +372,7 @@ impl Timeline {
     /// so it's not well defined which LSN you get if there were multiple commits
     /// "in flight" at that point in time.
     ///
-    pub async fn find_lsn_for_timestamp(
+    pub(crate) async fn find_lsn_for_timestamp(
         &self,
         search_timestamp: TimestampTz,
         cancel: &CancellationToken,
@@ -452,7 +452,7 @@ impl Timeline {
     /// Additionally, sets 'found_smaller'/'found_Larger, if encounters any commits
     /// with a smaller/larger timestamp.
     ///
-    pub async fn is_latest_commit_timestamp_ge_than(
+    pub(crate) async fn is_latest_commit_timestamp_ge_than(
         &self,
         search_timestamp: TimestampTz,
         probe_lsn: Lsn,
@@ -475,7 +475,7 @@ impl Timeline {
     /// Obtain the possible timestamp range for the given lsn.
     ///
     /// If the lsn has no timestamps, returns None. returns `(min, max, median)` if it has timestamps.
-    pub async fn get_timestamp_for_lsn(
+    pub(crate) async fn get_timestamp_for_lsn(
         &self,
         probe_lsn: Lsn,
         ctx: &RequestContext,
@@ -532,7 +532,7 @@ impl Timeline {
     }
 
     /// Get a list of SLRU segments
-    pub async fn list_slru_segments(
+    pub(crate) async fn list_slru_segments(
         &self,
         kind: SlruKind,
         version: Version<'_>,
@@ -548,7 +548,7 @@ impl Timeline {
         }
     }
 
-    pub async fn get_relmap_file(
+    pub(crate) async fn get_relmap_file(
         &self,
         spcnode: Oid,
         dbnode: Oid,
@@ -561,7 +561,7 @@ impl Timeline {
         Ok(buf)
     }
 
-    pub async fn list_dbdirs(
+    pub(crate) async fn list_dbdirs(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -575,7 +575,7 @@ impl Timeline {
         }
     }
 
-    pub async fn get_twophase_file(
+    pub(crate) async fn get_twophase_file(
         &self,
         xid: TransactionId,
         lsn: Lsn,
@@ -586,7 +586,7 @@ impl Timeline {
         Ok(buf)
     }
 
-    pub async fn list_twophase_files(
+    pub(crate) async fn list_twophase_files(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -600,7 +600,7 @@ impl Timeline {
         }
     }
 
-    pub async fn get_control_file(
+    pub(crate) async fn get_control_file(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -608,7 +608,7 @@ impl Timeline {
         self.get(CONTROLFILE_KEY, lsn, ctx).await
     }
 
-    pub async fn get_checkpoint(
+    pub(crate) async fn get_checkpoint(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -616,7 +616,7 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
-    pub async fn list_aux_files(
+    pub(crate) async fn list_aux_files(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,

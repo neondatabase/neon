@@ -1053,26 +1053,34 @@ impl WalIngest {
             }
         };
 
-        let vm_rel = RelTag {
-            forknum: VISIBILITYMAP_FORKNUM,
-            spcnode: decoded.blocks[0].rnode_spcnode,
-            dbnode: decoded.blocks[0].rnode_dbnode,
-            relnode: decoded.blocks[0].rnode_relnode,
-        };
-        Ok(self
-            .clear_visibility_map_bits_if_required(
-                modification,
-                vm_rel,
-                new_heap_blkno,
-                old_heap_blkno,
-                flags,
-                ctx,
-            )
-            .await
-            .map_err(HeapamRecordSpecialTreatmentError::EmitWalRecord)?)
+        // Clear the VM bits if required.
+        if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
+            let vm_rel = RelTag {
+                forknum: VISIBILITYMAP_FORKNUM,
+                spcnode: decoded.blocks[0].rnode_spcnode,
+                dbnode: decoded.blocks[0].rnode_dbnode,
+                relnode: decoded.blocks[0].rnode_relnode,
+            };
+
+            Ok(self
+                .clear_visibility_map_bits(
+                    modification,
+                    vm_rel,
+                    new_heap_blkno,
+                    old_heap_blkno,
+                    flags,
+                    ctx,
+                )
+                .await
+                .map_err(HeapamRecordSpecialTreatmentError::EmitWalRecord)?)
+        } else {
+            Ok(ClearVisibilityMapFlagsOutcome::Noop)
+        }
     }
 
-    async fn clear_visibility_map_bits_if_required(
+    /// Write NeonWalRecord::ClearVisibilityMapFlags records for clearing the VM bits
+    /// corresponding to new_heap_blkno and old_heap_blkno.
+    async fn clear_visibility_map_bits(
         &mut self,
         modification: &mut DatadirModification<'_>,
         vm_rel: RelTag,
@@ -1081,9 +1089,8 @@ impl WalIngest {
         flags: u8,
         ctx: &RequestContext,
     ) -> anyhow::Result<ClearVisibilityMapFlagsOutcome> {
-        let new = new_heap_blkno.map(|x| (x, pg_constants::HEAPBLK_TO_MAPBLOCK(x)));
-        let old = old_heap_blkno.map(|x| (x, pg_constants::HEAPBLK_TO_MAPBLOCK(x)));
-
+        // Determine the VM pages containing the old and the new heap block.
+        //
         // Sometimes, Postgres seems to create heap WAL records with the
         // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
         // not set. In fact, it's possible that the VM page does not exist at all.
@@ -1091,54 +1098,47 @@ impl WalIngest {
         // replaying it would fail to find the previous image of the page, because
         // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
         // record if it doesn't.
-        let (new, old) = {
-            let vm_size = if new.or(old).is_some() {
-                Some(get_relsize(modification, vm_rel, ctx).await?)
-            } else {
+        let vm_size = get_relsize(modification, vm_rel, ctx).await?;
+        let heap_to_vm_blk = |heap_blkno| {
+            let vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
+            if vm_blk >= vm_size {
                 None
-            };
-            let filter = |(heap_blk, vm_blk)| {
-                let vm_size = vm_size.expect("we set it to Some() if new or old is Some()");
-                if vm_blk >= vm_size {
-                    None
-                } else {
-                    Some((heap_blk, vm_blk))
-                }
-            };
-            (new.and_then(filter), old.and_then(filter))
+            } else {
+                Some(vm_blk)
+            }
         };
+        let new_vm_blk = new_heap_blkno.map(heap_to_vm_blk).flatten();
+        let old_vm_blk = old_heap_blkno.map(heap_to_vm_blk).flatten();
 
-        let outcome = match (new, old) {
-            (Some((new_heap_blkno, new_vm_blk)), Some((old_heap_blkno, old_vm_blk)))
-                if new_vm_blk == old_vm_blk =>
-            {
+        let mut outcome = ClearVisibilityMapFlagsOutcome::Noop;
+        if new_vm_blk.is_some() || old_vm_blk.is_some() {
+            if new_vm_blk == old_vm_blk {
                 // An UPDATE record that needs to clear the bits for both old and the
                 // new page, both of which reside on the same VM page.
                 self.put_rel_wal_record(
                     modification,
                     vm_rel,
-                    new_vm_blk, // could also be old_vm_blk, they're the same
+                    new_vm_blk.unwrap(),
                     NeonWalRecord::ClearVisibilityMapFlags {
-                        heap_blkno_1: Some(new_heap_blkno),
-                        heap_blkno_2: Some(old_heap_blkno),
+                        new_heap_blkno,
+                        old_heap_blkno,
                         flags,
                     },
                     ctx,
                 )
                 .await?;
-                ClearVisibilityMapFlagsOutcome::Stored
-            }
-            (new, old) => {
-                // Emit one record per VM block that needs updating.
-                let mut outcome = ClearVisibilityMapFlagsOutcome::Noop;
-                for (heap_blkno, vm_blk) in [new, old].into_iter().flatten() {
+                outcome = ClearVisibilityMapFlagsOutcome::Stored;
+            } else {
+                // Clear VM bits for one heap page, or for two pages that reside on
+                // different VM pages.
+                if let Some(new_vm_blk) = new_vm_blk {
                     self.put_rel_wal_record(
                         modification,
                         vm_rel,
-                        vm_blk,
+                        new_vm_blk,
                         NeonWalRecord::ClearVisibilityMapFlags {
-                            heap_blkno_1: Some(heap_blkno),
-                            heap_blkno_2: None,
+                            new_heap_blkno,
+                            old_heap_blkno: None,
                             flags,
                         },
                         ctx,
@@ -1146,7 +1146,21 @@ impl WalIngest {
                     .await?;
                     outcome = ClearVisibilityMapFlagsOutcome::Stored;
                 }
-                outcome
+                if let Some(old_vm_blk) = old_vm_blk {
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        old_vm_blk,
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno: None,
+                            old_heap_blkno,
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
+                    outcome = ClearVisibilityMapFlagsOutcome::Stored;
+                }
             }
         };
         anyhow::Ok(outcome)
@@ -1244,7 +1258,7 @@ impl WalIngest {
             relnode: decoded.blocks[0].rnode_relnode,
         };
         Ok(self
-            .clear_visibility_map_bits_if_required(
+            .clear_visibility_map_bits(
                 modification,
                 vm_rel,
                 new_heap_blkno,

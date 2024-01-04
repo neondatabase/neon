@@ -56,6 +56,7 @@ use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
+use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -1758,7 +1759,15 @@ impl Tenant {
                     // decoding the new WAL might need to look up previous pages, relation
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
-                    ancestor_timeline.wait_lsn(*lsn, ctx).await?;
+                    ancestor_timeline
+                        .wait_lsn(*lsn, ctx)
+                        .await
+                        .map_err(|e| match e {
+                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState) => {
+                                CreateTimelineError::AncestorLsn(anyhow::anyhow!(e))
+                            }
+                            WaitLsnError::Shutdown => CreateTimelineError::ShuttingDown,
+                        })?;
                 }
 
                 self.branch_timeline(

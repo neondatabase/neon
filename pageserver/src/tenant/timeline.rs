@@ -373,15 +373,20 @@ pub struct GcInfo {
 }
 
 /// An error happened in a get() operation.
-#[derive(thiserror::Error)]
-pub enum PageReconstructError {
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
+    #[error("Ancestor LSN wait error: {0}")]
+    AncestorLsnTimeout(#[from] WaitLsnError),
+
     /// The operation was cancelled
+    #[error("Cancelled")]
     Cancelled,
 
     /// The ancestor of this is being stopped
+    #[error("ancestor timeline {0} is being stopped")]
     AncestorStopping(TimelineId),
 
     /// An error happened replaying WAL records
@@ -400,32 +405,6 @@ enum FlushLayerError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-}
-
-impl std::fmt::Debug for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Other(err) => err.fmt(f),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::AncestorStopping(timeline_id) => {
-                write!(f, "ancestor timeline {timeline_id} is being stopped")
-            }
-            Self::WalRedo(err) => err.fmt(f),
-        }
-    }
-}
-
-impl std::fmt::Display for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Other(err) => err.fmt(f),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::AncestorStopping(timeline_id) => {
-                write!(f, "ancestor timeline {timeline_id} is being stopped")
-            }
-            Self::WalRedo(err) => err.fmt(f),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -450,6 +429,21 @@ impl std::fmt::Debug for Timeline {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "Timeline<{}>", self.timeline_id)
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum WaitLsnError {
+    // Called on a timeline which is shutting down
+    #[error("Shutdown")]
+    Shutdown,
+
+    // Called on an timeline not in active state or shutting down
+    #[error("Bad state (not active)")]
+    BadState,
+
+    // Timeout expired while waiting for LSN to catch up with goal.
+    #[error("{0}")]
+    Timeout(String),
 }
 
 /// Public interface functions
@@ -486,7 +480,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get(
+    pub(crate) async fn get(
         &self,
         key: Key,
         lsn: Lsn,
@@ -634,24 +628,28 @@ impl Timeline {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    pub async fn wait_lsn(
+    pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
         _ctx: &RequestContext, /* Prepare for use by cancellation */
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
+    ) -> Result<(), WaitLsnError> {
+        if self.cancel.is_cancelled() {
+            return Err(WaitLsnError::Shutdown);
+        } else if !self.is_active() {
+            return Err(WaitLsnError::BadState);
+        }
 
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
-        anyhow::ensure!(
+        debug_assert!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverManager),
             "wait_lsn cannot be called in WAL receiver"
         );
-        anyhow::ensure!(
+        debug_assert!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionHandler),
             "wait_lsn cannot be called in WAL receiver"
         );
-        anyhow::ensure!(
+        debug_assert!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionPoller),
             "wait_lsn cannot be called in WAL receiver"
         );
@@ -665,18 +663,22 @@ impl Timeline {
         {
             Ok(()) => Ok(()),
             Err(e) => {
-                // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
-                drop(_timer);
-                let walreceiver_status = self.walreceiver_status();
-                Err(anyhow::Error::new(e).context({
-                    format!(
+                use utils::seqwait::SeqWaitError::*;
+                match e {
+                    Shutdown => Err(WaitLsnError::Shutdown),
+                    Timeout => {
+                        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
+                        drop(_timer);
+                        let walreceiver_status = self.walreceiver_status();
+                        Err(WaitLsnError::Timeout(format!(
                         "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
                         lsn,
                         self.get_last_record_lsn(),
                         self.get_disk_consistent_lsn(),
                         walreceiver_status,
-                    )
-                }))
+                    )))
+                    }
+                }
             }
         }
     }
@@ -2295,11 +2297,12 @@ impl Timeline {
                 ancestor
                     .wait_lsn(timeline.ancestor_lsn, ctx)
                     .await
-                    .with_context(|| {
-                        format!(
-                            "wait for lsn {} on ancestor timeline_id={}",
-                            timeline.ancestor_lsn, ancestor.timeline_id
-                        )
+                    .map_err(|e| match e {
+                        e @ WaitLsnError::Timeout(_) => PageReconstructError::AncestorLsnTimeout(e),
+                        WaitLsnError::Shutdown => PageReconstructError::Cancelled,
+                        e @ WaitLsnError::BadState => {
+                            PageReconstructError::Other(anyhow::anyhow!(e))
+                        }
                     })?;
 
                 timeline_owned = ancestor;
@@ -4228,7 +4231,7 @@ impl Timeline {
                     .context("Failed to reconstruct a page image:")
                 {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::from(e)),
+                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
 
                 if img.len() == page_cache::PAGE_SZ {

@@ -403,8 +403,8 @@ impl PostgresRedoManager {
                 anyhow::bail!("tried to pass postgres wal record to neon WAL redo");
             }
             NeonWalRecord::ClearVisibilityMapFlags {
-                heap_blkno_1,
-                heap_blkno_2,
+                new_heap_blkno,
+                old_heap_blkno,
                 flags,
             } => {
                 // sanity check that this is modifying the correct relation
@@ -414,8 +414,11 @@ impl PostgresRedoManager {
                     "ClearVisibilityMapFlags record on unexpected rel {}",
                     rel
                 );
-                for heap_blkno in [heap_blkno_1, heap_blkno_2].into_iter().flatten() {
-                    let heap_blkno = *heap_blkno;
+
+                // Helper function to clear the VM bit corresponding to 'heap_blkno'.
+                // (The logic is similar to the guts of the visibilitymap_clear() function
+                // in PostgreSQL, after it has locked the right VM page.)
+                let mut visibilitymap_clear = |heap_blkno| {
                     // Calculate the VM block and offset that corresponds to the heap block.
                     let map_block = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
                     let map_byte = pg_constants::HEAPBLK_TO_MAPBYTE(heap_blkno);
@@ -428,6 +431,12 @@ impl PostgresRedoManager {
                     let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                     map[map_byte as usize] &= !(flags << map_offset);
+                };
+                if let Some(heap_blkno) = *new_heap_blkno {
+                    visibilitymap_clear(heap_blkno);
+                }
+                if let Some(heap_blkno) = *old_heap_blkno {
+                    visibilitymap_clear(heap_blkno);
                 }
             }
             // Non-relational WAL records are handled here, with custom code that has the
