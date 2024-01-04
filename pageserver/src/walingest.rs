@@ -709,6 +709,8 @@ impl WalIngest {
             _ => {}
         }
 
+        // Clear the VM bits if required.
+
         let vm_rel = RelTag {
             forknum: VISIBILITYMAP_FORKNUM,
             spcnode: decoded.blocks[0].rnode_spcnode,
@@ -766,7 +768,7 @@ impl WalIngest {
                 .await?;
             }
             (new, old) => {
-                // Emit one record per VM page that needs updating
+                // Emit one record per VM block that needs updating.
                 if let Some((new_heap_blkno, new_vm_blk)) = new {
                     self.put_rel_wal_record(
                         modification,
