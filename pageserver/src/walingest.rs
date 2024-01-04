@@ -709,16 +709,16 @@ impl WalIngest {
             _ => {}
         }
 
+        let vm_rel = RelTag {
+            forknum: VISIBILITYMAP_FORKNUM,
+            spcnode: decoded.blocks[0].rnode_spcnode,
+            dbnode: decoded.blocks[0].rnode_dbnode,
+            relnode: decoded.blocks[0].rnode_relnode,
+        };
+
         // Clear the VM bits if required.
         match (new_heap_blkno, old_heap_blkno) {
             (Some(_), Some(_)) => {
-                let vm_rel = RelTag {
-                    forknum: VISIBILITYMAP_FORKNUM,
-                    spcnode: decoded.blocks[0].rnode_spcnode,
-                    dbnode: decoded.blocks[0].rnode_dbnode,
-                    relnode: decoded.blocks[0].rnode_relnode,
-                };
-
                 let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
                 let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
@@ -792,13 +792,6 @@ impl WalIngest {
                 }
             }
             (Some(_), None) => {
-                let vm_rel = RelTag {
-                    forknum: VISIBILITYMAP_FORKNUM,
-                    spcnode: decoded.blocks[0].rnode_spcnode,
-                    dbnode: decoded.blocks[0].rnode_dbnode,
-                    relnode: decoded.blocks[0].rnode_relnode,
-                };
-
                 let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
                 let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
@@ -872,13 +865,6 @@ impl WalIngest {
                 }
             }
             (None, Some(_)) => {
-                let vm_rel = RelTag {
-                    forknum: VISIBILITYMAP_FORKNUM,
-                    spcnode: decoded.blocks[0].rnode_spcnode,
-                    dbnode: decoded.blocks[0].rnode_dbnode,
-                    relnode: decoded.blocks[0].rnode_relnode,
-                };
-
                 let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
                 let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
 
