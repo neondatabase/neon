@@ -25,6 +25,7 @@ use pageserver_api::{
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
 use postgres_backend::AuthType;
+use postgres_connection::parse_host_port;
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -866,9 +867,11 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let pageserver_id =
                 if let Some(id_str) = sub_args.get_one::<String>("endpoint-pageserver-id") {
-                    NodeId(id_str.parse().context("while parsing pageserver id")?)
+                    Some(NodeId(
+                        id_str.parse().context("while parsing pageserver id")?,
+                    ))
                 } else {
-                    DEFAULT_PAGESERVER_ID
+                    None
                 };
 
             let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
@@ -899,23 +902,31 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 endpoint.timeline_id,
             )?;
 
-            let attachment_service = AttachmentService::from_env(env);
-            let locate_result = attachment_service.tenant_locate(endpoint.tenant_id).await?;
-            let pageservers = locate_result
-                .shards
-                .into_iter()
-                .map(|shard| {
-                    (
-                        Host::parse(&shard.listen_pg_addr)
-                            .expect("Attachment service reported bad hostname"),
-                        shard.listen_pg_port,
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert!(!pageservers.is_empty());
-            let stripe_size = locate_result.shard_params.stripe_size.map(|s| s.0 as usize);
+            let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
+                let conf = env.get_pageserver_conf(pageserver_id).unwrap();
+                let parsed = parse_host_port(&conf.listen_pg_addr).expect("Bad config");
+                (vec![(parsed.0, parsed.1.unwrap_or(5432))], None)
+            } else {
+                let attachment_service = AttachmentService::from_env(env);
+                let locate_result = attachment_service.tenant_locate(endpoint.tenant_id).await?;
+                let pageservers = locate_result
+                    .shards
+                    .into_iter()
+                    .map(|shard| {
+                        (
+                            Host::parse(&shard.listen_pg_addr)
+                                .expect("Attachment service reported bad hostname"),
+                            shard.listen_pg_port,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let stripe_size = locate_result.shard_params.stripe_size.map(|s| s.0 as usize);
 
-            let ps_conf = env.get_pageserver_conf(pageserver_id)?;
+                (pageservers, stripe_size)
+            };
+            assert!(!pageservers.is_empty());
+
+            let ps_conf = env.get_pageserver_conf(DEFAULT_PAGESERVER_ID)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
 

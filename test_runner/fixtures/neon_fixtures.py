@@ -2852,7 +2852,7 @@ class Endpoint(PgProtocol):
             hot_standby=hot_standby,
             lsn=lsn,
             pageserver_id=pageserver_id,
-        ).start(remote_ext_config=remote_ext_config)
+        ).start(remote_ext_config=remote_ext_config, pageserver_id=pageserver_id)
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
