@@ -2,7 +2,7 @@ use crate::{
     auth,
     compute::{self, PostgresConnection},
     console::{self, errors::WakeComputeError, Api},
-    context::RequestContext,
+    context::RequestMonitoring,
     metrics::{bool_to_str, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
     proxy::retry::{retry_after, ShouldRetry},
 };
@@ -36,7 +36,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg 
 /// Try to connect to the compute node once.
 #[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute_once(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     node_info: &console::CachedNodeInfo,
     timeout: time::Duration,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
@@ -55,7 +55,7 @@ pub trait ConnectMechanism {
     type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
@@ -76,7 +76,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
 
     async fn connect_once(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
@@ -125,7 +125,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
 pub async fn connect_to_compute<M: ConnectMechanism>(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
     extra: &console::ConsoleReqExtra,

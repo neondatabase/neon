@@ -29,7 +29,7 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::config::HttpConfig;
-use crate::context::RequestContext;
+use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 
 use super::conn_pool::ConnInfo;
@@ -122,7 +122,7 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
 ) -> Result<ConnInfo, anyhow::Error> {
@@ -152,7 +152,7 @@ fn get_conn_info(
     if username.is_empty() {
         return Err(anyhow::anyhow!("missing username"));
     }
-    ctx.user = Some(username.clone());
+    ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
@@ -180,7 +180,7 @@ fn get_conn_info(
     }
 
     let hostname: SmolStr = hostname.into();
-    ctx.endpoint_id = Some(hostname.clone());
+    ctx.set_endpoint_id(Some(hostname.clone()));
 
     let pairs = connection_url.query_pairs();
 
@@ -205,7 +205,7 @@ fn get_conn_info(
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static HttpConfig,
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
@@ -295,7 +295,7 @@ pub async fn handle(
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
     config: &'static HttpConfig,
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,

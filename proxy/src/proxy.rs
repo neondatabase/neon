@@ -10,7 +10,7 @@ use crate::{
     compute,
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
-    context::RequestContext,
+    context::RequestMonitoring,
     metrics::{
         NUM_BYTES_PROXIED_COUNTER, NUM_BYTES_PROXIED_PER_CLIENT_COUNTER,
         NUM_CLIENT_CONNECTION_GAUGE, NUM_CONNECTION_REQUESTS_GAUGE,
@@ -26,7 +26,6 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
-use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -92,7 +91,7 @@ pub async fn task_main(
                     bail!("missing required client IP");
                 }
 
-                let mut ctx = RequestContext::new(session_id, peer_addr, "tcp", &config.region);
+                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "tcp", &config.region);
 
                 socket
                     .inner
@@ -169,7 +168,7 @@ impl ClientMode {
 
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     cancel_map: &CancelMap,
     stream: S,
     mode: ClientMode,
@@ -202,16 +201,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let creds = {
         let hostname = mode.hostname(stream.get_ref());
 
-        // record the values if we have them
-        ctx.application = params.get("application_name").map(SmolStr::from);
-        ctx.user = params.get("user").map(SmolStr::from);
-        ctx.endpoint_id = hostname.map(SmolStr::from);
-
         let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
+            .map(|_| auth::ClientCredentials::parse(ctx, &params, hostname, common_names))
             .transpose();
 
         match result {
@@ -220,7 +214,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
 
-    ctx.endpoint_id = creds.get_endpoint();
+    ctx.set_endpoint_id(creds.get_endpoint());
 
     let client = Client::new(
         stream,
@@ -354,7 +348,7 @@ async fn prepare_client_connection(
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
 pub async fn proxy_pass(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
@@ -438,7 +432,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     #[tracing::instrument(name = "", fields(ep = %self.creds.get_endpoint().unwrap_or_default()), skip_all)]
     async fn connect_to_db(
         self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         session: cancellation::Session<'_>,
         mode: ClientMode,
         config: &'static AuthenticationConfig,
@@ -472,7 +466,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             Ok(auth_result) => auth_result,
             Err(e) => {
                 let db = params.get("database");
-                let app = ctx.application.as_deref();
+                let app = params.get("application_name");
                 let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
                 return stream.throw_error(e).instrument(params_span).await;

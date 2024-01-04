@@ -1,7 +1,7 @@
 use crate::{
     cancellation::CancelMap,
     config::ProxyConfig,
-    context::RequestContext,
+    context::RequestMonitoring,
     error::io_error,
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
@@ -131,7 +131,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     websocket: HyperWebsocket,
     cancel_map: &CancelMap,
     hostname: Option<String>,

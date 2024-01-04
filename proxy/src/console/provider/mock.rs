@@ -7,7 +7,7 @@ use super::{
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
-use crate::{console::provider::CachedRoleSecret, context::RequestContext};
+use crate::{console::provider::CachedRoleSecret, context::RequestMonitoring};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
@@ -145,7 +145,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        _ctx: &mut RequestContext,
+        _ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         Ok(CachedRoleSecret::new_uncached(
@@ -155,7 +155,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips(
         &self,
-        _ctx: &mut RequestContext,
+        _ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
@@ -164,7 +164,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _ctx: &mut RequestContext,
+        _ctx: &mut RequestMonitoring,
         _extra: &ConsoleReqExtra,
         _creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {

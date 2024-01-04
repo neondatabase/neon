@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
 
-use super::{RequestContext, LOG_CHAN};
+use super::{RequestMonitoring, LOG_CHAN};
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a upload fails, we log it at info-level, and retry.
@@ -49,8 +49,8 @@ struct RequestData {
     region: &'static str,
 }
 
-impl From<RequestContext> for RequestData {
-    fn from(value: RequestContext) -> Self {
+impl From<RequestMonitoring> for RequestData {
+    fn from(value: RequestMonitoring) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.peer_addr.to_string(),

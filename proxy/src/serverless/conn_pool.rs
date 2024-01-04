@@ -28,7 +28,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    context::RequestContext,
+    context::RequestMonitoring,
     metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::{connect_compute::ConnectMechanism, neon_options},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
@@ -310,7 +310,7 @@ impl GlobalConnPool {
 
     pub async fn get(
         self: &Arc<Self>,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         conn_info: ConnInfo,
         force_new: bool,
     ) -> anyhow::Result<Client> {
@@ -490,7 +490,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
 
     async fn connect_once(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
@@ -515,7 +515,7 @@ impl ConnectMechanism for TokioMechanism<'_> {
 #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     conn_info: &ConnInfo,
     conn_id: uuid::Uuid,
     pool: Weak<RwLock<EndpointConnPool>>,
@@ -529,7 +529,8 @@ async fn connect_to_compute(
         ("application_name", APP_NAME),
         ("options", conn_info.options.as_deref().unwrap_or("")),
     ]);
-    let creds = auth::ClientCredentials::parse(&params, Some(&conn_info.hostname), common_names)?;
+    let creds =
+        auth::ClientCredentials::parse(ctx, &params, Some(&conn_info.hostname), common_names)?;
 
     let creds =
         ComputeUserInfo::try_from(creds).map_err(|_| anyhow!("missing endpoint identifier"))?;
@@ -551,8 +552,7 @@ async fn connect_to_compute(
         .await?
         .context("missing cache entry from wake_compute")?;
 
-    ctx.branch = Some(node_info.aux.branch_id.clone());
-    ctx.project = Some(node_info.aux.project_id.clone());
+    ctx.set_project(node_info.aux.clone());
 
     crate::proxy::connect_compute::connect_to_compute(
         ctx,
@@ -570,7 +570,7 @@ async fn connect_to_compute(
 }
 
 async fn connect_to_compute_once(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
     timeout: time::Duration,

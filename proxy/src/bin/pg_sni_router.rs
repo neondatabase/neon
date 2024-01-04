@@ -8,7 +8,7 @@ use std::{net::SocketAddr, sync::Arc};
 use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
-use proxy::context::RequestContext;
+use proxy::context::RequestMonitoring;
 use proxy::proxy::run_until_cancelled;
 use tokio::net::TcpListener;
 
@@ -171,7 +171,8 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let mut ctx = RequestContext::new(session_id, peer_addr.ip(), "sni_router", "sni");
+                let mut ctx =
+                    RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
                 handle_client(
                     &mut ctx,
                     dest_suffix,
@@ -245,7 +246,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn handle_client(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,

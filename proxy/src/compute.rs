@@ -1,6 +1,6 @@
 use crate::{
     auth::parse_endpoint_param, cancellation::CancelClosure, console::errors::WakeComputeError,
-    context::RequestContext, error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE,
+    context::RequestMonitoring, error::UserFacingError, metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::neon_option,
 };
 use futures::{FutureExt, TryFutureExt};
@@ -233,7 +233,7 @@ impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         allow_self_signed_compute: bool,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {

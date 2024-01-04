@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use crate::{
-    context::RequestContext,
+    context::RequestMonitoring,
     metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
 };
 use async_trait::async_trait;
@@ -52,15 +52,11 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
-        let application_name = format!(
-            "{}/{}",
-            ctx.application.as_deref().unwrap_or_default(),
-            ctx.protocol
-        );
+        let application_name = ctx.console_application_name();
         async {
             let request = self
                 .endpoint
@@ -110,16 +106,12 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
-        let application_name = format!(
-            "{}/{}",
-            ctx.application.as_deref().unwrap_or_default(),
-            ctx.protocol
-        );
+        let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
                 .endpoint
@@ -176,7 +168,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         let ep = creds.endpoint.clone();
@@ -197,7 +189,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         if let Some(allowed_ips) = self.caches.allowed_ips.get(&creds.endpoint) {
@@ -223,7 +215,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {

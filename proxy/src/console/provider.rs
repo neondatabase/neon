@@ -7,7 +7,7 @@ use crate::{
     auth::backend::ComputeUserInfo,
     cache::{timed_lru, TimedLru},
     compute,
-    context::RequestContext,
+    context::RequestMonitoring,
     scram,
 };
 use async_trait::async_trait;
@@ -261,20 +261,20 @@ pub trait Api {
     /// Get the client's auth secret for authentication.
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;

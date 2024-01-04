@@ -10,7 +10,7 @@ use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::AuthSecret;
-use crate::context::RequestContext;
+use crate::context::RequestMonitoring;
 use crate::proxy::connect_compute::handle_try_wake;
 use crate::proxy::retry::retry_after;
 use crate::scram;
@@ -163,7 +163,7 @@ impl TryFrom<ClientCredentials> for ComputeUserInfo {
 ///
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     api: &impl console::Api,
     creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -177,7 +177,7 @@ async fn auth_quirks(
         Err(info) => {
             let res = hacks::password_hack_no_authentication(info, client, &mut ctx.latency_timer)
                 .await?;
-            ctx.endpoint_id = Some(res.info.endpoint.clone());
+            ctx.set_endpoint_id(Some(res.info.endpoint.clone()));
             (res.info, Some(res.keys))
         }
         Ok(info) => (info, None),
@@ -222,7 +222,7 @@ async fn auth_quirks(
 }
 
 async fn authenticate_with_secret(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     secret: AuthSecret,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -261,7 +261,7 @@ async fn authenticate_with_secret(
 /// Authenticate the user and then wake a compute (or retrieve an existing compute session from cache)
 /// only if authentication was successfuly.
 async fn auth_and_wake_compute(
-    ctx: &mut RequestContext,
+    ctx: &mut RequestMonitoring,
     api: &impl console::Api,
     extra: &ConsoleReqExtra,
     creds: ClientCredentials,
@@ -292,8 +292,7 @@ async fn auth_and_wake_compute(
         tokio::time::sleep(wait_duration).await;
     };
 
-    ctx.branch = Some(node.aux.branch_id.clone());
-    ctx.project = Some(node.aux.project_id.clone());
+    ctx.set_project(node.aux.clone());
 
     match compute_credentials.keys {
         #[cfg(feature = "testing")]
@@ -337,7 +336,7 @@ impl<'a> BackendType<'a, ClientCredentials> {
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
         self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
@@ -410,7 +409,7 @@ impl<'a> BackendType<'a, ClientCredentials> {
 impl BackendType<'_, ComputeUserInfo> {
     pub async fn get_allowed_ips(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         use BackendType::*;
         match self {
@@ -427,7 +426,7 @@ impl BackendType<'_, ComputeUserInfo> {
     /// The link auth flow doesn't support this, so we return [`None`] in that case.
     pub async fn wake_compute(
         &self,
-        ctx: &mut RequestContext,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
     ) -> Result<Option<CachedNodeInfo>, console::errors::WakeComputeError> {
         use BackendType::*;
