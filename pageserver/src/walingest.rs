@@ -740,27 +740,27 @@ impl WalIngest {
                         old_vm_blk = None;
                     }
                 }
-
-                if new_vm_blk.is_some() || old_vm_blk.is_some() {
-                    if new_vm_blk == old_vm_blk {
-                        // An UPDATE record that needs to clear the bits for both old and the
-                        // new page, both of which reside on the same VM page.
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            new_vm_blk.unwrap(),
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno,
-                                old_heap_blkno,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    } else {
-                        // Clear VM bits for one heap page, or for two pages that reside on
-                        // different VM pages.
-                        if let Some(new_vm_blk) = new_vm_blk {
+                // Clear VM bits for one heap page, or for two pages that reside on
+                // different VM pages.
+                match (new_vm_blk, old_vm_blk) {
+                    (None, None) => todo!(),
+                    (Some(new_vm_blk), Some(old_vm_blk)) => {
+                        if new_vm_blk == old_vm_blk {
+                            // An UPDATE record that needs to clear the bits for both old and the
+                            // new page, both of which reside on the same VM page.
+                            self.put_rel_wal_record(
+                                modification,
+                                vm_rel,
+                                new_vm_blk,
+                                NeonWalRecord::ClearVisibilityMapFlags {
+                                    new_heap_blkno,
+                                    old_heap_blkno,
+                                    flags,
+                                },
+                                ctx,
+                            )
+                            .await?;
+                        } else {
                             self.put_rel_wal_record(
                                 modification,
                                 vm_rel,
@@ -773,8 +773,6 @@ impl WalIngest {
                                 ctx,
                             )
                             .await?;
-                        }
-                        if let Some(old_vm_blk) = old_vm_blk {
                             self.put_rel_wal_record(
                                 modification,
                                 vm_rel,
@@ -788,6 +786,34 @@ impl WalIngest {
                             )
                             .await?;
                         }
+                    }
+                    (None, Some(old_vm_blk)) => {
+                        self.put_rel_wal_record(
+                            modification,
+                            vm_rel,
+                            old_vm_blk,
+                            NeonWalRecord::ClearVisibilityMapFlags {
+                                new_heap_blkno: None,
+                                old_heap_blkno,
+                                flags,
+                            },
+                            ctx,
+                        )
+                        .await?;
+                    }
+                    (Some(new_vm_blk), None) => {
+                        self.put_rel_wal_record(
+                            modification,
+                            vm_rel,
+                            new_vm_blk,
+                            NeonWalRecord::ClearVisibilityMapFlags {
+                                new_heap_blkno,
+                                old_heap_blkno: None,
+                                flags,
+                            },
+                            ctx,
+                        )
+                        .await?;
                     }
                 }
             }
