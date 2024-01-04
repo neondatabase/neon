@@ -914,8 +914,8 @@ impl WalIngest {
                         vm_rel,
                         new_vm_blk.unwrap(),
                         NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno,
+                            heap_blkno_1: new_heap_blkno,
+                            heap_blkno_2: old_heap_blkno,
                             flags,
                         },
                         ctx,
@@ -930,8 +930,8 @@ impl WalIngest {
                             vm_rel,
                             new_vm_blk,
                             NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno,
-                                old_heap_blkno: None,
+                                heap_blkno_1: new_heap_blkno,
+                                heap_blkno_2: None,
                                 flags,
                             },
                             ctx,
@@ -944,8 +944,8 @@ impl WalIngest {
                             vm_rel,
                             old_vm_blk,
                             NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno: None,
-                                old_heap_blkno,
+                                heap_blkno_1: None,
+                                heap_blkno_2: old_heap_blkno,
                                 flags,
                             },
                             ctx,
