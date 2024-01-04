@@ -29,18 +29,13 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     initial_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
-    initial_tenant_dirs = [d for d in tenants_dir.iterdir()]
+    [d for d in tenants_dir.iterdir()]
 
-    neon_simple_env.pageserver.allowed_errors.extend(
-        [
-            ".*Failed to create directory structure for tenant .*, cleaning tmp data.*",
-            ".*Failed to fsync removed temporary tenant directory .*",
-        ]
-    )
+    neon_simple_env.pageserver.allowed_errors.append(".*tenant-config-before-write.*")
 
     pageserver_http = neon_simple_env.pageserver.http_client()
-    pageserver_http.configure_failpoints(("tenant-creation-before-tmp-rename", "return"))
-    with pytest.raises(Exception, match="tenant-creation-before-tmp-rename"):
+    pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
+    with pytest.raises(Exception, match="tenant-config-before-write"):
         _ = neon_simple_env.neon_cli.create_tenant()
 
     new_tenants = sorted(
@@ -48,10 +43,10 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    new_tenant_dirs = [d for d in tenants_dir.iterdir()]
-    assert (
-        new_tenant_dirs == initial_tenant_dirs
-    ), "pageserver should clean its temp tenant dirs on tenant creation failure"
+    # Any files left behind on disk during failed creation do not prevent
+    # a retry from succeeding.
+    pageserver_http.configure_failpoints(("tenant-config-before-write", "off"))
+    neon_simple_env.neon_cli.create_tenant()
 
 
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):

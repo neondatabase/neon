@@ -2734,6 +2734,10 @@ impl Tenant {
 "#
         .to_string();
 
+        fail::fail_point!("tenant-config-before-write", |_| {
+            anyhow::bail!("tenant-config-before-write");
+        });
+
         // Convert the config to a toml file.
         conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
 
