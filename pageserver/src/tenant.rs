@@ -1003,7 +1003,7 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        failpoint_support::sleep_millis_async!("attach-before-activate");
+        failpoint_support::sleep_millis_cancellable_async!("attach-before-activate", &self.cancel);
 
         info!("Done");
 
@@ -2035,6 +2035,13 @@ impl Tenant {
         // But the tenant background loops are joined-on in our caller.
         // It's mesed up.
         // we just ignore the failure to stop
+
+        // If we're still attaching, fire the cancellation token early to drop out: this
+        // will prevent us flushing, but ensures timely shutdown if some I/O during attach
+        // is very slow.
+        if matches!(self.current_state(), TenantState::Attaching) {
+            self.cancel.cancel();
+        }
 
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
