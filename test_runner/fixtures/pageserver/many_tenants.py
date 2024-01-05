@@ -1,26 +1,21 @@
 from dataclasses import dataclass
-import json
 import os
 import shutil
-import subprocess
-from pathlib import Path
 import time
 from typing import Any, Callable, Dict, List, Tuple
 
-import pytest
-from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    PgBin,
     SnapshotDir,
-    last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import wait_until_tenant_active, wait_until_tenant_state
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 import fixtures.pageserver.remote_storage
+from fixtures import work_queue
+
 
 @dataclass
 class SingleTimeline:
@@ -28,12 +23,13 @@ class SingleTimeline:
     timeline_id: TimelineId
     tenants: List[TenantId]
 
+
 def single_timeline(
     neon_env_builder: NeonEnvBuilder,
     snapshot_dir: SnapshotDir,
     setup_template: Callable[[NeonEnv], Tuple[TenantId, TimelineId, Dict[str, Any]]],
     ncopies: int,
-) ->  SingleTimeline:
+) -> SingleTimeline:
     """
     Create (or rehydrate from `snapshot_dir`) an env with `ncopies` copies
     of a template tenant with a single timeline.
@@ -79,12 +75,17 @@ def single_timeline(
         env.pageserver.allowed_errors.append(
             ".*attach failed, setting tenant state to Broken: attach-before-activate.*"
         )
-        for tenant in tenants:
+
+        def attach_broken(tenant):
             env.pageserver.tenant_attach(
                 tenant,
                 config=template_config.copy(),
             )
+            time.sleep(0.1)
             wait_until_tenant_state(ps_http, tenant, "Broken", 3)
+
+        work_queue.do(8, tenants, attach_broken)
+
         env.pageserver.stop()  # clears the failpoint as a side-effect
         tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
         fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(

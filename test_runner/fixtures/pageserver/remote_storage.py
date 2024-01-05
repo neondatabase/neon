@@ -14,6 +14,7 @@ from fixtures.pageserver.types import (
     InvalidFileName,
     parse_layer_file_name,
 )
+from fixtures import work_queue
 
 
 def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: TenantId):
@@ -56,27 +57,11 @@ def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: Te
 def duplicate_tenant(env: NeonEnv, template_tenant: TenantId, ncopies: int) -> List[TenantId]:
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    # duplicate the tenant in remote storage
-    def worker(queue: queue.Queue[Optional[TenantId]]):
-        while True:
-            tenant_id = queue.get()
-            if tenant_id is None:
-                return
-            duplicate_one_tenant(env, template_tenant, tenant_id)
+    def work(tenant_id):
+        duplicate_one_tenant(env, template_tenant, tenant_id)
 
     new_tenants: List[TenantId] = [TenantId.generate() for _ in range(0, ncopies)]
-    duplications: queue.Queue[Optional[TenantId]] = queue.Queue()
-    for t in new_tenants:
-        duplications.put(t)
-    workers = []
-    for _ in range(0, 8):  # TODO: use nproc instead of hard-coded count
-        w = threading.Thread(target=worker, args=[duplications])
-        workers.append(w)
-        w.start()
-        duplications.put(None)
-    for w in workers:
-        w.join()
-
+    work_queue.do(8, new_tenants, work)
     return new_tenants
 
 
