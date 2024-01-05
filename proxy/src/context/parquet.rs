@@ -25,8 +25,8 @@ pub struct ParquetUploadArgs {
     /// Storage location to upload the parquet files to.
     /// Encoded as toml (same format as pageservers), eg
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
-    #[clap(long, value_parser = remote_storage_from_toml)]
-    parquet_upload_remote_storage: Option<RemoteStorageConfig>,
+    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
+    parquet_upload_remote_storage: OptRemoteStorageConfig,
 
     /// How many rows to include in a row group
     #[clap(long, default_value_t = 8192)]
@@ -49,7 +49,11 @@ pub struct ParquetUploadArgs {
     parquet_upload_compression: Compression,
 }
 
-fn remote_storage_from_toml(s: &str) -> anyhow::Result<Option<RemoteStorageConfig>> {
+/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
+/// runtime type errors from the value parser we use.
+type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
+
+fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
     RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
@@ -307,23 +311,97 @@ impl std::io::Write for BytesWriter {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, sync::Arc};
+    use std::{net::Ipv4Addr, num::NonZeroUsize, sync::Arc};
 
     use camino::Utf8Path;
+    use clap::Parser;
     use futures::{Stream, StreamExt};
     use itertools::Itertools;
     use parquet::{
-        basic::ZstdLevel,
+        basic::{Compression, ZstdLevel},
         file::{
-            properties::WriterProperties, reader::FileReader,
+            properties::{WriterProperties, DEFAULT_PAGE_SIZE},
+            reader::FileReader,
             serialized_reader::SerializedFileReader,
         },
     };
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use remote_storage::{GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind};
+    use remote_storage::{
+        GenericRemoteStorage, RemoteStorageConfig, RemoteStorageKind, S3Config,
+        DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+    };
     use tokio::{sync::mpsc, time};
 
-    use super::{worker_inner, ParquetConfig, RequestData};
+    use super::{worker_inner, ParquetConfig, ParquetUploadArgs, RequestData};
+
+    #[derive(Parser)]
+    struct ProxyCliArgs {
+        #[clap(flatten)]
+        parquet_upload: ParquetUploadArgs,
+    }
+
+    #[test]
+    fn default_parser() {
+        let ProxyCliArgs { parquet_upload } = ProxyCliArgs::parse_from(["proxy"]);
+        assert_eq!(parquet_upload.parquet_upload_remote_storage, None);
+        assert_eq!(parquet_upload.parquet_upload_row_group_size, 8192);
+        assert_eq!(parquet_upload.parquet_upload_page_size, DEFAULT_PAGE_SIZE);
+        assert_eq!(parquet_upload.parquet_upload_size, 100_000_000);
+        assert_eq!(
+            parquet_upload.parquet_upload_maximum_duration,
+            time::Duration::from_secs(20 * 60)
+        );
+        assert_eq!(
+            parquet_upload.parquet_upload_compression,
+            Compression::UNCOMPRESSED
+        );
+    }
+
+    #[test]
+    fn full_parser() {
+        let ProxyCliArgs { parquet_upload } = ProxyCliArgs::parse_from([
+            "proxy",
+            "--parquet-upload-remote-storage",
+            "{bucket_name='default',prefix_in_bucket='proxy/',bucket_region='us-east-1',endpoint='http://minio:9000'}",
+            "--parquet-upload-row-group-size",
+            "100",
+            "--parquet-upload-page-size",
+            "10000",
+            "--parquet-upload-size",
+            "10000000",
+            "--parquet-upload-maximum-duration",
+            "10m",
+            "--parquet-upload-compression",
+            "zstd(5)",
+        ]);
+        assert_eq!(
+            parquet_upload.parquet_upload_remote_storage,
+            Some(RemoteStorageConfig {
+                storage: RemoteStorageKind::AwsS3(S3Config {
+                    bucket_name: "default".into(),
+                    bucket_region: "us-east-1".into(),
+                    prefix_in_bucket: Some("proxy/".into()),
+                    endpoint: Some("http://minio:9000".into()),
+                    concurrency_limit: NonZeroUsize::new(
+                        DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+                    )
+                    .unwrap(),
+                    max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                })
+            })
+        );
+        assert_eq!(parquet_upload.parquet_upload_row_group_size, 100);
+        assert_eq!(parquet_upload.parquet_upload_page_size, 10000);
+        assert_eq!(parquet_upload.parquet_upload_size, 10_000_000);
+        assert_eq!(
+            parquet_upload.parquet_upload_maximum_duration,
+            time::Duration::from_secs(10 * 60)
+        );
+        assert_eq!(
+            parquet_upload.parquet_upload_compression,
+            Compression::ZSTD(ZstdLevel::try_new(5).unwrap())
+        );
+    }
 
     fn generate_request_data(rng: &mut impl Rng) -> RequestData {
         RequestData {
