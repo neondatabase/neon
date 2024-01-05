@@ -11,7 +11,7 @@ use crate::{console::messages::MetricsAuxInfo, error::ErrorKind, metrics::Latenc
 
 pub mod parquet;
 
-static LOG_CHAN: OnceCell<mpsc::UnboundedSender<RequestMonitoring>> = OnceCell::new();
+static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestMonitoring>> = OnceCell::new();
 
 #[derive(Clone)]
 /// Context data for a single request to connect to a database.
@@ -36,8 +36,9 @@ pub struct RequestMonitoring {
     _error_kind: Option<ErrorKind>,
 
     // extra
+    // This sender is here to keep the request monitoring channel open while requests are taking place.
+    sender: Option<mpsc::UnboundedSender<RequestMonitoring>>,
     pub latency_timer: LatencyTimer,
-    logged: bool,
 }
 
 impl RequestMonitoring {
@@ -62,8 +63,8 @@ impl RequestMonitoring {
 
             _error_kind: None,
 
+            sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
-            logged: false,
         }
     }
 
@@ -99,12 +100,8 @@ impl RequestMonitoring {
     }
 
     pub fn log(&mut self) {
-        if !self.logged {
-            self.logged = true;
-            if let Some(tx) = LOG_CHAN.get() {
-                let _: Result<(), _> = tx.send(self.clone());
-            }
-            // info!("{}", serde_json::to_string(self).unwrap());
+        if let Some(tx) = self.sender.take() {
+            let _: Result<(), _> = tx.send(self.clone());
         }
     }
 }

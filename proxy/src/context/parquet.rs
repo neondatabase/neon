@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::BytesMut;
-use futures::{Future, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use parquet::{
     basic::Compression,
     file::{
@@ -118,21 +118,20 @@ pub async fn worker(
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    LOG_CHAN.set(tx).unwrap();
+    LOG_CHAN.set(tx.downgrade()).unwrap();
+
+    // setup row stream that will close on cancellation
+    tokio::spawn(async move {
+        cancellation_token.cancelled().await;
+        // dropping this sender will cause the channel to close only once
+        // all the remaining inflight requests have been completed.
+        drop(tx);
+    });
+    let rx = futures::stream::poll_fn(move |cx| rx.poll_recv(cx));
+    let rx = rx.map(RequestData::from);
 
     let storage =
         GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?;
-
-    // setup row stream that will close on cancellation
-    let mut cancelled = std::pin::pin!(cancellation_token.cancelled());
-    let rx = futures::stream::poll_fn(move |cx| {
-        // `cancelled` is 'fused'
-        if cancelled.as_mut().poll(cx).is_ready() {
-            rx.close();
-        }
-        rx.poll_recv(cx)
-    });
-    let rx = rx.map(RequestData::from);
 
     let properties = WriterProperties::builder()
         .set_data_page_size_limit(config.parquet_upload_page_size)
