@@ -785,6 +785,24 @@ pub(crate) async fn set_new_tenant_config(
     Ok(())
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum UpsertLocationError {
+    #[error("Bad config request: {0}")]
+    BadRequest(anyhow::Error),
+
+    #[error("Cannot change config in this state: {0}")]
+    Unavailable(#[from] TenantMapError),
+
+    #[error("Tenant is already being modified")]
+    InProgress,
+
+    #[error("Failed to flush: {0}")]
+    Flush(anyhow::Error),
+
+    #[error("Internal error: {0}")]
+    Other(#[from] anyhow::Error),
+}
+
 impl TenantManager {
     /// Convenience function so that anyone with a TenantManager can get at the global configuration, without
     /// having to pass it around everywhere as a separate object.
@@ -851,7 +869,7 @@ impl TenantManager {
         flush: Option<Duration>,
         spawn_mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Result<Option<Arc<Tenant>>, anyhow::Error> {
+    ) -> Result<Option<Arc<Tenant>>, UpsertLocationError> {
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
 
@@ -873,9 +891,10 @@ impl TenantManager {
                         // A transition from Attached to Attached in the same generation, we may
                         // take our fast path and just provide the updated configuration
                         // to the tenant.
-                        tenant.set_new_location_config(AttachedTenantConf::try_from(
-                            new_location_config.clone(),
-                        )?);
+                        tenant.set_new_location_config(
+                            AttachedTenantConf::try_from(new_location_config.clone())
+                                .map_err(UpsertLocationError::BadRequest)?,
+                        );
 
                         Some(FastPathModified::Attached(tenant.clone()))
                     } else {
@@ -902,8 +921,7 @@ impl TenantManager {
         match fast_path_taken {
             Some(FastPathModified::Attached(tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .map_err(SetNewTenantConfigError::Persist)?;
+                    .await?;
 
                 // Transition to AttachedStale means we may well hold a valid generation
                 // still, and have been requested to go stale as part of a migration.  If
@@ -916,7 +934,7 @@ impl TenantManager {
                     if let Some(flush_timeout) = flush {
                         match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
                             Ok(Err(e)) => {
-                                return Err(e);
+                                return Err(UpsertLocationError::Flush(e));
                             }
                             Ok(Ok(_)) => return Ok(Some(tenant)),
                             Err(_) => {
@@ -929,12 +947,11 @@ impl TenantManager {
                     }
                 }
 
-                return Ok((Some(tenant)));
+                return Ok(Some(tenant));
             }
             Some(FastPathModified::Secondary(_secondary_tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-                    .await
-                    .map_err(SetNewTenantConfigError::Persist)?;
+                    .await?;
 
                 return Ok(None);
             }
@@ -949,7 +966,14 @@ impl TenantManager {
         // the tenant is inaccessible to the outside world while we are doing this, but that is sensible:
         // the state is ill-defined while we're in transition.  Transitions are async, but fast: we do
         // not do significant I/O, and shutdowns should be prompt via cancellation tokens.
-        let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let mut slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)
+            .map_err(|e| match e {
+                TenantSlotError::AlreadyExists(_, _) | TenantSlotError::NotFound(_) => {
+                    unreachable!("Called with mode Any")
+                }
+                TenantSlotError::InProgress => UpsertLocationError::InProgress,
+                TenantSlotError::MapState(s) => UpsertLocationError::Unavailable(s),
+            })?;
 
         match slot_guard.get_old_value() {
             Some(TenantSlot::Attached(tenant)) => {
@@ -987,7 +1011,9 @@ impl TenantManager {
             Some(TenantSlot::InProgress(_)) => {
                 // This should never happen: acquire_slot should error out
                 // if the contents of a slot were InProgress.
-                anyhow::bail!("Acquired an InProgress slot, this is a bug.")
+                return Err(UpsertLocationError::Other(anyhow::anyhow!(
+                    "Acquired an InProgress slot, this is a bug."
+                )));
             }
             None => {
                 // Slot was vacant, nothing needs shutting down.
@@ -1009,9 +1035,7 @@ impl TenantManager {
         // Before activating either secondary or attached mode, persist the
         // configuration, so that on restart we will re-attach (or re-start
         // secondary) on the tenant.
-        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
-            .await
-            .map_err(SetNewTenantConfigError::Persist)?;
+        Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config).await?;
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
@@ -1042,7 +1066,12 @@ impl TenantManager {
             None
         };
 
-        slot_guard.upsert(new_slot)?;
+        slot_guard.upsert(new_slot).map_err(|e| match e {
+            TenantSlotUpsertError::InternalError(e) => {
+                UpsertLocationError::Other(anyhow::anyhow!(e))
+            }
+            TenantSlotUpsertError::MapState(e) => UpsertLocationError::Unavailable(e),
+        })?;
 
         Ok(attached_tenant)
     }
@@ -1629,7 +1658,7 @@ pub(crate) enum TenantMapInsertError {
 /// Superset of TenantMapError: issues that can occur when acquiring a slot
 /// for a particular tenant ID.
 #[derive(Debug, thiserror::Error)]
-pub enum TenantSlotError {
+pub(crate) enum TenantSlotError {
     /// When acquiring a slot with the expectation that the tenant already exists.
     #[error("Tenant {0} not found")]
     NotFound(TenantShardId),
@@ -1637,9 +1666,6 @@ pub enum TenantSlotError {
     /// When acquiring a slot with the expectation that the tenant does not already exist.
     #[error("tenant {0} already exists, state: {1:?}")]
     AlreadyExists(TenantShardId, TenantState),
-
-    #[error("tenant {0} already exists in but is not attached")]
-    Conflict(TenantShardId),
 
     // Tried to read a slot that is currently being mutated by another administrative
     // operation.

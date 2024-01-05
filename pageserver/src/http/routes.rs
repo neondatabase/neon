@@ -37,6 +37,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::UpsertLocationError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
@@ -168,7 +169,7 @@ impl From<TenantSlotError> for ApiError {
             NotFound(tenant_id) => {
                 ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
-            e @ (AlreadyExists(_, _) | Conflict(_)) => ApiError::Conflict(format!("{e}")),
+            e @ AlreadyExists(_, _) => ApiError::Conflict(format!("{e}")),
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
             }
@@ -183,6 +184,18 @@ impl From<TenantSlotUpsertError> for ApiError {
         match e {
             InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<UpsertLocationError> for ApiError {
+    fn from(e: UpsertLocationError) -> ApiError {
+        use UpsertLocationError::*;
+        match e {
+            BadRequest(e) => ApiError::BadRequest(e),
+            Unavailable(_) => ApiError::ShuttingDown,
+            e @ InProgress => ApiError::Conflict(format!("{e}")),
+            Flush(e) | Other(e) => ApiError::InternalServerError(e),
         }
     }
 }
@@ -684,8 +697,7 @@ async fn tenant_attach_handler(
             SpawnMode::Normal,
             &ctx,
         )
-        .await
-        .map_err(ApiError::BadRequest)?;
+        .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -1155,8 +1167,7 @@ async fn tenant_create_handler(
             SpawnMode::Create,
             &ctx,
         )
-        .await
-        .map_err(ApiError::BadRequest)?;
+        .await?;
 
     let Some(new_tenant) = new_tenant else {
         // This should never happen: indicates a bug in upsert_location
@@ -1280,11 +1291,7 @@ async fn put_tenant_location_config_handler(
             tenant::SpawnMode::Normal,
             &ctx,
         )
-        .await
-        // TODO: badrequest assumes the caller was asking for something unreasonable, but in
-        // principle we might have hit something like concurrent API calls to the same tenant,
-        // which is not a 400 but a 409.
-        .map_err(ApiError::BadRequest)?;
+        .await?;
 
     if let Some(_flush_ms) = flush {
         match state
