@@ -27,7 +27,7 @@ echo run the following commands
 cat <<EOF
     # test suite run
     export TEST_OUTPUT="/mnt/test_output"
-    DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest test_runner/performance/test_pageserver.py
+    DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest test_runner/performance/test_pageserver_pagebench.py
 
     # for interactive use
     export NEON_REPO_DIR="$(readlink -f ./bench_repo_dir)/repo"

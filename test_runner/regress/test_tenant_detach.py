@@ -484,7 +484,7 @@ def test_detach_while_attaching(
     pageserver_http.tenant_detach(tenant_id)
 
     # And re-attach
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(5000)")])
 
     env.pageserver.tenant_attach(tenant_id)
 
@@ -691,7 +691,7 @@ def test_ignore_while_attaching(
     # Detach it
     pageserver_http.tenant_detach(tenant_id)
     # And re-attach, but stop attach task_mgr task from completing
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "return(5000)")])
     env.pageserver.tenant_attach(tenant_id)
     # Run ignore on the task, thereby cancelling the attach.
     # XXX This should take priority over attach, i.e., it should cancel the attach task.
@@ -716,7 +716,7 @@ def test_ignore_while_attaching(
     ), "Only ignored tenant should be missing"
 
     # Calling load will bring the tenant back online
-    pageserver_http.configure_failpoints([("attach-before-activate", "off")])
+    pageserver_http.configure_failpoints([("attach-before-activate-sleep", "off")])
     env.pageserver.tenant_load(tenant_id)
 
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)

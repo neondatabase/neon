@@ -1003,7 +1003,10 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        failpoint_support::sleep_millis_async!("attach-before-activate");
+        fail::fail_point!("attach-before-activate", |_| {
+            anyhow::bail!("attach-before-activate");
+        });
+        failpoint_support::sleep_millis_async!("attach-before-activate-sleep");
 
         info!("Done");
 

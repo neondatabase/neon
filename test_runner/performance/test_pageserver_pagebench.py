@@ -3,15 +3,23 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+import time
 from typing import List, Tuple
 
 import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, SnapshotDir, last_flush_lsn_upload
-from fixtures.pageserver.utils import wait_until_tenant_active
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    SnapshotDir,
+    last_flush_lsn_upload,
+)
+from fixtures.pageserver.utils import wait_until_tenant_active, wait_until_tenant_state
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
+import fixtures.pageserver.remote_storage
 
 
 @pytest.fixture(scope="function")
@@ -45,7 +53,6 @@ def snapshotting_env(
         "image_creation_threshold": 3,
     }
 
-
     if test_snapshot_dir.is_initialized():
         save_snapshot = False
         env = neon_env_builder.from_repo_dir(test_snapshot_dir.path)
@@ -71,66 +78,46 @@ def snapshotting_env(
         template_tenant, template_timeline = env.neon_cli.create_tenant(
             conf=tenant_config_cli, set_default=True
         )
-        template_tenant_gen = int(ps_http.tenant_status(template_tenant)["generation"])
         with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
-            pg_bin.run_capture(["pgbench", "-i", "-s50", ep.connstr()])
+            pg_bin.run_capture(["pgbench", "-i", "-s5", ep.connstr()])
             last_flush_lsn_upload(env, ep, template_tenant, template_timeline)
         ps_http.tenant_detach(template_tenant)
 
-        # stop PS just for good measure
-        env.pageserver.stop()
+        # duplicate the template 20 times tenants in localfs storage
+        tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, 20)
 
-        # duplicate the tenant in remote storage
-        src_timelines_dir: Path = remote_storage.tenant_path(template_tenant) / "timelines"
-        assert src_timelines_dir.is_dir(), f"{src_timelines_dir} is not a directory"
-        tenants = [template_tenant]
-        for i in range(0, 100):
-            new_tenant = TenantId.generate()
-            tenants.append(new_tenant)
-            log.info("Duplicating tenant #%s: %s", i, new_tenant)
-
-            dst_timelines_dir: Path = remote_storage.tenant_path(new_tenant) / "timelines"
-            dst_timelines_dir.parent.mkdir(parents=False, exist_ok=False)
-            dst_timelines_dir.mkdir(parents=False, exist_ok=False)
-
-            for tl in src_timelines_dir.iterdir():
-                src_tl_dir = src_timelines_dir / tl.name
-                assert src_tl_dir.is_dir(), f"{src_tl_dir} is not a directory"
-                dst_tl_dir = dst_timelines_dir / tl.name
-                dst_tl_dir.mkdir(parents=False, exist_ok=False)
-                for file in tl.iterdir():
-                    shutil.copy2(file, dst_tl_dir)
-                    if "__" in file.name:
-                        cmd: List[str] = [
-                            str(
-                                env.neon_binpath / "pagectl"
-                            ),  # TODO: abstract this like the other binaries
-                            "layer",
-                            "rewrite-summary",
-                            str(dst_tl_dir / file.name),
-                            "--new-tenant-id",
-                            str(new_tenant),
-                        ]
-                        subprocess.run(cmd, check=True)
-                    else:
-                        # index_part etc need no patching
-                        pass
-
-        env.pageserver.start()
+        # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.
+        # However, on-demand downloads are quite slow ATM.
+        # => do the on-demand downloads in Python.
         assert ps_http.tenant_list() == []
+        # make the attach fail after it created enough on-disk state to retry loading
+        # the tenant next startup, but before it can start background loops that would start download
+        ps_http.configure_failpoints(("attach-before-activate", "return"))
+        env.pageserver.allowed_errors.append(
+            ".*attach failed, setting tenant state to Broken: attach-before-activate.*"
+        )
         for tenant in tenants:
-            ps_http.tenant_attach(
-                tenant, config=tenant_config_mgmt_api, generation=template_tenant_gen + 1
+            env.pageserver.tenant_attach(
+                tenant,
+                config=tenant_config_mgmt_api.copy(),
             )
-            env.attachment_service.attach_hook_issue(tenant, env.pageserver.id)
+            wait_until_tenant_state(ps_http, tenant, "Broken", 3)
+        env.pageserver.stop()  # clears the failpoint as a side-effect
+        tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
+        fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
+            env, tenant_timelines
+        )
+        env.pageserver.start()
 
     for tenant in tenants:
         wait_until_tenant_active(ps_http, tenant)
 
     # ensure all layers are resident for predictiable performance
-    # TODO: ensure all kinds of eviction are disabled (per-tenant, disk-usage-based)
     for tenant in tenants:
-        ps_http.download_all_layers(tenant, template_timeline)
+        for timeline in ps_http.tenant_status(tenant)["timelines"]:
+            info = ps_http.layer_map_info(tenant, timeline)
+            for layer in info.historic_layers:
+                assert not layer.remote
 
     # take snapshot after download all layers so tenant dir restoration is fast
     if save_snapshot:
