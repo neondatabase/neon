@@ -3945,8 +3945,6 @@ pub(crate) mod harness {
     pub struct TenantHarness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
-        // TODO(sharding): remove duplicative `tenant_id` in favor of access to tenant_shard_id
-        pub(crate) tenant_id: TenantId,
         pub tenant_shard_id: TenantShardId,
         pub generation: Generation,
         pub shard: ShardIndex,
@@ -4008,7 +4006,6 @@ pub(crate) mod harness {
             Ok(Self {
                 conf,
                 tenant_conf,
-                tenant_id,
                 tenant_shard_id,
                 generation: Generation::new(0xdeadbeef),
                 shard: ShardIndex::unsharded(),
