@@ -33,6 +33,29 @@ macro_rules! __failpoint_sleep_millis_async {
 }
 pub use __failpoint_sleep_millis_async as sleep_millis_async;
 
+#[macro_export]
+macro_rules! __failpoint_sleep_millis_cancellable_async {
+    ($name:literal, $cancel:expr) => {{
+        // If the failpoint is used with a "return" action, set should_sleep to the
+        // returned value (as string). Otherwise it's set to None.
+        let should_sleep = (|| {
+            ::fail::fail_point!($name, |x| x);
+            ::std::option::Option::None
+        })();
+
+        // Sleep if the action was a returned value
+        if let ::std::option::Option::Some(duration_str) = should_sleep {
+            $crate::failpoint_support::failpoint_sleep_cancellable_helper(
+                $name,
+                duration_str,
+                $cancel,
+            )
+            .await
+        }
+    }};
+}
+pub use __failpoint_sleep_millis_cancellable_async as sleep_millis_cancellable_async;
+
 // Helper function used by the macro. (A function has nicer scoping so we
 // don't need to decorate everything with "::")
 #[doc(hidden)]
@@ -42,6 +65,22 @@ pub async fn failpoint_sleep_helper(name: &'static str, duration_str: String) {
 
     tracing::info!("failpoint {:?}: sleeping for {:?}", name, d);
     tokio::time::sleep(d).await;
+    tracing::info!("failpoint {:?}: sleep done", name);
+}
+
+// Helper function used by the macro. (A function has nicer scoping so we
+// don't need to decorate everything with "::")
+#[doc(hidden)]
+pub async fn failpoint_sleep_cancellable_helper(
+    name: &'static str,
+    duration_str: String,
+    cancel: &CancellationToken,
+) {
+    let millis = duration_str.parse::<u64>().unwrap();
+    let d = std::time::Duration::from_millis(millis);
+
+    tracing::info!("failpoint {:?}: sleeping for {:?}", name, d);
+    tokio::time::timeout(d, cancel.cancelled()).await.ok();
     tracing::info!("failpoint {:?}: sleep done", name);
 }
 
