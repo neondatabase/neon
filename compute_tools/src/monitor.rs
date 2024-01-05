@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::compute::ComputeNode;
 use compute_api::responses::ComputeStatus;
+use compute_api::spec::ComputeFeature;
 
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -26,9 +27,14 @@ fn watch_compute_activity(compute: &ComputeNode) {
     // Define `client` outside of the loop to reuse existing connection if it's active.
     let mut client = Client::connect(connstr, NoTls);
 
-    let mut prev_active_time: f64 = 0.0;
+    let mut prev_active_time: Option<f64> = None;
+    let mut prev_sessions: Option<i64> = None;
 
-    info!("watching Postgres activity at {}", connstr);
+    if compute.has_feature(ComputeFeature::ActivityMonitorExperimental) {
+        info!("starting experimental activity monitor for {}", connstr);
+    } else {
+        info!("starting activity monitor for {}", connstr);
+    }
 
     loop {
         // Should be outside of the mutex lock to allow others to read while we sleep.
@@ -44,28 +50,50 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     continue;
                 }
 
-                // First, check if the total active time across all databases has changed. If it did,
-                // it means that user executed some queries. In theory, it can even go down if
-                // some databases were dropped, but it's still a user activity.
-                match get_databases_active_time(cli) {
-                    Ok(active_time) => {
-                        if prev_active_time == 0.0 {
-                            prev_active_time = active_time;
-                        } else if active_time != prev_active_time {
-                            // Update the last active time and continue, we don't need to
-                            // check backends state change.
-                            compute.update_last_active(Some(Utc::now()));
-                            prev_active_time = active_time;
+                // This is a new logic, only enable if the feature flag is set.
+                // TODO: remove this once we are sure that it works OR drop it altogether.
+                if compute.has_feature(ComputeFeature::ActivityMonitorExperimental) {
+                    // First, check if the total active time or sessions across all databases has changed.
+                    // If it did, it means that user executed some queries. In theory, it can even go down if
+                    // some databases were dropped, but it's still a user activity.
+                    match get_database_stats(cli) {
+                        Ok((active_time, sessions)) => {
+                            let mut detected_activity = false;
+
+                            prev_active_time = match prev_active_time {
+                                Some(prev_active_time) => {
+                                    if active_time != prev_active_time {
+                                        detected_activity = true;
+                                    }
+                                    Some(active_time)
+                                }
+                                None => Some(active_time),
+                            };
+                            prev_sessions = match prev_sessions {
+                                Some(prev_sessions) => {
+                                    if sessions != prev_sessions {
+                                        detected_activity = true;
+                                    }
+                                    Some(sessions)
+                                }
+                                None => Some(sessions),
+                            };
+
+                            if detected_activity {
+                                // Update the last active time and continue, we don't need to
+                                // check backends state change.
+                                compute.update_last_active(Some(Utc::now()));
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            error!("could not get database statistics: {}", e);
                             continue;
                         }
                     }
-                    Err(e) => {
-                        error!("could not get active_time: {}", e);
-                        continue;
-                    }
                 }
 
-                // Second, is databases statistics is the same, check all backends state change,
+                // Second, if database statistics is the same, check all backends state change,
                 // maybe there is some with more recent activity. `get_backends_state_change()`
                 // can return None or stale timestamp, so it's `compute.update_last_active()`
                 // responsibility to check if the new timestamp is more recent than the current one.
@@ -126,11 +154,17 @@ fn wait_for_postgres_start(compute: &ComputeNode) {
     }
 }
 
-// Figure out the total active time across all non-system databases.
-// It can return `0.0`, which means no user databases exist.
-fn get_databases_active_time(cli: &mut Client) -> anyhow::Result<f64> {
-    let active_time = cli.query_one(
-        "SELECT coalesce(sum(active_time), 0.0) AS total_active_time
+// Figure out the total active time and sessions across all non-system databases.
+// Returned tuple is `(active_time, sessions)`.
+// It can return `0.0` active time or `0` sessions, which means no user databases exist OR
+// it was a start with skipped `pg_catalog` updates and user didn't do any queries
+// (or open any sessions) yet.
+fn get_database_stats(cli: &mut Client) -> anyhow::Result<(f64, i64)> {
+    // Filter out `postgres` database as `compute_ctl` and other monitoring tools
+    // like `postgres_exporter` use it to query Postgres statistics.
+    let stats = cli.query_one(
+        "SELECT coalesce(sum(active_time), 0.0) AS total_active_time,
+            coalesce(sum(sessions), 0) AS total_sessions
         FROM pg_stat_database
         WHERE datname NOT IN (
                 'postgres',
@@ -139,17 +173,24 @@ fn get_databases_active_time(cli: &mut Client) -> anyhow::Result<f64> {
             );",
         &[],
     );
-    let active_time = match active_time {
-        Ok(active_time) => active_time,
+    let stats = match stats {
+        Ok(stats) => stats,
         Err(e) => {
             return Err(anyhow::anyhow!("could not query active_time: {}", e));
         }
     };
 
-    match active_time.try_get("total_active_time") {
-        Ok(active_time) => Ok(active_time),
-        Err(e) => Err(anyhow::anyhow!("could not get total_active_time: {}", e)),
-    }
+    let active_time: f64 = match stats.try_get("total_active_time") {
+        Ok(active_time) => active_time,
+        Err(e) => return Err(anyhow::anyhow!("could not get total_active_time: {}", e)),
+    };
+
+    let sessions: i64 = match stats.try_get("total_sessions") {
+        Ok(sessions) => sessions,
+        Err(e) => return Err(anyhow::anyhow!("could not get total_sessions: {}", e)),
+    };
+
+    Ok((active_time, sessions))
 }
 
 // Figure out the most recent state change time across all client backends.
