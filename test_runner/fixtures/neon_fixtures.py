@@ -1101,8 +1101,8 @@ class AbstractNeonCli(abc.ABC):
         If `local_binpath` is true, then we are invoking a test utility
         """
 
-        assert type(arguments) == list
-        assert type(self.COMMAND) == str
+        assert isinstance(arguments, list)
+        assert isinstance(self.COMMAND, str)
 
         if local_binpath:
             # Test utility

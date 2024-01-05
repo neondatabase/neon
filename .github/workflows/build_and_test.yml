@@ -105,11 +105,11 @@ jobs:
       - name: Install Python deps
         run: ./scripts/pysync
 
-      - name: Run ruff to ensure code format
-        run: poetry run ruff .
+      - name: Run `ruff check` to ensure code format
+        run: poetry run ruff check .
 
-      - name: Run black to ensure code format
-        run: poetry run black --diff --check .
+      - name: Run `ruff format` to ensure code format
+        run: poetry run ruff format --check .
 
       - name: Run mypy to check types
         run: poetry run mypy .

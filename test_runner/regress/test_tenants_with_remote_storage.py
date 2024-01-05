@@ -201,8 +201,8 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
         len(restored_timelines) == 1
     ), f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
     restored_timeline = restored_timelines[0]
-    assert restored_timeline["timeline_id"] == str(
-        timeline_id
+    assert (
+        restored_timeline["timeline_id"] == str(timeline_id)
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
 
     # Check that we had to retry the downloads
@@ -280,8 +280,8 @@ def test_tenant_redownloads_truncated_file_on_startup(
         len(restored_timelines) == 1
     ), f"Tenant {tenant_id} should have its timeline reattached after its layer is downloaded from the remote storage"
     retored_timeline = restored_timelines[0]
-    assert retored_timeline["timeline_id"] == str(
-        timeline_id
+    assert (
+        retored_timeline["timeline_id"] == str(timeline_id)
     ), f"Tenant {tenant_id} should have its old timeline {timeline_id} restored from the remote storage"
 
     # Request non-incremental logical size. Calculating it needs the layer file that

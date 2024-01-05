@@ -365,9 +365,9 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res, dict)
         assert TenantId(res["id"]) == tenant_id
         size = res["size"]
-        assert type(size) == int
+        assert isinstance(size, int)
         inputs = res["inputs"]
-        assert type(inputs) is dict
+        assert isinstance(inputs, dict)
         return (size, inputs)
 
     def tenant_size_debug(self, tenant_id: TenantId) -> str:
