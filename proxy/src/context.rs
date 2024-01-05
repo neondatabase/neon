@@ -31,9 +31,7 @@ pub struct RequestMonitoring {
     endpoint_id: Option<SmolStr>,
     user: Option<SmolStr>,
     application: Option<SmolStr>,
-
-    // currently unused
-    _error_kind: Option<ErrorKind>,
+    error_kind: Option<ErrorKind>,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -60,8 +58,7 @@ impl RequestMonitoring {
             endpoint_id: None,
             user: None,
             application: None,
-
-            _error_kind: None,
+            error_kind: None,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),

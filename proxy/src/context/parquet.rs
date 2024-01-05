@@ -74,17 +74,18 @@ pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 #[derive(parquet_derive::ParquetRecordWriter)]
 struct RequestData {
-    session_id: uuid::Uuid,
-    peer_addr: String,
+    region: &'static str,
+    protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
     timestamp: chrono::NaiveDateTime,
+    session_id: uuid::Uuid,
+    peer_addr: String,
     username: Option<String>,
     application_name: Option<String>,
     endpoint_id: Option<String>,
     project: Option<String>,
     branch: Option<String>,
-    protocol: &'static str,
-    region: &'static str,
+    error: Option<&'static str>,
 }
 
 impl From<RequestMonitoring> for RequestData {
@@ -100,6 +101,7 @@ impl From<RequestMonitoring> for RequestData {
             branch: value.branch.as_deref().map(String::from),
             protocol: value.protocol,
             region: value.region,
+            error: value.error_kind.as_ref().map(|e| e.to_str()),
         }
     }
 }
