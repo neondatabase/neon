@@ -254,7 +254,9 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     metadata_summary = S3Scrubber(
         neon_env_builder.test_output_dir, neon_env_builder
     ).scan_metadata()
-    assert metadata_summary["count"] == 1  # Scrubber should have seen our timeline
+    assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
+    assert metadata_summary["timeline_count"] == 1
+    assert metadata_summary["timeline_shard_count"] == 1
     assert not metadata_summary["with_errors"]
     assert not metadata_summary["with_warnings"]
 
