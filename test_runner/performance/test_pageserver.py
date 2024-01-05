@@ -15,8 +15,9 @@ from fixtures.types import TenantId, TimelineId
 
 
 @pytest.fixture(scope="function")
+@pytest.mark.timeout(1000)
 def snapshotting_env(
-    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path
+    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path,
 ) -> Tuple[NeonEnv, TimelineId, List[TenantId]]:
     """
     The fixture prepares environment or restores it from a snapshot.
@@ -44,7 +45,7 @@ def snapshotting_env(
     }
 
     if snapshot_dir.exists():
-        env = neon_env_builder.from_repo_dir(snapshot_dir, use_overlay=True)
+        env = neon_env_builder.from_repo_dir(snapshot_dir)
         ps_http = env.pageserver.http_client()
         tenants = list({TenantId(t.name) for t in (snapshot_dir.glob("pageserver_*/tenants/*"))})
         template_timeline = env.initial_timeline
@@ -78,7 +79,7 @@ def snapshotting_env(
         src_timelines_dir: Path = remote_storage.tenant_path(template_tenant) / "timelines"
         assert src_timelines_dir.is_dir(), f"{src_timelines_dir} is not a directory"
         tenants = [template_tenant]
-        for i in range(0, 20):
+        for i in range(0, 100):
             new_tenant = TenantId.generate()
             tenants.append(new_tenant)
             log.info("Duplicating tenant #%s: %s", i, new_tenant)
@@ -152,6 +153,7 @@ def test_getpage_throughput(
         env.pageserver.connstr(password=None),
         "--runtime",
         duration,
+        # "--per-target-rate-limit", "50",
         *[f"{tenant}/{template_timeline}" for tenant in tenants],
     ]
     log.info(f"command: {' '.join(cmd)}")
