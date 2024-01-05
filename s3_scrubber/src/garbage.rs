@@ -2,7 +2,10 @@
 //! S3 objects which are either not referenced by any metadata, or are referenced by a
 //! control plane tenant/timeline in a deleted state.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::Context;
 use aws_sdk_s3::{
@@ -118,6 +121,13 @@ const S3_CONCURRENCY: usize = 32;
 // How many concurrent API requests to make to the console API.
 const CONSOLE_CONCURRENCY: usize = 128;
 
+struct ConsoleCache {
+    /// Set of tenants found in the control plane API
+    projects: HashMap<TenantId, ProjectData>,
+    /// Set of tenants for which the control plane API returned 404
+    not_found: HashSet<TenantId>,
+}
+
 async fn find_garbage_inner(
     bucket_config: BucketConfig,
     console_config: ConsoleConfig,
@@ -143,23 +153,49 @@ async fn find_garbage_inner(
         console_projects.len()
     );
 
-    // TODO(sharding): batch calls into Console so that we only call once for each TenantId,
-    // rather than checking the same TenantId for multiple TenantShardId
+    // Because many tenant shards may look up the same TenantId, we maintain a cache.
+    let console_cache = Arc::new(std::sync::Mutex::new(ConsoleCache {
+        projects: console_projects,
+        not_found: HashSet::new(),
+    }));
 
     // Enumerate Tenants in S3, and check if each one exists in Console
     tracing::info!("Finding all tenants in bucket {}...", bucket_config.bucket);
     let tenants = stream_tenants(&s3_client, &target);
     let tenants_checked = tenants.map_ok(|t| {
         let api_client = cloud_admin_api_client.clone();
-        let console_projects = &console_projects;
+        let console_cache = console_cache.clone();
         async move {
-            match console_projects.get(&t.tenant_id) {
+            // Check cache before issuing API call
+            let project_data = {
+                let cache = console_cache.lock().unwrap();
+                let result = cache.projects.get(&t.tenant_id).cloned();
+                if result.is_none() && cache.not_found.contains(&t.tenant_id) {
+                    return Ok((t, None));
+                }
+                result
+            };
+
+            match project_data {
                 Some(project_data) => Ok((t, Some(project_data.clone()))),
-                None => api_client
-                    .find_tenant_project(t.tenant_id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))
-                    .map(|r| (t, r)),
+                None => {
+                    let project_data = api_client
+                        .find_tenant_project(t.tenant_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e));
+
+                    // Populate cache with result of API call
+                    {
+                        let mut cache = console_cache.lock().unwrap();
+                        if let Ok(Some(project_data)) = &project_data {
+                            cache.projects.insert(t.tenant_id, project_data.clone());
+                        } else if let Ok(None) = &project_data {
+                            cache.not_found.insert(t.tenant_id);
+                        }
+                    }
+
+                    project_data.map(|r| (t, r))
+                }
             }
         }
     });
