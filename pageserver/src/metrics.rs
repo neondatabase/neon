@@ -246,7 +246,6 @@ impl PageCacheMetrics {
 pub(crate) struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
 
-    pub current_bytes_ephemeral: UIntGauge,
     pub current_bytes_immutable: UIntGauge,
     pub current_bytes_materialized_page: UIntGauge,
 }
@@ -268,12 +267,6 @@ pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
                 "Maximum size of the page cache in bytes"
             )
             .expect("failed to define a metric")
-        },
-
-        current_bytes_ephemeral: {
-            PAGE_CACHE_SIZE_CURRENT_BYTES
-                .get_metric_with_label_values(&["ephemeral"])
-                .unwrap()
         },
         current_bytes_immutable: {
             PAGE_CACHE_SIZE_CURRENT_BYTES
