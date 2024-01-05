@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 import asyncpg
 import backoff
 import jwt
+import psutil
 import psycopg2
 import pytest
 import requests
@@ -468,6 +469,7 @@ class NeonEnvBuilder:
         self.initial_timeline = initial_timeline or TimelineId.generate()
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
+        self.overlay_mounts: List[Tuple[str, Path]] = []
 
         assert test_name.startswith(
             "test_"
@@ -520,6 +522,7 @@ class NeonEnvBuilder:
         repo_dir: Path,
         neon_binpath: Optional[Path] = None,
         pg_distrib_dir: Optional[Path] = None,
+        use_overlay: bool = False,
     ) -> NeonEnv:
         """
         A simple method to import data into the current NeonEnvBuilder from a snapshot of a repo dir.
@@ -547,7 +550,10 @@ class NeonEnvBuilder:
             tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
 
             log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
-            shutil.copytree(tenants_from_dir, tenants_to_dir)
+            if not use_overlay:
+                shutil.copytree(tenants_from_dir, tenants_to_dir)
+            else:
+                self.mount_overlay(f"{ps_dir.name}:tenants", tenants_from_dir, tenants_to_dir)
 
         for sk_from_dir in (repo_dir / "safekeepers").glob("sk*"):
             sk_to_dir = self.repo_dir / "safekeepers" / sk_from_dir.name
@@ -556,9 +562,13 @@ class NeonEnvBuilder:
             shutil.copytree(sk_from_dir, sk_to_dir, ignore=shutil.ignore_patterns("*.log", "*.pid"))
 
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
-        shutil.copytree(
-            repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
-        )
+        if not use_overlay:
+            shutil.copytree(
+                repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
+            )
+        else:
+            self.mount_overlay("local_fs_remote_storage",
+                repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage")
 
         if (attachments_json := Path(repo_dir / "attachments.json")).exists():
             shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
@@ -574,6 +584,46 @@ class NeonEnvBuilder:
             toml.dump(config, f)
 
         return self.env
+
+    @property
+    def overlay_state_dir(self):
+        return self.test_output_dir / "overlay-state"
+
+    def mount_overlay(self, ident: str, srcdir: Path, dstdir: Path):
+        assert self.overlay_state_dir.parent in dstdir.parents # so the post-cleanup assertion in self.cleanup_overlay is simpler
+        self.overlay_state_dir.mkdir(exist_ok=True)
+        assert srcdir.is_dir()
+        dstdir.mkdir(exist_ok=False, parents=False)
+        ident_state_dir = self.overlay_state_dir / ident
+        upper = ident_state_dir / "upper"
+        work = ident_state_dir / "work"
+        ident_state_dir.mkdir(exist_ok=False, parents=False) # exists_ok=False also checks uniqueness in self.overlay_mounts
+        upper.mkdir()
+        work.mkdir()
+        cmd = [ "sudo", "mount", "-t", "overlay", "overlay",
+            "-o", f"lowerdir={srcdir},upperdir={upper},workdir={work}", str(dstdir) ]
+        log.info(f"Mounting overlayfs srcdir={srcdir} dstdir={dstdir}: {cmd}")
+        subprocess_capture(self.overlay_state_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+        self.overlay_mounts.append((ident, dstdir))
+
+    def cleanup_overlay(self):
+        while len(self.overlay_mounts) > 0:
+            (ident, mountpoint) = self.overlay_mounts.pop()
+            ident_state_dir = self.overlay_state_dir / ident
+            cmd = [ "sudo", "umount", str(mountpoint) ]
+            log.info(f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}: {cmd}")
+            subprocess_capture(self.overlay_state_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+            log.info(f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}")
+            cmd = [ "sudo", "rm", "-rf", str(ident_state_dir)]
+            subprocess_capture(self.overlay_state_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+
+        self.overlay_state_dir.rmdir() # fails if empty, which acts as an assertion that above cleanup is complete
+
+        # assert all overlayfs mounts in our test directory are gone
+        for part in psutil.disk_partitions():
+            if part.fstype == "overlay":
+                mountpoint = Path(part.mountpoint)
+                assert not self.test_output_dir in mountpoint.parents
 
     def enable_scrub_on_exit(self):
         """
@@ -694,6 +744,13 @@ class NeonEnvBuilder:
                     S3Scrubber(self.test_output_dir, self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
+                    cleanup_error = e
+
+            try:
+                self.cleanup_overlay()
+            except Exception as e:
+                log.error(f"Error cleaning up overlay state: {e}")
+                if cleanup_error is not None:
                     cleanup_error = e
 
             try:

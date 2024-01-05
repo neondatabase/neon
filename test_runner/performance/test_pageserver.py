@@ -44,7 +44,7 @@ def snapshotting_env(
     }
 
     if snapshot_dir.exists():
-        env = neon_env_builder.from_repo_dir(snapshot_dir)
+        env = neon_env_builder.from_repo_dir(snapshot_dir, use_overlay=True)
         ps_http = env.pageserver.http_client()
         tenants = list({TenantId(t.name) for t in (snapshot_dir.glob("pageserver_*/tenants/*"))})
         template_timeline = env.initial_timeline
