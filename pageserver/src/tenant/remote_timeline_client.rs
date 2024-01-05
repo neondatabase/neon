@@ -229,6 +229,7 @@ use crate::{
     tenant::upload_queue::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
+    TENANT_HEATMAP_BASENAME,
 };
 
 use utils::id::{TenantId, TimelineId};
@@ -1741,11 +1742,11 @@ pub fn remote_index_path(
     .expect("Failed to construct path")
 }
 
-pub const HEATMAP_BASENAME: &str = "heatmap-v1.json";
-
 pub(crate) fn remote_heatmap_path(tenant_shard_id: &TenantShardId) -> RemotePath {
-    RemotePath::from_string(&format!("tenants/{tenant_shard_id}/{HEATMAP_BASENAME}"))
-        .expect("Failed to construct path")
+    RemotePath::from_string(&format!(
+        "tenants/{tenant_shard_id}/{TENANT_HEATMAP_BASENAME}"
+    ))
+    .expect("Failed to construct path")
 }
 
 /// Given the key of an index, parse out the generation part of the name

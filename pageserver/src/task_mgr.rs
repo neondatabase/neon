@@ -259,6 +259,9 @@ pub enum TaskKind {
     DiskUsageEviction,
 
     /// See [`crate::tenant::secondary`].
+    SecondaryDownloads,
+
+    /// See [`crate::tenant::secondary`].
     SecondaryUploads,
 
     // Initial logical size calculation
