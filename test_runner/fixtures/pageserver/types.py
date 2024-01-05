@@ -31,10 +31,10 @@ class DeltaLayerFileName:
     key_start: Key
     key_end: Key
 
-    def is_l0(self):
+    def is_l0(self) -> bool:
         return self.key_start == KEY_MIN and self.key_end == KEY_MAX
 
-    def to_str(self):
+    def to_str(self) -> str:
         ret = f"{self.key_start.as_int():036X}-{self.key_end.as_int():036X}__{self.lsn_start.as_int():016X}-{self.lsn_end.as_int():016X}"
         assert self == parse_layer_file_name(ret)
         return ret
