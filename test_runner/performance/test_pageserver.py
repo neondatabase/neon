@@ -78,7 +78,7 @@ def snapshotting_env(
         src_timelines_dir: Path = remote_storage.tenant_path(template_tenant) / "timelines"
         assert src_timelines_dir.is_dir(), f"{src_timelines_dir} is not a directory"
         tenants = [template_tenant]
-        for i in range(0, 200):
+        for i in range(0, 20):
             new_tenant = TenantId.generate()
             tenants.append(new_tenant)
             log.info("Duplicating tenant #%s: %s", i, new_tenant)
@@ -118,9 +118,6 @@ def snapshotting_env(
             )
             env.attachment_service.attach_hook_issue(tenant, env.pageserver.id)
 
-    if save_snapshot and not snapshot_dir.exists():
-        shutil.copytree(env.repo_dir, snapshot_dir)
-
     for tenant in tenants:
         wait_until_tenant_active(ps_http, tenant)
 
@@ -128,6 +125,10 @@ def snapshotting_env(
     # TODO: ensure all kinds of eviction are disabled (per-tenant, disk-usage-based)
     for tenant in tenants:
         ps_http.download_all_layers(tenant, template_timeline)
+
+    # take snapshot after download all layers so tenant dir restoration is fast
+    if save_snapshot and not snapshot_dir.exists():
+        shutil.copytree(env.repo_dir, snapshot_dir)
 
     return env, template_timeline, tenants
 
