@@ -15,6 +15,7 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -688,7 +689,7 @@ async fn tenant_attach_handler(
 
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
     let location_conf = LocationConf::attached_single(tenant_conf, generation);
-    state
+    let tenant = state
         .tenant_manager
         .upsert_location(
             tenant_shard_id,
@@ -698,6 +699,25 @@ async fn tenant_attach_handler(
             &ctx,
         )
         .await?;
+
+    let Some(tenant) = tenant else {
+        // This should never happen: indicates a bug in upsert_location
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Upsert succeeded but didn't return tenant!"
+        )));
+    };
+
+    // We might have successfully constructed a Tenant, but it could still
+    // end up in a broken state:
+    if let TenantState::Broken {
+        reason,
+        backtrace: _,
+    } = tenant.current_state()
+    {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Tenant state is Broken: {reason}"
+        )));
+    }
 
     json_response(StatusCode::ACCEPTED, ())
 }
