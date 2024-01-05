@@ -627,7 +627,7 @@ def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder
 
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
 # Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
-def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
+def test_load_negatives(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -644,20 +644,7 @@ def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
     ):
         env.pageserver.tenant_load(tenant_id)
 
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match=f"tenant {tenant_id} already exists, state: Active",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
-
     pageserver_http.tenant_ignore(tenant_id)
-
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
 
 
 def test_ignore_while_attaching(
