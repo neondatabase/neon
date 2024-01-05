@@ -3268,8 +3268,8 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
 def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return _get_test_dir(request, top_output_dir, "overlay-")
 
-def get_test_snapshot_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
-    return _get_test_dir(request, top_output_dir, "snapshot")
+def get_test_snapshot_dir_path(request: FixtureRequest, top_output_dir: Path) -> Path:
+    return _get_test_dir(request, top_output_dir, "snapshot-")
 
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return get_test_output_dir(request, top_output_dir) / "repo"
@@ -3313,6 +3313,44 @@ def test_output_dir(request: FixtureRequest, top_output_dir: Path, test_overlay_
     yield test_dir
 
     allure_attach_from_dir(test_dir)
+
+class SnapshotDir:
+    _path: Path
+
+    def __init__(self, path: Path):
+        self._path = path
+        if not self._path.exists():
+            self._path.mkdir()
+        else:
+            assert self._path.is_dir()
+
+    @property
+    def path(self) -> Path:
+        return self._path / "snapshot"
+
+    @property
+    def _marker_file_path(self) -> Path:
+        return self._path / "initialized.marker"
+
+    def is_initialized(self):
+        # TODO: in the future, take a `tag` as argument and store it in the marker in set_initialized.
+        # Then, in this function, compare marker file contents with the tag to invalidate the snapshot if the tag changed.
+        return self._marker_file_path.exists()
+
+    def set_initialized(self):
+        self._marker_file_path.write_text("")
+
+
+@pytest.fixture(scope="function", autouse=True)
+def test_snapshot_dir(request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path) -> SnapshotDir:
+    """Create the working directory for an individual test."""
+
+    _ = test_overlay_dir # overlay mounts use snapshot dir as the lowerdir => request it so it can unmount stale overlay mounts first
+
+    # one directory per test
+    snapshot_dir = get_test_snapshot_dir_path(request, top_output_dir)
+    log.info(f"test_snapshot_dir is {snapshot_dir}")
+    return SnapshotDir(snapshot_dir)
 
 @pytest.fixture(scope="function", autouse=True)
 def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:

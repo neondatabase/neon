@@ -8,7 +8,7 @@ from typing import List, Tuple
 import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, last_flush_lsn_upload
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, SnapshotDir, last_flush_lsn_upload
 from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
@@ -17,7 +17,9 @@ from fixtures.types import TenantId, TimelineId
 @pytest.fixture(scope="function")
 @pytest.mark.timeout(1000)
 def snapshotting_env(
-    neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path,
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    test_snapshot_dir: SnapshotDir,
 ) -> Tuple[NeonEnv, TimelineId, List[TenantId]]:
     """
     The fixture prepares environment or restores it from a snapshot.
@@ -28,7 +30,6 @@ def snapshotting_env(
     - if the fixture is executed on CI (it has CI=true in the environment), the snapshot is not saved
     """
 
-    snapshot_dir = test_output_dir.parent / f"snapshot-{test_output_dir.name}"
     save_snapshot = os.getenv("CI", "false") != "true"
 
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
@@ -44,10 +45,14 @@ def snapshotting_env(
         "image_creation_threshold": 3,
     }
 
-    if snapshot_dir.exists():
-        env = neon_env_builder.from_repo_dir(snapshot_dir)
+
+    if test_snapshot_dir.is_initialized():
+        save_snapshot = False
+        env = neon_env_builder.from_repo_dir(test_snapshot_dir.path)
         ps_http = env.pageserver.http_client()
-        tenants = list({TenantId(t.name) for t in (snapshot_dir.glob("pageserver_*/tenants/*"))})
+        tenants = list(
+            {TenantId(t.name) for t in (test_snapshot_dir.path.glob("pageserver_*/tenants/*"))}
+        )
         template_timeline = env.initial_timeline
 
         neon_env_builder.start()
@@ -128,8 +133,9 @@ def snapshotting_env(
         ps_http.download_all_layers(tenant, template_timeline)
 
     # take snapshot after download all layers so tenant dir restoration is fast
-    if save_snapshot and not snapshot_dir.exists():
-        shutil.copytree(env.repo_dir, snapshot_dir)
+    if save_snapshot:
+        shutil.copytree(env.repo_dir, test_snapshot_dir.path)
+        test_snapshot_dir.set_initialized()
 
     return env, template_timeline, tenants
 
