@@ -2,22 +2,27 @@ mod classic;
 mod hacks;
 mod link;
 
-pub use link::LinkAuthError;
+use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use tokio_postgres::config::AuthKeys;
 
+use crate::auth::backend::link::NeedsLinkAuthentication;
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
 use crate::cache::Cached;
+use crate::cancellation::Session;
+use crate::config::ProxyConfig;
 use crate::console::errors::GetAuthInfoError;
 use crate::console::provider::ConsoleBackend;
 use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
-use crate::proxy::connect_compute::handle_try_wake;
-use crate::proxy::retry::retry_after;
+use crate::proxy::wake_compute::NeedsWakeCompute;
+use crate::proxy::ClientMode;
 use crate::proxy::NeonOptions;
+use crate::rate_limiter::EndpointRateLimiter;
 use crate::scram;
-use crate::stream::Stream;
+use crate::state_machine::{user_facing_error, DynStage, ResultExt, Stage, StageError};
+use crate::stream::{PqStream, Stream};
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
     config::AuthenticationConfig,
@@ -30,10 +35,11 @@ use crate::{
 };
 use futures::TryFutureExt;
 use std::borrow::Cow;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, warn};
+use tracing::info;
+
+use self::hacks::NeedsPasswordHack;
 
 /// This type serves two purposes:
 ///
@@ -170,66 +176,94 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
     }
 }
 
-/// True to its name, this function encapsulates our current auth trade-offs.
-/// Here, we choose the appropriate auth flow based on circumstances.
-///
-/// All authentication flows will emit an AuthenticationOk message if successful.
-async fn auth_quirks(
-    ctx: &mut RequestMonitoring,
-    api: &impl console::Api,
-    user_info: ComputeUserInfoMaybeEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+struct NeedsAuthSecret<S> {
+    stream: PqStream<Stream<S>>,
+    api: Cow<'static, ConsoleBackend>,
+    params: StartupMessageParams,
+    allow_self_signed_compute: bool,
     allow_cleartext: bool,
+    info: ComputeUserInfo,
+    unauthenticated_password: Option<Vec<u8>>,
     config: &'static AuthenticationConfig,
-) -> auth::Result<ComputeCredentials<ComputeCredentialKeys>> {
-    // If there's no project so far, that entails that client doesn't
-    // support SNI or other means of passing the endpoint (project) name.
-    // We now expect to see a very specific payload in the place of password.
-    let (info, unauthenticated_password) = match user_info.try_into() {
-        Err(info) => {
-            let res = hacks::password_hack_no_authentication(info, client, &mut ctx.latency_timer)
-                .await?;
-            ctx.set_endpoint_id(Some(res.info.endpoint.clone()));
-            (res.info, Some(res.keys))
-        }
-        Ok(info) => (info, None),
-    };
 
-    info!("fetching user's authentication info");
-    let allowed_ips = api.get_allowed_ips(ctx, &info).await?;
+    // monitoring
+    ctx: RequestMonitoring,
+    cancel_session: Session,
+}
 
-    // check allowed list
-    if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-        return Err(auth::AuthError::ip_address_not_allowed());
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stage for NeedsAuthSecret<S> {
+    fn span(&self) -> tracing::Span {
+        tracing::info_span!("get_auth_secret")
     }
-    let cached_secret = api.get_role_secret(ctx, &info).await?;
+    async fn run(self) -> Result<DynStage, StageError> {
+        let Self {
+            stream,
+            api,
+            params,
+            allow_cleartext,
+            allow_self_signed_compute,
+            info,
+            unauthenticated_password,
+            config,
+            mut ctx,
+            cancel_session,
+        } = self;
 
-    let secret = cached_secret.value.clone().unwrap_or_else(|| {
-        // If we don't have an authentication secret, we mock one to
-        // prevent malicious probing (possible due to missing protocol steps).
-        // This mocked secret will never lead to successful authentication.
-        info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(&info.user, rand::random()))
-    });
-    match authenticate_with_secret(
-        ctx,
-        secret,
-        info,
-        client,
-        unauthenticated_password,
-        allow_cleartext,
-        config,
-    )
-    .await
-    {
-        Ok(keys) => Ok(keys),
-        Err(e) => {
+        info!("fetching user's authentication info");
+        let (allowed_ips, stream) = api
+            .get_allowed_ips(&mut ctx, &info)
+            .await
+            .send_error_to_user(&mut ctx, stream)?;
+
+        // check allowed list
+        if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
+            return Err(user_facing_error(
+                auth::AuthError::ip_address_not_allowed(),
+                &mut ctx,
+                stream,
+            ));
+        }
+        let (cached_secret, mut stream) = api
+            .get_role_secret(&mut ctx, &info)
+            .await
+            .send_error_to_user(&mut ctx, stream)?;
+
+        let secret = cached_secret.value.clone().unwrap_or_else(|| {
+            // If we don't have an authentication secret, we mock one to
+            // prevent malicious probing (possible due to missing protocol steps).
+            // This mocked secret will never lead to successful authentication.
+            info!("authentication info not found, mocking it");
+            AuthSecret::Scram(scram::ServerSecret::mock(&info.user, rand::random()))
+        });
+
+        let (keys, stream) = authenticate_with_secret(
+            &mut ctx,
+            secret,
+            info,
+            &mut stream,
+            unauthenticated_password,
+            allow_cleartext,
+            config,
+        )
+        .await
+        .map_err(|e| {
             if e.is_auth_failed() {
                 // The password could have been changed, so we invalidate the cache.
                 cached_secret.invalidate();
             }
-            Err(e)
-        }
+            e
+        })
+        .send_error_to_user(&mut ctx, stream)?;
+
+        Ok(Box::new(NeedsWakeCompute {
+            stream,
+            api,
+            params,
+            allow_self_signed_compute,
+            creds: keys,
+            ctx,
+            cancel_session,
+        }))
     }
 }
 
@@ -270,49 +304,6 @@ async fn authenticate_with_secret(
     classic::authenticate(info, client, config, &mut ctx.latency_timer, secret).await
 }
 
-/// Authenticate the user and then wake a compute (or retrieve an existing compute session from cache)
-/// only if authentication was successfuly.
-async fn auth_and_wake_compute(
-    ctx: &mut RequestMonitoring,
-    api: &impl console::Api,
-    user_info: ComputeUserInfoMaybeEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-    allow_cleartext: bool,
-    config: &'static AuthenticationConfig,
-) -> auth::Result<(CachedNodeInfo, ComputeUserInfo)> {
-    let compute_credentials =
-        auth_quirks(ctx, api, user_info, client, allow_cleartext, config).await?;
-
-    let mut num_retries = 0;
-    let mut node = loop {
-        let wake_res = api.wake_compute(ctx, &compute_credentials.info).await;
-        match handle_try_wake(wake_res, num_retries) {
-            Err(e) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
-                return Err(e.into());
-            }
-            Ok(ControlFlow::Continue(e)) => {
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-            }
-            Ok(ControlFlow::Break(n)) => break n,
-        }
-
-        let wait_duration = retry_after(num_retries);
-        num_retries += 1;
-        tokio::time::sleep(wait_duration).await;
-    };
-
-    ctx.set_project(node.aux.clone());
-
-    match compute_credentials.keys {
-        #[cfg(feature = "testing")]
-        ComputeCredentialKeys::Password(password) => node.config.password(password),
-        ComputeCredentialKeys::AuthKeys(auth_keys) => node.config.auth_keys(auth_keys),
-    };
-
-    Ok((node, compute_credentials.info))
-}
-
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
     /// Get compute endpoint name from the credentials.
     pub fn get_endpoint(&self) -> Option<SmolStr> {
@@ -337,50 +328,96 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
             Test(_) => "test",
         }
     }
+}
 
-    /// Authenticate the client via the requested backend, possibly using credentials.
-    #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
-    pub async fn authenticate(
-        self,
-        ctx: &mut RequestMonitoring,
-        client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-        allow_cleartext: bool,
-        config: &'static AuthenticationConfig,
-    ) -> auth::Result<(CachedNodeInfo, BackendType<'a, ComputeUserInfo>)> {
-        use BackendType::*;
+pub struct NeedsAuthentication<S> {
+    pub stream: PqStream<Stream<S>>,
+    pub creds: BackendType<'static, auth::ComputeUserInfoMaybeEndpoint>,
+    pub params: StartupMessageParams,
+    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    pub mode: ClientMode,
+    pub config: &'static ProxyConfig,
 
-        let res = match self {
-            Console(api, user_info) => {
-                info!(
-                    user = &*user_info.user,
-                    project = user_info.project(),
-                    "performing authentication using the console"
-                );
+    // monitoring
+    pub ctx: RequestMonitoring,
+    pub cancel_session: Session,
+}
 
-                let (cache_info, user_info) =
-                    auth_and_wake_compute(ctx, &*api, user_info, client, allow_cleartext, config)
-                        .await?;
-                (cache_info, BackendType::Console(api, user_info))
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stage for NeedsAuthentication<S> {
+    fn span(&self) -> tracing::Span {
+        tracing::info_span!("authenticate")
+    }
+    async fn run(self) -> Result<DynStage, StageError> {
+        let Self {
+            stream,
+            creds,
+            params,
+            endpoint_rate_limiter,
+            mode,
+            config,
+            mut ctx,
+            cancel_session,
+        } = self;
+
+        // check rate limit
+        if let Some(ep) = creds.get_endpoint() {
+            if !endpoint_rate_limiter.check(ep) {
+                return Err(user_facing_error(
+                    auth::AuthError::too_many_connections(),
+                    &mut ctx,
+                    stream,
+                ));
+            }
+        }
+
+        let allow_self_signed_compute = mode.allow_self_signed_compute(config);
+        let allow_cleartext = mode.allow_cleartext();
+
+        match creds {
+            BackendType::Console(api, creds) => {
+                // If there's no project so far, that entails that client doesn't
+                // support SNI or other means of passing the endpoint (project) name.
+                // We now expect to see a very specific payload in the place of password.
+                match creds.try_into() {
+                    Err(info) => Ok(Box::new(NeedsPasswordHack {
+                        stream,
+                        api,
+                        params,
+                        allow_self_signed_compute,
+                        info,
+                        allow_cleartext,
+                        config: &config.authentication_config,
+                        ctx,
+                        cancel_session,
+                    })),
+                    Ok(info) => Ok(Box::new(NeedsAuthSecret {
+                        stream,
+                        api,
+                        params,
+                        allow_self_signed_compute,
+                        info,
+                        unauthenticated_password: None,
+                        allow_cleartext,
+                        config: &config.authentication_config,
+                        ctx,
+                        cancel_session,
+                    })),
+                }
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Link(url) => {
-                info!("performing link authentication");
-
-                let node_info = link::authenticate(&url, client).await?;
-
-                (
-                    CachedNodeInfo::new_uncached(node_info),
-                    BackendType::Link(url),
-                )
-            }
+            BackendType::Link(link) => Ok(Box::new(NeedsLinkAuthentication {
+                stream,
+                link,
+                params,
+                allow_self_signed_compute,
+                ctx,
+                cancel_session,
+            })),
             #[cfg(test)]
-            Test(_) => {
+            BackendType::Test(_) => {
                 unreachable!("this function should never be called in the test backend")
             }
-        };
-
-        info!("user successfully authenticated");
-        Ok(res)
+        }
     }
 }
 

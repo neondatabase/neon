@@ -10,7 +10,7 @@ mod channel_binding;
 mod messages;
 mod stream;
 
-use crate::error::UserFacingError;
+use crate::error::{ReportableError, UserFacingError};
 use std::io;
 use thiserror::Error;
 
@@ -35,6 +35,25 @@ pub enum Error {
 
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+impl ReportableError for Error {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
+            Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
+            Error::BadClientMessage(_) => crate::error::ErrorKind::User,
+            Error::MissingBinding => crate::error::ErrorKind::Service,
+            Error::Io(io) => match io.kind() {
+                // tokio postgres uses these for various scram failures
+                io::ErrorKind::InvalidInput
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::Other => crate::error::ErrorKind::User,
+                // all other IO errors are likely disconnects.
+                _ => crate::error::ErrorKind::Disconnect,
+            },
+        }
+    }
 }
 
 impl UserFacingError for Error {

@@ -1,13 +1,21 @@
+use std::borrow::Cow;
+
 use super::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint,
+    NeedsAuthSecret,
 };
 use crate::{
     auth::{self, AuthFlow},
-    console::AuthSecret,
+    cancellation::Session,
+    config::AuthenticationConfig,
+    console::{provider::ConsoleBackend, AuthSecret},
+    context::RequestMonitoring,
     metrics::LatencyTimer,
     sasl,
-    stream::{self, Stream},
+    state_machine::{DynStage, ResultExt, Stage, StageError},
+    stream::{self, PqStream, Stream},
 };
+use pq_proto::StartupMessageParams;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
@@ -46,7 +54,7 @@ pub async fn authenticate_cleartext(
 /// Workaround for clients which don't provide an endpoint (project) name.
 /// Similar to [`authenticate_cleartext`], but there's a specific password format,
 /// and passwords are not yet validated (we don't know how to validate them!)
-pub async fn password_hack_no_authentication(
+async fn password_hack_no_authentication(
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     latency_timer: &mut LatencyTimer,
@@ -73,4 +81,48 @@ pub async fn password_hack_no_authentication(
         },
         keys: payload.password,
     })
+}
+
+pub struct NeedsPasswordHack<S> {
+    pub stream: PqStream<Stream<S>>,
+    pub api: Cow<'static, ConsoleBackend>,
+    pub params: StartupMessageParams,
+    pub allow_self_signed_compute: bool,
+    pub allow_cleartext: bool,
+    pub info: ComputeUserInfoNoEndpoint,
+    pub config: &'static AuthenticationConfig,
+
+    // monitoring
+    pub ctx: RequestMonitoring,
+    pub cancel_session: Session,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stage for NeedsPasswordHack<S> {
+    fn span(&self) -> tracing::Span {
+        tracing::info_span!("password_hack")
+    }
+    async fn run(mut self) -> Result<DynStage, StageError> {
+        let (res, stream) = password_hack_no_authentication(
+            self.info,
+            &mut self.stream,
+            &mut self.ctx.latency_timer,
+        )
+        .await
+        .send_error_to_user(&mut self.ctx, self.stream)?;
+
+        self.ctx.set_endpoint_id(Some(res.info.endpoint.clone()));
+        Ok(Box::new(NeedsAuthSecret {
+            stream,
+            info: res.info,
+            unauthenticated_password: Some(res.keys),
+
+            api: self.api,
+            params: self.params,
+            allow_self_signed_compute: self.allow_self_signed_compute,
+            allow_cleartext: self.allow_cleartext,
+            ctx: self.ctx,
+            cancel_session: self.cancel_session,
+            config: self.config,
+        }))
+    }
 }

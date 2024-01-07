@@ -13,7 +13,7 @@ use password_hack::PasswordHackPayload;
 mod flow;
 pub use flow::*;
 
-use crate::{console, error::UserFacingError};
+use crate::error::{ReportableError, UserFacingError};
 use std::io;
 use thiserror::Error;
 
@@ -23,15 +23,6 @@ pub type Result<T> = std::result::Result<T, AuthError>;
 /// Common authentication error.
 #[derive(Debug, Error)]
 pub enum AuthErrorImpl {
-    #[error(transparent)]
-    Link(#[from] backend::LinkAuthError),
-
-    #[error(transparent)]
-    GetAuthInfo(#[from] console::errors::GetAuthInfoError),
-
-    #[error(transparent)]
-    WakeCompute(#[from] console::errors::WakeComputeError),
-
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
     Sasl(#[from] crate::sasl::Error),
@@ -99,13 +90,25 @@ impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
     }
 }
 
+impl ReportableError for AuthError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self.0.as_ref() {
+            AuthErrorImpl::Sasl(s) => s.get_error_type(),
+            AuthErrorImpl::BadAuthMethod(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::MalformedPassword(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::MissingEndpointName => crate::error::ErrorKind::User,
+            AuthErrorImpl::AuthFailed(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::Io(_) => crate::error::ErrorKind::Disconnect,
+            AuthErrorImpl::IpAddressNotAllowed => crate::error::ErrorKind::User,
+            AuthErrorImpl::TooManyConnections => crate::error::ErrorKind::RateLimit,
+        }
+    }
+}
+
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
         use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Link(e) => e.to_string_client(),
-            GetAuthInfo(e) => e.to_string_client(),
-            WakeCompute(e) => e.to_string_client(),
             Sasl(e) => e.to_string_client(),
             AuthFailed(_) => self.to_string(),
             BadAuthMethod(_) => self.to_string(),

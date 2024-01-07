@@ -82,6 +82,19 @@ impl<S> Framed<S> {
             write_buf: self.write_buf,
         })
     }
+
+    /// Return new Framed with stream type transformed by f. For dynamic dispatch.
+    pub fn map_stream_sync<S2, F>(self, f: F) -> Framed<S2>
+    where
+        F: FnOnce(S) -> S2,
+    {
+        let stream = f(self.stream);
+        Framed {
+            stream,
+            read_buf: self.read_buf,
+            write_buf: self.write_buf,
+        }
+    }
 }
 
 impl<S: AsyncRead + Unpin> Framed<S> {

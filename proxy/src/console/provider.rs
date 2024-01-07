@@ -21,7 +21,7 @@ use tracing::info;
 
 pub mod errors {
     use crate::{
-        error::{io_error, UserFacingError},
+        error::{io_error, ReportableError, UserFacingError},
         http,
         proxy::retry::ShouldRetry,
     };
@@ -52,6 +52,15 @@ pub mod errors {
             match self {
                 Console { status, .. } => Some(*status),
                 _ => None,
+            }
+        }
+    }
+
+    impl ReportableError for ApiError {
+        fn get_error_type(&self) -> crate::error::ErrorKind {
+            match self {
+                ApiError::Console { .. } => crate::error::ErrorKind::ControlPlane,
+                ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
     }
@@ -140,6 +149,15 @@ pub mod errors {
         }
     }
 
+    impl ReportableError for GetAuthInfoError {
+        fn get_error_type(&self) -> crate::error::ErrorKind {
+            match self {
+                GetAuthInfoError::BadSecret => crate::error::ErrorKind::ControlPlane,
+                GetAuthInfoError::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+            }
+        }
+    }
+
     impl UserFacingError for GetAuthInfoError {
         fn to_string_client(&self) -> String {
             use GetAuthInfoError::*;
@@ -178,6 +196,16 @@ pub mod errors {
     impl From<tokio::time::error::Elapsed> for WakeComputeError {
         fn from(_: tokio::time::error::Elapsed) -> Self {
             WakeComputeError::TimeoutError
+        }
+    }
+
+    impl ReportableError for WakeComputeError {
+        fn get_error_type(&self) -> crate::error::ErrorKind {
+            match self {
+                WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
+                WakeComputeError::ApiError(e) => e.get_error_type(),
+                WakeComputeError::TimeoutError => crate::error::ErrorKind::RateLimit,
+            }
         }
     }
 

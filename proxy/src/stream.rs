@@ -1,5 +1,5 @@
 use crate::config::TlsServerEndPoint;
-use crate::error::UserFacingError;
+use crate::error::ErrorKind;
 use anyhow::bail;
 use bytes::BytesMut;
 
@@ -99,21 +99,14 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Allowing string literals is safe under the assumption they might not contain any runtime info.
     /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
     pub async fn throw_error_str<T>(&mut self, error: &'static str) -> anyhow::Result<T> {
-        tracing::info!("forwarding error to user: {error}");
+        let kind = ErrorKind::User;
+        tracing::error!(
+            kind = kind.to_str(),
+            full_msg = error,
+            user_msg = error,
+            "task finished with error"
+        );
         self.write_message(&BeMessage::ErrorResponse(error, None))
-            .await?;
-        bail!(error)
-    }
-
-    /// Write the error message using [`Self::write_message`], then re-throw it.
-    /// Trait [`UserFacingError`] acts as an allowlist for error types.
-    pub async fn throw_error<T, E>(&mut self, error: E) -> anyhow::Result<T>
-    where
-        E: UserFacingError + Into<anyhow::Error>,
-    {
-        let msg = error.to_string_client();
-        tracing::info!("forwarding error to user: {msg}");
-        self.write_message(&BeMessage::ErrorResponse(&msg, None))
             .await?;
         bail!(error)
     }

@@ -26,6 +26,7 @@ pub mod redis;
 pub mod sasl;
 pub mod scram;
 pub mod serverless;
+pub mod state_machine;
 pub mod stream;
 pub mod url;
 pub mod usage_metrics;

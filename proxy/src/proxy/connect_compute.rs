@@ -1,19 +1,119 @@
 use crate::{
     auth,
+    cancellation::{self, Session},
     compute::{self, PostgresConnection},
     console::{self, errors::WakeComputeError, Api},
     context::RequestMonitoring,
     metrics::{bool_to_str, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
-    proxy::retry::{retry_after, ShouldRetry},
+    state_machine::{DynStage, ResultExt, Stage, StageError},
+    stream::{PqStream, Stream},
 };
 use async_trait::async_trait;
 use hyper::StatusCode;
 use pq_proto::StartupMessageParams;
 use std::ops::ControlFlow;
-use tokio::time;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    time,
+};
 use tracing::{error, info, warn};
 
+use pq_proto::BeMessage as Be;
+
+use super::{
+    pass::ProxyPass,
+    retry::{retry_after, ShouldRetry},
+};
+
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
+
+pub struct NeedsComputeConnection<S> {
+    pub stream: PqStream<Stream<S>>,
+    pub user_info: auth::BackendType<'static, auth::backend::ComputeUserInfo>,
+    pub mechanism: TcpMechanism,
+    pub node_info: console::CachedNodeInfo,
+
+    // monitoring
+    pub ctx: RequestMonitoring,
+    pub cancel_session: Session,
+}
+
+impl<S> Stage for NeedsComputeConnection<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn span(&self) -> tracing::Span {
+        tracing::info_span!("connect_to_compute")
+    }
+    async fn run(self) -> Result<DynStage, StageError> {
+        let Self {
+            stream,
+            user_info,
+            mechanism,
+            node_info,
+            mut ctx,
+            cancel_session,
+        } = self;
+
+        let aux = node_info.aux.clone();
+        let (mut node, mut stream) =
+            connect_to_compute(&mut ctx, &mechanism, node_info, &user_info)
+                .await
+                .send_error_to_user(&mut ctx, stream)?;
+
+        prepare_client_connection(&node, &cancel_session, &mut stream)
+            .await
+            .no_user_error(&mut ctx, crate::error::ErrorKind::Disconnect)?;
+
+        // Before proxy passing, forward to compute whatever data is left in the
+        // PqStream input buffer. Normally there is none, but our serverless npm
+        // driver in pipeline mode sends startup, password and first query
+        // immediately after opening the connection.
+        let (stream, read_buf) = stream.into_inner();
+
+        node.stream
+            .write_all(&read_buf)
+            .await
+            .no_user_error(&mut ctx, crate::error::ErrorKind::Disconnect)?;
+
+        Ok(Box::new(ProxyPass {
+            client: stream,
+            compute: node.stream,
+            aux,
+            cancel_session,
+        }))
+    }
+}
+
+/// Finish client connection initialization: confirm auth success, send params, etc.
+#[tracing::instrument(skip_all)]
+async fn prepare_client_connection(
+    node: &compute::PostgresConnection,
+    session: &cancellation::Session,
+    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) -> std::io::Result<()> {
+    // Register compute's query cancellation token and produce a new, unique one.
+    // The new token (cancel_key_data) will be sent to the client.
+    let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
+
+    // Forward all postgres connection params to the client.
+    // Right now the implementation is very hacky and inefficent (ideally,
+    // we don't need an intermediate hashmap), but at least it should be correct.
+    for (name, value) in &node.params {
+        // TODO: Theoretically, this could result in a big pile of params...
+        stream.write_message_noflush(&Be::ParameterStatus {
+            name: name.as_bytes(),
+            value: value.as_bytes(),
+        })?;
+    }
+
+    stream
+        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
+        .write_message(&Be::ReadyForQuery)
+        .await?;
+
+    Ok(())
+}
 
 /// If we couldn't connect, a cached connection info might be to blame
 /// (e.g. the compute node's address might've changed at the wrong time).
@@ -63,13 +163,13 @@ pub trait ConnectMechanism {
     fn update_connect_config(&self, conf: &mut compute::ConnCfg);
 }
 
-pub struct TcpMechanism<'a> {
+pub struct TcpMechanism {
     /// KV-dictionary with PostgreSQL connection params.
-    pub params: &'a StartupMessageParams,
+    pub params: StartupMessageParams,
 }
 
 #[async_trait]
-impl ConnectMechanism for TcpMechanism<'_> {
+impl ConnectMechanism for TcpMechanism {
     type Connection = PostgresConnection;
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
@@ -84,7 +184,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
-        config.set_startup_params(self.params);
+        config.set_startup_params(&self.params);
     }
 }
 

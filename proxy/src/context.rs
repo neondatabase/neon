@@ -38,6 +38,7 @@ pub struct RequestMonitoring {
     // This sender is here to keep the request monitoring channel open while requests are taking place.
     sender: Option<mpsc::UnboundedSender<RequestMonitoring>>,
     pub latency_timer: LatencyTimer,
+    root_span: tracing::Span,
 }
 
 impl RequestMonitoring {
@@ -46,6 +47,7 @@ impl RequestMonitoring {
         peer_addr: IpAddr,
         protocol: &'static str,
         region: &'static str,
+        root_span: tracing::Span,
     ) -> Self {
         Self {
             peer_addr,
@@ -64,12 +66,19 @@ impl RequestMonitoring {
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
+            root_span,
         }
     }
 
     #[cfg(test)]
     pub fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), "test", "test")
+        RequestMonitoring::new(
+            Uuid::now_v7(),
+            [127, 0, 0, 1].into(),
+            "test",
+            "test",
+            tracing::Span::none(),
+        )
     }
 
     pub fn console_application_name(&self) -> String {
@@ -87,7 +96,10 @@ impl RequestMonitoring {
     }
 
     pub fn set_endpoint_id(&mut self, endpoint_id: Option<SmolStr>) {
-        self.endpoint_id = endpoint_id.or_else(|| self.endpoint_id.clone());
+        if let (None, Some(ep)) = (self.endpoint_id.as_ref(), endpoint_id) {
+            self.root_span.record("ep", &*ep);
+            self.endpoint_id = Some(ep)
+        }
     }
 
     pub fn set_application(&mut self, app: Option<SmolStr>) {
@@ -100,6 +112,10 @@ impl RequestMonitoring {
 
     pub fn set_success(&mut self) {
         self.success = true;
+    }
+
+    pub fn error(&mut self, err: ErrorKind) {
+        self.error_kind = Some(err);
     }
 
     pub fn log(&mut self) {

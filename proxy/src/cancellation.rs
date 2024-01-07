@@ -1,7 +1,7 @@
-use anyhow::{bail, Context};
+use anyhow::Context;
 use dashmap::DashMap;
 use pq_proto::CancelKeyData;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpStream;
 use tokio_postgres::{CancelToken, NoTls};
 use tracing::info;
@@ -25,39 +25,33 @@ impl CancelMap {
     }
 
     /// Run async action within an ephemeral session identified by [`CancelKeyData`].
-    pub async fn with_session<'a, F, R, V>(&'a self, f: F) -> anyhow::Result<V>
-    where
-        F: FnOnce(Session<'a>) -> R,
-        R: std::future::Future<Output = anyhow::Result<V>>,
-    {
+    pub fn get_session(self: Arc<Self>) -> Session {
         // HACK: We'd rather get the real backend_pid but tokio_postgres doesn't
         // expose it and we don't want to do another roundtrip to query
         // for it. The client will be able to notice that this is not the
         // actual backend_pid, but backend_pid is not used for anything
         // so it doesn't matter.
-        let key = rand::random();
+        let key = loop {
+            let key = rand::random();
 
-        // Random key collisions are unlikely to happen here, but they're still possible,
-        // which is why we have to take care not to rewrite an existing key.
-        match self.0.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                bail!("query cancellation key already exists: {key}")
+            // Random key collisions are unlikely to happen here, but they're still possible,
+            // which is why we have to take care not to rewrite an existing key.
+            match self.0.entry(key) {
+                dashmap::mapref::entry::Entry::Occupied(_) => {
+                    continue;
+                }
+                dashmap::mapref::entry::Entry::Vacant(e) => {
+                    e.insert(None);
+                }
             }
-            dashmap::mapref::entry::Entry::Vacant(e) => {
-                e.insert(None);
-            }
-        }
-
-        // This will guarantee that the session gets dropped
-        // as soon as the future is finished.
-        scopeguard::defer! {
-            self.0.remove(&key);
-            info!("dropped query cancellation key {key}");
-        }
+            break key;
+        };
 
         info!("registered new query cancellation key {key}");
-        let session = Session::new(key, self);
-        f(session).await
+        Session {
+            key,
+            cancel_map: self,
+        }
     }
 
     #[cfg(test)]
@@ -98,23 +92,17 @@ impl CancelClosure {
 }
 
 /// Helper for registering query cancellation tokens.
-pub struct Session<'a> {
+pub struct Session {
     /// The user-facing key identifying this session.
     key: CancelKeyData,
     /// The [`CancelMap`] this session belongs to.
-    cancel_map: &'a CancelMap,
+    cancel_map: Arc<CancelMap>,
 }
 
-impl<'a> Session<'a> {
-    fn new(key: CancelKeyData, cancel_map: &'a CancelMap) -> Self {
-        Self { key, cancel_map }
-    }
-}
-
-impl Session<'_> {
+impl Session {
     /// Store the cancel token for the given session.
     /// This enables query cancellation in `crate::proxy::prepare_client_connection`.
-    pub fn enable_query_cancellation(self, cancel_closure: CancelClosure) -> CancelKeyData {
+    pub fn enable_query_cancellation(&self, cancel_closure: CancelClosure) -> CancelKeyData {
         info!("enabling query cancellation for this session");
         self.cancel_map.0.insert(self.key, Some(cancel_closure));
 
@@ -122,37 +110,26 @@ impl Session<'_> {
     }
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.cancel_map.0.remove(&self.key);
+        info!("dropped query cancellation key {}", &self.key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use once_cell::sync::Lazy;
 
     #[tokio::test]
     async fn check_session_drop() -> anyhow::Result<()> {
-        static CANCEL_MAP: Lazy<CancelMap> = Lazy::new(Default::default);
+        let cancel_map: Arc<CancelMap> = Default::default();
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(CANCEL_MAP.with_session(|session| async move {
-            assert!(CANCEL_MAP.contains(&session));
-
-            tx.send(()).expect("failed to send");
-            futures::future::pending::<()>().await; // sleep forever
-
-            Ok(())
-        }));
-
-        // Wait until the task has been spawned.
-        rx.await.context("failed to hear from the task")?;
-
-        // Drop the session's entry by cancelling the task.
-        task.abort();
-        let error = task.await.expect_err("task should have failed");
-        if !error.is_cancelled() {
-            anyhow::bail!(error);
-        }
-
+        let session = cancel_map.clone().get_session();
+        assert!(cancel_map.contains(&session));
+        drop(session);
         // Check that the session has been dropped.
-        assert!(CANCEL_MAP.is_empty());
+        assert!(cancel_map.is_empty());
 
         Ok(())
     }

@@ -1,8 +1,11 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param, context::RequestMonitoring, error::UserFacingError,
-    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::NeonOptions,
+    auth::password_hack::parse_endpoint_param,
+    context::RequestMonitoring,
+    error::{ReportableError, UserFacingError},
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI,
+    proxy::NeonOptions,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -33,7 +36,24 @@ pub enum ComputeUserInfoParseError {
     MalformedProjectName(SmolStr),
 }
 
-impl UserFacingError for ComputeUserInfoParseError {}
+impl ReportableError for ComputeUserInfoParseError {
+    fn get_error_type(&self) -> crate::error::ErrorKind {
+        match self {
+            ComputeUserInfoParseError::MissingKey(_) => crate::error::ErrorKind::User,
+            ComputeUserInfoParseError::InconsistentProjectNames { .. } => {
+                crate::error::ErrorKind::User
+            }
+            ComputeUserInfoParseError::UnknownCommonName { .. } => crate::error::ErrorKind::User,
+            ComputeUserInfoParseError::MalformedProjectName(_) => crate::error::ErrorKind::User,
+        }
+    }
+}
+
+impl UserFacingError for ComputeUserInfoParseError {
+    fn to_string_client(&self) -> String {
+        self.to_string()
+    }
+}
 
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.

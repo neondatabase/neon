@@ -164,6 +164,13 @@ async fn task_main(
         let tls_config = Arc::clone(&tls_config);
         let dest_suffix = Arc::clone(&dest_suffix);
 
+        let root_span = tracing::info_span!(
+            "handle_client",
+            ?session_id,
+            endpoint = tracing::field::Empty
+        );
+        let root_span2 = root_span.clone();
+
         connections.spawn(
             async move {
                 socket
@@ -171,8 +178,13 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let mut ctx =
-                    RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
+                let mut ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr.ip(),
+                    "sni_router",
+                    "sni",
+                    root_span2,
+                );
                 handle_client(
                     &mut ctx,
                     dest_suffix,
@@ -186,7 +198,7 @@ async fn task_main(
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
             })
-            .instrument(tracing::info_span!("handle_client", ?session_id)),
+            .instrument(root_span),
         );
     }
 
@@ -271,6 +283,7 @@ async fn handle_client(
 
     let client = tokio::net::TcpStream::connect(destination).await?;
 
+    ctx.log();
     let metrics_aux: MetricsAuxInfo = Default::default();
-    proxy::proxy::proxy_pass(ctx, tls_stream, client, metrics_aux).await
+    proxy::proxy::pass::proxy_pass(tls_stream, client, metrics_aux).await
 }

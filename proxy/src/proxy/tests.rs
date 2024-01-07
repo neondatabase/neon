@@ -3,14 +3,19 @@
 mod mitm;
 
 use super::connect_compute::ConnectMechanism;
+use super::handshake::handshake;
 use super::retry::ShouldRetry;
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
 use crate::console::{self, CachedNodeInfo, NodeInfo};
+use crate::proxy::connect_compute::connect_to_compute;
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
-use crate::{auth, http, sasl, scram};
+use crate::stream::PqStream;
+use crate::{auth, compute, http, sasl, scram};
+use anyhow::bail;
 use async_trait::async_trait;
+use pq_proto::BeMessage as Be;
 use rstest::rstest;
 use smol_str::SmolStr;
 use tokio_postgres::config::SslMode;
@@ -202,7 +207,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
         .err() // -> Option<E>
         .context("server shouldn't accept client")?;
 
-    assert!(client_err.to_string().contains(&server_err.to_string()));
+    assert!(server_err.to_string().contains(ERR_INSECURE_CONNECTION));
 
     Ok(())
 }

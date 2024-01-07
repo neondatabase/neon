@@ -124,6 +124,12 @@ pub async fn task_main(
                             let cancel_map = Arc::new(CancelMap::default());
                             let session_id = uuid::Uuid::new_v4();
 
+                            let root_span = info_span!(
+                                "serverless",
+                                session = %session_id,
+                                %peer_addr,
+                            );
+
                             request_handler(
                                 req,
                                 config,
@@ -135,12 +141,9 @@ pub async fn task_main(
                                 sni_name,
                                 peer_addr.ip(),
                                 endpoint_rate_limiter,
+                                root_span.clone(),
                             )
-                            .instrument(info_span!(
-                                "serverless",
-                                session = %session_id,
-                                %peer_addr,
-                            ))
+                            .instrument(root_span)
                             .await
                         }
                     },
@@ -205,6 +208,7 @@ async fn request_handler(
     sni_hostname: Option<String>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    root_span: tracing::Span,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()
@@ -215,27 +219,33 @@ async fn request_handler(
 
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&request) {
-        info!(session_id = ?session_id, "performing websocket upgrade");
+        info!("performing websocket upgrade");
 
         let (response, websocket) = hyper_tungstenite::upgrade(&mut request, None)
             .map_err(|e| ApiError::BadRequest(e.into()))?;
 
         ws_connections.spawn(
             async move {
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+                let ctx =
+                    RequestMonitoring::new(session_id, peer_addr, "ws", &config.region, root_span);
 
-                if let Err(e) = websocket::serve_websocket(
+                let websocket = match websocket.await {
+                    Err(e) => {
+                        error!("error in websocket connection: {e:#}");
+                        return;
+                    }
+                    Ok(ws) => ws,
+                };
+
+                websocket::serve_websocket(
                     config,
-                    &mut ctx,
+                    ctx,
                     websocket,
-                    &cancel_map,
+                    cancel_map,
                     host,
                     endpoint_rate_limiter,
                 )
                 .await
-                {
-                    error!(session_id = ?session_id, "error in websocket connection: {e:#}");
-                }
             }
             .in_current_span(),
         );
@@ -243,7 +253,8 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let mut ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+        let mut ctx =
+            RequestMonitoring::new(session_id, peer_addr, "http", &config.region, root_span);
 
         sql_over_http::handle(
             tls,
