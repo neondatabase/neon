@@ -18,8 +18,6 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
-use pageserver_api::models::LocationConfig;
-use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
@@ -2312,19 +2310,19 @@ impl Tenant {
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
     /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
     /// rare external API calls, like a reconciliation at startup.
-    pub(crate) fn get_location_conf(&self) -> LocationConfig {
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
         let conf = self.tenant_conf.read().unwrap();
 
         let location_config_mode = match conf.location.attach_mode {
-            AttachmentMode::Single => LocationConfigMode::AttachedSingle,
-            AttachmentMode::Multi => LocationConfigMode::AttachedMulti,
-            AttachmentMode::Stale => LocationConfigMode::AttachedStale,
+            AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
+            AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
+            AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
         };
 
         // We have a pageserver TenantConf, we need the API-facing TenantConfig.
         let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
 
-        LocationConfig {
+        models::LocationConfig {
             mode: location_config_mode,
             generation: self.generation.into(),
             secondary_conf: None,

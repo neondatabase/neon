@@ -1309,9 +1309,7 @@ async fn list_location_config_handler(
             .map(|(tenant_shard_id, slot)| {
                 let v = match slot {
                     TenantSlot::Attached(t) => Some(t.get_location_conf()),
-                    TenantSlot::Secondary => {
-                        todo!();
-                    }
+                    TenantSlot::Secondary(s) => Some(s.get_location_conf()),
                     TenantSlot::InProgress(_) => None,
                 };
                 (tenant_shard_id, v)
