@@ -9,7 +9,7 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models;
+use pageserver_api::models::{self, EvictionPolicy};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -426,30 +426,6 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub heatmap_period: Option<Duration>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum EvictionPolicy {
-    NoEviction,
-    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
-}
-
-impl EvictionPolicy {
-    pub fn discriminant_str(&self) -> &'static str {
-        match self {
-            EvictionPolicy::NoEviction => "NoEviction",
-            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvictionPolicyLayerAccessThreshold {
-    #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[serde(with = "humantime_serde")]
-    pub threshold: Duration,
 }
 
 impl TenantConfOpt {

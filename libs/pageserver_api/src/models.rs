@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     io::Read,
     num::{NonZeroU64, NonZeroUsize},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -232,15 +232,35 @@ pub struct TenantConfig {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
-    // We defer the parsing of the eviction_policy field to the request handler.
-    // Otherwise we'd have to move the types for eviction policy into this package.
-    // We might do that once the eviction feature has stabilizied.
-    // For now, this field is not even documented in the openapi_spec.yml.
-    pub eviction_policy: Option<serde_json::Value>,
+    pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum EvictionPolicy {
+    NoEviction,
+    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+}
+
+impl EvictionPolicy {
+    pub fn discriminant_str(&self) -> &'static str {
+        match self {
+            EvictionPolicy::NoEviction => "NoEviction",
+            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictionPolicyLayerAccessThreshold {
+    #[serde(with = "humantime_serde")]
+    pub period: Duration,
+    #[serde(with = "humantime_serde")]
+    pub threshold: Duration,
 }
 
 /// A flattened analog of a `pagesever::tenant::LocationMode`, which

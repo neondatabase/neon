@@ -15,8 +15,8 @@ use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
     models::{
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
-        TimelineState,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        LayerMapInfo, TimelineState,
     },
     shard::{ShardIdentity, TenantShardId},
 };
@@ -68,7 +68,7 @@ use crate::metrics::{
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
-use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
+use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
