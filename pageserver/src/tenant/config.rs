@@ -555,6 +555,12 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
     }
 }
 
+impl From<TenantConfOpt> for models::TenantConfig {
+    fn from(value: TenantConfOpt) -> Self {
+        todo!();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

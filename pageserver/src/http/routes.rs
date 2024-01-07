@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
@@ -37,6 +38,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::TenantSlot;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
@@ -1295,6 +1297,30 @@ async fn put_tenant_location_config_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn list_location_config_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let slots = state.tenant_manager.list();
+    let result = LocationConfigListResponse {
+        tenant_shards: slots
+            .into_iter()
+            .map(|(tenant_shard_id, slot)| {
+                let v = match slot {
+                    TenantSlot::Attached(t) => Some(t.get_location_conf()),
+                    TenantSlot::Secondary => {
+                        todo!();
+                    }
+                    TenantSlot::InProgress(_) => None,
+                };
+                (tenant_shard_id, v)
+            })
+            .collect(),
+    };
+    json_response(StatusCode::OK, result)
+}
+
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
 async fn handle_tenant_break(
     r: Request<Body>,
@@ -1835,6 +1861,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             api_handler(r, put_tenant_location_config_handler)
+        })
+        .get("/v1/location_config", |r| {
+            api_handler(r, list_location_config_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)

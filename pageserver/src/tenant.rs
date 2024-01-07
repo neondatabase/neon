@@ -17,6 +17,9 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use pageserver_api::models;
+use pageserver_api::models::LocationConfig;
+use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
@@ -2304,6 +2307,32 @@ impl Tenant {
             .location
             .attach_mode
             .clone()
+    }
+
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> LocationConfig {
+        let conf = self.tenant_conf.read().unwrap();
+
+        let location_config_mode = match conf.location.attach_mode {
+            AttachmentMode::Single => LocationConfigMode::AttachedSingle,
+            AttachmentMode::Multi => LocationConfigMode::AttachedMulti,
+            AttachmentMode::Stale => LocationConfigMode::AttachedStale,
+        };
+
+        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
+        let tenant_config: models::TenantConfig = conf.tenant_conf.clone().into();
+
+        LocationConfig {
+            mode: location_config_mode,
+            generation: self.generation.into(),
+            secondary_conf: None,
+            shard_number: self.shard_identity.number.0,
+            shard_count: self.shard_identity.count.0,
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_config,
+        }
     }
 
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {

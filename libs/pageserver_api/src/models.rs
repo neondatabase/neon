@@ -340,6 +340,11 @@ pub struct LocationConfig {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct LocationConfigListResponse {
+    pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TenantCreateResponse(pub TenantId);
 
