@@ -3341,6 +3341,7 @@ dependencies = [
  "const_format",
  "enum-map",
  "hex",
+ "humantime-serde",
  "postgres_ffi",
  "rand 0.8.5",
  "serde",
