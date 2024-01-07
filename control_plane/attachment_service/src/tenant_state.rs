@@ -26,6 +26,9 @@ pub(crate) struct TenantState {
 
     pub(crate) shard: ShardIdentity,
 
+    // Runtime only: sequence used to coordinate when updating this object while
+    // with background reconcilers may be running.  A reconciler runs to a particular
+    // sequence.
     pub(crate) sequence: Sequence,
 
     // Latest generation number: next time we attach, increment this
@@ -45,6 +48,8 @@ pub(crate) struct TenantState {
     // with `Self::reconcile`.
     pub(crate) observed: ObservedState,
 
+    // Tenant configuration, passed through opaquely to the pageserver.  Identical
+    // for all shards in a tenant.
     pub(crate) config: TenantConfig,
 
     /// If a reconcile task is currently in flight, it may be joined here (it is

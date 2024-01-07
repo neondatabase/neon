@@ -127,18 +127,13 @@ impl FromStr for NodeAvailability {
     }
 }
 
+/// FIXME: this is a duplicate of the type in the attachment_service crate, because the
+/// type needs to be defined with diesel traits in there.
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub enum NodeSchedulingPolicy {
-    // Normal, happy state
     Active,
-
-    // A newly added node: gradually move some work here.
     Filling,
-
-    // Do not schedule new work here, but leave configured locations in place.
     Pause,
-
-    // Do not schedule work here.  Gracefully move work away, as resources allow.
     Draining,
 }
 

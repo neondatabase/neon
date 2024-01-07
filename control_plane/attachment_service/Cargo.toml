@@ -20,6 +20,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
+diesel = { version = "2.1.4", features = ["sqlite", "serde_json"] }
+
 utils = { path = "../../libs/utils/" }
 control_plane = { path = ".." }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
