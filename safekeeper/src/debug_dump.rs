@@ -7,13 +7,16 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::bail;
 use anyhow::Result;
 use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
+use postgres_ffi::MAX_SEND_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
 
+use sha2::{Digest, Sha256};
 use utils::id::NodeId;
 use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
@@ -25,6 +28,7 @@ use crate::safekeeper::TermHistory;
 use crate::SafeKeeperConf;
 
 use crate::send_wal::WalSenderState;
+use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
 
 /// Various filters that influence the resulting JSON output.
@@ -299,4 +303,57 @@ fn build_config(config: SafeKeeperConf) -> Config {
         max_offloader_lag_bytes: config.max_offloader_lag_bytes,
         wal_backup_enabled: config.wal_backup_enabled,
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimelineDigestRequest {
+    pub from_lsn: Lsn,
+    pub until_lsn: Lsn,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineDigest {
+    pub sha256: String,
+}
+
+pub async fn calculate_digest(
+    tli: &Arc<crate::timeline::Timeline>,
+    request: TimelineDigestRequest,
+) -> Result<TimelineDigest> {
+    if request.from_lsn > request.until_lsn {
+        bail!("from_lsn is greater than until_lsn");
+    }
+
+    let conf = GlobalTimelines::get_global_config();
+    let (_, persisted_state) = tli.get_state().await;
+
+    if persisted_state.timeline_start_lsn > request.from_lsn {
+        bail!("requested LSN is before the start of the timeline");
+    }
+
+    let mut wal_reader = WalReader::new(
+        conf.workdir.clone(),
+        tli.timeline_dir.clone(),
+        &persisted_state,
+        request.from_lsn,
+        true,
+    )?;
+
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; MAX_SEND_SIZE];
+
+    let mut bytes_left = (request.until_lsn.0 - request.from_lsn.0) as usize;
+    while bytes_left > 0 {
+        let bytes_to_read = std::cmp::min(buf.len(), bytes_left);
+        let bytes_read = wal_reader.read(&mut buf[..bytes_to_read]).await?;
+        if bytes_read == 0 {
+            bail!("wal_reader.read returned 0 bytes");
+        }
+        hasher.update(&buf[..bytes_read]);
+        bytes_left -= bytes_read;
+    }
+
+    let digest = hasher.finalize();
+    let digest = hex::encode(digest);
+    Ok(TimelineDigest { sha256: digest })
 }

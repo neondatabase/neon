@@ -85,6 +85,8 @@ pub mod sync;
 
 pub mod failpoint_support;
 
+pub mod yielding_loop;
+
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
 /// we have several cases:

@@ -117,6 +117,10 @@ pub const TENANT_CONFIG_NAME: &str = "config";
 /// Full path: `tenants/<tenant_id>/config`.
 pub const TENANT_LOCATION_CONFIG_NAME: &str = "config-v1";
 
+/// Per-tenant copy of their remote heatmap, downloaded into the local
+/// tenant path while in secondary mode.
+pub const TENANT_HEATMAP_BASENAME: &str = "heatmap-v1.json";
+
 /// A suffix used for various temporary files. Any temporary files found in the
 /// data directory at pageserver startup can be automatically removed.
 pub const TEMP_FILE_SUFFIX: &str = "___temp";

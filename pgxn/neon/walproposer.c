@@ -99,7 +99,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		port = strchr(host, ':');
 		if (port == NULL)
 		{
-			walprop_log(FATAL, "port is not specified");
+			wp_log(FATAL, "port is not specified");
 		}
 		*port++ = '\0';
 		sep = strchr(port, ',');
@@ -107,7 +107,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 			*sep++ = '\0';
 		if (wp->n_safekeepers + 1 >= MAX_SAFEKEEPERS)
 		{
-			walprop_log(FATAL, "Too many safekeepers");
+			wp_log(FATAL, "too many safekeepers");
 		}
 		wp->safekeeper[wp->n_safekeepers].host = host;
 		wp->safekeeper[wp->n_safekeepers].port = port;
@@ -123,7 +123,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
 							   sk->host, sk->port, wp->config->neon_timeline, wp->config->neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
-				walprop_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
+				wp_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
 
 		initStringInfo(&wp->safekeeper[wp->n_safekeepers].outbuf);
@@ -133,7 +133,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	}
 	if (wp->n_safekeepers < 1)
 	{
-		walprop_log(FATAL, "Safekeepers addresses are not specified");
+		wp_log(FATAL, "safekeepers addresses are not specified");
 	}
 	wp->quorum = wp->n_safekeepers / 2 + 1;
 
@@ -144,15 +144,15 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp->api.strong_random(wp, &wp->greetRequest.proposerId, sizeof(wp->greetRequest.proposerId));
 	wp->greetRequest.systemId = wp->config->systemId;
 	if (!wp->config->neon_timeline)
-		walprop_log(FATAL, "neon.timeline_id is not provided");
+		wp_log(FATAL, "neon.timeline_id is not provided");
 	if (*wp->config->neon_timeline != '\0' &&
 		!HexDecodeString(wp->greetRequest.timeline_id, wp->config->neon_timeline, 16))
-		walprop_log(FATAL, "Could not parse neon.timeline_id, %s", wp->config->neon_timeline);
+		wp_log(FATAL, "could not parse neon.timeline_id, %s", wp->config->neon_timeline);
 	if (!wp->config->neon_tenant)
-		walprop_log(FATAL, "neon.tenant_id is not provided");
+		wp_log(FATAL, "neon.tenant_id is not provided");
 	if (*wp->config->neon_tenant != '\0' &&
 		!HexDecodeString(wp->greetRequest.tenant_id, wp->config->neon_tenant, 16))
-		walprop_log(FATAL, "Could not parse neon.tenant_id, %s", wp->config->neon_tenant);
+		wp_log(FATAL, "could not parse neon.tenant_id, %s", wp->config->neon_tenant);
 
 	wp->greetRequest.timeline = wp->config->pgTimeline;
 	wp->greetRequest.walSegSize = wp->config->wal_segment_size;
@@ -274,8 +274,8 @@ WalProposerPoll(WalProposer *wp)
 				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
 											   wp->config->safekeeper_connection_timeout))
 				{
-					walprop_log(WARNING, "terminating connection to safekeeper '%s:%s' in '%s' state: no messages received during the last %dms or connection attempt took longer than that",
-								sk->host, sk->port, FormatSafekeeperState(sk), wp->config->safekeeper_connection_timeout);
+					wp_log(WARNING, "terminating connection to safekeeper '%s:%s' in '%s' state: no messages received during the last %dms or connection attempt took longer than that",
+						   sk->host, sk->port, FormatSafekeeperState(sk), wp->config->safekeeper_connection_timeout);
 					ShutdownConnection(sk);
 				}
 			}
@@ -356,8 +356,8 @@ ResetConnection(Safekeeper *sk)
 		 *
 		 * https://www.postgresql.org/docs/devel/libpq-connect.html#LIBPQ-PQCONNECTSTARTPARAMS
 		 */
-		walprop_log(WARNING, "Immediate failure to connect with node '%s:%s':\n\terror: %s",
-					sk->host, sk->port, wp->api.conn_error_message(sk));
+		wp_log(WARNING, "immediate failure to connect with node '%s:%s':\n\terror: %s",
+			   sk->host, sk->port, wp->api.conn_error_message(sk));
 
 		/*
 		 * Even though the connection failed, we still need to clean up the
@@ -380,7 +380,7 @@ ResetConnection(Safekeeper *sk)
 	 * (see libpqrcv_connect, defined in
 	 * src/backend/replication/libpqwalreceiver/libpqwalreceiver.c)
 	 */
-	walprop_log(LOG, "connecting with node %s:%s", sk->host, sk->port);
+	wp_log(LOG, "connecting with node %s:%s", sk->host, sk->port);
 
 	sk->state = SS_CONNECTING_WRITE;
 	sk->latestMsgReceivedAt = wp->api.get_current_timestamp(wp);
@@ -434,7 +434,7 @@ ReconnectSafekeepers(WalProposer *wp)
 static void
 AdvancePollState(Safekeeper *sk, uint32 events)
 {
-#ifdef WALPROPOSER_LIB			/* walprop_log needs wp in lib build */
+#ifdef WALPROPOSER_LIB			/* wp_log needs wp in lib build */
 	WalProposer *wp = sk->wp;
 #endif
 
@@ -452,8 +452,8 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * ResetConnection
 			 */
 		case SS_OFFLINE:
-			walprop_log(FATAL, "Unexpected safekeeper %s:%s state advancement: is offline",
-						sk->host, sk->port);
+			wp_log(FATAL, "unexpected safekeeper %s:%s state advancement: is offline",
+				   sk->host, sk->port);
 			break;				/* actually unreachable, but prevents
 								 * -Wimplicit-fallthrough */
 
@@ -488,8 +488,8 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * requests.
 			 */
 		case SS_VOTING:
-			walprop_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
-						sk->port, FormatSafekeeperState(sk));
+			wp_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
+				   sk->port, FormatSafekeeperState(sk));
 			ResetConnection(sk);
 			return;
 
@@ -517,8 +517,8 @@ AdvancePollState(Safekeeper *sk, uint32 events)
 			 * Idle state for waiting votes from quorum.
 			 */
 		case SS_IDLE:
-			walprop_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
-						sk->port, FormatSafekeeperState(sk));
+			wp_log(WARNING, "EOF from node %s:%s in %s state", sk->host,
+				   sk->port, FormatSafekeeperState(sk));
 			ResetConnection(sk);
 			return;
 
@@ -543,8 +543,8 @@ HandleConnectionEvent(Safekeeper *sk)
 	switch (result)
 	{
 		case WP_CONN_POLLING_OK:
-			walprop_log(LOG, "connected with node %s:%s", sk->host,
-						sk->port);
+			wp_log(LOG, "connected with node %s:%s", sk->host,
+				   sk->port);
 			sk->latestMsgReceivedAt = wp->api.get_current_timestamp(wp);
 
 			/*
@@ -567,8 +567,8 @@ HandleConnectionEvent(Safekeeper *sk)
 			break;
 
 		case WP_CONN_POLLING_FAILED:
-			walprop_log(WARNING, "failed to connect to node '%s:%s': %s",
-						sk->host, sk->port, wp->api.conn_error_message(sk));
+			wp_log(WARNING, "failed to connect to node '%s:%s': %s",
+				   sk->host, sk->port, wp->api.conn_error_message(sk));
 
 			/*
 			 * If connecting failed, we don't want to restart the connection
@@ -604,8 +604,8 @@ SendStartWALPush(Safekeeper *sk)
 
 	if (!wp->api.conn_send_query(sk, "START_WAL_PUSH"))
 	{
-		walprop_log(WARNING, "Failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
-					sk->host, sk->port, wp->api.conn_error_message(sk));
+		wp_log(WARNING, "failed to send 'START_WAL_PUSH' query to safekeeper %s:%s: %s",
+			   sk->host, sk->port, wp->api.conn_error_message(sk));
 		ShutdownConnection(sk);
 		return;
 	}
@@ -641,8 +641,8 @@ RecvStartWALPushResult(Safekeeper *sk)
 			break;
 
 		case WP_EXEC_FAILED:
-			walprop_log(WARNING, "Failed to send query to safekeeper %s:%s: %s",
-						sk->host, sk->port, wp->api.conn_error_message(sk));
+			wp_log(WARNING, "failed to send query to safekeeper %s:%s: %s",
+				   sk->host, sk->port, wp->api.conn_error_message(sk));
 			ShutdownConnection(sk);
 			return;
 
@@ -652,8 +652,8 @@ RecvStartWALPushResult(Safekeeper *sk)
 			 * wrong"
 			 */
 		case WP_EXEC_UNEXPECTED_SUCCESS:
-			walprop_log(WARNING, "Received bad response from safekeeper %s:%s query execution",
-						sk->host, sk->port);
+			wp_log(WARNING, "received bad response from safekeeper %s:%s query execution",
+				   sk->host, sk->port);
 			ShutdownConnection(sk);
 			return;
 	}
@@ -688,7 +688,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->greetResponse))
 		return;
 
-	walprop_log(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
+	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
@@ -708,7 +708,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 		if (wp->n_connected == wp->quorum)
 		{
 			wp->propTerm++;
-			walprop_log(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, wp->quorum, wp->propTerm);
+			wp_log(LOG, "proposer connected to quorum (%d) safekeepers, propTerm=" INT64_FORMAT, wp->quorum, wp->propTerm);
 
 			wp->voteRequest = (VoteRequest)
 			{
@@ -721,9 +721,9 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	else if (sk->greetResponse.term > wp->propTerm)
 	{
 		/* Another compute with higher term is running. */
-		walprop_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
-					sk->host, sk->port,
-					sk->greetResponse.term, wp->propTerm);
+		wp_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
+			   sk->host, sk->port,
+			   sk->greetResponse.term, wp->propTerm);
 	}
 
 	/*
@@ -763,7 +763,7 @@ SendVoteRequest(Safekeeper *sk)
 	WalProposer *wp = sk->wp;
 
 	/* We have quorum for voting, send our vote request */
-	walprop_log(LOG, "requesting vote from %s:%s for term " UINT64_FORMAT, sk->host, sk->port, wp->voteRequest.term);
+	wp_log(LOG, "requesting vote from %s:%s for term " UINT64_FORMAT, sk->host, sk->port, wp->voteRequest.term);
 	/* On failure, logging & resetting is handled */
 	if (!BlockingWrite(sk, &wp->voteRequest, sizeof(wp->voteRequest), SS_WAIT_VERDICT))
 		return;
@@ -780,12 +780,12 @@ RecvVoteResponse(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->voteResponse))
 		return;
 
-	walprop_log(LOG,
-				"got VoteResponse from acceptor %s:%s, voteGiven=" UINT64_FORMAT ", epoch=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X, timelineStartLsn=%X/%X",
-				sk->host, sk->port, sk->voteResponse.voteGiven, GetHighestTerm(&sk->voteResponse.termHistory),
-				LSN_FORMAT_ARGS(sk->voteResponse.flushLsn),
-				LSN_FORMAT_ARGS(sk->voteResponse.truncateLsn),
-				LSN_FORMAT_ARGS(sk->voteResponse.timelineStartLsn));
+	wp_log(LOG,
+		   "got VoteResponse from acceptor %s:%s, voteGiven=" UINT64_FORMAT ", epoch=" UINT64_FORMAT ", flushLsn=%X/%X, truncateLsn=%X/%X, timelineStartLsn=%X/%X",
+		   sk->host, sk->port, sk->voteResponse.voteGiven, GetHighestTerm(&sk->voteResponse.termHistory),
+		   LSN_FORMAT_ARGS(sk->voteResponse.flushLsn),
+		   LSN_FORMAT_ARGS(sk->voteResponse.truncateLsn),
+		   LSN_FORMAT_ARGS(sk->voteResponse.timelineStartLsn));
 
 	/*
 	 * In case of acceptor rejecting our vote, bail out, but only if either it
@@ -795,9 +795,9 @@ RecvVoteResponse(Safekeeper *sk)
 	if ((!sk->voteResponse.voteGiven) &&
 		(sk->voteResponse.term > wp->propTerm || wp->n_votes < wp->quorum))
 	{
-		walprop_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
-					sk->host, sk->port,
-					sk->voteResponse.term, wp->propTerm);
+		wp_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejects our connection request with term " INT64_FORMAT "",
+			   sk->host, sk->port,
+			   sk->voteResponse.term, wp->propTerm);
 	}
 	Assert(sk->voteResponse.term == wp->propTerm);
 
@@ -841,7 +841,7 @@ HandleElectedProposer(WalProposer *wp)
 	 */
 	if (!wp->api.recovery_download(wp, &wp->safekeeper[wp->donor]))
 	{
-		walprop_log(FATAL, "failed to download WAL for logical replicaiton");
+		wp_log(FATAL, "failed to download WAL for logical replicaiton");
 	}
 
 	if (wp->truncateLsn == wp->propEpochStartLsn && wp->config->syncSafekeepers)
@@ -948,10 +948,10 @@ DetermineEpochStartLsn(WalProposer *wp)
 				if (wp->timelineStartLsn != InvalidXLogRecPtr &&
 					wp->timelineStartLsn != wp->safekeeper[i].voteResponse.timelineStartLsn)
 				{
-					walprop_log(WARNING,
-								"inconsistent timelineStartLsn: current %X/%X, received %X/%X",
-								LSN_FORMAT_ARGS(wp->timelineStartLsn),
-								LSN_FORMAT_ARGS(wp->safekeeper[i].voteResponse.timelineStartLsn));
+					wp_log(WARNING,
+						   "inconsistent timelineStartLsn: current %X/%X, received %X/%X",
+						   LSN_FORMAT_ARGS(wp->timelineStartLsn),
+						   LSN_FORMAT_ARGS(wp->safekeeper[i].voteResponse.timelineStartLsn));
 				}
 				wp->timelineStartLsn = wp->safekeeper[i].voteResponse.timelineStartLsn;
 			}
@@ -969,7 +969,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 		{
 			wp->timelineStartLsn = wp->api.get_redo_start_lsn(wp);
 		}
-		walprop_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
+		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
 	}
 
 	/*
@@ -996,12 +996,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].term = wp->propTerm;
 	wp->propTermHistory.entries[wp->propTermHistory.n_entries - 1].lsn = wp->propEpochStartLsn;
 
-	walprop_log(LOG, "got votes from majority (%d) of nodes, term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
-				wp->quorum,
-				wp->propTerm,
-				LSN_FORMAT_ARGS(wp->propEpochStartLsn),
-				wp->safekeeper[wp->donor].host, wp->safekeeper[wp->donor].port,
-				LSN_FORMAT_ARGS(wp->truncateLsn));
+	wp_log(LOG, "got votes from majority (%d) of nodes, term " UINT64_FORMAT ", epochStartLsn %X/%X, donor %s:%s, truncate_lsn %X/%X",
+		   wp->quorum,
+		   wp->propTerm,
+		   LSN_FORMAT_ARGS(wp->propEpochStartLsn),
+		   wp->safekeeper[wp->donor].host, wp->safekeeper[wp->donor].port,
+		   LSN_FORMAT_ARGS(wp->truncateLsn));
 
 	/*
 	 * Ensure the basebackup we are running (at RedoStartLsn) matches LSN
@@ -1034,10 +1034,10 @@ DetermineEpochStartLsn(WalProposer *wp)
 				 * scenario.
 				 */
 				disable_core_dump();
-				walprop_log(PANIC,
-							"collected propEpochStartLsn %X/%X, but basebackup LSN %X/%X",
-							LSN_FORMAT_ARGS(wp->propEpochStartLsn),
-							LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));
+				wp_log(PANIC,
+					   "collected propEpochStartLsn %X/%X, but basebackup LSN %X/%X",
+					   LSN_FORMAT_ARGS(wp->propEpochStartLsn),
+					   LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));
 			}
 		}
 		walprop_shared->mineLastElectedTerm = wp->propTerm;
@@ -1091,34 +1091,10 @@ SendProposerElected(Safekeeper *sk)
 	{
 		/* safekeeper is empty or no common point, start from the beginning */
 		sk->startStreamingAt = wp->propTermHistory.entries[0].lsn;
-
-		if (sk->startStreamingAt < wp->truncateLsn)
-		{
-			/*
-			 * There's a gap between the WAL starting point and a truncateLsn,
-			 * which can't appear in a normal working cluster. That gap means
-			 * that all safekeepers reported that they have persisted WAL up
-			 * to the truncateLsn before, but now current safekeeper tells
-			 * otherwise.
-			 *
-			 * Also we have a special condition here, which is empty
-			 * safekeeper with no history. In combination with a gap, that can
-			 * happen when we introduce a new safekeeper to the cluster. This
-			 * is a rare case, which is triggered manually for now, and should
-			 * be treated with care.
-			 */
-
-			/*
-			 * truncateLsn will not change without ack from current
-			 * safekeeper, and it's aligned to the WAL record, so we can
-			 * safely start streaming from this point.
-			 */
-			sk->startStreamingAt = wp->truncateLsn;
-
-			walprop_log(WARNING, "empty safekeeper joined cluster as %s:%s, historyStart=%X/%X, sk->startStreamingAt=%X/%X",
-						sk->host, sk->port, LSN_FORMAT_ARGS(wp->propTermHistory.entries[0].lsn),
-						LSN_FORMAT_ARGS(sk->startStreamingAt));
-		}
+		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, timelineStartLsn=%X/%X, termHistory.n_entries=%u" ,
+		 	 sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), LSN_FORMAT_ARGS(wp->timelineStartLsn), wp->propTermHistory.n_entries);
+		/* wp->timelineStartLsn == InvalidXLogRecPtr can be only when timeline is created manually (test_s3_wal_replay) */
+		Assert(sk->startStreamingAt == wp->timelineStartLsn || wp->timelineStartLsn == InvalidXLogRecPtr);
 	}
 	else
 	{
@@ -1141,7 +1117,7 @@ SendProposerElected(Safekeeper *sk)
 		}
 	}
 
-	Assert(sk->startStreamingAt >= wp->truncateLsn && sk->startStreamingAt <= wp->availableLsn);
+	Assert(sk->startStreamingAt <= wp->availableLsn);
 
 	msg.tag = 'e';
 	msg.term = wp->propTerm;
@@ -1150,9 +1126,9 @@ SendProposerElected(Safekeeper *sk)
 	msg.timelineStartLsn = wp->timelineStartLsn;
 
 	lastCommonTerm = i >= 0 ? wp->propTermHistory.entries[i].term : 0;
-	walprop_log(LOG,
-				"sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s, timelineStartLsn=%X/%X",
-				sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port, LSN_FORMAT_ARGS(msg.timelineStartLsn));
+	wp_log(LOG,
+		   "sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s, timelineStartLsn=%X/%X",
+		   sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port, LSN_FORMAT_ARGS(msg.timelineStartLsn));
 
 	resetStringInfo(&sk->outbuf);
 	pq_sendint64_le(&sk->outbuf, msg.tag);
@@ -1261,8 +1237,8 @@ HandleActiveState(Safekeeper *sk, uint32 events)
 	/* expected never to happen, c.f. walprop_pg_active_state_update_event_set */
 	if (events & WL_SOCKET_CLOSED)
 	{
-		walprop_log(WARNING, "connection to %s:%s in active state failed, got WL_SOCKET_CLOSED on neon_walreader socket",
-					sk->host, sk->port);
+		wp_log(WARNING, "connection to %s:%s in active state failed, got WL_SOCKET_CLOSED on neon_walreader socket",
+			   sk->host, sk->port);
 		ShutdownConnection(sk);
 		return;
 	}
@@ -1323,12 +1299,12 @@ SendAppendRequests(Safekeeper *sk)
 			req = &sk->appendRequest;
 			PrepareAppendRequest(sk->wp, &sk->appendRequest, sk->streamingAt, endLsn);
 
-			walprop_log(DEBUG5, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
-						req->endLsn - req->beginLsn,
-						LSN_FORMAT_ARGS(req->beginLsn),
-						LSN_FORMAT_ARGS(req->endLsn),
-						LSN_FORMAT_ARGS(req->commitLsn),
-						LSN_FORMAT_ARGS(wp->truncateLsn), sk->host, sk->port);
+			wp_log(DEBUG5, "sending message len %ld beginLsn=%X/%X endLsn=%X/%X commitLsn=%X/%X truncateLsn=%X/%X to %s:%s",
+				   req->endLsn - req->beginLsn,
+				   LSN_FORMAT_ARGS(req->beginLsn),
+				   LSN_FORMAT_ARGS(req->endLsn),
+				   LSN_FORMAT_ARGS(req->commitLsn),
+				   LSN_FORMAT_ARGS(wp->truncateLsn), sk->host, sk->port);
 
 			resetStringInfo(&sk->outbuf);
 
@@ -1355,8 +1331,8 @@ SendAppendRequests(Safekeeper *sk)
 				case NEON_WALREAD_WOULDBLOCK:
 					return true;
 				case NEON_WALREAD_ERROR:
-					walprop_log(WARNING, "WAL reading for node %s:%s failed: %s",
-								sk->host, sk->port, errmsg);
+					wp_log(WARNING, "WAL reading for node %s:%s failed: %s",
+						   sk->host, sk->port, errmsg);
 					ShutdownConnection(sk);
 					return false;
 				default:
@@ -1388,9 +1364,9 @@ SendAppendRequests(Safekeeper *sk)
 					return true;
 
 				case PG_ASYNC_WRITE_FAIL:
-					walprop_log(WARNING, "failed to send to node %s:%s in %s state: %s",
-								sk->host, sk->port, FormatSafekeeperState(sk),
-								wp->api.conn_error_message(sk));
+					wp_log(WARNING, "failed to send to node %s:%s in %s state: %s",
+						   sk->host, sk->port, FormatSafekeeperState(sk),
+						   wp->api.conn_error_message(sk));
 					ShutdownConnection(sk);
 					return false;
 				default:
@@ -1429,11 +1405,11 @@ RecvAppendResponses(Safekeeper *sk)
 		if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->appendResponse))
 			break;
 
-		walprop_log(DEBUG2, "received message term=" INT64_FORMAT " flushLsn=%X/%X commitLsn=%X/%X from %s:%s",
-					sk->appendResponse.term,
-					LSN_FORMAT_ARGS(sk->appendResponse.flushLsn),
-					LSN_FORMAT_ARGS(sk->appendResponse.commitLsn),
-					sk->host, sk->port);
+		wp_log(DEBUG2, "received message term=" INT64_FORMAT " flushLsn=%X/%X commitLsn=%X/%X from %s:%s",
+			   sk->appendResponse.term,
+			   LSN_FORMAT_ARGS(sk->appendResponse.flushLsn),
+			   LSN_FORMAT_ARGS(sk->appendResponse.commitLsn),
+			   sk->host, sk->port);
 
 		if (sk->appendResponse.term > wp->propTerm)
 		{
@@ -1443,9 +1419,9 @@ RecvAppendResponses(Safekeeper *sk)
 			 * core as this is kinda expected scenario.
 			 */
 			disable_core_dump();
-			walprop_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
-						sk->host, sk->port,
-						sk->appendResponse.term, wp->propTerm);
+			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
+				   sk->host, sk->port,
+				   sk->appendResponse.term, wp->propTerm);
 		}
 
 		readAnything = true;
@@ -1489,32 +1465,32 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->currentClusterSize = pq_getmsgint64(reply_message);
-			walprop_log(DEBUG2, "ParsePageserverFeedbackMessage: current_timeline_size %lu",
-						rf->currentClusterSize);
+			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: current_timeline_size %lu",
+				   rf->currentClusterSize);
 		}
 		else if ((strcmp(key, "ps_writelsn") == 0) || (strcmp(key, "last_received_lsn") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->last_received_lsn = pq_getmsgint64(reply_message);
-			walprop_log(DEBUG2, "ParsePageserverFeedbackMessage: last_received_lsn %X/%X",
-						LSN_FORMAT_ARGS(rf->last_received_lsn));
+			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: last_received_lsn %X/%X",
+				   LSN_FORMAT_ARGS(rf->last_received_lsn));
 		}
 		else if ((strcmp(key, "ps_flushlsn") == 0) || (strcmp(key, "disk_consistent_lsn") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->disk_consistent_lsn = pq_getmsgint64(reply_message);
-			walprop_log(DEBUG2, "ParsePageserverFeedbackMessage: disk_consistent_lsn %X/%X",
-						LSN_FORMAT_ARGS(rf->disk_consistent_lsn));
+			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: disk_consistent_lsn %X/%X",
+				   LSN_FORMAT_ARGS(rf->disk_consistent_lsn));
 		}
 		else if ((strcmp(key, "ps_applylsn") == 0) || (strcmp(key, "remote_consistent_lsn") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->remote_consistent_lsn = pq_getmsgint64(reply_message);
-			walprop_log(DEBUG2, "ParsePageserverFeedbackMessage: remote_consistent_lsn %X/%X",
-						LSN_FORMAT_ARGS(rf->remote_consistent_lsn));
+			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: remote_consistent_lsn %X/%X",
+				   LSN_FORMAT_ARGS(rf->remote_consistent_lsn));
 		}
 		else if ((strcmp(key, "ps_replytime") == 0) || (strcmp(key, "replytime") == 0))
 		{
@@ -1526,8 +1502,8 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 
 				/* Copy because timestamptz_to_str returns a static buffer */
 				replyTimeStr = pstrdup(timestamptz_to_str(rf->replytime));
-				walprop_log(DEBUG2, "ParsePageserverFeedbackMessage: replytime %lu reply_time: %s",
-							rf->replytime, replyTimeStr);
+				wp_log(DEBUG2, "ParsePageserverFeedbackMessage: replytime %lu reply_time: %s",
+					   rf->replytime, replyTimeStr);
 
 				pfree(replyTimeStr);
 			}
@@ -1541,7 +1517,7 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 			 * Skip unknown keys to support backward compatibile protocol
 			 * changes
 			 */
-			walprop_log(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, len);
+			wp_log(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, len);
 			pq_getmsgbytes(reply_message, len);
 		};
 	}
@@ -1606,7 +1582,7 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 
 	if (wp->n_votes < wp->quorum)
 	{
-		walprop_log(WARNING, "GetDonor called before elections are won");
+		wp_log(WARNING, "GetDonor called before elections are won");
 		return NULL;
 	}
 
@@ -1734,9 +1710,9 @@ AsyncRead(Safekeeper *sk, char **buf, int *buf_size)
 			return false;
 
 		case PG_ASYNC_READ_FAIL:
-			walprop_log(WARNING, "Failed to read from node %s:%s in %s state: %s", sk->host,
-						sk->port, FormatSafekeeperState(sk),
-						wp->api.conn_error_message(sk));
+			wp_log(WARNING, "failed to read from node %s:%s in %s state: %s", sk->host,
+				   sk->port, FormatSafekeeperState(sk),
+				   wp->api.conn_error_message(sk));
 			ShutdownConnection(sk);
 			return false;
 	}
@@ -1774,8 +1750,8 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 	tag = pq_getmsgint64_le(&s);
 	if (tag != anymsg->tag)
 	{
-		walprop_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
-					sk->port, FormatSafekeeperState(sk));
+		wp_log(WARNING, "unexpected message tag %c from node %s:%s in state %s", (char) tag, sk->host,
+			   sk->port, FormatSafekeeperState(sk));
 		ResetConnection(sk);
 		return false;
 	}
@@ -1851,9 +1827,9 @@ BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState succes
 
 	if (!wp->api.conn_blocking_write(sk, msg, msg_size))
 	{
-		walprop_log(WARNING, "Failed to send to node %s:%s in %s state: %s",
-					sk->host, sk->port, FormatSafekeeperState(sk),
-					wp->api.conn_error_message(sk));
+		wp_log(WARNING, "failed to send to node %s:%s in %s state: %s",
+			   sk->host, sk->port, FormatSafekeeperState(sk),
+			   wp->api.conn_error_message(sk));
 		ShutdownConnection(sk);
 		return false;
 	}
@@ -1904,9 +1880,9 @@ AsyncWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState flush_sta
 			wp->api.update_event_set(sk, WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE);
 			return false;
 		case PG_ASYNC_WRITE_FAIL:
-			walprop_log(WARNING, "Failed to send to node %s:%s in %s state: %s",
-						sk->host, sk->port, FormatSafekeeperState(sk),
-						wp->api.conn_error_message(sk));
+			wp_log(WARNING, "failed to send to node %s:%s in %s state: %s",
+				   sk->host, sk->port, FormatSafekeeperState(sk),
+				   wp->api.conn_error_message(sk));
 			ShutdownConnection(sk);
 			return false;
 		default:
@@ -1943,9 +1919,9 @@ AsyncFlush(Safekeeper *sk)
 			/* Nothing to do; try again when the socket's ready */
 			return false;
 		case -1:
-			walprop_log(WARNING, "Failed to flush write to node %s:%s in %s state: %s",
-						sk->host, sk->port, FormatSafekeeperState(sk),
-						wp->api.conn_error_message(sk));
+			wp_log(WARNING, "failed to flush write to node %s:%s in %s state: %s",
+				   sk->host, sk->port, FormatSafekeeperState(sk),
+				   wp->api.conn_error_message(sk));
 			ResetConnection(sk);
 			return false;
 		default:
@@ -1974,11 +1950,11 @@ CompareLsn(const void *a, const void *b)
  *
  * The strings are intended to be used as a prefix to "state", e.g.:
  *
- *   walprop_log(LOG, "currently in %s state", FormatSafekeeperState(sk));
+ *   wp_log(LOG, "currently in %s state", FormatSafekeeperState(sk));
  *
  * If this sort of phrasing doesn't fit the message, instead use something like:
  *
- *   walprop_log(LOG, "currently in state [%s]", FormatSafekeeperState(sk));
+ *   wp_log(LOG, "currently in state [%s]", FormatSafekeeperState(sk));
  */
 static char *
 FormatSafekeeperState(Safekeeper *sk)
@@ -2059,8 +2035,8 @@ AssertEventsOkForState(uint32 events, Safekeeper *sk)
 		 * To give a descriptive message in the case of failure, we use elog
 		 * and then an assertion that's guaranteed to fail.
 		 */
-		walprop_log(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
-					FormatEvents(wp, events), sk->host, sk->port, FormatSafekeeperState(sk));
+		wp_log(WARNING, "events %s mismatched for safekeeper %s:%s in state [%s]",
+			   FormatEvents(wp, events), sk->host, sk->port, FormatSafekeeperState(sk));
 		Assert(events_ok_for_state);
 	}
 }
@@ -2199,8 +2175,8 @@ FormatEvents(WalProposer *wp, uint32 events)
 
 	if (events & (~all_flags))
 	{
-		walprop_log(WARNING, "Event formatting found unexpected component %d",
-					events & (~all_flags));
+		wp_log(WARNING, "event formatting found unexpected component %d",
+			   events & (~all_flags));
 		return_str[6] = '*';
 		return_str[7] = '\0';
 	}

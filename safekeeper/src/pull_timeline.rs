@@ -1,16 +1,24 @@
+use std::sync::Arc;
+
+use camino::Utf8PathBuf;
+use camino_tempfile::Utf8TempDir;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use anyhow::{bail, Context, Result};
 use tokio::io::AsyncWriteExt;
 use tracing::info;
-use utils::id::{TenantId, TenantTimelineId, TimelineId};
+use utils::{
+    id::{TenantId, TenantTimelineId, TimelineId},
+    lsn::Lsn,
+};
 
 use crate::{
     control_file, debug_dump,
     http::routes::TimelineStatus,
+    timeline::{Timeline, TimelineError},
     wal_storage::{self, Storage},
-    GlobalTimelines,
+    GlobalTimelines, SafeKeeperConf,
 };
 
 /// Info about timeline on safekeeper ready for reporting.
@@ -91,7 +99,7 @@ pub async fn handle_request(request: Request) -> Result<Response> {
 async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
-        "Pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
+        "pulling timeline {} from safekeeper {}, commit_lsn={}, flush_lsn={}, term={}, epoch={}",
         ttid,
         host,
         status.commit_lsn,
@@ -121,14 +129,14 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
     if dump.timelines.len() != 1 {
         bail!(
-            "Expected to fetch single timeline, got {} timelines",
+            "expected to fetch single timeline, got {} timelines",
             dump.timelines.len()
         );
     }
 
     let timeline = dump.timelines.into_iter().next().unwrap();
     let disk_content = timeline.disk_content.ok_or(anyhow::anyhow!(
-        "Timeline {} doesn't have disk content",
+        "timeline {} doesn't have disk content",
         ttid
     ))?;
 
@@ -155,29 +163,12 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     filenames.insert(0, "safekeeper.control".to_string());
 
     info!(
-        "Downloading {} files from safekeeper {}",
+        "downloading {} files from safekeeper {}",
         filenames.len(),
         host
     );
 
-    // Creating temp directory for a new timeline. It needs to be
-    // located on the same filesystem as the rest of the timelines.
-
-    // conf.workdir is usually /storage/safekeeper/data
-    // will try to transform it into /storage/safekeeper/tmp
-    let temp_base = conf
-        .workdir
-        .parent()
-        .ok_or(anyhow::anyhow!("workdir has no parent"))?
-        .join("tmp");
-
-    tokio::fs::create_dir_all(&temp_base).await?;
-
-    let tli_dir = camino_tempfile::Builder::new()
-        .suffix("_temptli")
-        .prefix(&format!("{}_{}_", ttid.tenant_id, ttid.timeline_id))
-        .tempdir_in(temp_base)?;
-    let tli_dir_path = tli_dir.path().to_path_buf();
+    let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, ttid).await?;
 
     // Note: some time happens between fetching list of files and fetching files themselves.
     //       It's possible that some files will be removed from safekeeper and we will fail to fetch them.
@@ -201,47 +192,105 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     // TODO: fsync?
 
     // Let's create timeline from temp directory and verify that it's correct
+    let (commit_lsn, flush_lsn) = validate_temp_timeline(conf, ttid, &tli_dir_path).await?;
+    info!(
+        "finished downloading timeline {}, commit_lsn={}, flush_lsn={}",
+        ttid, commit_lsn, flush_lsn
+    );
+    assert!(status.commit_lsn <= status.flush_lsn);
 
-    let control_path = tli_dir_path.join("safekeeper.control");
+    // Finally, load the timeline.
+    let _tli = load_temp_timeline(conf, ttid, &tli_dir_path).await?;
+
+    Ok(Response {
+        safekeeper_host: host,
+    })
+}
+
+/// Create temp directory for a new timeline. It needs to be located on the same
+/// filesystem as the rest of the timelines. It will be automatically deleted when
+/// Utf8TempDir goes out of scope.
+pub async fn create_temp_timeline_dir(
+    conf: &SafeKeeperConf,
+    ttid: TenantTimelineId,
+) -> Result<(Utf8TempDir, Utf8PathBuf)> {
+    // conf.workdir is usually /storage/safekeeper/data
+    // will try to transform it into /storage/safekeeper/tmp
+    let temp_base = conf
+        .workdir
+        .parent()
+        .ok_or(anyhow::anyhow!("workdir has no parent"))?
+        .join("tmp");
+
+    tokio::fs::create_dir_all(&temp_base).await?;
+
+    let tli_dir = camino_tempfile::Builder::new()
+        .suffix("_temptli")
+        .prefix(&format!("{}_{}_", ttid.tenant_id, ttid.timeline_id))
+        .tempdir_in(temp_base)?;
+
+    let tli_dir_path = tli_dir.path().to_path_buf();
+
+    Ok((tli_dir, tli_dir_path))
+}
+
+/// Do basic validation of a temp timeline, before moving it to the global map.
+pub async fn validate_temp_timeline(
+    conf: &SafeKeeperConf,
+    ttid: TenantTimelineId,
+    path: &Utf8PathBuf,
+) -> Result<(Lsn, Lsn)> {
+    let control_path = path.join("safekeeper.control");
 
     let control_store = control_file::FileStorage::load_control_file(control_path)?;
     if control_store.server.wal_seg_size == 0 {
         bail!("wal_seg_size is not set");
     }
 
-    let wal_store =
-        wal_storage::PhysicalStorage::new(&ttid, tli_dir_path.clone(), conf, &control_store)?;
+    let wal_store = wal_storage::PhysicalStorage::new(&ttid, path.clone(), conf, &control_store)?;
 
-    let commit_lsn = status.commit_lsn;
+    let commit_lsn = control_store.commit_lsn;
     let flush_lsn = wal_store.flush_lsn();
 
-    info!(
-        "Finished downloading timeline {}, commit_lsn={}, flush_lsn={}",
-        ttid, commit_lsn, flush_lsn
-    );
-    assert!(status.commit_lsn <= status.flush_lsn);
+    Ok((commit_lsn, flush_lsn))
+}
+
+/// Move timeline from a temp directory to the main storage, and load it to the global map.
+/// This operation is done under a lock to prevent bugs if several concurrent requests are
+/// trying to load the same timeline. Note that it doesn't guard against creating the
+/// timeline with the same ttid, but no one should be doing this anyway.
+pub async fn load_temp_timeline(
+    conf: &SafeKeeperConf,
+    ttid: TenantTimelineId,
+    tmp_path: &Utf8PathBuf,
+) -> Result<Arc<Timeline>> {
+    // Take a lock to prevent concurrent loadings
+    let load_lock = GlobalTimelines::loading_lock().await;
+    let guard = load_lock.lock().await;
+
+    if !matches!(GlobalTimelines::get(ttid), Err(TimelineError::NotFound(_))) {
+        bail!("timeline already exists, cannot overwrite it")
+    }
 
     // Move timeline dir to the correct location
     let timeline_path = conf.timeline_dir(&ttid);
 
     info!(
-        "Moving timeline {} from {} to {}",
-        ttid, tli_dir_path, timeline_path
+        "moving timeline {} from {} to {}",
+        ttid, tmp_path, timeline_path
     );
     tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
-    tokio::fs::rename(tli_dir_path, &timeline_path).await?;
+    tokio::fs::rename(tmp_path, &timeline_path).await?;
 
-    let tli = GlobalTimelines::load_timeline(ttid)
+    let tli = GlobalTimelines::load_timeline(&guard, ttid)
         .await
         .context("Failed to load timeline after copy")?;
 
     info!(
-        "Loaded timeline {}, flush_lsn={}",
+        "loaded timeline {}, flush_lsn={}",
         ttid,
         tli.get_flush_lsn().await
     );
 
-    Ok(Response {
-        safekeeper_host: host,
-    })
+    Ok(tli)
 }

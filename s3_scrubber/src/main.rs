@@ -1,3 +1,4 @@
+use pageserver_api::shard::TenantShardId;
 use s3_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use s3_scrubber::scan_metadata::scan_metadata;
 use s3_scrubber::{init_logging, BucketConfig, ConsoleConfig, NodeKind, TraversingDepth};
@@ -34,6 +35,8 @@ enum Command {
     ScanMetadata {
         #[arg(short, long, default_value_t = false)]
         json: bool,
+        #[arg(long = "tenant-id", num_args = 0..)]
+        tenant_ids: Vec<TenantShardId>,
     },
 }
 
@@ -57,35 +60,37 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     match cli.command {
-        Command::ScanMetadata { json } => match scan_metadata(bucket_config.clone()).await {
-            Err(e) => {
-                tracing::error!("Failed: {e}");
-                Err(e)
-            }
-            Ok(summary) => {
-                if json {
-                    println!("{}", serde_json::to_string(&summary).unwrap())
-                } else {
-                    println!("{}", summary.summary_string());
+        Command::ScanMetadata { json, tenant_ids } => {
+            match scan_metadata(bucket_config.clone(), tenant_ids).await {
+                Err(e) => {
+                    tracing::error!("Failed: {e}");
+                    Err(e)
                 }
-                if summary.is_fatal() {
-                    Err(anyhow::anyhow!("Fatal scrub errors detected"))
-                } else if summary.is_empty() {
-                    // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
-                    // scrubber they were likely expecting to scan something, and if we see no timelines
-                    // at all then it's likely due to some configuration issues like a bad prefix
-                    Err(anyhow::anyhow!(
-                        "No timelines found in bucket {} prefix {}",
-                        bucket_config.bucket,
-                        bucket_config
-                            .prefix_in_bucket
-                            .unwrap_or("<none>".to_string())
-                    ))
-                } else {
-                    Ok(())
+                Ok(summary) => {
+                    if json {
+                        println!("{}", serde_json::to_string(&summary).unwrap())
+                    } else {
+                        println!("{}", summary.summary_string());
+                    }
+                    if summary.is_fatal() {
+                        Err(anyhow::anyhow!("Fatal scrub errors detected"))
+                    } else if summary.is_empty() {
+                        // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
+                        // scrubber they were likely expecting to scan something, and if we see no timelines
+                        // at all then it's likely due to some configuration issues like a bad prefix
+                        Err(anyhow::anyhow!(
+                            "No timelines found in bucket {} prefix {}",
+                            bucket_config.bucket,
+                            bucket_config
+                                .prefix_in_bucket
+                                .unwrap_or("<none>".to_string())
+                        ))
+                    } else {
+                        Ok(())
+                    }
                 }
             }
-        },
+        }
         Command::FindGarbage {
             node_kind,
             depth,

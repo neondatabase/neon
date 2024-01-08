@@ -23,6 +23,7 @@ use tracing::*;
 use tokio_tar::{Builder, EntryType, Header};
 
 use crate::context::RequestContext;
+use crate::pgdatadir_mapping::Version;
 use crate::tenant::Timeline;
 use pageserver_api::reltag::{RelTag, SlruKind};
 
@@ -174,7 +175,7 @@ where
         ] {
             for segno in self
                 .timeline
-                .list_slru_segments(kind, self.lsn, self.ctx)
+                .list_slru_segments(kind, Version::Lsn(self.lsn), self.ctx)
                 .await?
             {
                 self.add_slru_segment(kind, segno).await?;
@@ -192,7 +193,7 @@ where
             // Otherwise only include init forks of unlogged relations.
             let rels = self
                 .timeline
-                .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
                 .await?;
             for &rel in rels.iter() {
                 // Send init fork as main fork to provide well formed empty
@@ -267,7 +268,7 @@ where
     async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_rel_size(src, self.lsn, false, self.ctx)
+            .get_rel_size(src, Version::Lsn(self.lsn), false, self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
@@ -288,7 +289,7 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(src, blknum, self.lsn, false, self.ctx)
+                    .get_rel_page_at_lsn(src, blknum, Version::Lsn(self.lsn), false, self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
@@ -310,7 +311,7 @@ where
     async fn add_slru_segment(&mut self, slru: SlruKind, segno: u32) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_slru_segment_size(slru, segno, self.lsn, self.ctx)
+            .get_slru_segment_size(slru, segno, Version::Lsn(self.lsn), self.ctx)
             .await?;
 
         let mut slru_buf: Vec<u8> = Vec::with_capacity(nblocks as usize * BLCKSZ as usize);
@@ -352,7 +353,7 @@ where
         let relmap_img = if has_relmap_file {
             let img = self
                 .timeline
-                .get_relmap_file(spcnode, dbnode, self.lsn, self.ctx)
+                .get_relmap_file(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
                 .await?;
 
             ensure!(
@@ -399,7 +400,7 @@ where
             if !has_relmap_file
                 && self
                     .timeline
-                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                    .list_rels(spcnode, dbnode, Version::Lsn(self.lsn), self.ctx)
                     .await?
                     .is_empty()
             {

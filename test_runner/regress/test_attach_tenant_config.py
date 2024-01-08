@@ -194,12 +194,13 @@ def test_fully_custom_config(positive_env: NeonEnv):
     assert set(our_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"
-    assert {
-        k: initial_tenant_config.effective_config[k] != our_tenant_config.effective_config[k]
-        for k in fully_custom_config.keys()
-    } == {
-        k: True for k in fully_custom_config.keys()
-    }, "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
+    assert (
+        {
+            k: initial_tenant_config.effective_config[k] != our_tenant_config.effective_config[k]
+            for k in fully_custom_config.keys()
+        }
+        == {k: True for k in fully_custom_config.keys()}
+    ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
 
     ps_http.tenant_detach(tenant_id)
     env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)

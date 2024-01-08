@@ -21,7 +21,11 @@ struct GlobalTimelinesState {
     timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
     wal_backup_launcher_tx: Option<Sender<TenantTimelineId>>,
     conf: Option<SafeKeeperConf>,
+    load_lock: Arc<tokio::sync::Mutex<TimelineLoadLock>>,
 }
+
+// Used to prevent concurrent timeline loading.
+pub struct TimelineLoadLock;
 
 impl GlobalTimelinesState {
     /// Get configuration, which must be set once during init.
@@ -63,6 +67,7 @@ static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
         timelines: HashMap::new(),
         wal_backup_launcher_tx: None,
         conf: None,
+        load_lock: Arc::new(tokio::sync::Mutex::new(TimelineLoadLock)),
     })
 });
 
@@ -174,8 +179,16 @@ impl GlobalTimelines {
         Ok(())
     }
 
+    /// Take a lock for timeline loading.
+    pub async fn loading_lock() -> Arc<tokio::sync::Mutex<TimelineLoadLock>> {
+        TIMELINES_STATE.lock().unwrap().load_lock.clone()
+    }
+
     /// Load timeline from disk to the memory.
-    pub async fn load_timeline(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+    pub async fn load_timeline<'a>(
+        _guard: &tokio::sync::MutexGuard<'a, TimelineLoadLock>,
+        ttid: TenantTimelineId,
+    ) -> Result<Arc<Timeline>> {
         let (conf, wal_backup_launcher_tx) = TIMELINES_STATE.lock().unwrap().get_dependencies();
 
         match Timeline::load_timeline(&conf, ttid, wal_backup_launcher_tx) {

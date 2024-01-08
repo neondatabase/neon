@@ -45,6 +45,8 @@ pub(crate) enum BackgroundLoopKind {
     ConsumptionMetricsCollectMetrics,
     ConsumptionMetricsSyntheticSizeWorker,
     InitialLogicalSizeCalculation,
+    HeatmapUpload,
+    SecondaryDownload,
 }
 
 impl BackgroundLoopKind {

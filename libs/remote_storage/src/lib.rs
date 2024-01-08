@@ -207,6 +207,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
 
     async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+
+    /// Copy a remote object inside a bucket from one path to another.
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
 }
 
 pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
@@ -372,6 +375,15 @@ impl GenericRemoteStorage {
             Self::AwsS3(s) => s.delete_objects(paths).await,
             Self::AzureBlob(s) => s.delete_objects(paths).await,
             Self::Unreliable(s) => s.delete_objects(paths).await,
+        }
+    }
+
+    pub async fn copy_object(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.copy(from, to).await,
+            Self::AwsS3(s) => s.copy(from, to).await,
+            Self::AzureBlob(s) => s.copy(from, to).await,
+            Self::Unreliable(s) => s.copy(from, to).await,
         }
     }
 }
@@ -660,6 +672,7 @@ impl ConcurrencyLimiter {
             RequestKind::Put => &self.write,
             RequestKind::List => &self.read,
             RequestKind::Delete => &self.write,
+            RequestKind::Copy => &self.write,
         }
     }
 

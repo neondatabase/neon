@@ -1118,6 +1118,7 @@ impl LayerInner {
                         tracing::info!("evicted layer after unknown residence period");
                     }
                 }
+                timeline.metrics.evictions.inc();
                 timeline
                     .metrics
                     .resident_physical_size_sub(self.desc.file_size);

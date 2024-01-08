@@ -167,22 +167,21 @@ build: |
       && apt-get update \
       && apt-get install -y \
           build-essential \
-          curl \
+          git \
           libevent-dev \
-          libssl-dev \
-          patchutils \
+          libtool \
           pkg-config
 
-  ENV PGBOUNCER_VERSION 1.21.0
-  ENV PGBOUNCER_GITPATH 1_21_0
+  # Note, we use pgbouncer from neondatabase/pgbouncer fork, which could contain extra commits.
+  # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
+  ENV PGBOUNCER_TAG pgbouncer_1_21_0-neon-1
   RUN set -e \
-      && curl -sfSL https://github.com/pgbouncer/pgbouncer/releases/download/pgbouncer_${PGBOUNCER_GITPATH}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz -o pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
-      && tar xzvf pgbouncer-${PGBOUNCER_VERSION}.tar.gz \
-      && cd pgbouncer-${PGBOUNCER_VERSION} \
-      && curl https://github.com/pgbouncer/pgbouncer/commit/a7b3c0a5f4caa9dbe92743d04cf1e28c4c05806c.patch | filterdiff --include a/src/server.c | patch -p1 \
+      && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/neondatabase/pgbouncer.git pgbouncer \
+      && cd pgbouncer \
+      && ./autogen.sh \
       && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
-      && make -j $(nproc) \
-      && make install
+      && make -j $(nproc) dist_man_MANS= \
+      && make install dist_man_MANS=
 merge: |
   # tweak nofile limits
   RUN set -e \

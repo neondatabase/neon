@@ -37,8 +37,8 @@ use crate::tenant::{
     TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
 };
 use crate::{
-    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_LOCATION_CONFIG_NAME,
-    TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
+    IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME,
+    TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX, TIMELINE_UNINIT_MARK_SUFFIX,
 };
 
 use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
@@ -75,6 +75,9 @@ pub mod defaults {
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
 
     pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
+    pub const DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY: usize = 1;
+
+    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
     ///
     /// Default built-in configuration file.
@@ -88,6 +91,7 @@ pub mod defaults {
 #wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
 #wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
 
+#page_cache_size = {DEFAULT_PAGE_CACHE_SIZE}
 #max_file_descriptors = {DEFAULT_MAX_FILE_DESCRIPTORS}
 
 # initial superuser role name to use when creating a new tenant
@@ -108,6 +112,8 @@ pub mod defaults {
 
 #background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
 
+#ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
+
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -125,6 +131,7 @@ pub mod defaults {
 #gc_feedback = false
 
 #heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
+#secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
 
 [remote_storage]
 
@@ -233,6 +240,13 @@ pub struct PageServerConf {
     /// How many heatmap uploads may be done concurrency: lower values implicitly deprioritize
     /// heatmap uploads vs. other remote storage operations.
     pub heatmap_upload_concurrency: usize,
+
+    /// How many remote storage downloads may be done for secondary tenants concurrently.  Implicitly
+    /// deprioritises secondary downloads vs. remote storage operations for attached tenants.
+    pub secondary_download_concurrency: usize,
+
+    /// Maximum number of WAL records to be ingested and committed at the same time
+    pub ingest_batch_size: u64,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -314,6 +328,9 @@ struct PageServerConfigBuilder {
     control_plane_emergency_mode: BuilderValue<bool>,
 
     heatmap_upload_concurrency: BuilderValue<usize>,
+    secondary_download_concurrency: BuilderValue<usize>,
+
+    ingest_batch_size: BuilderValue<u64>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -386,6 +403,9 @@ impl Default for PageServerConfigBuilder {
             control_plane_emergency_mode: Set(false),
 
             heatmap_upload_concurrency: Set(DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
+            secondary_download_concurrency: Set(DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
+
+            ingest_batch_size: Set(DEFAULT_INGEST_BATCH_SIZE),
         }
     }
 }
@@ -534,6 +554,14 @@ impl PageServerConfigBuilder {
         self.heatmap_upload_concurrency = BuilderValue::Set(value)
     }
 
+    pub fn secondary_download_concurrency(&mut self, value: usize) {
+        self.secondary_download_concurrency = BuilderValue::Set(value)
+    }
+
+    pub fn ingest_batch_size(&mut self, ingest_batch_size: u64) {
+        self.ingest_batch_size = BuilderValue::Set(ingest_batch_size)
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_warmup = self
             .concurrent_tenant_warmup
@@ -632,10 +660,15 @@ impl PageServerConfigBuilder {
             control_plane_emergency_mode: self
                 .control_plane_emergency_mode
                 .ok_or(anyhow!("missing control_plane_emergency_mode"))?,
-
             heatmap_upload_concurrency: self
                 .heatmap_upload_concurrency
                 .ok_or(anyhow!("missing heatmap_upload_concurrency"))?,
+            secondary_download_concurrency: self
+                .secondary_download_concurrency
+                .ok_or(anyhow!("missing secondary_download_concurrency"))?,
+            ingest_batch_size: self
+                .ingest_batch_size
+                .ok_or(anyhow!("missing ingest_batch_size"))?,
         })
     }
 }
@@ -691,6 +724,11 @@ impl PageServerConf {
     pub fn tenant_location_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
         self.tenant_path(tenant_shard_id)
             .join(TENANT_LOCATION_CONFIG_NAME)
+    }
+
+    pub(crate) fn tenant_heatmap_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+        self.tenant_path(tenant_shard_id)
+            .join(TENANT_HEATMAP_BASENAME)
     }
 
     pub fn timelines_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
@@ -878,6 +916,10 @@ impl PageServerConf {
                 "heatmap_upload_concurrency" => {
                     builder.heatmap_upload_concurrency(parse_toml_u64(key, item)? as usize)
                 },
+                "secondary_download_concurrency" => {
+                    builder.secondary_download_concurrency(parse_toml_u64(key, item)? as usize)
+                },
+                "ingest_batch_size" => builder.ingest_batch_size(parse_toml_u64(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -949,6 +991,8 @@ impl PageServerConf {
             control_plane_api_token: None,
             control_plane_emergency_mode: false,
             heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
+            secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
+            ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
         }
     }
 }
@@ -1177,7 +1221,9 @@ background_task_maximum_delay = '334 s'
                 control_plane_api: None,
                 control_plane_api_token: None,
                 control_plane_emergency_mode: false,
-                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
+                secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
+                ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1238,7 +1284,9 @@ background_task_maximum_delay = '334 s'
                 control_plane_api: None,
                 control_plane_api_token: None,
                 control_plane_emergency_mode: false,
-                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY
+                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
+                secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
+                ingest_batch_size: 100,
             },
             "Should be able to parse all basic config values correctly"
         );
