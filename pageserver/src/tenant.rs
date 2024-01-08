@@ -130,6 +130,13 @@ macro_rules! pausable_failpoint {
             .expect("spawn_blocking");
         }
     };
+    ($name:literal, $cond:expr) => {
+        if cfg!(feature = "testing") {
+            if $cond {
+                pausable_failpoint!($name)
+            }
+        }
+    };
 }
 
 pub mod blob_io;
