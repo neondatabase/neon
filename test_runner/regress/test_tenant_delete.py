@@ -24,7 +24,7 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
-from fixtures.types import TenantId
+from fixtures.types import TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
 
 
@@ -119,9 +119,9 @@ FAILPOINTS = [
     "tenant-delete-before-create-local-mark",
     "tenant-delete-before-background",
     "tenant-delete-before-polling-ongoing-deletions",
-    "tenant-delete-before-cleanup-remaining-fs-traces",
+    "tenant-deleteore-cleanup-remaining-fs-traces",
     "tenant-delete-before-remove-timelines-dir",
-    "tenant-delete-before-remove-deleted-mark",
+    "tenant-delete-before-remove-deleted-mark-bef",
     "tenant-delete-before-remove-tenant-dir",
     # Some failpoints from timeline deletion
     "timeline-delete-before-index-deleted-at",
@@ -539,6 +539,92 @@ def test_tenant_delete_concurrent(
         ps_http.configure_failpoints((BEFORE_RUN_FAILPOINT, "off"))
         with pytest.raises(PageserverApiException, match=CONFLICT_MESSAGE):
             background_4xx_req.result(timeout=10)
+
+    # Physical deletion should have happened
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(tenant_id),
+            )
+        ),
+    )
+
+    # Zero tenants remain (we deleted the default tenant)
+    assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
+
+def test_tenant_delete_races_timeline_creation(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    """
+    Validate that timeline creation executed in parallel with deletion works correctly.
+
+    This is a reproducer for https://github.com/neondatabase/neon/issues/6255
+    """
+    remote_storage_kind = RemoteStorageKind.MOCK_S3
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    ps_http = env.pageserver.http_client()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
+
+    env.pageserver.allowed_errors.extend(
+        [
+            # lucky race with stopping from flushing a layer we fail to schedule any uploads
+            ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+            # Errors logged from our 4xx requests
+            f".*{CONFLICT_MESSAGE}.*",
+        ]
+    )
+
+    BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-runs"
+    DELETE_BEFORE_MAP_REMOVE_FAILPOINT = "tenant-delete-before-map-remove"
+
+    # Wait just before the initdb upload
+    ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
+
+    def timeline_create():
+        ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate())
+
+    Thread(target=timeline_create).start()
+
+    def hit_initdb_upload_failpoint():
+        assert env.pageserver.log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
+
+    wait_until(100, 0.1, hit_initdb_upload_failpoint)
+
+    ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "pause"))
+
+    def tenant_delete():
+        # Send the initial deletion request
+        ps_http.tenant_delete(tenant_id)
+
+    Thread(target=tenant_delete).start()
+
+    log.info(f"waiting for deletion to arrive")
+    def deletion_arrived():
+        #assert env.pageserver.log_contains(f"Request handled, status: 202 Accepted")
+        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir") # never completes
+        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-deleted-mark")
+        assert env.pageserver.log_contains(f"cfg failpoint: {DELETE_BEFORE_MAP_REMOVE_FAILPOINT} pause")
+        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir")
+        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-map-remove")
+
+    wait_until(100, 0.1, deletion_arrived)
+
+    ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "off"))
+
+    log.info(f"deletion arrived!")
+
+    # Disable the failpoint and wait for deletion to finish
+    ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
+
+    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
+    tenant_delete_wait_completed(ps_http, tenant_id, iterations)
 
     # Physical deletion should have happened
     assert_prefix_empty(
