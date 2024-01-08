@@ -77,6 +77,11 @@ impl Key {
         key
     }
 
+    pub fn sub_unoptimized_checked_panicking(&self, x: u32) -> Key {
+        let key = self.to_i128();
+        Self::from_i128(key.checked_sub(x.into()).unwrap())
+    }
+
     pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
@@ -141,6 +146,7 @@ impl Key {
     }
 }
 
+#[inline(always)]
 pub fn is_rel_block_key(key: &Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
 }
