@@ -13,14 +13,14 @@ During basebackup, we issue many `Timeline::get` calls for SLRU pages that are *
 For an example, see
 https://github.com/neondatabase/neon/blob/5c88213eaf1b1e29c610a078d0b380f69ed49a7e/pageserver/src/basebackup.rs#L281-L302.
 
-Each call must traverse the layer map to gather reconstruct data (`Timeline::get_reconstruct_data`) for the requested page number (`blknum` in the example).
+Each of these `Timeline::get` calls must traverse the layer map to gather reconstruct data (`Timeline::get_reconstruct_data`) for the requested page number (`blknum` in the example).
 For each layer visited by layer map traversal, we do a `DiskBtree` point lookup.
 If it's negative (no entry), we resume layer map traversal.
 If it's positive, we collect the result in our reconstruct data bag.
 If the reconstruct data bag contents suffice to reconstruct the page, we're done with `get_reconstruct_data` and move on to walredo.
 Otherwise, we resume layer map traversal.
 
-That is quite inefficient because:
+Doing this many `Timeline::get` calls is quite inefficient because:
 
 1. We do the layer map traversal repeatedly, even if, e.g., all the data sits in the same image layer at the bottom of the stack.
 2. We may visit many DiskBtree inner pages multiple times for point lookup of different keys.
@@ -82,17 +82,18 @@ The performance improvement for the vectored use case is demonstrated in some wa
 
 High-level set of tasks / changes to be made:
 
-- Get clarity on API:
+- **Get clarity on API**:
   - Define naive `Timeline::get_vectored` implementation & adopt it across pageserver.
-  - Get peer review on return type (e.g. `Vec<Bytes>` vs `impl Stream`)
-  - Iterate until the API is agreed
-- Vectored Layer Map traversal
+  - The tricky thing here will be the return type (e.g. `Vec<Bytes>` vs `impl Stream`).
+  - Start with something simple to explore the different usages of the API.
+    Then iterate with peers until we have something that is good enough.
+- **Vectored Layer Map traversal**
   - Vectored `LayerMap::search` (take 1 LSN and N `Key`s instead of just 1 LSN and 1 `Key`)
   - Refactor `Timeline::get_reconstruct_data` to hold & return state for N `Key`s instead of 1
     - The slightly tricky part here is what to do about `cont_lsn` [after we've found some reconstruct data for some keys](https://github.com/neondatabase/neon/blob/d066dad84b076daf3781cdf9a692098889d3974e/pageserver/src/tenant/timeline.rs#L2378-L2385)
       but need more.
       Likely we'll need to keep track of `cont_lsn` per key and continue next iteration at `max(cont_lsn)` of all keys that still need data.
-- Vectored `Layer::get_value_reconstruct_data` / `DiskBtree`
+- **Vectored `Layer::get_value_reconstruct_data` / `DiskBtree`**
   - Current code calls it [here](https://github.com/neondatabase/neon/blob/d066dad84b076daf3781cdf9a692098889d3974e/pageserver/src/tenant/timeline.rs#L2378-L2384).
   - Delta layers use `DiskBtreeReader::visit()` to collect the `(offset,len)` pairs for delta record blobs to load.
   - Image layers use `DiskBtreeReader::get` to get the offset of the image blob to load. Underneath, that's just a `::visit()` call.
@@ -105,12 +106,12 @@ High-level set of tasks / changes to be made:
       * Take a `&[KeyVec]`, sort it;
       * during Btree traversal, peek at the next `KeyVec` range to determine whether we need to descend or back out.
       * NB: this should be a straight-forward extension of the minimal solution above, as we'll already be checking for "is there more key range in the requested `KeyVec`".
-- Facilitate merging of the reads we issue to the OS and eventually NVMe.
+- **Facilitate merging of the reads we issue to the OS and eventually NVMe.**
   - The `DiskBtree::visit` produces a set of offsets which we then read from a `VirtualFile` [here](https://github.com/neondatabase/neon/blob/292281c9dfb24152b728b1a846cc45105dac7fe0/pageserver/src/tenant/storage_layer/delta_layer.rs#L772-L804)
     - [Delta layer reads](https://github.com/neondatabase/neon/blob/292281c9dfb24152b728b1a846cc45105dac7fe0/pageserver/src/tenant/storage_layer/delta_layer.rs#L772-L804)
       - We hit (and rely) on `PageCache` and `VirtualFile here (not great under pressure)
     - [Image layer reads](https://github.com/neondatabase/neon/blob/292281c9dfb24152b728b1a846cc45105dac7fe0/pageserver/src/tenant/storage_layer/image_layer.rs#L429-L435)
-  - What needs to happen here is the **vectorization of the `blob_io` interface**, and then the `VirtualFile` API.
+  - What needs to happen is the **vectorization of the `blob_io` interface and then the `VirtualFile` API**.
   - That is tricky because
     - the `VirtualFile` API, which sits underneath `blob_io`, is being touched by ongoing [io_uring work](https://github.com/neondatabase/neon/pull/5824)
     - there's the question how IO buffers will be managed; currently this area relies heavily on `PageCache`, but there's controversy around the future of `PageCache`.
@@ -126,6 +127,9 @@ No feature flags are required for this epic.
 
 At the end of this epic, `Timeline::get` forwards to `Timeline::get_vectored`, i.e., it's an all-or-nothing type of change.
 
+It is encouraged to deliver this feature incrementally, i.e., do many small PRs over multiple weeks.
+That will help isolate performance regressions across weekly releases.
+
 # Interaction With Sharding
 
 [Sharding](https://github.com/neondatabase/neon/pull/5432) splits up the key space, see functions `is_key_local` / `key_to_shard_number`.
@@ -135,4 +139,4 @@ Just as with `Timeline::get`, callers of `Timeline::get_vectored` are responsibl
 Given that this is already the case, there shouldn't be significant interaction/interference with sharding.
 
 However, let's have a safety check for this constraint (error or assertion) because there are currently few affordances at the higher layers of Pageserver for sharding<=>keyspace interaction.
-For example, keyspaces are not broken up by shard stripe, so if someone naively converted the compaction code to issue a vectored get for a keyspace range it would violate this constraint.
+For example, `KeySpace` is not broken up by shard stripe, so if someone naively converted the compaction code to issue a vectored get for a keyspace range it would violate this constraint.
