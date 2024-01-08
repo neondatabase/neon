@@ -92,10 +92,8 @@ async fn main_impl(
     for timeline in &timelines {
         js.spawn({
             let timeline = *timeline;
-            // FIXME: this triggers initial logical size calculation
-            // https://github.com/neondatabase/neon/issues/6168
             let info = mgmt_api_client
-                .timeline_info(timeline.tenant_id, timeline.timeline_id)
+                .timeline_info(timeline.tenant_id, timeline.timeline_id, None)
                 .await
                 .unwrap();
             async move {

@@ -94,11 +94,18 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        force_await_logical_size: Option<bool>,
     ) -> Result<pageserver_api::models::TimelineInfo> {
         let uri = format!(
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             self.mgmt_api_endpoint
         );
+
+        let uri = match force_await_logical_size {
+            Some(force) => format!("{}?force-await-logical-size={}", uri, force),
+            None => uri,
+        };
+
         self.get(&uri)
             .await?
             .json()
