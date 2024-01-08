@@ -2,7 +2,7 @@ pub mod partitioning;
 
 use std::{
     collections::HashMap,
-    io::Read,
+    io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
     time::SystemTime,
 };
@@ -815,9 +815,10 @@ impl PagestreamBeMessage {
                     PagestreamBeMessage::GetPage(PagestreamGetPageResponse { page: page.into() })
                 }
                 Tag::Error => {
-                    let buf = buf.get_ref();
-                    let cstr = std::ffi::CStr::from_bytes_until_nul(buf)?;
-                    let rust_str = cstr.to_str()?;
+                    let mut msg = Vec::new();
+                    buf.read_until(0, &mut msg)?;
+                    let cstring = std::ffi::CString::from_vec_with_nul(msg)?;
+                    let rust_str = cstring.to_str()?;
                     PagestreamBeMessage::Error(PagestreamErrorResponse {
                         message: rust_str.to_owned(),
                     })
