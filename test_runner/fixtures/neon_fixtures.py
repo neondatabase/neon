@@ -568,8 +568,11 @@ class NeonEnvBuilder:
                 repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
             )
         else:
-            self.overlay_mount("local_fs_remote_storage",
-                repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage")
+            self.overlay_mount(
+                "local_fs_remote_storage",
+                repo_dir / "local_fs_remote_storage",
+                self.repo_dir / "local_fs_remote_storage",
+            )
 
         if (attachments_json := Path(repo_dir / "attachments.json")).exists():
             shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
@@ -592,19 +595,33 @@ class NeonEnvBuilder:
         The overlayfs `upperdir` and `workdir` will be placed in test_overlay_dir.
         """
         assert self.test_overlay_dir
-        assert self.test_output_dir in dstdir.parents # so that teardown & test_overlay_dir fixture work
+        assert (
+            self.test_output_dir in dstdir.parents
+        )  # so that teardown & test_overlay_dir fixture work
         assert srcdir.is_dir()
         dstdir.mkdir(exist_ok=False, parents=False)
         ident_state_dir = self.test_overlay_dir / ident
         upper = ident_state_dir / "upper"
         work = ident_state_dir / "work"
-        ident_state_dir.mkdir(exist_ok=False, parents=False) # exists_ok=False also checks uniqueness in self.overlay_mounts
+        ident_state_dir.mkdir(
+            exist_ok=False, parents=False
+        )  # exists_ok=False also checks uniqueness in self.overlay_mounts
         upper.mkdir()
         work.mkdir()
-        cmd = [ "sudo", "mount", "-t", "overlay", "overlay",
-            "-o", f"lowerdir={srcdir},upperdir={upper},workdir={work}", str(dstdir) ]
+        cmd = [
+            "sudo",
+            "mount",
+            "-t",
+            "overlay",
+            "overlay",
+            "-o",
+            f"lowerdir={srcdir},upperdir={upper},workdir={work}",
+            str(dstdir),
+        ]
         log.info(f"Mounting overlayfs srcdir={srcdir} dstdir={dstdir}: {cmd}")
-        subprocess_capture(self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
         self.overlay_mounts_created_by_us.append((ident, dstdir))
 
     def overlay_cleanup_teardown(self):
@@ -617,12 +634,20 @@ class NeonEnvBuilder:
         while len(self.overlay_mounts_created_by_us) > 0:
             (ident, mountpoint) = self.overlay_mounts_created_by_us.pop()
             ident_state_dir = self.test_overlay_dir / ident
-            cmd = [ "sudo", "umount", str(mountpoint) ]
-            log.info(f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}: {cmd}")
-            subprocess_capture(self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
-            log.info(f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}")
-            cmd = [ "sudo", "rm", "-rf", str(ident_state_dir)]
-            subprocess_capture(self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+            cmd = ["sudo", "umount", str(mountpoint)]
+            log.info(
+                f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}: {cmd}"
+            )
+            subprocess_capture(
+                self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+            )
+            log.info(
+                f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}"
+            )
+            cmd = ["sudo", "rm", "-rf", str(ident_state_dir)]
+            subprocess_capture(
+                self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+            )
 
         # assert all overlayfs mounts in our test directory are gone
         assert [] == list(overlayfs.iter_mounts_beneath(self.test_overlay_dir))
@@ -3261,7 +3286,7 @@ class S3Scrubber:
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:
     """Compute the path to a working directory for an individual test."""
     test_name = request.node.name
-    test_dir = top_output_dir / (prefix+test_name.replace("/", "-"))
+    test_dir = top_output_dir / (prefix + test_name.replace("/", "-"))
 
     # We rerun flaky tests multiple times, use a separate directory for each run.
     if (suffix := getattr(request.node, "execution_count", None)) is not None:
@@ -3272,11 +3297,13 @@ def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) ->
     assert isinstance(test_dir, Path)
     return test_dir
 
+
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     """
     The working directory for a test.
     """
     return _get_test_dir(request, top_output_dir, "")
+
 
 def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     """
@@ -3284,6 +3311,7 @@ def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     that a test creates. See `NeonEnvBuilder.overlay_mount`.
     """
     return _get_test_dir(request, top_output_dir, "overlay-")
+
 
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return get_test_output_dir(request, top_output_dir) / "repo"
@@ -3313,10 +3341,12 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path) -> Iterator[Path]:
+def test_output_dir(
+    request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
+) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
-    _ = test_overlay_dir # request overlay dir fixture so the fixture does its cleanups
+    _ = test_overlay_dir  # request overlay dir fixture so the fixture does its cleanups
 
     # one directory per test
     test_dir = get_test_output_dir(request, top_output_dir)
@@ -3327,6 +3357,7 @@ def test_output_dir(request: FixtureRequest, top_output_dir: Path, test_overlay_
     yield test_dir
 
     allure_attach_from_dir(test_dir)
+
 
 @pytest.fixture(scope="function", autouse=True)
 def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
@@ -3349,11 +3380,13 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
     overlay_dir.mkdir(exist_ok=True)
     # unmount stale overlayfs mounts which subdirectories of `overlay_dir/*` as the overlayfs `upperdir` and `workdir`
     for mountpoint in overlayfs.iter_mounts_beneath(get_test_output_dir(request, top_output_dir)):
-        cmd = [ "sudo", "umount", str(mountpoint) ]
-        log.info(f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}")
+        cmd = ["sudo", "umount", str(mountpoint)]
+        log.info(
+            f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}"
+        )
         subprocess.run(cmd, capture_output=True, check=True)
     # the overlayfs `workdir`` is owned by `root`, shutil.rmtree won't work.
-    cmd = [ "sudo", "rm", "-rf", str(overlay_dir)]
+    cmd = ["sudo", "rm", "-rf", str(overlay_dir)]
     subprocess.run(cmd, capture_output=True, check=True)
 
     overlay_dir.mkdir()
