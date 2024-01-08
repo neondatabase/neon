@@ -23,7 +23,7 @@ impl Statvfs {
     }
 
     // NB: allow() because the block count type is u32 on macOS.
-    #[allow(clippy::useless_conversion)]
+    #[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
     pub fn blocks(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.blocks()).unwrap(),
@@ -32,7 +32,7 @@ impl Statvfs {
     }
 
     // NB: allow() because the block count type is u32 on macOS.
-    #[allow(clippy::useless_conversion)]
+    #[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
     pub fn blocks_available(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.blocks_available()).unwrap(),
