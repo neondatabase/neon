@@ -330,7 +330,6 @@ impl RemoteStorage for AzureBlobStorage {
         ))
     }
 
-    #[allow(clippy::diverging_sub_expression)]
     async fn time_travel_recover(
         &self,
         _prefix: Option<&RemotePath>,
