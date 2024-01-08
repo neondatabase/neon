@@ -59,12 +59,16 @@ def single_timeline(
         # clean up the useless default tenant
         ps_http.tenant_delete(env.initial_tenant)
 
+        log.info("invoking callback to create template tenant")
         template_tenant, template_timeline, template_config = setup_template(env)
+        log.info(f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}")
 
+        log.info(f"detach template tenant form pageserver")
         env.pageserver.http_client().tenant_detach(template_tenant)
-        # duplicate the template 20 times tenants in localfs storage
+        log.info(f"duplicating template tenant {ncopies} times in S3")
         tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
+        log.info(f"attach duplicated tenants to pageserver")
         # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.
         # However, on-demand downloads are quite slow ATM.
         # => do the on-demand downloads in Python.
@@ -84,15 +88,17 @@ def single_timeline(
             time.sleep(0.1)
             wait_until_tenant_state(ps_http, tenant, "Broken", 3)
 
-        work_queue.do(8, tenants, attach_broken)
+        work_queue.do(22, tenants, attach_broken)
 
         env.pageserver.stop()  # clears the failpoint as a side-effect
         tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
+        log.info(f"python-side on-demand download the layer files into local tenant dir")
         fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
             env, tenant_timelines
         )
         env.pageserver.start()
 
+    log.info(f"wait for tenants to become active")
     for tenant in tenants:
         wait_until_tenant_active(ps_http, tenant)
 
@@ -104,6 +110,8 @@ def single_timeline(
                 assert not layer.remote
 
     # take snapshot after download all layers so tenant dir restoration is fast
+    log.info(f"take snapshot")
+    # TODO: use overlayfs to make this step less costly; we'd implement half of docker at that point
     if save_snapshot:
         shutil.copytree(env.repo_dir, snapshot_dir.path)
         snapshot_dir.set_initialized()
