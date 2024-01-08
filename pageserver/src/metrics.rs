@@ -29,7 +29,7 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 // Metrics collected on operations on the storage repository.
 #[derive(Debug, EnumVariantNames, IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
-pub enum StorageTimeOperation {
+pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "layer flush")]
     LayerFlush,
 
@@ -55,7 +55,7 @@ pub enum StorageTimeOperation {
     CreateTenant,
 }
 
-pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
+pub(crate) static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "pageserver_storage_operations_seconds_sum",
         "Total time spent on storage operations with operation, tenant and timeline dimensions",
@@ -64,7 +64,7 @@ pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
+pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_storage_operations_seconds_count",
         "Count of storage operations with operation, tenant and timeline dimensions",
@@ -150,7 +150,7 @@ pub(crate) static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub struct PageCacheMetricsForTaskKind {
+pub(crate) struct PageCacheMetricsForTaskKind {
     pub read_accesses_materialized_page: IntCounter,
     pub read_accesses_immutable: IntCounter,
 
@@ -159,7 +159,7 @@ pub struct PageCacheMetricsForTaskKind {
     pub read_hits_materialized_page_older_lsn: IntCounter,
 }
 
-pub struct PageCacheMetrics {
+pub(crate) struct PageCacheMetrics {
     map: EnumMap<TaskKind, EnumMap<PageContentKind, PageCacheMetricsForTaskKind>>,
 }
 
@@ -181,7 +181,7 @@ static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
+pub(crate) static PAGE_CACHE: Lazy<PageCacheMetrics> = Lazy::new(|| PageCacheMetrics {
     map: EnumMap::from_array(std::array::from_fn(|task_kind| {
         let task_kind = <TaskKind as enum_map::Enum>::from_usize(task_kind);
         let task_kind: &'static str = task_kind.into();
@@ -243,10 +243,9 @@ impl PageCacheMetrics {
     }
 }
 
-pub struct PageCacheSizeMetrics {
+pub(crate) struct PageCacheSizeMetrics {
     pub max_bytes: UIntGauge,
 
-    pub current_bytes_ephemeral: UIntGauge,
     pub current_bytes_immutable: UIntGauge,
     pub current_bytes_materialized_page: UIntGauge,
 }
@@ -260,31 +259,26 @@ static PAGE_CACHE_SIZE_CURRENT_BYTES: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-pub static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> = Lazy::new(|| PageCacheSizeMetrics {
-    max_bytes: {
-        register_uint_gauge!(
-            "pageserver_page_cache_size_max_bytes",
-            "Maximum size of the page cache in bytes"
-        )
-        .expect("failed to define a metric")
-    },
-
-    current_bytes_ephemeral: {
-        PAGE_CACHE_SIZE_CURRENT_BYTES
-            .get_metric_with_label_values(&["ephemeral"])
-            .unwrap()
-    },
-    current_bytes_immutable: {
-        PAGE_CACHE_SIZE_CURRENT_BYTES
-            .get_metric_with_label_values(&["immutable"])
-            .unwrap()
-    },
-    current_bytes_materialized_page: {
-        PAGE_CACHE_SIZE_CURRENT_BYTES
-            .get_metric_with_label_values(&["materialized_page"])
-            .unwrap()
-    },
-});
+pub(crate) static PAGE_CACHE_SIZE: Lazy<PageCacheSizeMetrics> =
+    Lazy::new(|| PageCacheSizeMetrics {
+        max_bytes: {
+            register_uint_gauge!(
+                "pageserver_page_cache_size_max_bytes",
+                "Maximum size of the page cache in bytes"
+            )
+            .expect("failed to define a metric")
+        },
+        current_bytes_immutable: {
+            PAGE_CACHE_SIZE_CURRENT_BYTES
+                .get_metric_with_label_values(&["immutable"])
+                .unwrap()
+        },
+        current_bytes_materialized_page: {
+            PAGE_CACHE_SIZE_CURRENT_BYTES
+                .get_metric_with_label_values(&["materialized_page"])
+                .unwrap()
+        },
+    });
 
 pub(crate) mod page_cache_eviction_metrics {
     use std::num::NonZeroUsize;
@@ -740,13 +734,13 @@ pub(crate) static TENANT: Lazy<TenantMetrics> = Lazy::new(|| {
 
 /// Each `Timeline`'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
-pub struct EvictionsWithLowResidenceDuration {
+pub(crate) struct EvictionsWithLowResidenceDuration {
     data_source: &'static str,
     threshold: Duration,
     counter: Option<IntCounter>,
 }
 
-pub struct EvictionsWithLowResidenceDurationBuilder {
+pub(crate) struct EvictionsWithLowResidenceDurationBuilder {
     data_source: &'static str,
     threshold: Duration,
 }
@@ -1009,7 +1003,7 @@ pub enum SmgrQueryType {
 }
 
 #[derive(Debug)]
-pub struct SmgrQueryTimePerTimeline {
+pub(crate) struct SmgrQueryTimePerTimeline {
     metrics: [GlobalAndPerTimelineHistogram; SmgrQueryType::COUNT],
 }
 
@@ -1181,8 +1175,8 @@ static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
     .map(|ms| (ms as f64) / 1000.0)
 });
 
-pub struct BasebackupQueryTime(HistogramVec);
-pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
+pub(crate) struct BasebackupQueryTime(HistogramVec);
+pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
     BasebackupQueryTime({
         register_histogram_vec!(
             "pageserver_basebackup_query_seconds",
@@ -1202,7 +1196,7 @@ impl DurationResultObserver for BasebackupQueryTime {
     }
 }
 
-pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
+pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_live_connections",
         "Number of live network connections",
@@ -1667,7 +1661,7 @@ pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
     Lazy::new(WalRedoProcessCounters::default);
 
 /// Similar to `prometheus::HistogramTimer` but does not record on drop.
-pub struct StorageTimeMetricsTimer {
+pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
 }
@@ -1692,7 +1686,7 @@ impl StorageTimeMetricsTimer {
 /// Timing facilities for an globally histogrammed metric, which is supported by per tenant and
 /// timeline total sum and count.
 #[derive(Clone, Debug)]
-pub struct StorageTimeMetrics {
+pub(crate) struct StorageTimeMetrics {
     /// Sum of f64 seconds, per operation, tenant_id and timeline_id
     timeline_sum: Counter,
     /// Number of oeprations, per operation, tenant_id and timeline_id
@@ -1731,7 +1725,7 @@ impl StorageTimeMetrics {
 }
 
 #[derive(Debug)]
-pub struct TimelineMetrics {
+pub(crate) struct TimelineMetrics {
     tenant_id: String,
     shard_id: String,
     timeline_id: String,
@@ -1939,7 +1933,7 @@ impl Drop for PerTimelineRemotePhysicalSizeGauge {
     }
 }
 
-pub struct RemoteTimelineClientMetrics {
+pub(crate) struct RemoteTimelineClientMetrics {
     tenant_id: String,
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
@@ -2237,7 +2231,7 @@ impl Drop for RemoteTimelineClientMetrics {
 
 /// Wrapper future that measures the time spent by a remote storage operation,
 /// and records the time and success/failure as a prometheus metric.
-pub trait MeasureRemoteOp: Sized {
+pub(crate) trait MeasureRemoteOp: Sized {
     fn measure_remote_op(
         self,
         tenant_id: TenantId,
@@ -2262,7 +2256,7 @@ pub trait MeasureRemoteOp: Sized {
 impl<T: Sized> MeasureRemoteOp for T {}
 
 pin_project! {
-    pub struct MeasuredRemoteOp<F>
+    pub(crate) struct MeasuredRemoteOp<F>
     {
         #[pin]
         inner: F,
