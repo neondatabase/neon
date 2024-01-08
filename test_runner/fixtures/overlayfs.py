@@ -1,6 +1,7 @@
-from typing import Iterator
-import psutil
 from pathlib import Path
+from typing import Iterator
+
+import psutil
 
 
 def iter_mounts_beneath(topdir: Path) -> Iterator[Path]:

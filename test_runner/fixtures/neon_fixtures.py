@@ -40,6 +40,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 from urllib3.util.retry import Retry
 
+from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.allowed_errors import (
@@ -69,7 +70,6 @@ from fixtures.utils import (
     subprocess_capture,
     wait_until,
 )
-from fixtures import overlayfs
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
