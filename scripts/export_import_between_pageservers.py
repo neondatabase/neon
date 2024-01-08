@@ -63,7 +63,7 @@ def subprocess_capture(capture_dir: str, cmd: List[str], **kwargs: Any) -> str:
     If those files already exist, we will overwrite them.
     Returns basepath for files with captured output.
     """
-    assert type(cmd) is list
+    assert isinstance(cmd, list)
     base = os.path.basename(cmd[0]) + "_{}".format(global_counter())
     basepath = os.path.join(capture_dir, base)
     stdout_filename = basepath + ".stdout"

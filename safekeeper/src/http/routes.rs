@@ -2,7 +2,7 @@ use hyper::{Body, Request, Response, StatusCode, Uri};
 
 use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::SkTimelineInfo;
+use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -14,19 +14,21 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use utils::failpoint_support::failpoints_handler;
+use utils::http::request::parse_query_param;
 
 use std::io::Write as _;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::info_span;
+use tracing::{info_span, Instrument};
 use utils::http::endpoint::{request_span, ChannelWriter};
 
+use crate::debug_dump::TimelineDigestRequest;
 use crate::receive_wal::WalReceiverState;
 use crate::safekeeper::Term;
 use crate::safekeeper::{ServerInfo, TermLsn};
 use crate::send_wal::WalSenderState;
 use crate::timeline::PeerInfo;
-use crate::{debug_dump, pull_timeline};
+use crate::{copy_timeline, debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -202,6 +204,56 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
+}
+
+async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let request_data: TimelineCopyRequest = json_request(&mut request).await?;
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "source_timeline_id")?,
+    );
+
+    let source = GlobalTimelines::get(ttid)?;
+
+    copy_timeline::handle_request(copy_timeline::Request{
+        source,
+        until_lsn: request_data.until_lsn,
+        destination_ttid: TenantTimelineId::new(ttid.tenant_id, request_data.target_timeline_id),
+    })
+        .instrument(info_span!("copy_timeline", from=%ttid, to=%request_data.target_timeline_id, until_lsn=%request_data.until_lsn))
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let from_lsn: Option<Lsn> = parse_query_param(&request, "from_lsn")?;
+    let until_lsn: Option<Lsn> = parse_query_param(&request, "until_lsn")?;
+
+    let request = TimelineDigestRequest {
+        from_lsn: from_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "from_lsn is required"
+        )))?,
+        until_lsn: until_lsn.ok_or(ApiError::BadRequest(anyhow::anyhow!(
+            "until_lsn is required"
+        )))?,
+    };
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let response = debug_dump::calculate_digest(&tli, request)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, response)
 }
 
 /// Download a file from the timeline directory.
@@ -472,11 +524,18 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
             |r| request_span(r, timeline_files_handler),
         )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
+            |r| request_span(r, timeline_copy_handler),
+        )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {
             request_span(r, record_safekeeper_info)
         })
         .get("/v1/debug_dump", |r| request_span(r, dump_debug_handler))
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
+            request_span(r, timeline_digest_handler)
+        })
 }
 
 #[cfg(test)]

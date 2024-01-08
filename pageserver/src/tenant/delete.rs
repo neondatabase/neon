@@ -588,7 +588,7 @@ impl DeleteTenantFlow {
                             }
                             break;
                         }
-                        TenantsMapRemoveResult::Occupied(TenantSlot::Secondary) => {
+                        TenantsMapRemoveResult::Occupied(TenantSlot::Secondary(_)) => {
                             // This is unexpected: this secondary tenants should not have been created, and we
                             // are not in a position to shut it down from here.
                             tracing::warn!("Tenant transitioned to secondary mode while deleting!");

@@ -152,6 +152,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
+            PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
@@ -1275,6 +1276,23 @@ async fn put_tenant_location_config_handler(
         // which is not a 400 but a 409.
         .map_err(ApiError::BadRequest)?;
 
+    if let Some(_flush_ms) = flush {
+        match state
+            .secondary_controller
+            .upload_tenant(tenant_shard_id)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!("Uploaded heatmap during flush");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to flush heatmap: {e}");
+            }
+        }
+    } else {
+        tracing::info!("No flush requested when configuring");
+    }
+
     json_response(StatusCode::OK, ())
 }
 
@@ -1612,6 +1630,21 @@ async fn secondary_upload_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn secondary_download_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    state
+        .secondary_controller
+        .download_tenant(tenant_shard_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1879,6 +1912,9 @@ pub fn make_router(
         })
         .put("/v1/deletion_queue/flush", |r| {
             api_handler(r, deletion_queue_flush)
+        })
+        .post("/v1/tenant/:tenant_shard_id/secondary/download", |r| {
+            api_handler(r, secondary_download_handler)
         })
         .put("/v1/tenant/:tenant_shard_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)

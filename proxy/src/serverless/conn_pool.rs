@@ -13,7 +13,7 @@ use pq_proto::StartupMessageParams;
 use prometheus::{exponential_buckets, register_histogram, Histogram};
 use rand::Rng;
 use smol_str::SmolStr;
-use std::{collections::HashMap, net::IpAddr, pin::pin, sync::Arc, sync::Weak, time::Duration};
+use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
     fmt,
     task::{ready, Poll},
@@ -28,7 +28,8 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
-    metrics::{LatencyTimer, NUM_DB_CONNECTIONS_GAUGE},
+    context::RequestMonitoring,
+    metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::{connect_compute::ConnectMechanism, neon_options},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
@@ -309,13 +310,11 @@ impl GlobalConnPool {
 
     pub async fn get(
         self: &Arc<Self>,
+        ctx: &mut RequestMonitoring,
         conn_info: ConnInfo,
         force_new: bool,
-        session_id: uuid::Uuid,
-        peer_addr: IpAddr,
     ) -> anyhow::Result<Client> {
         let mut client: Option<ClientInner> = None;
-        let mut latency_timer = LatencyTimer::new("http");
 
         let mut hash_valid = false;
         let mut endpoint_pool = Weak::new();
@@ -360,23 +359,21 @@ impl GlobalConnPool {
                 info!(%conn_id, "pool: cached connection '{conn_info}' is closed, opening a new one");
                 connect_to_compute(
                     self.proxy_config,
+                    ctx,
                     &conn_info,
                     conn_id,
-                    session_id,
-                    latency_timer,
-                    peer_addr,
                     endpoint_pool.clone(),
                 )
                 .await
             } else {
                 info!("pool: reusing connection '{conn_info}'");
-                client.session.send(session_id)?;
+                client.session.send(ctx.session_id)?;
                 tracing::Span::current().record(
                     "pid",
                     &tracing::field::display(client.inner.get_process_id()),
                 );
-                latency_timer.pool_hit();
-                latency_timer.success();
+                ctx.latency_timer.pool_hit();
+                ctx.latency_timer.success();
                 return Ok(Client::new(client, conn_info, endpoint_pool).await);
             }
         } else {
@@ -384,11 +381,9 @@ impl GlobalConnPool {
             info!(%conn_id, "pool: opening a new connection '{conn_info}'");
             connect_to_compute(
                 self.proxy_config,
+                ctx,
                 &conn_info,
                 conn_id,
-                session_id,
-                latency_timer,
-                peer_addr,
                 endpoint_pool.clone(),
             )
             .await
@@ -483,7 +478,6 @@ impl GlobalConnPool {
 struct TokioMechanism<'a> {
     pool: Weak<RwLock<EndpointConnPool>>,
     conn_info: &'a ConnInfo,
-    session_id: uuid::Uuid,
     conn_id: uuid::Uuid,
     idle: Duration,
 }
@@ -496,15 +490,16 @@ impl ConnectMechanism for TokioMechanism<'_> {
 
     async fn connect_once(
         &self,
+        ctx: &mut RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
         connect_to_compute_once(
+            ctx,
             node_info,
             self.conn_info,
             timeout,
             self.conn_id,
-            self.session_id,
             self.pool.clone(),
             self.idle,
         )
@@ -520,11 +515,9 @@ impl ConnectMechanism for TokioMechanism<'_> {
 #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
 async fn connect_to_compute(
     config: &config::ProxyConfig,
+    ctx: &mut RequestMonitoring,
     conn_info: &ConnInfo,
     conn_id: uuid::Uuid,
-    session_id: uuid::Uuid,
-    latency_timer: LatencyTimer,
-    peer_addr: IpAddr,
     pool: Weak<RwLock<EndpointConnPool>>,
 ) -> anyhow::Result<ClientInner> {
     let tls = config.tls_config.as_ref();
@@ -536,12 +529,8 @@ async fn connect_to_compute(
         ("application_name", APP_NAME),
         ("options", conn_info.options.as_deref().unwrap_or("")),
     ]);
-    let creds = auth::ClientCredentials::parse(
-        &params,
-        Some(&conn_info.hostname),
-        common_names,
-        peer_addr,
-    )?;
+    let creds =
+        auth::ClientCredentials::parse(ctx, &params, Some(&conn_info.hostname), common_names)?;
 
     let creds =
         ComputeUserInfo::try_from(creds).map_err(|_| anyhow!("missing endpoint identifier"))?;
@@ -549,48 +538,48 @@ async fn connect_to_compute(
 
     let console_options = neon_options(&params);
 
-    let extra = console::ConsoleReqExtra {
-        session_id: uuid::Uuid::new_v4(),
-        application_name: APP_NAME.to_string(),
-        options: console_options,
-    };
     if !config.disable_ip_check_for_http {
-        let allowed_ips = backend.get_allowed_ips(&extra).await?;
-        if !check_peer_addr_is_in_list(&peer_addr, &allowed_ips) {
+        let allowed_ips = backend.get_allowed_ips(ctx).await?;
+        if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
             return Err(auth::AuthError::ip_address_not_allowed().into());
         }
     }
+    let extra = console::ConsoleReqExtra {
+        options: console_options,
+    };
     let node_info = backend
-        .wake_compute(&extra)
+        .wake_compute(ctx, &extra)
         .await?
         .context("missing cache entry from wake_compute")?;
 
+    ctx.set_project(node_info.aux.clone());
+
     crate::proxy::connect_compute::connect_to_compute(
+        ctx,
         &TokioMechanism {
             conn_id,
             conn_info,
-            session_id,
             pool,
             idle: config.http_config.pool_options.idle_timeout,
         },
         node_info,
         &extra,
         &backend,
-        latency_timer,
     )
     .await
 }
 
 async fn connect_to_compute_once(
+    ctx: &mut RequestMonitoring,
     node_info: &console::CachedNodeInfo,
     conn_info: &ConnInfo,
     timeout: time::Duration,
     conn_id: uuid::Uuid,
-    mut session: uuid::Uuid,
     pool: Weak<RwLock<EndpointConnPool>>,
     idle: Duration,
 ) -> Result<ClientInner, tokio_postgres::Error> {
     let mut config = (*node_info.config).clone();
+    let mut session = ctx.session_id;
 
     let (client, mut connection) = config
         .user(&conn_info.username)
@@ -601,7 +590,7 @@ async fn connect_to_compute_once(
         .await?;
 
     let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
-        .with_label_values(&["http"])
+        .with_label_values(&[ctx.protocol])
         .guard();
 
     tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));

@@ -278,8 +278,8 @@ impl ImageLayer {
             .metadata()
             .context("get file metadata to determine size")?;
 
-        // TODO(sharding): we should get TenantShardId from path.
-        // OR, not at all: any layer we load from disk should also get reconciled with remote IndexPart.
+        // This function is never used for constructing layers in a running pageserver,
+        // so it does not need an accurate TenantShardId.
         let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
 
         Ok(ImageLayer {

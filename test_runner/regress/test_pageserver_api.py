@@ -145,8 +145,7 @@ def expect_updated_msg_lsn(
     last_msg_lsn = Lsn(timeline_details["last_received_msg_lsn"])
     assert (
         prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn
-    ), f"the last received message's LSN {last_msg_lsn} hasn't been updated \
-        compared to the previous message's LSN {prev_msg_lsn}"
+    ), f"the last received message's LSN {last_msg_lsn} hasn't been updated compared to the previous message's LSN {prev_msg_lsn}"
 
     return last_msg_lsn
 

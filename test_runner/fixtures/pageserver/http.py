@@ -326,6 +326,10 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/heatmap_upload")
         self.verbose_error(res)
 
+    def tenant_secondary_download(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/download")
+        self.verbose_error(res)
+
     def set_tenant_config(self, tenant_id: TenantId, config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
         res = self.put(
@@ -361,9 +365,9 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res, dict)
         assert TenantId(res["id"]) == tenant_id
         size = res["size"]
-        assert type(size) == int
+        assert isinstance(size, int)
         inputs = res["inputs"]
-        assert type(inputs) is dict
+        assert isinstance(inputs, dict)
         return (size, inputs)
 
     def tenant_size_debug(self, tenant_id: TenantId) -> str:

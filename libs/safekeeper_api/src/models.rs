@@ -51,3 +51,9 @@ pub struct SkTimelineInfo {
     #[serde(default)]
     pub http_connstr: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimelineCopyRequest {
+    pub target_timeline_id: TimelineId,
+    pub until_lsn: Lsn,
+}

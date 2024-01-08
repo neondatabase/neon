@@ -6,8 +6,11 @@ use super::{
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedNodeInfo, CachedRoleSecret, ConsoleReqExtra,
     NodeInfo,
 };
-use crate::metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER};
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
+use crate::{
+    context::RequestMonitoring,
+    metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
+};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
@@ -49,19 +52,20 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
+        let application_name = ctx.console_application_name();
         async {
             let request = self
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", extra.session_id)])
+                .query(&[("session_id", ctx.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name.as_str()),
+                    ("application_name", application_name.as_str()),
                     ("project", creds.endpoint.as_str()),
                     ("role", creds.inner.user.as_str()),
                 ])
@@ -102,19 +106,21 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
+        let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", extra.session_id)])
+                .query(&[("session_id", ctx.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name.as_str()),
+                    ("application_name", application_name.as_str()),
                     ("project", creds.endpoint.as_str()),
                 ]);
 
@@ -162,7 +168,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         let ep = creds.endpoint.clone();
@@ -170,7 +176,7 @@ impl super::Api for Api {
         if let Some(role_secret) = self.caches.role_secret.get(&(ep.clone(), user.clone())) {
             return Ok(role_secret);
         }
-        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let auth_info = self.do_get_auth_info(ctx, creds).await?;
         let (_, secret) = self
             .caches
             .role_secret
@@ -183,7 +189,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
         if let Some(allowed_ips) = self.caches.allowed_ips.get(&creds.endpoint) {
@@ -195,7 +201,7 @@ impl super::Api for Api {
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
             .inc();
-        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let auth_info = self.do_get_auth_info(ctx, creds).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let ep = creds.endpoint.clone();
         let user = creds.inner.user.clone();
@@ -209,6 +215,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
@@ -236,7 +243,7 @@ impl super::Api for Api {
             }
         }
 
-        let node = self.do_wake_compute(extra, creds).await?;
+        let node = self.do_wake_compute(ctx, extra, creds).await?;
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 

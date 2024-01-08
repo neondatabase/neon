@@ -16,6 +16,7 @@ mod auth;
 pub mod broker;
 pub mod control_file;
 pub mod control_file_upgrade;
+pub mod copy_timeline;
 pub mod debug_dump;
 pub mod handler;
 pub mod http;

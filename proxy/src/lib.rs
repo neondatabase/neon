@@ -13,6 +13,7 @@ pub mod cancellation;
 pub mod compute;
 pub mod config;
 pub mod console;
+pub mod context;
 pub mod error;
 pub mod http;
 pub mod logging;
