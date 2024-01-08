@@ -21,10 +21,10 @@ def do(nthreads: int, inputs: List[T], work_fn: Callable[[T], U]) -> List[U]:
             if item is None:
                 return
             output = work_fn(item._item)
-            output_queue.put(Item(output))
+            output_queue.put(output)
 
     input_queue: queue.Queue[Optional["Item[T]"]] = queue.Queue()
-    output_queue: queue.Queue[Optional["Item[U]"]] = queue.Queue()
+    output_queue: queue.Queue[U] = queue.Queue()
     for t in inputs:
         input_queue.put(Item(t))
     workers = []
