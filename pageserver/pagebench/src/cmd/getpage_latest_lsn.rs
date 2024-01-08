@@ -117,6 +117,7 @@ async fn main_impl(
                     .keyspace(timeline.tenant_id, timeline.timeline_id)
                     .await?;
                 let lsn = partitioning.at_lsn;
+                let start = Instant::now();
                 let mut filtered = KeySpaceAccum::new();
                 // let's hope this is inlined and vectorized...
                 // TODO: turn this loop into a is_rel_block_range() function.
@@ -130,20 +131,28 @@ async fn main_impl(
                     }
                 }
                 let filtered = filtered.to_keyspace();
+                let filter_duration = start.elapsed();
 
-                anyhow::Ok(filtered.ranges.into_iter().map(move |r| KeyRange {
-                    timeline,
-                    timeline_lsn: lsn,
-                    start: r.start.to_i128(),
-                    end: r.end.to_i128(),
-                }))
+                anyhow::Ok((
+                    filter_duration,
+                    filtered.ranges.into_iter().map(move |r| KeyRange {
+                        timeline,
+                        timeline_lsn: lsn,
+                        start: r.start.to_i128(),
+                        end: r.end.to_i128(),
+                    }),
+                ))
             }
         });
     }
+    let mut total_filter_duration = Duration::from_secs(0);
     let mut all_ranges: Vec<KeyRange> = Vec::new();
     while let Some(res) = js.join_next().await {
-        all_ranges.extend(res.unwrap().unwrap());
+        let (filter_duration, range) = res.unwrap().unwrap();
+        all_ranges.extend(range);
+        total_filter_duration += filter_duration;
     }
+    info!("filter duration: {}", total_filter_duration.as_secs_f64());
 
     let live_stats = Arc::new(LiveStats::default());
 
