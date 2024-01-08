@@ -76,3 +76,5 @@ Just as with `Timeline::get`, callers of `Timeline::get_vectored` are responsibl
 
 Given that this is already the case, there shouldn't be significant interaction/interference with sharding.
 
+However, let's have a safety check for this constraint (error or assertion) because there are currently few affordances at the higher layers of Pageserver for sharding<=>keyspace interaction.
+For example, keyspaces are not broken up by shard stripe, so if someone naively converted the compaction code to issue a vectored get for a keyspace range it would violate this constraint.
