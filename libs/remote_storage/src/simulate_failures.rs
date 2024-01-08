@@ -164,6 +164,13 @@ impl RemoteStorage for UnreliableWrapper {
         Ok(())
     }
 
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+        // copy is equivalent to download + upload
+        self.attempt(RemoteOp::Download(from.clone()))?;
+        self.attempt(RemoteOp::Upload(to.clone()))?;
+        self.inner.copy_object(from, to).await
+    }
+
     async fn time_travel_recover(
         &self,
         prefix: Option<&RemotePath>,

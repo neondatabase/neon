@@ -6,7 +6,7 @@ authors = []
 
 [tool.poetry.dependencies]
 python = "^3.9"
-pytest = "^7.3.1"
+pytest = "^7.4.4"
 psycopg2-binary = "^2.9.6"
 typing-extensions = "^4.6.1"
 PyJWT = {version = "^2.1.0", extras = ["crypto"]}
@@ -17,7 +17,7 @@ aiopg = "^1.4.0"
 Jinja2 = "^3.0.2"
 types-requests = "^2.31.0.0"
 types-psycopg2 = "^2.9.21.10"
-boto3 = "^1.26.16"
+boto3 = "^1.34.11"
 boto3-stubs = {extras = ["s3"], version = "^1.26.16"}
 moto = {extras = ["server"], version = "^4.1.2"}
 backoff = "^2.2.1"
@@ -40,21 +40,12 @@ pytest-split = "^0.8.1"
 zstandard = "^0.21.0"
 
 [tool.poetry.group.dev.dependencies]
-black = "^23.3.0"
 mypy = "==1.3.0"
-ruff = "^0.0.269"
+ruff = "^0.1.11"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
-
-[tool.black]
-line-length = 100
-extend-exclude = '''
-/(
-    vendor
-)/
-'''
 
 [tool.mypy]
 exclude = "^vendor/"
@@ -82,7 +73,9 @@ ignore_missing_imports = true
 [tool.ruff]
 target-version = "py39"
 extend-exclude = ["vendor/"]
-ignore = ["E501"]
+ignore = [
+    "E501", # Line too long, we don't want to be too strict about it
+]
 select = [
     "E", # pycodestyle
     "F", # Pyflakes
@@ -90,3 +83,4 @@ select = [
     "W", # pycodestyle
     "B", # bugbear
 ]
+line-length = 100 # this setting is rather guidance, it won't fail if it can't make the shorter

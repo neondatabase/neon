@@ -11,6 +11,7 @@ use crate::{
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
+use pageserver_api::shard::TenantShardId;
 use std::collections::HashMap;
 use std::time::Duration;
 use utils::{
@@ -40,9 +41,9 @@ async fn await_lsn(
     loop {
         let latest = match get_lsns(tenant_id, pageserver).await {
             Ok(l) => l,
-            Err(e) => {
+            Err(_e) => {
                 println!(
-                    "🕑 Can't get LSNs on pageserver {} yet, waiting ({e})",
+                    "🕑 Waiting for pageserver {} to activate...",
                     pageserver.conf.id
                 );
                 std::thread::sleep(Duration::from_millis(500));
@@ -89,7 +90,7 @@ pub async fn migrate_tenant(
     tenant_id: TenantId,
     dest_ps: PageServerNode,
 ) -> anyhow::Result<()> {
-    // Get a new generation
+    println!("🤔 Checking existing status...");
     let attachment_service = AttachmentService::from_env(env);
 
     fn build_location_config(
@@ -133,6 +134,20 @@ pub async fn migrate_tenant(
             .await?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps).await?);
+    }
+
+    println!(
+        "🔁 Downloading latest layers to destination pageserver {}",
+        dest_ps.conf.id
+    );
+    match dest_ps
+        .tenant_secondary_download(&TenantShardId::unsharded(tenant_id))
+        .await
+    {
+        Ok(()) => {}
+        Err(_) => {
+            println!("  (skipping, destination wasn't in secondary mode)")
+        }
     }
 
     let gen = attachment_service

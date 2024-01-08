@@ -11,7 +11,8 @@ pub(crate) enum RequestKind {
     Put = 1,
     Delete = 2,
     List = 3,
-    TimeTravel = 4,
+    Copy = 4,
+    TimeTravel = 5,
 }
 
 use RequestKind::*;
@@ -23,6 +24,7 @@ impl RequestKind {
             Put => "put_object",
             Delete => "delete_object",
             List => "list_objects",
+            Copy => "copy_object",
             TimeTravel => "time_travel_recover",
         }
     }
@@ -40,7 +42,7 @@ impl<C> RequestTyped<C> {
 
     fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
         use RequestKind::*;
-        let mut it = [Get, Put, Delete, List, TimeTravel].into_iter();
+        let mut it = [Get, Put, Delete, List, Copy, TimeTravel].into_iter();
         let arr = std::array::from_fn::<C, 5, _>(|index| {
             let next = it.next().unwrap();
             assert_eq!(index, next.as_index());

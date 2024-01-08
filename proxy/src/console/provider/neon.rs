@@ -11,7 +11,7 @@ use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -141,7 +141,7 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(&host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
@@ -269,9 +269,10 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     Err(ApiError::Console { status, text })
 }
 
-fn parse_host_port(input: &str) -> Option<(String, u16)> {
-    let parsed: SocketAddr = input.parse().ok()?;
-    Some((parsed.ip().to_string(), parsed.port()))
+fn parse_host_port(input: &str) -> Option<(&str, u16)> {
+    let (host, port) = input.rsplit_once(':')?;
+    let ipv6_brackets: &[_] = &['[', ']'];
+    Some((host.trim_matches(ipv6_brackets), port.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -279,9 +280,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_host_port() {
+    fn test_parse_host_port_v4() {
         let (host, port) = parse_host_port("127.0.0.1:5432").expect("failed to parse");
         assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_parse_host_port_v6() {
+        let (host, port) = parse_host_port("[2001:db8::1]:5432").expect("failed to parse");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_parse_host_port_url() {
+        let (host, port) = parse_host_port("compute-foo-bar-1234.default.svc.cluster.local:5432")
+            .expect("failed to parse");
+        assert_eq!(host, "compute-foo-bar-1234.default.svc.cluster.local");
         assert_eq!(port, 5432);
     }
 }

@@ -25,6 +25,7 @@ use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
+use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -65,9 +66,6 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
-
-// Imports only used for testing APIs
-use pageserver_api::models::ConfigureFailpointsRequest;
 
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
@@ -154,6 +152,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
+            PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
@@ -1275,6 +1274,23 @@ async fn put_tenant_location_config_handler(
         // which is not a 400 but a 409.
         .map_err(ApiError::BadRequest)?;
 
+    if let Some(_flush_ms) = flush {
+        match state
+            .secondary_controller
+            .upload_tenant(tenant_shard_id)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!("Uploaded heatmap during flush");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to flush heatmap: {e}");
+            }
+        }
+    } else {
+        tracing::info!("No flush requested when configuring");
+    }
+
     json_response(StatusCode::OK, ())
 }
 
@@ -1289,34 +1305,6 @@ async fn handle_tenant_break(
         .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
 
     tenant.set_broken("broken from test".to_owned()).await;
-
-    json_response(StatusCode::OK, ())
-}
-
-async fn failpoints_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    if !fail::has_failpoints() {
-        return Err(ApiError::BadRequest(anyhow!(
-            "Cannot manage failpoints because pageserver was compiled without failpoints support"
-        )));
-    }
-
-    let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
-    for fp in failpoints {
-        info!("cfg failpoint: {} {}", fp.name, fp.actions);
-
-        // We recognize one extra "action" that's not natively recognized
-        // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = crate::failpoint_support::apply_failpoint(&fp.name, &fp.actions);
-
-        if let Err(err_msg) = cfg_result {
-            return Err(ApiError::BadRequest(anyhow!(
-                "Failed to configure failpoints: {err_msg}"
-            )));
-        }
-    }
 
     json_response(StatusCode::OK, ())
 }
@@ -1640,6 +1628,21 @@ async fn secondary_upload_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn secondary_download_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    state
+        .secondary_controller
+        .download_tenant(tenant_shard_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1907,6 +1910,9 @@ pub fn make_router(
         })
         .put("/v1/deletion_queue/flush", |r| {
             api_handler(r, deletion_queue_flush)
+        })
+        .post("/v1/tenant/:tenant_shard_id/secondary/download", |r| {
+            api_handler(r, secondary_download_handler)
         })
         .put("/v1/tenant/:tenant_shard_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)

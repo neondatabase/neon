@@ -33,6 +33,7 @@ use tracing::*;
 use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::failpoint_support;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
@@ -55,6 +56,7 @@ use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
+use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -594,10 +596,9 @@ impl Tenant {
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        // TODO(sharding): make WalRedoManager shard-aware
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
-            tenant_shard_id.tenant_id,
+            tenant_shard_id,
         )));
 
         let TenantSharedResources {
@@ -890,7 +891,7 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
-        crate::failpoint_support::sleep_millis_async!("before-attaching-tenant");
+        failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
         let preload = match preload {
             Some(p) => p,
@@ -1002,7 +1003,7 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
+        failpoint_support::sleep_millis_async!("attach-before-activate");
 
         info!("Done");
 
@@ -1144,10 +1145,9 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         reason: String,
     ) -> Arc<Tenant> {
-        // TODO(sharding): make WalRedoManager shard-aware
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
-            tenant_shard_id.tenant_id,
+            tenant_shard_id,
         )));
         Arc::new(Tenant::new(
             TenantState::Broken {
@@ -1759,7 +1759,15 @@ impl Tenant {
                     // decoding the new WAL might need to look up previous pages, relation
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
-                    ancestor_timeline.wait_lsn(*lsn, ctx).await?;
+                    ancestor_timeline
+                        .wait_lsn(*lsn, ctx)
+                        .await
+                        .map_err(|e| match e {
+                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState) => {
+                                CreateTimelineError::AncestorLsn(anyhow::anyhow!(e))
+                            }
+                            WaitLsnError::Shutdown => CreateTimelineError::ShuttingDown,
+                        })?;
                 }
 
                 self.branch_timeline(
@@ -2839,9 +2847,7 @@ impl Tenant {
             }
         };
 
-        crate::failpoint_support::sleep_millis_async!(
-            "gc_iteration_internal_after_getting_gc_timelines"
-        );
+        failpoint_support::sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
         // If there is nothing to GC, we don't want any messages in the INFO log.
         if !gc_timelines.is_empty() {

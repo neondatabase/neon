@@ -553,6 +553,38 @@ impl RemoteStorage for S3Bucket {
         Ok(())
     }
 
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+        let kind = RequestKind::Copy;
+        let _guard = self.permit(kind).await;
+
+        let started_at = start_measuring_requests(kind);
+
+        // we need to specify bucket_name as a prefix
+        let copy_source = format!(
+            "{}/{}",
+            self.bucket_name,
+            self.relative_path_to_s3_object(from)
+        );
+
+        let res = self
+            .client
+            .copy_object()
+            .bucket(self.bucket_name.clone())
+            .key(self.relative_path_to_s3_object(to))
+            .copy_source(copy_source)
+            .send()
+            .await;
+
+        let started_at = ScopeGuard::into_inner(started_at);
+        metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+
+        res?;
+
+        Ok(())
+    }
+
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
         // if prefix is none then download file `from`

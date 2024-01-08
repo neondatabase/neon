@@ -324,6 +324,12 @@ impl RemoteStorage for AzureBlobStorage {
         Ok(())
     }
 
+    async fn copy(&self, _from: &RemotePath, _to: &RemotePath) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "copy for azure blob storage is not implemented"
+        ))
+    }
+
     #[allow(clippy::diverging_sub_expression)]
     async fn time_travel_recover(
         &self,
@@ -332,7 +338,9 @@ impl RemoteStorage for AzureBlobStorage {
     ) -> anyhow::Result<()> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview
-        unimplemented!()
+        Err(anyhow::anyhow!(
+            "time travel recovery for azure blob storage is not implemented"
+        ))
     }
 }
 

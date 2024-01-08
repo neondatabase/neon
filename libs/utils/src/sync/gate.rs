@@ -15,6 +15,12 @@ pub struct Gate {
     name: String,
 }
 
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Gate<{}>", self.name)
+    }
+}
+
 /// RAII guard for a [`Gate`]: as long as this exists, calls to [`Gate::close`] will
 /// not complete.
 #[derive(Debug)]

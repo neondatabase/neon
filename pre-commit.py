@@ -36,17 +36,17 @@ def rustfmt(fix_inplace: bool = False, no_color: bool = False) -> str:
     return cmd
 
 
-def black(fix_inplace: bool) -> str:
-    cmd = "poetry run black"
-    if not fix_inplace:
-        cmd += " --diff --check"
+def ruff_check(fix_inplace: bool) -> str:
+    cmd = "poetry run ruff check"
+    if fix_inplace:
+        cmd += " --fix"
     return cmd
 
 
-def ruff(fix_inplace: bool) -> str:
-    cmd = "poetry run ruff"
-    if fix_inplace:
-        cmd += " --fix"
+def ruff_format(fix_inplace: bool) -> str:
+    cmd = "poetry run ruff format"
+    if not fix_inplace:
+        cmd += " --diff --check"
     return cmd
 
 
@@ -109,16 +109,16 @@ if __name__ == "__main__":
         no_color=args.no_color,
     )
     check(
-        name="black",
+        name="ruff check",
         suffix=".py",
-        cmd=black(fix_inplace=args.fix_inplace),
+        cmd=ruff_check(fix_inplace=args.fix_inplace),
         changed_files=files,
         no_color=args.no_color,
     )
     check(
-        name="ruff",
+        name="ruff format",
         suffix=".py",
-        cmd=ruff(fix_inplace=args.fix_inplace),
+        cmd=ruff_format(fix_inplace=args.fix_inplace),
         changed_files=files,
         no_color=args.no_color,
     )

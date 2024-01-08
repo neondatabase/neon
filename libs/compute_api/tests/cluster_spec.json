@@ -243,5 +243,9 @@
         "public_extensions": [
           "postgis"
         ]
+      },
+      "pgbouncer_settings": {
+        "default_pool_size": "42",
+        "pool_mode": "session"
       }
 }

@@ -23,7 +23,7 @@ use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::ops::Range;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use super::{DeltaLayerWriter, ResidentLayer};
 
@@ -246,16 +246,43 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-    pub async fn put_value(
+    pub(crate) async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
         val: &Value,
         ctx: &RequestContext,
     ) -> Result<()> {
-        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-        let inner: &mut _ = &mut *self.inner.write().await;
+        let mut inner = self.inner.write().await;
         self.assert_writable();
+        self.put_value_locked(&mut inner, key, lsn, val, ctx).await
+    }
+
+    pub(crate) async fn put_values(
+        &self,
+        values: &HashMap<Key, Vec<(Lsn, Value)>>,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        self.assert_writable();
+        for (key, vals) in values {
+            for (lsn, val) in vals {
+                self.put_value_locked(&mut inner, *key, *lsn, val, ctx)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn put_value_locked(
+        &self,
+        locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
+        key: Key,
+        lsn: Lsn,
+        val: &Value,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
 
         let off = {
             // Avoid doing allocations for "small" values.
@@ -264,7 +291,7 @@ impl InMemoryLayer {
             let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
             buf.clear();
             val.ser_into(&mut buf)?;
-            inner
+            locked_inner
                 .file
                 .write_blob(
                     &buf,
@@ -275,7 +302,7 @@ impl InMemoryLayer {
                 .await?
         };
 
-        let vec_map = inner.index.entry(key).or_default();
+        let vec_map = locked_inner.index.entry(key).or_default();
         let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
@@ -285,13 +312,11 @@ impl InMemoryLayer {
         Ok(())
     }
 
-    pub async fn put_tombstone(&self, _key_range: Range<Key>, _lsn: Lsn) -> Result<()> {
+    pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
         // TODO: Currently, we just leak the storage for any deleted keys
-
         Ok(())
     }
 
-    /// Make the layer non-writeable. Only call once.
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {
