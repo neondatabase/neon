@@ -114,6 +114,9 @@ High-level set of tasks / changes to be made:
   - That is tricky because
     - the `VirtualFile` API, which sits underneath `blob_io`, is being touched by ongoing [io_uring work](https://github.com/neondatabase/neon/pull/5824)
     - there's the question how IO buffers will be managed; currently this area relies heavily on `PageCache`, but there's controversy around the future of `PageCache`.
+      - The guiding principle here should be to avoid coupling this work to the `PageCache`.
+      - I.e., treat `PageCache` as an extra hop in the I/O chain, rather than as an integral part of buffer management.
+
 
 Let's see how we can improve by doing the first three items in above list first, then revisit.
 
