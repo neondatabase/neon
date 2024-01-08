@@ -146,10 +146,13 @@ def test_create_snapshot(
     shutil.copytree(test_output_dir, compatibility_snapshot_dir)
 
 
-@pytest.fixture(scope="session")
+# TODO: this should really be a session-scoped fixture, but pg_version is function-scoped.
+@pytest.fixture(scope="function")
 def compatibility_snapshot_dir(pg_version: PgVersion) -> Path:
-    # TODO: figure out how to to run the code in test_create_snapshot here,
-    #       instead of ab-using pytest-order like we do right now.
+    """
+    The user of the test suite provides us with a snapshot of `test_create_snapshot`'s output
+    in the directory at COMPATIBILITY_SNAPSHOT_DIR.
+    """
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert (
         compatibility_snapshot_dir_env is not None
