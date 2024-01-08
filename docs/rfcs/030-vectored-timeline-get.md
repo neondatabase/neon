@@ -14,11 +14,19 @@ For an example, see
 https://github.com/neondatabase/neon/blob/5c88213eaf1b1e29c610a078d0b380f69ed49a7e/pageserver/src/basebackup.rs#L281-L302.
 
 Each call must traverse the layer map to gather reconstruct data (`Timeline::get_reconstruct_data`) for the requested page number (`blknum` in the example).
+For each layer visited by layer map traversal, we do a `DiskBtree` point lookup.
+If it's negative (no entry), we resume layer map traversal.
+If it's positive, we collect the result in our reconstruct data bag.
+If the reconstruct data bag contents suffice to reconstruct the page, we're done with `get_reconstruct_data` and move on to walredo.
+Otherwise, we resume layer map traversal.
 
 That is quite inefficient because:
 
 1. We do the layer map traversal repeatedly, even if, e.g., all the data sits in the same image layer at the bottom of the stack.
-2. Anecdotally, keys adjacent in keyspace and written simultaneously also end up physically adjacent in the layer files [^1].
+2. We may visit many DiskBtree inner pages multiple times for point lookup of different keys.
+   This is likely particularly bad for L0s which span the whole key space and hence must be visited by layer map traversal, but
+   may not contain the data we're looking for.
+3. Anecdotally, keys adjacent in keyspace and written simultaneously also end up physically adjacent in the layer files [^1].
    So, to provide the reconstruct data for N adjacent keys, we would actually only _need_ to issue a single large read to the filesystem, instead of the N reads we currently do.
    The filesystem, in turn, ideally stores the layer file physically contiguously, so our large read will turn into one IOP toward the disk.
 
@@ -54,15 +62,62 @@ for key in keys_iter {
 return out;
 ```
 
-# Performance
+However, unlike above, an ideal solution will
 
-A single invocation of `Timeline::get_vectored` visits each layer in the layer map at most once.
+* Visit each `struct Layer` at most once.
+* For each visited layer, call `Layer::get_value_reconstruct_data` at most once.
+  * This means, read each `DiskBtree` page at most once.
+* Facilitate merging of the reads we issue to the OS and eventually NVMe.
 
-The base performance is identical to the current `Timeline::get`.
+Each of these items above represents a signficant amount of work.
+
+## Performance
+
+Ideally, the **base performance** of a vectored get of a single page should be identical to the current `Timeline::get`.
+A reasonable constant overhead over current `Timeline::get` is acceptable.
 
 The performance improvement for the vectored use case is demonstrated in some way, e.g., using the `pagebench` basebackup benchmark against a tenant with a lot of SLRU segments.
 
-# Rollout / Feature Flags
+# Implementation
+
+High-level set of tasks / changes to be made:
+
+- Get clarity on API:
+  - Define naive `Timeline::get_vectored` implementation & adopt it across pageserver.
+  - Get peer review on return type (e.g. `Vec<Bytes>` vs `impl Stream`)
+  - Iterate until the API is agreed
+- Vectored Layer Map traversal
+  - Vectored `LayerMap::search` (take 1 LSN and N `Key`s instead of just 1 LSN and 1 `Key`)
+  - Refactor `Timeline::get_reconstruct_data` to hold & return state for N `Key`s instead of 1
+    - The slightly tricky part here is what to do about `cont_lsn` [after we've found some reconstruct data for some keys](https://github.com/neondatabase/neon/blob/d066dad84b076daf3781cdf9a692098889d3974e/pageserver/src/tenant/timeline.rs#L2378-L2385)
+      but need more.
+      Likely we'll need to keep track of `cont_lsn` per key and continue next iteration at `max(cont_lsn)` of all keys that still need data.
+- Vectored `Layer::get_value_reconstruct_data` / `DiskBtree`
+  - Current code calls it [here](https://github.com/neondatabase/neon/blob/d066dad84b076daf3781cdf9a692098889d3974e/pageserver/src/tenant/timeline.rs#L2378-L2384).
+  - Delta layers use `DiskBtreeReader::visit()` to collect the `(offset,len)` pairs for delta record blobs to load.
+  - Image layers use `DiskBtreeReader::get` to get the offset of the image blob to load. Underneath, that's just a `::visit()` call.
+  - What needs to happen to `DiskBtree::visit()`?
+    * Minimally
+      * take a single `KeyVec` instead of a single `Key` as argument, i.e., take a single contiguous key range to visit.
+      * Change the visit code to to invoke the callback for all values in the `KeyVec`'s key range
+      * This should be good enough for what we've seen when investigating basebackup slowness, because there, the key ranges are contiguous.
+    * Ideally:
+      * Take a `&[KeyVec]`, sort it;
+      * during Btree traversal, peek at the next `KeyVec` range to determine whether we need to descend or back out.
+      * NB: this should be a straight-forward extension of the minimal solution above, as we'll already be checking for "is there more key range in the requested `KeyVec`".
+- Facilitate merging of the reads we issue to the OS and eventually NVMe.
+  - The `DiskBtree::visit` produces a set of offsets which we then read from a `VirtualFile` [here](https://github.com/neondatabase/neon/blob/292281c9dfb24152b728b1a846cc45105dac7fe0/pageserver/src/tenant/storage_layer/delta_layer.rs#L772-L804)
+    - [Delta layer reads](https://github.com/neondatabase/neon/blob/292281c9dfb24152b728b1a846cc45105dac7fe0/pageserver/src/tenant/storage_layer/delta_layer.rs#L772-L804)
+      - We hit (and rely) on `PageCache` and `VirtualFile here (not great under pressure)
+    - [Image layer reads](https://github.com/neondatabase/neon/blob/292281c9dfb24152b728b1a846cc45105dac7fe0/pageserver/src/tenant/storage_layer/image_layer.rs#L429-L435)
+  - What needs to happen here is the **vectorization of the `blob_io` interface**, and then the `VirtualFile` API.
+  - That is tricky because
+    - the `VirtualFile` API, which sits underneath `blob_io`, is being touched by ongoing [io_uring work](https://github.com/neondatabase/neon/pull/5824)
+    - there's the question how IO buffers will be managed; currently this area relies heavily on `PageCache`, but there's controversy around the future of `PageCache`.
+
+Let's see how we can improve by doing the first three items in above list first, then revisit.
+
+## Rollout / Feature Flags
 
 No feature flags are required for this epic.
 
