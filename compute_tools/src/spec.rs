@@ -763,7 +763,8 @@ END $$;
     let mut query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
     client.simple_query(query)?;
 
-    query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (id integer NOT NULL DEFAULT 0)";
+    query =
+        "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (id integer NOT NULL DEFAULT 0)";
     client.simple_query(query)?;
 
     query = "INSERT INTO neon_migration.migration_id VALUES (0) ON CONFLICT DO NOTHING";
