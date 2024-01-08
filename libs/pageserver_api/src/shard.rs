@@ -422,6 +422,21 @@ impl ShardIdentity {
         }
     }
 
+    /// Return true if the key should be discarded if found in this shard's
+    /// data store, e.g. during compaction after a split
+    pub fn is_key_disposable(&self, key: &Key) -> bool {
+        if key_is_shard0(key) {
+            // Q: Why can't we dispose of shard0 content if we're not shard 0?
+            // A: because the WAL ingestion logic currently ingests some shard 0
+            //    content on all shards, even though it's only read on shard 0.  If we
+            //    dropped it, then subsequent WAL ingest to these keys would encounter
+            //    an error.
+            false
+        } else {
+            !self.is_key_local(key)
+        }
+    }
+
     pub fn shard_slug(&self) -> String {
         if self.count > ShardCount(0) {
             format!("-{:02x}{:02x}", self.number.0, self.count.0)
@@ -515,12 +530,7 @@ fn key_is_shard0(key: &Key) -> bool {
     // relation pages are distributed to shards other than shard zero. Everything else gets
     // stored on shard 0.  This guarantees that shard 0 can independently serve basebackup
     // requests, and any request other than those for particular blocks in relations.
-    //
-    // In this condition:
-    // - is_rel_block_key includes only relations, i.e. excludes SLRU data and
-    // all metadata.
-    // - field6 is set to -1 for relation size pages.
-    !(is_rel_block_key(key) && key.field6 != 0xffffffff)
+    !is_rel_block_key(key)
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name

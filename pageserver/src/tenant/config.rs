@@ -46,6 +46,8 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
+
+    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

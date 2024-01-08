@@ -38,6 +38,9 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(
+        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
+    )
 
     ps_http = env.pageserver.http_client()
 

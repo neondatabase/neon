@@ -66,12 +66,10 @@ impl FileStorage {
 
     /// Create file storage for a new timeline, but don't persist it yet.
     pub fn create_new(
-        ttid: &TenantTimelineId,
+        timeline_dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
         state: SafeKeeperState,
     ) -> Result<FileStorage> {
-        let timeline_dir = conf.timeline_dir(ttid);
-
         let store = FileStorage {
             timeline_dir,
             conf: conf.clone(),
@@ -277,7 +275,8 @@ mod test {
             .await
             .expect("failed to create timeline dir");
         let state = SafeKeeperState::empty();
-        let storage = FileStorage::create_new(ttid, conf, state.clone())?;
+        let timeline_dir = conf.timeline_dir(ttid);
+        let storage = FileStorage::create_new(timeline_dir, conf, state.clone())?;
         Ok((storage, state))
     }
 

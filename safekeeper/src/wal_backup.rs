@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use utils::id::NodeId;
 
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -530,4 +530,63 @@ pub async fn read_object(
     let reader = tokio::io::BufReader::with_capacity(BUFFER_SIZE, reader);
 
     Ok(Box::pin(reader))
+}
+
+/// Copy segments from one timeline to another. Used in copy_timeline.
+pub async fn copy_s3_segments(
+    wal_seg_size: usize,
+    src_ttid: &TenantTimelineId,
+    dst_ttid: &TenantTimelineId,
+    from_segment: XLogSegNo,
+    to_segment: XLogSegNo,
+) -> Result<()> {
+    const SEGMENTS_PROGRESS_REPORT_INTERVAL: u64 = 1024;
+
+    let storage = REMOTE_STORAGE
+        .get()
+        .expect("failed to get remote storage")
+        .as_ref()
+        .unwrap();
+
+    let relative_dst_path =
+        Utf8Path::new(&dst_ttid.tenant_id.to_string()).join(dst_ttid.timeline_id.to_string());
+
+    let remote_path = RemotePath::new(&relative_dst_path)?;
+
+    let files = storage.list_files(Some(&remote_path)).await?;
+    let uploaded_segments = &files
+        .iter()
+        .filter_map(|file| file.object_name().map(ToOwned::to_owned))
+        .collect::<HashSet<_>>();
+
+    debug!(
+        "these segments have already been uploaded: {:?}",
+        uploaded_segments
+    );
+
+    let relative_src_path =
+        Utf8Path::new(&src_ttid.tenant_id.to_string()).join(src_ttid.timeline_id.to_string());
+
+    for segno in from_segment..to_segment {
+        if segno % SEGMENTS_PROGRESS_REPORT_INTERVAL == 0 {
+            info!("copied all segments from {} until {}", from_segment, segno);
+        }
+
+        let segment_name = XLogFileName(PG_TLI, segno, wal_seg_size);
+        if uploaded_segments.contains(&segment_name) {
+            continue;
+        }
+        debug!("copying segment {}", segment_name);
+
+        let from = RemotePath::new(&relative_src_path.join(&segment_name))?;
+        let to = RemotePath::new(&relative_dst_path.join(&segment_name))?;
+
+        storage.copy_object(&from, &to).await?;
+    }
+
+    info!(
+        "finished copying segments from {} until {}",
+        from_segment, to_segment
+    );
+    Ok(())
 }
