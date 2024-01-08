@@ -316,9 +316,14 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
+    force_await_initial_logical_size: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+
+    if force_await_initial_logical_size {
+        timeline.clone().await_initial_logical_size().await
+    }
 
     let mut info = build_timeline_info_common(timeline, ctx).await?;
     if include_non_incremental_logical_size {
@@ -507,6 +512,8 @@ async fn timeline_list_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -520,6 +527,7 @@ async fn timeline_list_handler(
             let timeline_info = build_timeline_info(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
+                force_await_initial_logical_size.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -547,6 +555,8 @@ async fn timeline_detail_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -562,6 +572,7 @@ async fn timeline_detail_handler(
         let timeline_info = build_timeline_info(
             &timeline,
             include_non_incremental_logical_size.unwrap_or(false),
+            force_await_initial_logical_size.unwrap_or(false),
             &ctx,
         )
         .await
