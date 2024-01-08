@@ -150,15 +150,15 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
         MaybeEnabledS3::Enabled(ctx) => ctx,
         MaybeEnabledS3::Disabled => return Ok(()),
     };
-    const WAIT_TIME: u64 = 1_500;
-
-    // This depends on discrepancies in the clock between S3 and the environment the tests
+    // Our test depends on discrepancies in the clock between S3 and the environment the tests
     // run in. Therefore, wait a little bit before and after. The alternative would be
     // to take the time from S3 response headers.
+    const WAIT_TIME: Duration = Duration::from_millis(3_000);
+
     async fn time_point() -> SystemTime {
-        tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
+        tokio::time::sleep(WAIT_TIME).await;
         let ret = SystemTime::now();
-        tokio::time::sleep(Duration::from_millis(WAIT_TIME)).await;
+        tokio::time::sleep(WAIT_TIME).await;
         ret
     }
 
@@ -194,6 +194,19 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     let t1_files = list_files(&ctx.client).await?;
     let t1 = time_point().await;
     println!("at t1: {t1_files:?}");
+
+    // A little check to ensure that our clock is not too far off from the S3 clock
+    {
+        let dl = ctx.client.download(&path2).await?;
+        let last_modified = dl.last_modified.unwrap();
+        let half_wt = WAIT_TIME.mul_f32(0.5);
+        let t0_hwt = t0 + half_wt;
+        let t1_hwt = t1 - half_wt;
+        if !(t0_hwt..=t1_hwt).contains(&last_modified) {
+            panic!("last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
+                This likely means a large lock discrepancy between S3 and the local clock.");
+        }
+    }
 
     let (data, len) = upload_stream("remote blob data3".as_bytes().into());
     ctx.client.upload(data, len, &path3, None).await?;
