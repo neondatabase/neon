@@ -551,7 +551,7 @@ class NeonEnvBuilder:
             tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
 
             log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
-            if not self.test_overlay_dir:
+            if self.test_overlay_dir is None:
                 shutil.copytree(tenants_from_dir, tenants_to_dir)
             else:
                 self.overlay_mount(f"{ps_dir.name}:tenants", tenants_from_dir, tenants_to_dir)
@@ -563,7 +563,7 @@ class NeonEnvBuilder:
             shutil.copytree(sk_from_dir, sk_to_dir, ignore=shutil.ignore_patterns("*.log", "*.pid"))
 
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
-        if not self.test_overlay_dir:
+        if self.test_overlay_dir is None:
             shutil.copytree(
                 repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
             )
@@ -629,7 +629,7 @@ class NeonEnvBuilder:
         Unmount the overlayfs mounts created by `self.overlay_mount()`.
         Supposed to be called during env teardown.
         """
-        if not self.test_overlay_dir:
+        if self.test_overlay_dir is None:
             return
         while len(self.overlay_mounts_created_by_us) > 0:
             (ident, mountpoint) = self.overlay_mounts_created_by_us.pop()
@@ -3340,13 +3340,13 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 # scope. So it uses the get_test_output_dir() function to get the path, and
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
+#
+# NB: we request the overlay dir fixture so the fixture does its cleanups
 @pytest.fixture(scope="function", autouse=True)
 def test_output_dir(
     request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
 ) -> Iterator[Path]:
     """Create the working directory for an individual test."""
-
-    _ = test_overlay_dir  # request overlay dir fixture so the fixture does its cleanups
 
     # one directory per test
     test_dir = get_test_output_dir(request, top_output_dir)
@@ -3359,7 +3359,7 @@ def test_output_dir(
     allure_attach_from_dir(test_dir)
 
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(scope="function")
 def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
     """
     Idempotently create a test's overlayfs mount state directory.
@@ -3368,14 +3368,11 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
     The procedure cleans up after previous runs that were aborted (e.g. due to Ctrl-C, OOM kills, etc).
     """
 
-    if not os.getenv("NEON_ENV_BUILDER_FROM_REPO_DIR_USE_OVERLAYFS"):
-        overlay_dir = None
-    else:
-        overlay_dir = get_test_overlay_dir(request, top_output_dir)
-
-    log.info("test_overlay_dir is {overlay_dir}")
-    if not overlay_dir:
+    if os.getenv("NEON_ENV_BUILDER_FROM_REPO_DIR_USE_OVERLAYFS") is None:
         return None
+
+    overlay_dir = get_test_overlay_dir(request, top_output_dir)
+    log.info(f"test_overlay_dir is {overlay_dir}")
 
     overlay_dir.mkdir(exist_ok=True)
     # unmount stale overlayfs mounts which subdirectories of `overlay_dir/*` as the overlayfs `upperdir` and `workdir`
