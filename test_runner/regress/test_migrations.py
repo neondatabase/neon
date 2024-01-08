@@ -1,3 +1,5 @@
+import time
+
 from fixtures.neon_fixtures import NeonEnv
 
 
@@ -7,6 +9,7 @@ def test_migrations(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create("test_migrations")
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
+    time.sleep(1)  # Sleep to let migrations run
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
@@ -15,6 +18,7 @@ def test_migrations(neon_simple_env: NeonEnv):
 
     endpoint.stop()
     endpoint.start()
+    time.sleep(1)  # Sleep to let migrations run
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
