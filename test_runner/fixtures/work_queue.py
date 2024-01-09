@@ -14,13 +14,19 @@ def do(nthreads: int, inputs: List[T], work_fn: Callable[[T], U]) -> List[U]:
         def __init__(self, item: V):
             self._item = item
 
+    work_fn_raised = threading.Event()
+
     # duplicate the tenant in remote storage
     def worker(input_queue: queue.Queue[Item[T]], output_queue: queue.Queue[U]):
         while True:
             item = input_queue.get()
             if item is None:
                 return
-            output = work_fn(item._item)
+            try:
+                output = work_fn(item._item)
+            except Exception:
+                work_fn_raised.set()
+                raise
             output_queue.put(output)
 
     input_queue: queue.Queue[Optional["Item[T]"]] = queue.Queue()
@@ -35,6 +41,9 @@ def do(nthreads: int, inputs: List[T], work_fn: Callable[[T], U]) -> List[U]:
         input_queue.put(None)
     for w in workers:
         w.join()
+
+    if work_fn_raised.is_set():
+        raise Exception("one of the work_fn's raised an exception, don't do that")
 
     outputs = []
     while True:
