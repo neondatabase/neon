@@ -85,6 +85,12 @@ impl TenantShardId {
     pub fn is_unsharded(&self) -> bool {
         self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
     }
+    pub fn to_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_number: self.shard_number,
+            shard_count: self.shard_count,
+        }
+    }
 }
 
 /// Formatting helper
