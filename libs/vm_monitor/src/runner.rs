@@ -446,12 +446,11 @@ impl Runner {
                     if let Some(t) = self.last_upscale_request_at {
                         let elapsed = t.elapsed();
                         if elapsed < Duration::from_secs(1) {
-                            info!(
-                                elapsed_millis = elapsed.as_millis(),
-                                avg_non_reclaimable = bytes_to_mebibytes(cgroup_mem_stat.avg_non_reclaimable),
-                                threshold = bytes_to_mebibytes(cgroup.threshold),
-                                "cgroup memory stats are high enough to upscale but too soon to forward the request, ignoring",
-                            );
+                            // *Ideally* we'd like to log here that we're ignoring the fact the
+                            // memory stats are too high, but in practice this can result in
+                            // spamming the logs with repetitive messages about ignoring the signal
+                            //
+                            // See https://github.com/neondatabase/neon/issues/5865 for more.
                             continue;
                         }
                     }
