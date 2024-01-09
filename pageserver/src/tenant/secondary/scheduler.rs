@@ -1,4 +1,3 @@
-use async_trait;
 use futures::Future;
 use std::{
     collections::HashMap,
@@ -65,7 +64,6 @@ where
     _phantom: PhantomData<(PJ, RJ, C, CMD)>,
 }
 
-#[async_trait::async_trait]
 pub(crate) trait JobGenerator<PJ, RJ, C, CMD>
 where
     C: Completion,

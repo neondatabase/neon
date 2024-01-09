@@ -186,7 +186,6 @@ type Scheduler = TenantBackgroundJobs<
     DownloadCommand,
 >;
 
-#[async_trait::async_trait]
 impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCommand>
     for SecondaryDownloader
 {
