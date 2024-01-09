@@ -144,8 +144,11 @@ def test_remote_storage_backup_and_restore(
     # Introduce failpoint in list remote timelines code path to make tenant_attach fail.
     # This is before the failures injected by test_remote_failures, so it's a permanent error.
     pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
-    env.pageserver.allowed_errors.append(
-        ".*attach failed.*: storage-sync-list-remote-timelines",
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*attach failed.*: storage-sync-list-remote-timelines",
+            ".*Tenant state is Broken: storage-sync-list-remote-timelines.*",
+        ]
     )
     # Attach it. This HTTP request will succeed and launch a
     # background task to load the tenant. In that background task,
@@ -159,9 +162,13 @@ def test_remote_storage_backup_and_restore(
         "data": {"reason": "storage-sync-list-remote-timelines"},
     }
 
-    # Ensure that even though the tenant is broken, we can't attach it again.
-    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
-        env.pageserver.tenant_attach(tenant_id)
+    # Ensure that even though the tenant is broken, retrying the attachment fails
+    with pytest.raises(Exception, match="Tenant state is Broken"):
+        # Use same generation as in previous attempt
+        gen_state = env.attachment_service.inspect(tenant_id)
+        assert gen_state is not None
+        generation = gen_state[0]
+        env.pageserver.tenant_attach(tenant_id, generation=generation)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.
@@ -176,10 +183,8 @@ def test_remote_storage_backup_and_restore(
     ), "we shouldn't have tried any layer downloads yet since list remote timelines has a failpoint"
     env.pageserver.start()
 
-    # Ensure that the pageserver remembers that the tenant was attaching, by
-    # trying to attach it again. It should fail.
-    with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state:"):
-        env.pageserver.tenant_attach(tenant_id)
+    # The attach should have got far enough that it recovers on restart (i.e. tenant's
+    # config was written to local storage).
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
 
     wait_until_tenant_active(

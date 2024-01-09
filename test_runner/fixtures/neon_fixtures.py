@@ -41,6 +41,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 from urllib3.util.retry import Retry
 
+from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.allowed_errors import (
@@ -553,7 +554,7 @@ class NeonEnvBuilder:
             tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
 
             log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
-            if not self.test_overlay_dir:
+            if self.test_overlay_dir is None:
                 shutil.copytree(tenants_from_dir, tenants_to_dir)
             else:
                 self.overlay_mount(f"{ps_dir.name}:tenants", tenants_from_dir, tenants_to_dir)
@@ -565,13 +566,16 @@ class NeonEnvBuilder:
             shutil.copytree(sk_from_dir, sk_to_dir, ignore=shutil.ignore_patterns("*.log", "*.pid"))
 
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
-        if not self.test_overlay_dir:
+        if self.test_overlay_dir is None:
             shutil.copytree(
                 repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
             )
         else:
-            self.overlay_mount("local_fs_remote_storage",
-                repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage")
+            self.overlay_mount(
+                "local_fs_remote_storage",
+                repo_dir / "local_fs_remote_storage",
+                self.repo_dir / "local_fs_remote_storage",
+            )
 
         if (attachments_json := Path(repo_dir / "attachments.json")).exists():
             shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
@@ -1909,18 +1913,24 @@ class NeonPageserver(PgProtocol):
         return None
 
     def tenant_attach(
-        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+        self,
+        tenant_id: TenantId,
+        config: None | Dict[str, Any] = None,
+        config_null: bool = False,
+        generation: Optional[int] = None,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
+        if generation is None:
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         return client.tenant_attach(
             tenant_id,
             config,
             config_null,
-            generation=self.env.attachment_service.attach_hook_issue(tenant_id, self.id),
+            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
@@ -3276,9 +3286,9 @@ class S3Scrubber:
 
 
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:
-    """Compute the working directory for an individual test."""
+    """Compute the path to a working directory for an individual test."""
     test_name = request.node.name
-    test_dir = top_output_dir / (prefix+test_name.replace("/", "-"))
+    test_dir = top_output_dir / f"{prefix}{test_name.replace('/', '-')}"
 
     # We rerun flaky tests multiple times, use a separate directory for each run.
     if (suffix := getattr(request.node, "execution_count", None)) is not None:
@@ -3289,10 +3299,19 @@ def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) ->
     assert isinstance(test_dir, Path)
     return test_dir
 
+
 def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    """
+    The working directory for a test.
+    """
     return _get_test_dir(request, top_output_dir, "")
 
+
 def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    """
+    Directory that contains `upperdir` and `workdir` for overlayfs mounts
+    that a test creates. See `NeonEnvBuilder.overlay_mount`.
+    """
     return _get_test_dir(request, top_output_dir, "overlay-")
 
 def get_test_snapshot_dir_path(request: FixtureRequest, top_output_dir: Path) -> Path:
@@ -3325,8 +3344,12 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 # scope. So it uses the get_test_output_dir() function to get the path, and
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
+#
+# NB: we request the overlay dir fixture so the fixture does its cleanups
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path) -> Iterator[Path]:
+def test_output_dir(
+    request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
+) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
     _ = test_overlay_dir # request it so it can do cleanups
@@ -3378,6 +3401,8 @@ def test_snapshot_dir(request: FixtureRequest, top_output_dir: Path, test_overla
     snapshot_dir = get_test_snapshot_dir_path(request, top_output_dir)
     log.info(f"test_snapshot_dir is {snapshot_dir}")
     return SnapshotDir(snapshot_dir)
+
+
 
 @pytest.fixture(scope="function", autouse=True)
 def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
