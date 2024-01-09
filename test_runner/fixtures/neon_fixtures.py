@@ -15,11 +15,11 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from functools import cached_property
+from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, cast
 from urllib.parse import urlparse
 
 import asyncpg
@@ -3394,6 +3394,10 @@ def get_test_snapshot_dir_path(request: FixtureRequest, top_output_dir: Path) ->
     return _get_test_dir(request, top_output_dir, "snapshot-")
 
 
+def get_shared_snapshot_dir_path(top_output_dir: Path, snapshot_name: str) -> Path:
+    return top_output_dir / "shared-snapshots" / snapshot_name
+
+
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return get_test_output_dir(request, top_output_dir) / "repo"
 
@@ -3448,7 +3452,7 @@ class SnapshotDir:
     def __init__(self, path: Path):
         self._path = path
         if not self._path.exists():
-            self._path.mkdir()
+            self._path.mkdir(parents=True)
         else:
             assert self._path.is_dir()
 
@@ -3481,6 +3485,16 @@ def test_snapshot_dir(
     snapshot_dir = get_test_snapshot_dir_path(request, top_output_dir)
     log.info(f"test_snapshot_dir is {snapshot_dir}")
     return SnapshotDir(snapshot_dir)
+
+
+@pytest.fixture(scope="function")
+def shared_snapshot_dir_fn(top_output_dir: Path) -> Callable[[str], SnapshotDir]:
+    def f(top_output_dir, name):
+        snapshot_dir = get_shared_snapshot_dir_path(top_output_dir, name)
+
+        return SnapshotDir(snapshot_dir)
+
+    return partial(f, top_output_dir)
 
 
 @pytest.fixture(scope="function", autouse=True)

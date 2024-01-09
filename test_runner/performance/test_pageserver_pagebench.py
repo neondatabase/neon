@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Callable
 
 import fixtures.pageserver.many_tenants as many_tenants
 import pytest
@@ -21,7 +22,7 @@ from fixtures.neon_fixtures import (
 def getpage_throughput_fixture(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
-    test_snapshot_dir: SnapshotDir,
+    shared_snapshot_dir_fn: Callable[[str], SnapshotDir],
     request: FixtureRequest,
 ) -> many_tenants.SingleTimeline:
     def setup_template(env: NeonEnv):
@@ -51,9 +52,10 @@ def getpage_throughput_fixture(
 
     n_tenants = request.param
     save_snapshot = os.getenv("CI", "false") != "true"
+    snapshot_dir = shared_snapshot_dir_fn(f"{n_tenants}-tenants")
     return many_tenants.single_timeline(
         neon_env_builder,
-        test_snapshot_dir,
+        snapshot_dir,
         setup_template,
         n_tenants,
         save_snapshot,
