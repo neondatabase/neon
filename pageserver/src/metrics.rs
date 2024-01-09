@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, IntoEnumIterator, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -1879,9 +1879,13 @@ impl Drop for TimelineMetrics {
     }
 }
 
-pub fn remove_tenant_metrics(tenant_id: &TenantId) {
-    let tid = tenant_id.to_string();
-    let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
+pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
+    // Only shard zero deals in synthetic sizes
+    if tenant_shard_id.is_zero() {
+        let tid = tenant_shard_id.tenant_id.to_string();
+        let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
+    }
+
     // we leave the BROKEN_TENANTS_SET entry if any
 }
 

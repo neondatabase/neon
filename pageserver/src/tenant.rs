@@ -3590,6 +3590,9 @@ impl Tenant {
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
 
+        // Only shard zero should be calculating synthetic sizes
+        debug_assert!(self.shard_identity.is_zero());
+
         TENANT_SYNTHETIC_SIZE_METRIC
             .get_metric_with_label_values(&[&self.tenant_shard_id.tenant_id.to_string()])
             .unwrap()
@@ -3741,7 +3744,7 @@ async fn run_initdb(
 
 impl Drop for Tenant {
     fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id.tenant_id);
+        remove_tenant_metrics(&self.tenant_shard_id);
     }
 }
 /// Dump contents of a layer file to stdout.
