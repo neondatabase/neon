@@ -10,7 +10,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     SnapshotDir,
 )
-from fixtures.pageserver.utils import wait_until_tenant_active, wait_until_tenant_state
+from fixtures.pageserver.utils import (
+    wait_until_all_tenants_state,
+    wait_until_tenant_active,
+    wait_until_tenant_state,
+)
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 import fixtures.pageserver.remote_storage
@@ -20,8 +24,6 @@ from fixtures import work_queue
 @dataclass
 class SingleTimeline:
     env: NeonEnv
-    timeline_id: TimelineId
-    tenants: List[TenantId]
 
 
 def single_timeline(
@@ -43,10 +45,6 @@ def single_timeline(
         save_snapshot = False
         env = neon_env_builder.from_repo_dir(snapshot_dir.path)
         ps_http = env.pageserver.http_client()
-        tenants = list(
-            {TenantId(t.name) for t in (snapshot_dir.path.glob("pageserver_*/tenants/*"))}
-        )
-        template_timeline = env.initial_timeline
     else:
         if snapshot_dir.path.exists():
             shutil.rmtree(snapshot_dir.path)
@@ -137,11 +135,13 @@ def single_timeline(
 
     env.start()
 
-    log.info(f"wait for tenants to become active")
-    for tenant in tenants:
-        wait_until_tenant_active(ps_http, tenant, iterations=ncopies, period=1)
+    log.info(f"wait for all tenants to become active")
+    wait_until_all_tenants_state(
+        ps_http, "Active", iterations=ncopies, period=1, http_error_ok=False
+    )
 
     # ensure all layers are resident for predictiable performance
+    tenants = [info["id"] for info in ps_http.tenant_list()]
     for tenant in tenants:
         for timeline in ps_http.tenant_status(tenant)["timelines"]:
             info = ps_http.layer_map_info(tenant, timeline)
@@ -149,4 +149,4 @@ def single_timeline(
                 assert not layer.remote
 
     log.info("ready")
-    return SingleTimeline(env, template_timeline, tenants)
+    return SingleTimeline(env)

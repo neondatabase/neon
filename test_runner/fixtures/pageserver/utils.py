@@ -61,6 +61,14 @@ def wait_for_upload(
     )
 
 
+def _tenant_in_expected_state(tenant_info: Dict[str, Any], expected_state: str):
+    if tenant_info["state"]["slug"] == expected_state:
+        return True
+    if tenant_info["state"]["slug"] == "Broken":
+        raise RuntimeError(f"tenant became Broken, not {expected_state}")
+    return False
+
+
 def wait_until_tenant_state(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
@@ -78,15 +86,41 @@ def wait_until_tenant_state(
             log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
         else:
             log.debug(f"Tenant {tenant_id} data: {tenant}")
-            if tenant["state"]["slug"] == expected_state:
+            if _tenant_in_expected_state(tenant, expected_state):
                 return tenant
-            if tenant["state"]["slug"] == "Broken":
-                raise RuntimeError(f"tenant became Broken, not {expected_state}")
 
         time.sleep(period)
 
     raise Exception(
         f"Tenant {tenant_id} did not become {expected_state} within {iterations * period} seconds"
+    )
+
+
+def wait_until_all_tenants_state(
+    pageserver_http: PageserverHttpClient,
+    expected_state: str,
+    iterations: int,
+    period: float = 1.0,
+    http_error_ok: bool = True,
+):
+    """
+    Like wait_until_tenant_state, but checks all tenants.
+    """
+    for _ in range(iterations):
+        try:
+            tenants = pageserver_http.tenant_list()
+        except Exception as e:
+            if http_error_ok:
+                log.debug(f"Failed to list tenants: {e}")
+            else:
+                raise
+        else:
+            if all(map(lambda tenant: _tenant_in_expected_state(tenant, expected_state), tenants)):
+                return
+        time.sleep(period)
+
+    raise Exception(
+        f"Not all tenants became active {expected_state} within {iterations * period} seconds"
     )
 
 

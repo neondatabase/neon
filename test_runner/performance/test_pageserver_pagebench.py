@@ -61,11 +61,7 @@ def test_getpage_throughput(
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
 ):
-    env, template_timeline, tenants = (
-        getpage_throughput_fixture.env,
-        getpage_throughput_fixture.timeline_id,
-        getpage_throughput_fixture.tenants,
-    )
+    env = getpage_throughput_fixture.env
     ps_http = env.pageserver.http_client()
 
     # run the benchmark with one client per timeline, each doing 10k requests to random keys.
@@ -80,7 +76,8 @@ def test_getpage_throughput(
         "--runtime",
         duration,
         # "--per-target-rate-limit", "50",
-        *[f"{tenant}/{template_timeline}" for tenant in tenants],
+        # don't specify the targets, our fixture prepares us exactly 20k tenants,
+        # and pagebench will auto-discover them
     ]
     log.info(f"command: {' '.join(cmd)}")
     basepath = pg_bin.run_capture(cmd, with_command_header=False)
