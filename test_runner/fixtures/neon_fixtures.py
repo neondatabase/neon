@@ -625,6 +625,54 @@ class NeonEnvBuilder:
         )
         self.overlay_mounts_created_by_us.append((ident, dstdir))
 
+    def _overlay_umount(self, mountpoint: Path):
+        cmd = ["sudo", "umount", str(mountpoint)]
+        assert mountpoint.is_mount()
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
+
+    def overlay_unmount_and_move(self, ident: str, dst: Path):
+        """
+        Unmount previously established overlayfs mount at `dstdir` and move the upperdir contents to `dst`.
+        If `dst` is an empty directory, it gets replaced.
+        Caller is responsible for ensuring the unmount will succeed, i.e., that there aren't any nested mounts.
+
+        Raises exception if self.test_overlay_dir is None
+        """
+        assert self.test_overlay_dir is not None
+        # not mutating state yet, make checks
+        ident_state_dir = self.test_overlay_dir / ident
+        assert ident_state_dir.is_dir()
+        upper = ident_state_dir / "upper"
+        work = ident_state_dir / "work"
+        assert upper.is_dir()
+        assert work.is_dir()
+        assert (
+            self.test_overlay_dir not in dst.parents
+        ), "otherwise workdir cleanup below wouldn't work"
+        # find index, still not mutating state
+        idxmap = {
+            existing_ident: idx
+            for idx, (existing_ident, _) in enumerate(self.overlay_mounts_created_by_us)
+        }
+        idx = idxmap.get(ident)
+        if idx is None:
+            raise RuntimeError(f"cannot find mount for ident {ident}")
+
+        if dst.is_dir():
+            dst.rmdir()  # raises exception if not empty, which is what we want
+
+        _, mountpoint = self.overlay_mounts_created_by_us.pop(idx)
+        self._overlay_umount(mountpoint)
+        upper.rename(dst)
+        # we moved the upperdir, clean up workdir and then its parent ident_state_dir
+        cmd = ["sudo", "rm", "-rf", str(work)]
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
+        ident_state_dir.rmdir()  # should be empty since we moved `upper` out
+
     def overlay_cleanup_teardown(self):
         """
         Unmount the overlayfs mounts created by `self.overlay_mount()`.
@@ -635,12 +683,17 @@ class NeonEnvBuilder:
         while len(self.overlay_mounts_created_by_us) > 0:
             (ident, mountpoint) = self.overlay_mounts_created_by_us.pop()
             ident_state_dir = self.test_overlay_dir / ident
-            cmd = [ "sudo", "umount", str(mountpoint) ]
-            log.info(f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}: {cmd}")
-            subprocess_capture(self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
-            log.info(f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}")
-            cmd = [ "sudo", "rm", "-rf", str(ident_state_dir)]
-            subprocess_capture(self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+            log.info(
+                f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}"
+            )
+            self._overlay_umount(mountpoint)
+            log.info(
+                f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}"
+            )
+            cmd = ["sudo", "rm", "-rf", str(ident_state_dir)]
+            subprocess_capture(
+                self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+            )
 
         # assert all overlayfs mounts in our test directory are gone
         assert [] == list(overlayfs.iter_mounts_beneath(self.test_overlay_dir))
@@ -711,8 +764,15 @@ class NeonEnvBuilder:
         if self.preserve_database_files:
             return
 
+        overlayfs_mounts = {mountpoint for _, mountpoint in self.overlay_mounts_created_by_us}
+
         directories_to_clean: List[Path] = []
         for test_entry in Path(self.repo_dir).glob("**/*"):
+            if test_entry in overlayfs_mounts:
+                continue
+            for parent in test_entry.parents:
+                if parent in overlayfs_mounts:
+                    continue
             if test_entry.is_file():
                 test_file = test_entry
                 if ATTACHMENT_NAME_REGEX.fullmatch(test_file.name):
@@ -762,13 +822,6 @@ class NeonEnvBuilder:
                     cleanup_error = e
 
             try:
-                self.overlay_cleanup_teardown()
-            except Exception as e:
-                log.error(f"Error cleaning up overlay state: {e}")
-                if cleanup_error is not None:
-                    cleanup_error = e
-
-            try:
                 self.cleanup_remote_storage()
             except Exception as e:
                 log.error(f"Error during remote storage cleanup: {e}")
@@ -787,6 +840,13 @@ class NeonEnvBuilder:
 
             for pageserver in self.env.pageservers:
                 pageserver.assert_no_errors()
+
+        try:
+            self.overlay_cleanup_teardown()
+        except Exception as e:
+            log.error(f"Error cleaning up overlay state: {e}")
+            if cleanup_error is not None:
+                cleanup_error = e
 
 
 class NeonEnv:

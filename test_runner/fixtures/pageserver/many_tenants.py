@@ -47,9 +47,22 @@ def single_timeline(
             {TenantId(t.name) for t in (snapshot_dir.path.glob("pageserver_*/tenants/*"))}
         )
         template_timeline = env.initial_timeline
-
-        neon_env_builder.start()
     else:
+        if snapshot_dir.path.exists():
+            shutil.rmtree(snapshot_dir.path)
+
+        if save_snapshot and neon_env_builder.test_overlay_dir is not None:
+            # Make repo_dir an overlayfs mount with lowerdir being the empty snapshot_dir.
+            # When we're done filling up repo_dir, tear everything down, unmount the overlayfs, and use
+            # the upperdir as the snapshot. This is equivalent to docker `FROM scratch`.
+            assert not neon_env_builder.repo_dir.exists()
+            assert neon_env_builder.repo_dir.parent.exists()
+            snapshot_dir.path.mkdir()
+            neon_env_builder.overlay_mount(
+                "create-snapshot-repo-dir", snapshot_dir.path, neon_env_builder.repo_dir
+            )
+            neon_env_builder.config_init_force = "empty-dir-ok"
+
         env = neon_env_builder.init_start()
 
         remote_storage = env.pageserver_remote_storage
@@ -88,7 +101,7 @@ def single_timeline(
                 config=template_config.copy(),
             )
             time.sleep(0.1)
-            wait_until_tenant_state(ps_http, tenant, "Broken", 3)
+            wait_until_tenant_state(ps_http, tenant, "Broken", 10)
 
         work_queue.do(22, tenants, attach_broken)
 
@@ -100,7 +113,29 @@ def single_timeline(
         fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
             env, tenant_timelines
         )
-        env.pageserver.start()
+
+        if save_snapshot:
+            env.stop(immediate=True, ps_assert_metric_no_errors=True)
+            if neon_env_builder.test_overlay_dir is None:
+                log.info(f"take snapshot using shutil.copytree")
+                shutil.copytree(env.repo_dir, snapshot_dir.path)
+            else:
+                log.info(f"take snapshot by using overlayfs upperdir")
+                neon_env_builder.overlay_unmount_and_move(
+                    "create-snapshot-repo-dir", snapshot_dir.path
+                )
+                log.info("remove empty repo_dir (previously mountpoint) for snapshot overlay_mount")
+                env.repo_dir.rmdir()
+                # TODO from here on, we should be able to reset / goto top where snapshot_dir.is_initialized()
+                log.info(f"make repo_dir an overlayfs mount of the snapshot we just created")
+                neon_env_builder.overlay_mount(
+                    "repo-dir-after-taking-snapshot", snapshot_dir.path, env.repo_dir
+                )
+            snapshot_dir.set_initialized()
+        else:
+            log.info("skip taking snapshot")
+
+    env.start()
 
     log.info(f"wait for tenants to become active")
     for tenant in tenants:
@@ -112,15 +147,6 @@ def single_timeline(
             info = ps_http.layer_map_info(tenant, timeline)
             for layer in info.historic_layers:
                 assert not layer.remote
-
-    # take snapshot after download all layers so tenant dir restoration is fast
-    # TODO: use overlayfs to make this step less costly; we'd implement half of docker at that point
-    if save_snapshot:
-        log.info(f"take snapshot")
-        shutil.copytree(env.repo_dir, snapshot_dir.path)
-        snapshot_dir.set_initialized()
-    else:
-        log.info("skip taking snapshot")
 
     log.info("ready")
     return SingleTimeline(env, template_timeline, tenants)
