@@ -156,11 +156,6 @@ class EvictionEnv:
 
         wait_until(10, 1, statvfs_called)
 
-        # these can sometimes happen during startup before any tenants have been
-        # loaded, so nothing can be evicted, we just wait for next iteration which
-        # is able to evict.
-        self.neon_env.pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
-
 
 def human_bytes(amt: float) -> str:
     suffixes = ["", "Ki", "Mi", "Gi"]
