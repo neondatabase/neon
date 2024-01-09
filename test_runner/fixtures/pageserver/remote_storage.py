@@ -1,14 +1,12 @@
+import os
 import queue
 import shutil
-import subprocess
 import threading
 from pathlib import Path
 from typing import Any, List, Tuple
 
 from fixtures import work_queue
-from fixtures.neon_fixtures import (
-    NeonEnv,
-)
+from fixtures.neon_fixtures import NeonEnv, Pagectl
 from fixtures.pageserver.types import (
     InvalidFileName,
     parse_layer_file_name,
@@ -37,17 +35,15 @@ def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: Te
         for file in tl.iterdir():
             shutil.copy2(file, dst_tl_dir)
             if "__" in file.name:
-                cmd: List[str] = [
-                    str(
-                        env.neon_binpath / "pagectl"
-                    ),  # TODO: abstract this like the other binaries
-                    "layer",
-                    "rewrite-summary",
-                    str(dst_tl_dir / file.name),
-                    "--new-tenant-id",
-                    str(new_tenant),
-                ]
-                subprocess.run(cmd, check=True)
+                Pagectl(env).raw_cli(
+                    [
+                        "layer",
+                        "rewrite-summary",
+                        str(dst_tl_dir / file.name),
+                        "--new-tenant-id",
+                        str(new_tenant),
+                    ]
+                )
             else:
                 # index_part etc need no patching
                 pass
@@ -109,7 +105,8 @@ def copy_all_remote_layer_files_to_local_tenant_dir(
             shutil.copy(remote_path, local_path, follow_symlinks=False)
 
     workers = []
-    for _ in range(0, 8):  # TODO: use nproc instead of hard-coded count
+    n_threads = os.cpu_count() or 1
+    for _ in range(0, n_threads):
         w = threading.Thread(target=copy_layer_worker, args=[work])
         workers.append(w)
         w.start()
