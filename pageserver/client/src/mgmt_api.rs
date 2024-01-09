@@ -28,14 +28,12 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[async_trait::async_trait]
-pub trait ResponseErrorMessageExt: Sized {
+pub(crate) trait ResponseErrorMessageExt: Sized {
     async fn error_from_body(self) -> Result<Self>;
 }
 
-#[async_trait::async_trait]
 impl ResponseErrorMessageExt for reqwest::Response {
-    async fn error_from_body(mut self) -> Result<Self> {
+    async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
         if !(status.is_client_error() || status.is_server_error()) {
             return Ok(self);
