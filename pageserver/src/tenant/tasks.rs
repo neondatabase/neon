@@ -10,6 +10,7 @@ use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
+use fail::fail_point;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{backoff, completion};
@@ -64,6 +65,12 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
         .with_label_values(&[loop_kind.as_static_str()])
         .guard();
+
+    fail_point!(
+        "initial-size-calculation-permit-pause",
+        loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation,
+        |_| { panic!("pause fail point used to return early") }
+    );
 
     match CONCURRENT_BACKGROUND_TASKS.acquire().await {
         Ok(permit) => permit,
