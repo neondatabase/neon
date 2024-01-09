@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use futures::TryFutureExt;
 use itertools::Itertools;
 use smol_str::SmolStr;
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};

@@ -5,6 +5,7 @@ use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
+use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
