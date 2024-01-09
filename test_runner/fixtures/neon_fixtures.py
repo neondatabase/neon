@@ -953,7 +953,7 @@ class NeonEnv:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
         self.attachment_service.stop(immediate=immediate)
-        self.broker.stop()
+        self.broker.stop(immediate=immediate)
 
     @property
     def pageserver(self) -> NeonPageserver:
