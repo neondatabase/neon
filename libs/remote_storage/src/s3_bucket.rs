@@ -373,7 +373,6 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
     }
 }
 
-#[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
     async fn list(
         &self,

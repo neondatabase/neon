@@ -3,16 +3,17 @@
 //! testing purposes.
 use bytes::Bytes;
 use futures::stream::Stream;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::{collections::hash_map::Entry, sync::Arc};
 
 use crate::{
-    Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata,
+    Download, DownloadError, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorage,
+    StorageMetadata,
 };
 
 pub struct UnreliableWrapper {
-    inner: crate::GenericRemoteStorage,
+    inner: GenericRemoteStorage<Arc<VoidStorage>>,
 
     // This many attempts of each operation will fail, then we let it succeed.
     attempts_to_fail: u64,
@@ -34,6 +35,15 @@ enum RemoteOp {
 impl UnreliableWrapper {
     pub fn new(inner: crate::GenericRemoteStorage, attempts_to_fail: u64) -> Self {
         assert!(attempts_to_fail > 0);
+        let inner = match inner {
+            GenericRemoteStorage::AwsS3(s) => GenericRemoteStorage::AwsS3(s),
+            GenericRemoteStorage::AzureBlob(s) => GenericRemoteStorage::AzureBlob(s),
+            GenericRemoteStorage::LocalFs(s) => GenericRemoteStorage::LocalFs(s),
+            // We could also make this a no-op, as in, extract the inner of the passed generic remote storage
+            GenericRemoteStorage::Unreliable(_s) => {
+                panic!("Can't wrap unreliable wrapper unreliably")
+            }
+        };
         UnreliableWrapper {
             inner,
             attempts_to_fail,
@@ -84,7 +94,56 @@ impl UnreliableWrapper {
     }
 }
 
-#[async_trait::async_trait]
+#[derive(Clone)]
+struct VoidStorage;
+
+impl RemoteStorage for VoidStorage {
+    async fn list_prefixes(
+        &self,
+        _prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
+        unimplemented!()
+    }
+    async fn list_files(&self, _prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        unimplemented!()
+    }
+    async fn list(
+        &self,
+        _prefix: Option<&RemotePath>,
+        _mode: ListingMode,
+    ) -> anyhow::Result<Listing, DownloadError> {
+        unimplemented!()
+    }
+    async fn upload(
+        &self,
+        _from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+        _data_size_bytes: usize,
+        _to: &RemotePath,
+        _metadata: Option<StorageMetadata>,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+    async fn download(&self, _from: &RemotePath) -> Result<Download, DownloadError> {
+        unimplemented!()
+    }
+    async fn download_byte_range(
+        &self,
+        _from: &RemotePath,
+        _start_inclusive: u64,
+        _end_exclusive: Option<u64>,
+    ) -> Result<Download, DownloadError> {
+        unimplemented!()
+    }
+    async fn delete(&self, _path: &RemotePath) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+    async fn delete_objects<'a>(&self, _paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+    async fn copy(&self, _from: &RemotePath, _to: &RemotePath) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+}
 impl RemoteStorage for UnreliableWrapper {
     async fn list_prefixes(
         &self,
