@@ -114,10 +114,12 @@ impl KeySpaceAccum {
         }
     }
 
+    #[inline(always)]
     pub fn add_key(&mut self, key: Key) {
         self.add_range(singleton_range(key))
     }
 
+    #[inline(always)]
     pub fn add_range(&mut self, range: Range<Key>) {
         match self.accum.as_mut() {
             Some(accum) => {
