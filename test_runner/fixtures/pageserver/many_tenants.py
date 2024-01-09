@@ -110,10 +110,13 @@ def single_timeline(
                 assert not layer.remote
 
     # take snapshot after download all layers so tenant dir restoration is fast
-    log.info(f"take snapshot")
     # TODO: use overlayfs to make this step less costly; we'd implement half of docker at that point
     if save_snapshot:
+        log.info(f"take snapshot")
         shutil.copytree(env.repo_dir, snapshot_dir.path)
         snapshot_dir.set_initialized()
+    else:
+        log.info("skip taking snapshot")
 
+    log.info("ready")
     return SingleTimeline(env, template_timeline, tenants)
