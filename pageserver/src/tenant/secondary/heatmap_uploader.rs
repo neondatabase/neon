@@ -134,7 +134,6 @@ type Scheduler = TenantBackgroundJobs<
     UploadCommand,
 >;
 
-#[async_trait::async_trait]
 impl JobGenerator<UploadPending, WriteInProgress, WriteComplete, UploadCommand>
     for HeatmapUploader
 {
