@@ -325,7 +325,12 @@ async fn build_timeline_info(
         timeline.clone().await_initial_logical_size().await
     }
 
-    let mut info = build_timeline_info_common(timeline, ctx).await?;
+    let mut info = build_timeline_info_common(
+        timeline,
+        ctx,
+        tenant::timeline::GetLogicalSizePriority::Background,
+    )
+    .await?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
@@ -342,6 +347,7 @@ async fn build_timeline_info(
 async fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
     ctx: &RequestContext,
+    logical_size_task_priority: tenant::timeline::GetLogicalSizePriority,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
     let initdb_lsn = timeline.initdb_lsn;
@@ -364,8 +370,7 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size =
-        timeline.get_current_logical_size(tenant::timeline::GetLogicalSizePriority::User, ctx);
+    let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -476,7 +481,7 @@ async fn timeline_create_handler(
         .await {
             Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
-                let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
+                let timeline_info = build_timeline_info_common(&new_timeline, &ctx, tenant::timeline::GetLogicalSizePriority::User)
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
