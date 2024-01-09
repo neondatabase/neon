@@ -1,4 +1,3 @@
-import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -30,14 +29,12 @@ def single_timeline(
     snapshot_dir: SnapshotDir,
     setup_template: Callable[[NeonEnv], Tuple[TenantId, TimelineId, Dict[str, Any]]],
     ncopies: int,
+    save_snapshot: bool,
 ) -> SingleTimeline:
     """
     Create (or rehydrate from `snapshot_dir`) an env with `ncopies` copies
     of a template tenant with a single timeline.
     """
-
-    save_snapshot = os.getenv("CI", "false") != "true"
-
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     if snapshot_dir.is_initialized():

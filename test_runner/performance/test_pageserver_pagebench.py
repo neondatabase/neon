@@ -1,8 +1,10 @@
 import json
+import os
 from pathlib import Path
 
-import fixtures.pageserver.many_tenants
+import fixtures.pageserver.many_tenants as many_tenants
 import pytest
+from _pytest.fixtures import FixtureRequest
 from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -20,7 +22,8 @@ def getpage_throughput_fixture(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
     test_snapshot_dir: SnapshotDir,
-) -> fixtures.pageserver.many_tenants.SingleTimeline:
+    request: FixtureRequest,
+) -> many_tenants.SingleTimeline:
     def setup_template(env: NeonEnv):
         # create our template tenant
         config = {
@@ -46,16 +49,20 @@ def getpage_throughput_fixture(
         ep.stop_and_destroy()
         return (template_tenant, template_timeline, config)
 
-    return fixtures.pageserver.many_tenants.single_timeline(
+    n_tenants = request.param
+    save_snapshot = os.getenv("CI", "false") != "true"
+    return many_tenants.single_timeline(
         neon_env_builder,
         test_snapshot_dir,
         setup_template,
-        20_000,
+        n_tenants,
+        save_snapshot,
     )
 
 
+@pytest.mark.parametrize("getpage_throughput_fixture", [20000], ids=["20k-tenants"], indirect=True)
 def test_getpage_throughput(
-    getpage_throughput_fixture: fixtures.pageserver.many_tenants.SingleTimeline,
+    getpage_throughput_fixture: many_tenants.SingleTimeline,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
 ):
