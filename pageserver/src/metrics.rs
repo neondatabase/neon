@@ -1002,7 +1002,7 @@ static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling, aggegated by query type and tenant/timeline.",
-        &["smgr_query_type", "tenant_id", "timeline_id"],
+        &["smgr_query_type", "tenant_id", "shard_id", "timeline_id"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
@@ -1069,8 +1069,9 @@ static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 impl SmgrQueryTimePerTimeline {
-    pub(crate) fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
-        let tenant_id = tenant_id.to_string();
+    pub(crate) fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_slug = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
         let metrics = std::array::from_fn(|i| {
             let op = SmgrQueryType::from_repr(i).unwrap();
@@ -1078,7 +1079,7 @@ impl SmgrQueryTimePerTimeline {
                 .get_metric_with_label_values(&[op.into()])
                 .unwrap();
             let per_tenant_timeline = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
-                .get_metric_with_label_values(&[op.into(), &tenant_id, &timeline_id])
+                .get_metric_with_label_values(&[op.into(), &tenant_id, &shard_slug, &timeline_id])
                 .unwrap();
             GlobalAndPerTimelineHistogram {
                 global,
@@ -1098,6 +1099,7 @@ impl SmgrQueryTimePerTimeline {
 
 #[cfg(test)]
 mod smgr_query_time_tests {
+    use pageserver_api::shard::TenantShardId;
     use strum::IntoEnumIterator;
     use utils::id::{TenantId, TimelineId};
 
@@ -1124,7 +1126,10 @@ mod smgr_query_time_tests {
         for op in &ops {
             let tenant_id = TenantId::generate();
             let timeline_id = TimelineId::generate();
-            let metrics = super::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
+            let metrics = super::SmgrQueryTimePerTimeline::new(
+                &TenantShardId::unsharded(tenant_id),
+                &timeline_id,
+            );
 
             let get_counts = || {
                 let global: u64 = ops

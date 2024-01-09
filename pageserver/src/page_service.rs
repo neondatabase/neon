@@ -545,8 +545,6 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         self.flush_cancellable(pgb, &tenant.cancel).await?;
 
-        let metrics = metrics::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
-
         loop {
             let msg = tokio::select! {
                 biased;
@@ -585,7 +583,6 @@ impl PageServerHandler {
 
             let (response, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
-                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelExists);
                     let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.lsn);
                     (
                         self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
@@ -595,7 +592,6 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::Nblocks(req) => {
-                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetRelSize);
                     let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.lsn);
                     (
                         self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
@@ -605,7 +601,6 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetPage(req) => {
-                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetPageAtLsn);
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn);
                     (
                         self.handle_get_page_at_lsn_request(tenant_id, timeline_id, &req, &ctx)
@@ -615,7 +610,6 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::DbSize(req) => {
-                    let _timer = metrics.start_timer(metrics::SmgrQueryType::GetDbSize);
                     let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.lsn);
                     (
                         self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
@@ -865,6 +859,9 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetRelExists);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
@@ -888,6 +885,11 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetRelSize);
+
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -910,6 +912,11 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetDbSize);
+
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
             Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
@@ -1079,6 +1086,10 @@ impl PageServerHandler {
                 }
             }
         };
+
+        let _timer = timeline
+            .query_metrics
+            .start_timer(metrics::SmgrQueryType::GetPageAtLsn);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn =
