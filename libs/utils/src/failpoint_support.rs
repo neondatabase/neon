@@ -15,6 +15,10 @@ use tracing::*;
 /// specified time (in milliseconds). The main difference is that we use async
 /// tokio sleep function. Another difference is that we print lines to the log,
 /// which can be useful in tests to check that the failpoint was hit.
+///
+/// Optionally pass a cancellation token, and this failpoint will drop out of
+/// its sleep when the cancellation token fires.  This is useful for testing
+/// cases where we would like to block something, but test its clean shutdown behavior.
 #[macro_export]
 macro_rules! __failpoint_sleep_millis_async {
     ($name:literal) => {{
@@ -30,11 +34,6 @@ macro_rules! __failpoint_sleep_millis_async {
             $crate::failpoint_support::failpoint_sleep_helper($name, duration_str).await
         }
     }};
-}
-pub use __failpoint_sleep_millis_async as sleep_millis_async;
-
-#[macro_export]
-macro_rules! __failpoint_sleep_millis_cancellable_async {
     ($name:literal, $cancel:expr) => {{
         // If the failpoint is used with a "return" action, set should_sleep to the
         // returned value (as string). Otherwise it's set to None.
@@ -54,7 +53,7 @@ macro_rules! __failpoint_sleep_millis_cancellable_async {
         }
     }};
 }
-pub use __failpoint_sleep_millis_cancellable_async as sleep_millis_cancellable_async;
+pub use __failpoint_sleep_millis_async as sleep_millis_async;
 
 // Helper function used by the macro. (A function has nicer scoping so we
 // don't need to decorate everything with "::")
