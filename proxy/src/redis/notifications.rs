@@ -83,10 +83,11 @@ where
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     use Notification::*;
     match msg {
-        AllowedIpsUpdate { project } => cache.invalidate_allowed_ips_for_project(&project),
-        PasswordUpdate { project, role } => {
-            cache.invalidate_role_secret_for_project(&project, &role)
-        }
+        AllowedIpsUpdate { project_id } => cache.invalidate_allowed_ips_for_project(&project_id),
+        PasswordUpdate {
+            project_id,
+            role_name,
+        } => cache.invalidate_role_secret_for_project(&project_id, &role_name),
     }
 }
 
@@ -160,8 +161,8 @@ mod tests {
 
     #[test]
     fn parse_allowed_ips() -> anyhow::Result<()> {
-        let project = "new_project".to_string();
-        let data = format!("{{\"project\": \"{project}\"}}");
+        let project_id = "new_project".to_string();
+        let data = format!("{{\"project\": \"{project_id}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/allowed_ips_updated",
@@ -174,7 +175,7 @@ mod tests {
         assert_eq!(
             result,
             Notification::AllowedIpsUpdate {
-                project: project.into()
+                project_id: project_id.into()
             }
         );
 
@@ -183,9 +184,9 @@ mod tests {
 
     #[test]
     fn parse_password_updated() -> anyhow::Result<()> {
-        let project = "new_project".to_string();
-        let role = "new_role".to_string();
-        let data = format!("{{\"project\": \"{project}\", \"role\": \"{role}\"}}");
+        let project_id = "new_project".to_string();
+        let role_name = "new_role".to_string();
+        let data = format!("{{\"project\": \"{project_id}\", \"role\": \"{role_name}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/password_updated",
@@ -198,8 +199,8 @@ mod tests {
         assert_eq!(
             result,
             Notification::PasswordUpdate {
-                project: project.into(),
-                role: role.into()
+                project_id: project_id.into(),
+                role_name: role_name.into()
             }
         );
 

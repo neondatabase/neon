@@ -16,7 +16,7 @@ use super::{Cache, Cached};
 
 pub trait ProjectInfoCache {
     fn invalidate_allowed_ips_for_project(&self, project_id: &SmolStr);
-    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, user: &SmolStr);
+    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, role_name: &SmolStr);
     fn enable_ttl(&self);
     fn disable_ttl(&self);
 }
@@ -48,9 +48,9 @@ struct EndpointInfo {
 }
 
 impl EndpointInfo {
-    pub fn new_with_secret(user: SmolStr, secret: AuthSecret) -> Self {
+    pub fn new_with_secret(role_name: SmolStr, secret: AuthSecret) -> Self {
         let mut secret_map = std::collections::HashMap::new();
-        secret_map.insert(user, secret.into());
+        secret_map.insert(role_name, secret.into());
         Self {
             secret: secret_map,
             allowed_ips: None,
@@ -70,11 +70,11 @@ impl EndpointInfo {
     }
     pub fn get_role_secret(
         &self,
-        user: &SmolStr,
+        role_name: &SmolStr,
         valid_since: Instant,
         ignore_cache_since: Option<Instant>,
     ) -> Option<(AuthSecret, bool)> {
-        if let Some(secret) = self.secret.get(user) {
+        if let Some(secret) = self.secret.get(role_name) {
             if valid_since < secret.created_at {
                 return Some((
                     secret.value.clone(),
@@ -103,8 +103,8 @@ impl EndpointInfo {
     pub fn invalidate_allowed_ips(&mut self) {
         self.allowed_ips = None;
     }
-    pub fn invalidate_role_secret(&mut self, user: &SmolStr) {
-        self.secret.remove(user);
+    pub fn invalidate_role_secret(&mut self, role_name: &SmolStr) {
+        self.secret.remove(role_name);
     }
 }
 
@@ -139,10 +139,10 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, user: &SmolStr) {
+    fn invalidate_role_secret_for_project(&self, project_id: &SmolStr, role_name: &SmolStr) {
         info!(
-            "invalidating role secret for project `{}` and user `{}`",
-            project_id, user
+            "invalidating role secret for project_id `{}` and role_name `{}`",
+            project_id, role_name
         );
         let endpoints = self
             .project2ep
@@ -151,7 +151,7 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             .unwrap_or_default();
         for endpoint_id in endpoints {
             if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
-                endpoint_info.invalidate_role_secret(user);
+                endpoint_info.invalidate_role_secret(role_name);
             }
         }
     }
@@ -183,17 +183,20 @@ impl ProjectInfoCacheImpl {
     pub fn get_role_secret(
         &self,
         endpoint_id: &SmolStr,
-        user: &SmolStr,
+        role_name: &SmolStr,
     ) -> Option<Cached<&Self, AuthSecret>> {
         let (valid_since, ignore_cache_since) = self.get_cache_times();
         if let Some(endpoint_info) = self.cache.get(endpoint_id) {
-            let value = endpoint_info.get_role_secret(user, valid_since, ignore_cache_since);
+            let value = endpoint_info.get_role_secret(role_name, valid_since, ignore_cache_since);
             if let Some((value, ignore_cache)) = value {
                 if !ignore_cache {
                     let cached = Cached {
                         token: Some((
                             self,
-                            CachedLookupInfo::new_role_secret(endpoint_id.clone(), user.clone()),
+                            CachedLookupInfo::new_role_secret(
+                                endpoint_id.clone(),
+                                role_name.clone(),
+                            ),
                         )),
                         value,
                     };
@@ -232,7 +235,7 @@ impl ProjectInfoCacheImpl {
         &self,
         project_id: &SmolStr,
         endpoint_id: &SmolStr,
-        user: &SmolStr,
+        role_name: &SmolStr,
         secret: AuthSecret,
     ) {
         if self.cache.len() >= self.config.size {
@@ -242,12 +245,14 @@ impl ProjectInfoCacheImpl {
         self.inser_project2endpoint(project_id, endpoint_id);
         if let Some(mut endpoint_info) = self.cache.get_mut(endpoint_id) {
             if endpoint_info.secret.len() < self.config.max_roles {
-                endpoint_info.secret.insert(user.clone(), secret.into());
+                endpoint_info
+                    .secret
+                    .insert(role_name.clone(), secret.into());
             }
         } else {
             self.cache.insert(
                 endpoint_id.clone(),
-                EndpointInfo::new_with_secret(user.clone(), secret),
+                EndpointInfo::new_with_secret(role_name.clone(), secret),
             );
         }
     }
@@ -334,10 +339,10 @@ pub struct CachedLookupInfo {
 }
 
 impl CachedLookupInfo {
-    pub(self) fn new_role_secret(endpoint_id: SmolStr, user: SmolStr) -> Self {
+    pub(self) fn new_role_secret(endpoint_id: SmolStr, role_name: SmolStr) -> Self {
         Self {
             endpoint_id,
-            lookup_type: LookupType::RoleSecret(user),
+            lookup_type: LookupType::RoleSecret(role_name),
         }
     }
     pub(self) fn new_allowed_ips(endpoint_id: SmolStr) -> Self {
@@ -362,9 +367,9 @@ impl Cache for ProjectInfoCacheImpl {
 
     fn invalidate(&self, key: &Self::LookupInfo<SmolStr>) {
         match &key.lookup_type {
-            LookupType::RoleSecret(user) => {
+            LookupType::RoleSecret(role_name) => {
                 if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
-                    endpoint_info.invalidate_role_secret(user);
+                    endpoint_info.invalidate_role_secret(role_name);
                 }
             }
             LookupType::AllowedIps => {

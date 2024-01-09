@@ -6,8 +6,8 @@ use super::{
 };
 use crate::cache::Cached;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
+use crate::context::RequestMonitoring;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
-use crate::{console::provider::CachedRoleSecret, context::RequestMonitoring};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use smol_str::SmolStr;
