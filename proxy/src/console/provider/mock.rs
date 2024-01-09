@@ -2,7 +2,7 @@
 
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
 use crate::cache::Cached;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
@@ -172,7 +172,6 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         _ctx: &mut RequestMonitoring,
-        _extra: &ConsoleReqExtra,
         _creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute()

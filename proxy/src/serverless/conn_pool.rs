@@ -25,15 +25,11 @@ use tokio::time::{self, Instant};
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
-    auth::{
-        self,
-        backend::{ComputeUserInfo, ComputeUserInfoNoEndpoint},
-        check_peer_addr_is_in_list,
-    },
+    auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
     console,
     context::RequestMonitoring,
     metrics::NUM_DB_CONNECTIONS_GAUGE,
-    proxy::{connect_compute::ConnectMechanism, NeonOptions},
+    proxy::connect_compute::ConnectMechanism,
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -45,21 +41,19 @@ pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
-    pub username: SmolStr,
+    pub user_info: ComputeUserInfo,
     pub dbname: SmolStr,
-    pub endpoint: SmolStr,
     pub password: SmolStr,
-    pub options: NeonOptions,
 }
 
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
     pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
-        (self.dbname.clone(), self.username.clone())
+        (self.dbname.clone(), self.user_info.inner.user.clone())
     }
 
     pub fn endpoint_cache_key(&self) -> SmolStr {
-        self.options.get_cache_key(&self.endpoint)
+        self.user_info.endpoint_cache_key()
     }
 }
 
@@ -69,10 +63,10 @@ impl fmt::Display for ConnInfo {
         write!(
             f,
             "{}@{}/{}?{}",
-            self.username,
-            self.endpoint,
+            self.user_info.inner.user,
+            self.user_info.endpoint,
             self.dbname,
-            self.options.get_cache_key("")
+            self.user_info.inner.options.get_cache_key("")
         )
     }
 }
@@ -535,15 +529,10 @@ async fn connect_to_compute(
     pool: Weak<RwLock<EndpointConnPool>>,
 ) -> anyhow::Result<ClientInner> {
     ctx.set_application(Some(APP_NAME));
-    let creds = ComputeUserInfo {
-        endpoint: conn_info.endpoint.clone(),
-        inner: ComputeUserInfoNoEndpoint {
-            user: conn_info.username.clone(),
-            options: conn_info.options.clone(),
-        },
-    };
-
-    let backend = config.auth_backend.as_ref().map(|_| creds);
+    let backend = config
+        .auth_backend
+        .as_ref()
+        .map(|_| conn_info.user_info.clone());
 
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(ctx).await?;
@@ -551,11 +540,8 @@ async fn connect_to_compute(
             return Err(auth::AuthError::ip_address_not_allowed().into());
         }
     }
-    let extra = console::ConsoleReqExtra {
-        options: conn_info.options.clone(),
-    };
     let node_info = backend
-        .wake_compute(ctx, &extra)
+        .wake_compute(ctx)
         .await?
         .context("missing cache entry from wake_compute")?;
 
@@ -570,7 +556,6 @@ async fn connect_to_compute(
             idle: config.http_config.pool_options.idle_timeout,
         },
         node_info,
-        &extra,
         &backend,
     )
     .await
@@ -589,7 +574,7 @@ async fn connect_to_compute_once(
     let mut session = ctx.session_id;
 
     let (client, mut connection) = config
-        .user(&conn_info.username)
+        .user(&conn_info.user_info.inner.user)
         .password(&*conn_info.password)
         .dbname(&conn_info.dbname)
         .connect_timeout(timeout)

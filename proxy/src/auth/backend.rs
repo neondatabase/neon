@@ -22,7 +22,7 @@ use crate::{
     config::AuthenticationConfig,
     console::{
         self,
-        provider::{CachedAllowedIps, CachedNodeInfo, ConsoleReqExtra},
+        provider::{CachedAllowedIps, CachedNodeInfo},
         Api,
     },
     stream, url,
@@ -128,14 +128,22 @@ pub struct ComputeCredentials<T> {
     pub keys: T,
 }
 
+#[derive(Debug, Clone)]
 pub struct ComputeUserInfoNoEndpoint {
     pub user: SmolStr,
     pub options: NeonOptions,
 }
 
+#[derive(Debug, Clone)]
 pub struct ComputeUserInfo {
     pub endpoint: SmolStr,
     pub inner: ComputeUserInfoNoEndpoint,
+}
+
+impl ComputeUserInfo {
+    pub fn endpoint_cache_key(&self) -> SmolStr {
+        self.inner.options.get_cache_key(&self.endpoint)
+    }
 }
 
 pub enum ComputeCredentialKeys {
@@ -268,7 +276,6 @@ async fn authenticate_with_secret(
 async fn auth_and_wake_compute(
     ctx: &mut RequestMonitoring,
     api: &impl console::Api,
-    extra: &ConsoleReqExtra,
     creds: ClientCredentials,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -278,9 +285,7 @@ async fn auth_and_wake_compute(
 
     let mut num_retries = 0;
     let mut node = loop {
-        let wake_res = api
-            .wake_compute(ctx, extra, &compute_credentials.info)
-            .await;
+        let wake_res = api.wake_compute(ctx, &compute_credentials.info).await;
         match handle_try_wake(wake_res, num_retries) {
             Err(e) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
@@ -342,7 +347,6 @@ impl<'a> BackendType<'a, ClientCredentials> {
     pub async fn authenticate(
         self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
@@ -357,16 +361,9 @@ impl<'a> BackendType<'a, ClientCredentials> {
                     "performing authentication using the console"
                 );
 
-                let (cache_info, user_info) = auth_and_wake_compute(
-                    ctx,
-                    &*api,
-                    extra,
-                    creds,
-                    client,
-                    allow_cleartext,
-                    config,
-                )
-                .await?;
+                let (cache_info, user_info) =
+                    auth_and_wake_compute(ctx, &*api, creds, client, allow_cleartext, config)
+                        .await?;
                 (cache_info, BackendType::Console(api, user_info))
             }
             #[cfg(feature = "testing")]
@@ -377,16 +374,9 @@ impl<'a> BackendType<'a, ClientCredentials> {
                     "performing authentication using a local postgres instance"
                 );
 
-                let (cache_info, user_info) = auth_and_wake_compute(
-                    ctx,
-                    &*api,
-                    extra,
-                    creds,
-                    client,
-                    allow_cleartext,
-                    config,
-                )
-                .await?;
+                let (cache_info, user_info) =
+                    auth_and_wake_compute(ctx, &*api, creds, client, allow_cleartext, config)
+                        .await?;
                 (cache_info, BackendType::Postgres(api, user_info))
             }
             // NOTE: this auth backend doesn't use client credentials.
@@ -432,14 +422,13 @@ impl BackendType<'_, ComputeUserInfo> {
     pub async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
     ) -> Result<Option<CachedNodeInfo>, console::errors::WakeComputeError> {
         use BackendType::*;
 
         match self {
-            Console(api, creds) => api.wake_compute(ctx, extra, creds).map_ok(Some).await,
+            Console(api, creds) => api.wake_compute(ctx, creds).map_ok(Some).await,
             #[cfg(feature = "testing")]
-            Postgres(api, creds) => api.wake_compute(ctx, extra, creds).map_ok(Some).await,
+            Postgres(api, creds) => api.wake_compute(ctx, creds).map_ok(Some).await,
             Link(_) => Ok(None),
             #[cfg(test)]
             Test(x) => x.wake_compute().map(Some),

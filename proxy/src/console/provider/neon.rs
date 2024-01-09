@@ -4,7 +4,7 @@ use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
-    ConsoleReqExtra, NodeInfo,
+    NodeInfo,
 };
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use crate::{
@@ -110,7 +110,6 @@ impl Api {
     async fn do_wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -127,7 +126,7 @@ impl Api {
                     ("project", creds.endpoint.as_str()),
                 ]);
 
-            let options = extra.options_as_deep_object();
+            let options = creds.inner.options.to_deep_object();
             if !options.is_empty() {
                 request_builder = request_builder.query(&options);
             }
@@ -229,10 +228,9 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key = creds.inner.options.get_cache_key(&creds.endpoint);
+        let key = creds.endpoint_cache_key();
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
@@ -254,7 +252,7 @@ impl super::Api for Api {
             }
         }
 
-        let node = self.do_wake_compute(ctx, extra, creds).await?;
+        let node = self.do_wake_compute(ctx, creds).await?;
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 

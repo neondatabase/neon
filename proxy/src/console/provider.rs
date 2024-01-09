@@ -9,7 +9,6 @@ use crate::{
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
-    proxy::NeonOptions,
     scram,
 };
 use async_trait::async_trait;
@@ -198,19 +197,6 @@ pub mod errors {
     }
 }
 
-/// Extra query params we'd like to pass to the console.
-pub struct ConsoleReqExtra {
-    pub options: NeonOptions,
-}
-
-impl ConsoleReqExtra {
-    // https://swagger.io/docs/specification/serialization/ DeepObject format
-    // paramName[prop1]=value1&paramName[prop2]=value2&....
-    pub fn options_as_deep_object(&self) -> Vec<(String, SmolStr)> {
-        self.options.to_deep_object()
-    }
-}
-
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum AuthSecret {
@@ -275,7 +261,6 @@ pub trait Api {
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
-        extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }

@@ -9,7 +9,7 @@ use crate::{
     cancellation::{self, CancelMap},
     compute,
     config::{AuthenticationConfig, ProxyConfig, TlsConfig},
-    console::{self, messages::MetricsAuxInfo},
+    console::messages::MetricsAuxInfo,
     context::RequestMonitoring,
     metrics::{
         NUM_BYTES_PROXIED_COUNTER, NUM_BYTES_PROXIED_PER_CLIENT_COUNTER,
@@ -454,13 +454,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             }
         }
 
-        let extra = console::ConsoleReqExtra {
-            options: NeonOptions::parse_params(params),
-        };
-
         let user = creds.get_user().to_owned();
         let auth_result = match creds
-            .authenticate(ctx, &extra, &mut stream, mode.allow_cleartext(), config)
+            .authenticate(ctx, &mut stream, mode.allow_cleartext(), config)
             .await
         {
             Ok(auth_result) => auth_result,
@@ -478,7 +474,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         node_info.allow_self_signed_compute = allow_self_signed_compute;
 
         let aux = node_info.aux.clone();
-        let mut node = connect_to_compute(ctx, &TcpMechanism { params }, node_info, &extra, &creds)
+        let mut node = connect_to_compute(ctx, &TcpMechanism { params }, node_info, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
@@ -524,8 +520,8 @@ impl NeonOptions {
             .collect()
     }
 
-    /// https://swagger.io/docs/specification/serialization/ DeepObject format
-    /// paramName[prop1]=value1&paramName[prop2]=value2&....
+    /// <https://swagger.io/docs/specification/serialization/> DeepObject format
+    /// `paramName[prop1]=value1&paramName[prop2]=value2&...`
     pub fn to_deep_object(&self) -> Vec<(String, SmolStr)> {
         self.0
             .iter()

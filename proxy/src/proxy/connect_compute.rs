@@ -128,7 +128,6 @@ pub async fn connect_to_compute<M: ConnectMechanism>(
     ctx: &mut RequestMonitoring,
     mechanism: &M,
     mut node_info: console::CachedNodeInfo,
-    extra: &console::ConsoleReqExtra,
     creds: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
 ) -> Result<M::Connection, M::Error>
 where
@@ -160,9 +159,9 @@ where
     info!("compute node's state has likely changed; requesting a wake-up");
     let node_info = loop {
         let wake_res = match creds {
-            auth::BackendType::Console(api, creds) => api.wake_compute(ctx, extra, creds).await,
+            auth::BackendType::Console(api, creds) => api.wake_compute(ctx, creds).await,
             #[cfg(feature = "testing")]
-            auth::BackendType::Postgres(api, creds) => api.wake_compute(ctx, extra, creds).await,
+            auth::BackendType::Postgres(api, creds) => api.wake_compute(ctx, creds).await,
             // nothing to do?
             auth::BackendType::Link(_) => return Err(err.into()),
             // test backend
