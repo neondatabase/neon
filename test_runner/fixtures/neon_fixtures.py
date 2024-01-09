@@ -1917,18 +1917,24 @@ class NeonPageserver(PgProtocol):
         return None
 
     def tenant_attach(
-        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+        self,
+        tenant_id: TenantId,
+        config: None | Dict[str, Any] = None,
+        config_null: bool = False,
+        generation: Optional[int] = None,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
+        if generation is None:
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         return client.tenant_attach(
             tenant_id,
             config,
             config_null,
-            generation=self.env.attachment_service.attach_hook_issue(tenant_id, self.id),
+            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
