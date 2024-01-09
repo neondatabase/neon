@@ -7,6 +7,7 @@ use super::{
 use crate::cache::Cached;
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
+use crate::{console::provider::CachedRoleSecret, context::RequestMonitoring};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use smol_str::SmolStr;
@@ -147,7 +148,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        _extra: &ConsoleReqExtra,
+        _ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Option<CachedRoleSecret>, GetAuthInfoError> {
         Ok(self
@@ -159,7 +160,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips(
         &self,
-        _extra: &ConsoleReqExtra,
+        _ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedAllowedIps, GetAuthInfoError> {
         Ok(Cached::new_uncached(Arc::new(
@@ -170,6 +171,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
+        _ctx: &mut RequestMonitoring,
         _extra: &ConsoleReqExtra,
         _creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {

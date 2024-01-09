@@ -129,13 +129,13 @@ Run `poetry shell` to activate the virtual environment.
 Alternatively, use `poetry run` to run a single command in the venv, e.g. `poetry run pytest`.
 
 ### Obligatory checks
-We force code formatting via `black`, `ruff`, and type hints via `mypy`.
+We force code formatting via `ruff`, and type hints via `mypy`.
 Run the following commands in the repository's root (next to `pyproject.toml`):
 
 ```bash
-poetry run black .  # All code is reformatted
-poetry run ruff .  # Python linter
-poetry run mypy .  # Ensure there are no typing errors
+poetry run ruff format . # All code is reformatted
+poetry run ruff check .  # Python linter
+poetry run mypy .        # Ensure there are no typing errors
 ```
 
 **WARNING**: do not run `mypy` from a directory other than the root of the repository.

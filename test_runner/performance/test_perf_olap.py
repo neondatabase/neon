@@ -42,9 +42,10 @@ def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
 # Please do not alter the label for the query, as it is used to identify it.
 # Labels for ClickBench queries match the labels in ClickBench reports
 # on https://benchmark.clickhouse.com/ (the DB size may differ).
+#
+# Disable auto formatting for the list of queries so that it's easier to read
+# fmt: off
 QUERIES: Tuple[LabelledQuery, ...] = (
-    # Disable `black` formatting for the list of queries so that it's easier to read
-    # fmt: off
     ### ClickBench queries:
     LabelledQuery("Q0",  r"SELECT COUNT(*) FROM hits;"),
     LabelledQuery("Q1",  r"SELECT COUNT(*) FROM hits WHERE AdvEngineID <> 0;"),
@@ -96,8 +97,8 @@ QUERIES: Tuple[LabelledQuery, ...] = (
     # LabelledQuery("NQ0", r"..."),
     # LabelledQuery("NQ1", r"..."),
     # ...
-    # fmt: on
 )
+# fmt: on
 
 EXPLAIN_STRING: str = "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS, SETTINGS, FORMAT JSON)"
 

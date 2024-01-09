@@ -43,6 +43,9 @@ enum AuthBackend {
 #[derive(Parser)]
 #[command(version = GIT_VERSION, about)]
 struct ProxyCliArgs {
+    /// Name of the region this proxy is deployed in
+    #[clap(long, default_value_t = String::new())]
+    region: String,
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
@@ -138,6 +141,9 @@ struct ProxyCliArgs {
     /// cache for `project_info` (use `size=0` to disable)
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
+
+    #[clap(flatten)]
+    parquet_upload: ParquetUploadArgs,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -225,6 +231,11 @@ async fn main() -> anyhow::Result<()> {
             endpoint_rate_limiter.clone(),
         ));
     }
+
+    client_tasks.spawn(proxy::context::parquet::worker(
+        cancellation_token.clone(),
+        args.parquet_upload,
+    ));
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
@@ -379,6 +390,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        // TODO: add this argument
+        region: args.region.clone(),
     }));
 
     Ok(config)

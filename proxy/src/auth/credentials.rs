@@ -1,7 +1,7 @@
 //! User credentials used in authentication.
 
 use crate::{
-    auth::password_hack::parse_endpoint_param, error::UserFacingError,
+    auth::password_hack::parse_endpoint_param, context::RequestMonitoring, error::UserFacingError,
     metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::neon_options_str,
 };
 use itertools::Itertools;
@@ -44,7 +44,6 @@ pub struct ClientCredentials {
     pub project: Option<SmolStr>,
 
     pub cache_key: SmolStr,
-    pub peer_addr: IpAddr,
 }
 
 impl ClientCredentials {
@@ -56,16 +55,21 @@ impl ClientCredentials {
 
 impl ClientCredentials {
     pub fn parse(
+        ctx: &mut RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<HashSet<String>>,
-        peer_addr: IpAddr,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
         // Some parameters are stored in the startup message.
         let get_param = |key| params.get(key).ok_or(MissingKey(key));
-        let user = get_param("user")?.into();
+        let user: SmolStr = get_param("user")?.into();
+
+        // record the values if we have them
+        ctx.set_application(params.get("application_name").map(SmolStr::from));
+        ctx.set_user(user.clone());
+        ctx.set_endpoint_id(sni.map(SmolStr::from));
 
         // Project name might be passed via PG's command-line options.
         let project_option = params
@@ -147,7 +151,6 @@ impl ClientCredentials {
             user,
             project,
             cache_key,
-            peer_addr,
         })
     }
 }
@@ -219,8 +222,8 @@ mod tests {
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -234,8 +237,8 @@ mod tests {
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -249,8 +252,8 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
         assert_eq!(creds.cache_key, "foo");
@@ -265,8 +268,8 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
@@ -280,8 +283,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
@@ -298,8 +301,8 @@ mod tests {
             ),
         ]);
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert!(creds.project.is_none());
 
@@ -313,8 +316,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
         ]);
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, None, None, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert!(creds.project.is_none());
 
@@ -328,8 +331,8 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
 
@@ -342,14 +345,14 @@ mod tests {
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         Ok(())
@@ -363,8 +366,8 @@ mod tests {
         let sni = Some("second.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let err = ClientCredentials::parse(&options, sni, common_names, peer_addr)
+        let mut ctx = RequestMonitoring::test();
+        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names)
             .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
@@ -382,8 +385,8 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let err = ClientCredentials::parse(&options, sni, common_names, peer_addr)
+        let mut ctx = RequestMonitoring::test();
+        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names)
             .expect_err("should fail");
         match err {
             UnknownCommonName { cn } => {
@@ -402,8 +405,8 @@ mod tests {
 
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
-        let peer_addr = IpAddr::from([127, 0, 0, 1]);
-        let creds = ClientCredentials::parse(&options, sni, common_names, peer_addr)?;
+        let mut ctx = RequestMonitoring::test();
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
         assert_eq!(creds.project.as_deref(), Some("project"));
         assert_eq!(creds.cache_key, "projectendpoint_type:read_write lsn:0/2");
 

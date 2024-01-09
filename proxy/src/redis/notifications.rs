@@ -33,12 +33,15 @@ enum Notification {
         rename = "/allowed_ips_updated",
         deserialize_with = "deserialize_allowed_ips"
     )]
-    AllowedIpsUpdate { project: SmolStr },
+    AllowedIpsUpdate { project_id: SmolStr },
     #[serde(
         rename = "/password_updated",
         deserialize_with = "deserialize_password_updated"
     )]
-    PasswordUpdate { project: SmolStr, role: SmolStr },
+    PasswordUpdate {
+        project_id: SmolStr,
+        role_name: SmolStr,
+    },
 }
 
 fn deserialize_allowed_ips<'de, D>(deserializer: D) -> Result<SmolStr, D::Error>

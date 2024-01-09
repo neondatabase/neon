@@ -391,8 +391,7 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
     assert (
         tenant_id not in tenants_after_detach
-    ), f"Ignored and then detached tenant {tenant_id} \
-        should not be present in pageserver's memory"
+    ), f"Ignored and then detached tenant {tenant_id} should not be present in pageserver's memory"
 
 
 # Creates a tenant, and detaches it with extra paremeter that forces ignored tenant detach.
@@ -430,8 +429,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
     assert (
         tenant_id not in tenants_after_detach
-    ), f"Ignored and then detached tenant {tenant_id} \
-        should not be present in pageserver's memory"
+    ), f"Ignored and then detached tenant {tenant_id} should not be present in pageserver's memory"
 
 
 def test_detach_while_attaching(
@@ -629,7 +627,7 @@ def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder
 
 # Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
 # Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
-def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
+def test_load_negatives(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -646,25 +644,16 @@ def test_load_attach_negatives(neon_env_builder: NeonEnvBuilder):
     ):
         env.pageserver.tenant_load(tenant_id)
 
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match=f"tenant {tenant_id} already exists, state: Active",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
-
     pageserver_http.tenant_ignore(tenant_id)
 
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
 
-
-def test_ignore_while_attaching(
+def test_detach_while_activating(
     neon_env_builder: NeonEnvBuilder,
 ):
+    """
+    Test cancellation behavior for tenants that are stuck somewhere between
+    being attached and reaching Active state.
+    """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start()
@@ -686,39 +675,28 @@ def test_ignore_while_attaching(
     data_secret = "very secret secret"
     insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
 
-    tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    tenants_before_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
 
     # Detach it
     pageserver_http.tenant_detach(tenant_id)
+
     # And re-attach, but stop attach task_mgr task from completing
-    pageserver_http.configure_failpoints([("attach-before-activate", "return(5000)")])
+    pageserver_http.configure_failpoints([("attach-before-activate", "return(600000)")])
     env.pageserver.tenant_attach(tenant_id)
-    # Run ignore on the task, thereby cancelling the attach.
-    # XXX This should take priority over attach, i.e., it should cancel the attach task.
-    # But neither the failpoint, nor the proper remote_timeline_client download functions,
-    # are sensitive to task_mgr::shutdown.
-    # This problem is tracked in https://github.com/neondatabase/neon/issues/2996 .
-    # So, for now, effectively, this ignore here will block until attach task completes.
-    pageserver_http.tenant_ignore(tenant_id)
 
-    # Cannot attach it due to some local files existing
-    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match="tenant directory already exists",
-    ):
-        env.pageserver.tenant_attach(tenant_id)
+    # The tenant is in the Activating state.  This should not block us from
+    # shutting it down and detaching it.
+    pageserver_http.tenant_detach(tenant_id)
 
-    tenants_after_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    assert tenant_id not in tenants_after_ignore, "Ignored tenant should be missing"
-    assert len(tenants_after_ignore) + 1 == len(
-        tenants_before_ignore
+    tenants_after_detach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
+    assert tenant_id not in tenants_after_detach, "Detached tenant should be missing"
+    assert len(tenants_after_detach) + 1 == len(
+        tenants_before_detach
     ), "Only ignored tenant should be missing"
 
-    # Calling load will bring the tenant back online
+    # Subsequently attaching it again should still work
     pageserver_http.configure_failpoints([("attach-before-activate", "off")])
-    env.pageserver.tenant_load(tenant_id)
-
+    env.pageserver.tenant_attach(tenant_id)
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
     endpoint.stop()
@@ -817,9 +795,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         if found_broken:
             break
         time.sleep(0.5)
-    assert (
-        found_broken
-    ), f"broken should still be in set, but it is not in the tenant state count: broken={broken}, broken_set={broken_set}"
+    assert found_broken, f"broken should still be in set, but it is not in the tenant state count: broken={broken}, broken_set={broken_set}"
 
     env.pageserver.tenant_load(env.initial_tenant)
 
@@ -837,6 +813,4 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
             break
         time.sleep(0.5)
 
-    assert (
-        found_active
-    ), f"reloaded tenant should be active, and broken tenant set item removed: active={active}, broken_set={broken_set}"
+    assert found_active, f"reloaded tenant should be active, and broken tenant set item removed: active={active}, broken_set={broken_set}"

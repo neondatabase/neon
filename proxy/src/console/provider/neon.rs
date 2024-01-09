@@ -9,6 +9,7 @@ use super::{
 use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use crate::{
     cache::Cached,
+    context::RequestMonitoring,
     metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
 };
 use async_trait::async_trait;
@@ -53,19 +54,20 @@ impl Api {
 
     async fn do_get_auth_info(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let request_id = uuid::Uuid::new_v4().to_string();
+        let application_name = ctx.console_application_name();
         async {
             let request = self
                 .endpoint
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", extra.session_id)])
+                .query(&[("session_id", ctx.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name.as_str()),
+                    ("application_name", application_name.as_str()),
                     ("project", creds.endpoint.as_str()),
                     ("role", creds.inner.user.as_str()),
                 ])
@@ -107,19 +109,21 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
         let request_id = uuid::Uuid::new_v4().to_string();
+        let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
                 .endpoint
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", extra.session_id)])
+                .query(&[("session_id", ctx.session_id)])
                 .query(&[
-                    ("application_name", extra.application_name.as_str()),
+                    ("application_name", application_name.as_str()),
                     ("project", creds.endpoint.as_str()),
                 ]);
 
@@ -146,7 +150,7 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(&host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
@@ -167,7 +171,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Option<CachedRoleSecret>, GetAuthInfoError> {
         let ep = &creds.endpoint;
@@ -175,7 +179,7 @@ impl super::Api for Api {
         if let Some(role_secret) = self.caches.project_info.get_role_secret(ep, user) {
             return Ok(Some(role_secret));
         }
-        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let auth_info = self.do_get_auth_info(ctx, creds).await?;
         let project_id = auth_info.project_id.unwrap_or(ep.clone());
         if let Some(secret) = &auth_info.secret {
             self.caches
@@ -193,7 +197,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedAllowedIps, GetAuthInfoError> {
         let ep = &creds.endpoint;
@@ -206,7 +210,7 @@ impl super::Api for Api {
         ALLOWED_IPS_BY_CACHE_OUTCOME
             .with_label_values(&["miss"])
             .inc();
-        let auth_info = self.do_get_auth_info(extra, creds).await?;
+        let auth_info = self.do_get_auth_info(ctx, creds).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &creds.inner.user;
         let project_id = auth_info.project_id.unwrap_or(ep.clone());
@@ -224,6 +228,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
@@ -251,7 +256,7 @@ impl super::Api for Api {
             }
         }
 
-        let node = self.do_wake_compute(extra, creds).await?;
+        let node = self.do_wake_compute(ctx, extra, creds).await?;
         let (_, cached) = self.caches.node_info.insert(key.clone(), node);
         info!(key = &*key, "created a cache entry for compute node info");
 
@@ -284,9 +289,10 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     Err(ApiError::Console { status, text })
 }
 
-fn parse_host_port(input: &str) -> Option<(String, u16)> {
-    let parsed: SocketAddr = input.parse().ok()?;
-    Some((parsed.ip().to_string(), parsed.port()))
+fn parse_host_port(input: &str) -> Option<(&str, u16)> {
+    let (host, port) = input.rsplit_once(':')?;
+    let ipv6_brackets: &[_] = &['[', ']'];
+    Some((host.trim_matches(ipv6_brackets), port.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -294,9 +300,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_host_port() {
+    fn test_parse_host_port_v4() {
         let (host, port) = parse_host_port("127.0.0.1:5432").expect("failed to parse");
         assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_parse_host_port_v6() {
+        let (host, port) = parse_host_port("[2001:db8::1]:5432").expect("failed to parse");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_parse_host_port_url() {
+        let (host, port) = parse_host_port("compute-foo-bar-1234.default.svc.cluster.local:5432")
+            .expect("failed to parse");
+        assert_eq!(host, "compute-foo-bar-1234.default.svc.cluster.local");
         assert_eq!(port, 5432);
     }
 }

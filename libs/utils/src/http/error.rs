@@ -31,6 +31,9 @@ pub enum ApiError {
     #[error("Shutting down")]
     ShuttingDown,
 
+    #[error("Timeout")]
+    Timeout(Cow<'static, str>),
+
     #[error(transparent)]
     InternalServerError(anyhow::Error),
 }
@@ -66,6 +69,10 @@ impl ApiError {
             ApiError::ResourceUnavailable(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ApiError::Timeout(err) => HttpErrorBody::response_from_msg_and_status(
+                err.to_string(),
+                StatusCode::REQUEST_TIMEOUT,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),

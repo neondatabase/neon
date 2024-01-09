@@ -8,6 +8,7 @@ use crate::{
     cache::{project_info::ProjectInfoCacheImpl, Cached, TimedLru},
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
+    context::RequestMonitoring,
     scram,
 };
 use async_trait::async_trait;
@@ -198,10 +199,6 @@ pub mod errors {
 
 /// Extra query params we'd like to pass to the console.
 pub struct ConsoleReqExtra {
-    /// A unique identifier for a connection.
-    pub session_id: uuid::Uuid,
-    /// Name of client application, if set.
-    pub application_name: String,
     pub options: Vec<(String, String)>,
 }
 
@@ -266,19 +263,20 @@ pub trait Api {
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<Option<CachedRoleSecret>, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips(
         &self,
-        extra: &ConsoleReqExtra,
+        ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
     ) -> Result<CachedAllowedIps, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
+        ctx: &mut RequestMonitoring,
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;

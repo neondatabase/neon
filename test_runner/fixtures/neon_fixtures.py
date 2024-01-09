@@ -40,6 +40,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
 from urllib3.util.retry import Retry
 
+from fixtures import overlayfs
 from fixtures.broker import NeonBroker
 from fixtures.log_helper import log
 from fixtures.pageserver.allowed_errors import (
@@ -347,7 +348,9 @@ class PgProtocol:
         """
         return self.safe_psql_many([query], **kwargs)[0]
 
-    def safe_psql_many(self, queries: List[str], **kwargs: Any) -> List[List[Tuple[Any, ...]]]:
+    def safe_psql_many(
+        self, queries: List[str], log_query=True, **kwargs: Any
+    ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
         This method passes all extra params to connstr.
@@ -356,7 +359,8 @@ class PgProtocol:
         with closing(self.connect(**kwargs)) as conn:
             with conn.cursor() as cur:
                 for query in queries:
-                    log.info(f"Executing query: {query}")
+                    if log_query:
+                        log.info(f"Executing query: {query}")
                     cur.execute(query)
 
                     if cur.description is None:
@@ -365,11 +369,11 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query) -> Any:
+    def safe_psql_scalar(self, query, log_query=True) -> Any:
         """
         Execute query returning single row with single column.
         """
-        return self.safe_psql(query)[0][0]
+        return self.safe_psql(query, log_query=log_query)[0][0]
 
 
 @dataclass
@@ -421,6 +425,7 @@ class NeonEnvBuilder:
         pg_version: PgVersion,
         test_name: str,
         test_output_dir: Path,
+        test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         pageserver_config_override: Optional[str] = None,
         num_safekeepers: int = 1,
@@ -465,6 +470,8 @@ class NeonEnvBuilder:
         self.initial_timeline = initial_timeline or TimelineId.generate()
         self.scrub_on_exit = False
         self.test_output_dir = test_output_dir
+        self.test_overlay_dir = test_overlay_dir
+        self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
 
         assert test_name.startswith(
             "test_"
@@ -544,7 +551,10 @@ class NeonEnvBuilder:
             tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
 
             log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
-            shutil.copytree(tenants_from_dir, tenants_to_dir)
+            if self.test_overlay_dir is None:
+                shutil.copytree(tenants_from_dir, tenants_to_dir)
+            else:
+                self.overlay_mount(f"{ps_dir.name}:tenants", tenants_from_dir, tenants_to_dir)
 
         for sk_from_dir in (repo_dir / "safekeepers").glob("sk*"):
             sk_to_dir = self.repo_dir / "safekeepers" / sk_from_dir.name
@@ -553,9 +563,16 @@ class NeonEnvBuilder:
             shutil.copytree(sk_from_dir, sk_to_dir, ignore=shutil.ignore_patterns("*.log", "*.pid"))
 
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
-        shutil.copytree(
-            repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
-        )
+        if self.test_overlay_dir is None:
+            shutil.copytree(
+                repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
+            )
+        else:
+            self.overlay_mount(
+                "local_fs_remote_storage",
+                repo_dir / "local_fs_remote_storage",
+                self.repo_dir / "local_fs_remote_storage",
+            )
 
         if (attachments_json := Path(repo_dir / "attachments.json")).exists():
             shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
@@ -571,6 +588,69 @@ class NeonEnvBuilder:
             toml.dump(config, f)
 
         return self.env
+
+    def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
+        """
+        Mount `srcdir` as an overlayfs mount at `dstdir`.
+        The overlayfs `upperdir` and `workdir` will be placed in test_overlay_dir.
+        """
+        assert self.test_overlay_dir
+        assert (
+            self.test_output_dir in dstdir.parents
+        )  # so that teardown & test_overlay_dir fixture work
+        assert srcdir.is_dir()
+        dstdir.mkdir(exist_ok=False, parents=False)
+        ident_state_dir = self.test_overlay_dir / ident
+        upper = ident_state_dir / "upper"
+        work = ident_state_dir / "work"
+        ident_state_dir.mkdir(
+            exist_ok=False, parents=False
+        )  # exists_ok=False also checks uniqueness in self.overlay_mounts
+        upper.mkdir()
+        work.mkdir()
+        cmd = [
+            "sudo",
+            "mount",
+            "-t",
+            "overlay",
+            "overlay",
+            "-o",
+            f"lowerdir={srcdir},upperdir={upper},workdir={work}",
+            str(dstdir),
+        ]
+        log.info(f"Mounting overlayfs srcdir={srcdir} dstdir={dstdir}: {cmd}")
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
+        self.overlay_mounts_created_by_us.append((ident, dstdir))
+
+    def overlay_cleanup_teardown(self):
+        """
+        Unmount the overlayfs mounts created by `self.overlay_mount()`.
+        Supposed to be called during env teardown.
+        """
+        if self.test_overlay_dir is None:
+            return
+        while len(self.overlay_mounts_created_by_us) > 0:
+            (ident, mountpoint) = self.overlay_mounts_created_by_us.pop()
+            ident_state_dir = self.test_overlay_dir / ident
+            cmd = ["sudo", "umount", str(mountpoint)]
+            log.info(
+                f"Unmounting overlayfs mount created during setup for ident {ident} at {mountpoint}: {cmd}"
+            )
+            subprocess_capture(
+                self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+            )
+            log.info(
+                f"Cleaning up overlayfs state dir (owned by root user) for ident {ident} at {ident_state_dir}"
+            )
+            cmd = ["sudo", "rm", "-rf", str(ident_state_dir)]
+            subprocess_capture(
+                self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+            )
+
+        # assert all overlayfs mounts in our test directory are gone
+        assert [] == list(overlayfs.iter_mounts_beneath(self.test_overlay_dir))
 
     def enable_scrub_on_exit(self):
         """
@@ -678,7 +758,10 @@ class NeonEnvBuilder:
                 sk.stop(immediate=True)
 
             for pageserver in self.env.pageservers:
-                pageserver.assert_no_metric_errors()
+                # if the test threw an exception, don't check for errors
+                # as a failing assertion would cause the cleanup below to fail
+                if exc_type is not None:
+                    pageserver.assert_no_metric_errors()
 
                 pageserver.stop(immediate=True)
 
@@ -691,6 +774,13 @@ class NeonEnvBuilder:
                     S3Scrubber(self.test_output_dir, self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
+                    cleanup_error = e
+
+            try:
+                self.overlay_cleanup_teardown()
+            except Exception as e:
+                log.error(f"Error cleaning up overlay state: {e}")
+                if cleanup_error is not None:
                     cleanup_error = e
 
             try:
@@ -890,8 +980,8 @@ class NeonEnv:
         """Get list of safekeeper endpoints suitable for safekeepers GUC"""
         return ",".join(f"localhost:{wa.port.pg}" for wa in self.safekeepers)
 
-    def get_pageserver_version(self) -> str:
-        bin_pageserver = str(self.neon_binpath / "pageserver")
+    def get_binary_version(self, binary_name: str) -> str:
+        bin_pageserver = str(self.neon_binpath / binary_name)
         res = subprocess.run(
             [bin_pageserver, "--version"],
             check=True,
@@ -1014,6 +1104,7 @@ def neon_env_builder(
     default_broker: NeonBroker,
     run_id: uuid.UUID,
     request: FixtureRequest,
+    test_overlay_dir: Path,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1044,6 +1135,7 @@ def neon_env_builder(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
+        test_overlay_dir=test_overlay_dir,
     ) as builder:
         yield builder
 
@@ -1098,8 +1190,8 @@ class AbstractNeonCli(abc.ABC):
         If `local_binpath` is true, then we are invoking a test utility
         """
 
-        assert type(arguments) == list
-        assert type(self.COMMAND) == str
+        assert isinstance(arguments, list)
+        assert isinstance(self.COMMAND, str)
 
         if local_binpath:
             # Test utility
@@ -1656,7 +1748,7 @@ class NeonPageserver(PgProtocol):
         self.running = False
         self.service_port = port
         self.config_override = config_override
-        self.version = env.get_pageserver_version()
+        self.version = env.get_binary_version("pageserver")
 
         # After a test finishes, we will scrape the log to see if there are any
         # unexpected error messages. If your test expects an error, add it to
@@ -1825,18 +1917,24 @@ class NeonPageserver(PgProtocol):
         return None
 
     def tenant_attach(
-        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+        self,
+        tenant_id: TenantId,
+        config: None | Dict[str, Any] = None,
+        config_null: bool = False,
+        generation: Optional[int] = None,
     ):
         """
         Tenant attachment passes through here to acquire a generation number before proceeding
         to call into the pageserver HTTP client.
         """
         client = self.http_client()
+        if generation is None:
+            generation = self.env.attachment_service.attach_hook_issue(tenant_id, self.id)
         return client.tenant_attach(
             tenant_id,
             config,
             config_null,
-            generation=self.env.attachment_service.attach_hook_issue(tenant_id, self.id),
+            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
@@ -2924,7 +3022,10 @@ class Safekeeper:
                 return res
 
     def http_client(self, auth_token: Optional[str] = None) -> SafekeeperHttpClient:
-        return SafekeeperHttpClient(port=self.port.http, auth_token=auth_token)
+        is_testing_enabled = '"testing"' in self.env.get_binary_version("safekeeper")
+        return SafekeeperHttpClient(
+            port=self.port.http, auth_token=auth_token, is_testing_enabled=is_testing_enabled
+        )
 
     def data_dir(self) -> str:
         return os.path.join(self.env.repo_dir, "safekeepers", f"sk{self.id}")
@@ -2975,16 +3076,41 @@ class SafekeeperMetrics:
 class SafekeeperHttpClient(requests.Session):
     HTTPError = requests.HTTPError
 
-    def __init__(self, port: int, auth_token: Optional[str] = None):
+    def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled=False):
         super().__init__()
         self.port = port
         self.auth_token = auth_token
+        self.is_testing_enabled = is_testing_enabled
 
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
+
+    def is_testing_enabled_or_skip(self):
+        if not self.is_testing_enabled:
+            pytest.skip("safekeeper was built without 'testing' feature")
+
+    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+        self.is_testing_enabled_or_skip()
+
+        if isinstance(config_strings, tuple):
+            pairs = [config_strings]
+        else:
+            pairs = config_strings
+
+        log.info(f"Requesting config failpoints: {repr(pairs)}")
+
+        res = self.put(
+            f"http://localhost:{self.port}/v1/failpoints",
+            json=[{"name": name, "actions": actions} for name, actions in pairs],
+        )
+        log.info(f"Got failpoints request response code {res.status_code}")
+        res.raise_for_status()
+        res_json = res.json()
+        assert res_json is None
+        return res_json
 
     def debug_dump(self, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         params = params or {}
@@ -2996,6 +3122,28 @@ class SafekeeperHttpClient(requests.Session):
 
     def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def copy_timeline(self, tenant_id: TenantId, timeline_id: TimelineId, body: Dict[str, Any]):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/copy",
+            json=body,
+        )
+        res.raise_for_status()
+
+    def timeline_digest(
+        self, tenant_id: TenantId, timeline_id: TimelineId, from_lsn: Lsn, until_lsn: Lsn
+    ) -> Dict[str, Any]:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/digest",
+            params={
+                "from_lsn": str(from_lsn),
+                "until_lsn": str(until_lsn),
+            },
+        )
         res.raise_for_status()
         res_json = res.json()
         assert isinstance(res_json, dict)
@@ -3141,10 +3289,10 @@ class S3Scrubber:
             raise
 
 
-def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
-    """Compute the working directory for an individual test."""
+def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:
+    """Compute the path to a working directory for an individual test."""
     test_name = request.node.name
-    test_dir = top_output_dir / test_name.replace("/", "-")
+    test_dir = top_output_dir / f"{prefix}{test_name.replace('/', '-')}"
 
     # We rerun flaky tests multiple times, use a separate directory for each run.
     if (suffix := getattr(request.node, "execution_count", None)) is not None:
@@ -3154,6 +3302,21 @@ def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     # make mypy happy
     assert isinstance(test_dir, Path)
     return test_dir
+
+
+def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    """
+    The working directory for a test.
+    """
+    return _get_test_dir(request, top_output_dir, "")
+
+
+def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
+    """
+    Directory that contains `upperdir` and `workdir` for overlayfs mounts
+    that a test creates. See `NeonEnvBuilder.overlay_mount`.
+    """
+    return _get_test_dir(request, top_output_dir, "overlay-")
 
 
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
@@ -3183,8 +3346,12 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 # scope. So it uses the get_test_output_dir() function to get the path, and
 # this fixture ensures that the directory exists.  That works because
 # 'autouse' fixtures are run before other fixtures.
+#
+# NB: we request the overlay dir fixture so the fixture does its cleanups
 @pytest.fixture(scope="function", autouse=True)
-def test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Iterator[Path]:
+def test_output_dir(
+    request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
+) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
     # one directory per test
@@ -3196,6 +3363,43 @@ def test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Iterator[P
     yield test_dir
 
     allure_attach_from_dir(test_dir)
+
+
+@pytest.fixture(scope="function")
+def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
+    """
+    Idempotently create a test's overlayfs mount state directory.
+    If the functionality isn't enabled via env var, returns None.
+
+    The procedure cleans up after previous runs that were aborted (e.g. due to Ctrl-C, OOM kills, etc).
+    """
+
+    if os.getenv("NEON_ENV_BUILDER_FROM_REPO_DIR_USE_OVERLAYFS") is None:
+        return None
+
+    overlay_dir = get_test_overlay_dir(request, top_output_dir)
+    log.info(f"test_overlay_dir is {overlay_dir}")
+
+    overlay_dir.mkdir(exist_ok=True)
+    # unmount stale overlayfs mounts which subdirectories of `overlay_dir/*` as the overlayfs `upperdir` and `workdir`
+    for mountpoint in overlayfs.iter_mounts_beneath(get_test_output_dir(request, top_output_dir)):
+        cmd = ["sudo", "umount", str(mountpoint)]
+        log.info(
+            f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}"
+        )
+        subprocess.run(cmd, capture_output=True, check=True)
+    # the overlayfs `workdir`` is owned by `root`, shutil.rmtree won't work.
+    cmd = ["sudo", "rm", "-rf", str(overlay_dir)]
+    subprocess.run(cmd, capture_output=True, check=True)
+
+    overlay_dir.mkdir()
+
+    return overlay_dir
+
+    # no need to clean up anything: on clean shutdown,
+    # NeonEnvBuilder.overlay_cleanup_teardown takes care of cleanup
+    # and on unclean shutdown, this function will take care of it
+    # on the next test run
 
 
 SKIP_DIRS = frozenset(

@@ -3,7 +3,7 @@ use std::{thread, time::Duration};
 
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::compute::ComputeNode;
 
@@ -81,6 +81,29 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     // Get idle backend `state_change` with the max timestamp.
                     if let Some(last) = idle_backs.iter().max() {
                         last_active = Some(*last);
+                    }
+                }
+
+                // If there are existing (logical) walsenders, do not suspend.
+                //
+                // walproposer doesn't currently show up in pg_stat_replication,
+                // but protect if it will be
+                let ws_count_query = "select count(*) from pg_stat_replication where application_name != 'walproposer';";
+                match cli.query_one(ws_count_query, &[]) {
+                    Ok(r) => match r.try_get::<&str, i64>("count") {
+                        Ok(num_ws) => {
+                            if num_ws > 0 {
+                                last_active = Some(Utc::now());
+                            }
+                        }
+                        Err(e) => {
+                            warn!("failed to parse ws count: {:?}", e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        warn!("failed to get list of walsenders: {:?}", e);
+                        continue;
                     }
                 }
 

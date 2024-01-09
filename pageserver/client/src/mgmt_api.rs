@@ -1,4 +1,4 @@
-use pageserver_api::models::*;
+use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method};
 use utils::{
     http::error::HttpErrorBody,
@@ -28,14 +28,12 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[async_trait::async_trait]
-pub trait ResponseErrorMessageExt: Sized {
+pub(crate) trait ResponseErrorMessageExt: Sized {
     async fn error_from_body(self) -> Result<Self>;
 }
 
-#[async_trait::async_trait]
 impl ResponseErrorMessageExt for reqwest::Response {
-    async fn error_from_body(mut self) -> Result<Self> {
+    async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
         if !(status.is_client_error() || status.is_server_error()) {
             return Ok(self);
@@ -162,6 +160,18 @@ impl Client {
         let uri = format!("{}/v1/tenant/config", self.mgmt_api_endpoint);
         self.request(Method::PUT, &uri, req).await?;
         Ok(())
+    }
+
+    pub async fn tenant_secondary_download(&self, tenant_id: TenantShardId) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{}/secondary/download",
+            self.mgmt_api_endpoint, tenant_id
+        );
+        self.request(Method::POST, &uri, ())
+            .await?
+            .error_for_status()
+            .map(|_| ())
+            .map_err(|e| Error::ApiError(format!("{}", e)))
     }
 
     pub async fn location_config(
