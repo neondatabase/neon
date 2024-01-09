@@ -201,7 +201,7 @@ impl ProjectInfoCacheImpl {
             };
             return Some(cached);
         }
-        return Some(Cached::new_uncached(value));
+        Some(Cached::new_uncached(value))
     }
     pub fn insert_role_secret(
         &self,
