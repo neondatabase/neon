@@ -22,6 +22,7 @@ use crate::{
 };
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
+use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
@@ -504,12 +505,12 @@ impl NeonOptions {
     }
 
     fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
-        Self(
-            options
-                .filter_map(neon_option)
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
-        )
+        let mut options = options
+            .filter_map(neon_option)
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect_vec();
+        options.sort();
+        Self(options)
     }
 
     pub fn get_cache_key(&self, prefix: &str) -> SmolStr {
