@@ -9,6 +9,7 @@ use crate::{
     compute,
     config::{CacheOptions, ProjectInfoCacheOptions},
     context::RequestMonitoring,
+    proxy::NeonOptions,
     scram,
 };
 use async_trait::async_trait;
@@ -199,17 +200,14 @@ pub mod errors {
 
 /// Extra query params we'd like to pass to the console.
 pub struct ConsoleReqExtra {
-    pub options: Vec<(String, String)>,
+    pub options: NeonOptions,
 }
 
 impl ConsoleReqExtra {
     // https://swagger.io/docs/specification/serialization/ DeepObject format
     // paramName[prop1]=value1&paramName[prop2]=value2&....
-    pub fn options_as_deep_object(&self) -> Vec<(String, String)> {
-        self.options
-            .iter()
-            .map(|(k, v)| (format!("options[{}]", k), v.to_string()))
-            .collect()
+    pub fn options_as_deep_object(&self) -> Vec<(String, SmolStr)> {
+        self.options.to_deep_object()
     }
 }
 
@@ -249,7 +247,7 @@ pub struct NodeInfo {
     pub allow_self_signed_compute: bool,
 }
 
-pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
+pub type NodeInfoCache = TimedLru<SmolStr, NodeInfo>;
 pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, AuthSecret>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<SmolStr>>>;
@@ -310,7 +308,7 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks {
     name: &'static str,
-    node_locks: DashMap<Arc<str>, Arc<Semaphore>>,
+    node_locks: DashMap<SmolStr, Arc<Semaphore>>,
     permits: usize,
     timeout: Duration,
     registered: prometheus::IntCounter,
@@ -378,7 +376,7 @@ impl ApiLocks {
 
     pub async fn get_wake_compute_permit(
         &self,
-        key: &Arc<str>,
+        key: &SmolStr,
     ) -> Result<WakeComputePermit, errors::WakeComputeError> {
         if self.permits == 0 {
             return Ok(WakeComputePermit { permit: None });

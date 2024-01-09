@@ -14,6 +14,7 @@ use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
 use crate::proxy::connect_compute::handle_try_wake;
 use crate::proxy::retry::retry_after;
+use crate::proxy::NeonOptions;
 use crate::scram;
 use crate::stream::Stream;
 use crate::{
@@ -129,7 +130,7 @@ pub struct ComputeCredentials<T> {
 
 pub struct ComputeUserInfoNoEndpoint {
     pub user: SmolStr,
-    pub cache_key: SmolStr,
+    pub options: NeonOptions,
 }
 
 pub struct ComputeUserInfo {
@@ -150,7 +151,7 @@ impl TryFrom<ClientCredentials> for ComputeUserInfo {
     fn try_from(creds: ClientCredentials) -> Result<Self, Self::Error> {
         let inner = ComputeUserInfoNoEndpoint {
             user: creds.user,
-            cache_key: creds.cache_key,
+            options: creds.options,
         };
         match creds.project {
             None => Err(inner),

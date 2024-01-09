@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
@@ -9,7 +9,6 @@ use pbkdf2::{
     password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
     Params, Pbkdf2,
 };
-use pq_proto::StartupMessageParams;
 use prometheus::{exponential_buckets, register_histogram, Histogram};
 use rand::Rng;
 use smol_str::SmolStr;
@@ -26,11 +25,15 @@ use tokio::time::{self, Instant};
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
-    auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
+    auth::{
+        self,
+        backend::{ComputeUserInfo, ComputeUserInfoNoEndpoint},
+        check_peer_addr_is_in_list,
+    },
     console,
     context::RequestMonitoring,
     metrics::NUM_DB_CONNECTIONS_GAUGE,
-    proxy::{connect_compute::ConnectMechanism, neon_options},
+    proxy::{connect_compute::ConnectMechanism, NeonOptions},
     usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
 };
 use crate::{compute, config};
@@ -38,15 +41,15 @@ use crate::{compute, config};
 use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
-pub const APP_NAME: &str = "/sql_over_http";
+pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
 
 #[derive(Debug, Clone)]
 pub struct ConnInfo {
     pub username: SmolStr,
     pub dbname: SmolStr,
-    pub hostname: SmolStr,
+    pub endpoint: SmolStr,
     pub password: SmolStr,
-    pub options: Option<SmolStr>,
+    pub options: NeonOptions,
 }
 
 impl ConnInfo {
@@ -54,12 +57,23 @@ impl ConnInfo {
     pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
         (self.dbname.clone(), self.username.clone())
     }
+
+    pub fn endpoint_cache_key(&self) -> SmolStr {
+        self.options.get_cache_key(&self.endpoint)
+    }
 }
 
 impl fmt::Display for ConnInfo {
     // use custom display to avoid logging password
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}/{}", self.username, self.hostname, self.dbname)
+        write!(
+            f,
+            "{}@{}/{}?{}",
+            self.username,
+            self.endpoint,
+            self.dbname,
+            self.options.get_cache_key("")
+        )
     }
 }
 
@@ -319,7 +333,7 @@ impl GlobalConnPool {
         let mut hash_valid = false;
         let mut endpoint_pool = Weak::new();
         if !force_new {
-            let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+            let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
             endpoint_pool = Arc::downgrade(&pool);
             let mut hash = None;
 
@@ -401,7 +415,7 @@ impl GlobalConnPool {
             Err(err)
                 if hash_valid && err.to_string().contains("password authentication failed") =>
             {
-                let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+                let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
                 let mut pool = pool.write();
                 if let Some(entry) = pool.pools.get_mut(&conn_info.db_and_user()) {
                     entry.password_hash = None;
@@ -418,7 +432,7 @@ impl GlobalConnPool {
                 })
                 .await??;
 
-                let pool = self.get_or_create_endpoint_pool(&conn_info.hostname);
+                let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
                 let mut pool = pool.write();
                 pool.pools
                     .entry(conn_info.db_and_user())
@@ -520,23 +534,16 @@ async fn connect_to_compute(
     conn_id: uuid::Uuid,
     pool: Weak<RwLock<EndpointConnPool>>,
 ) -> anyhow::Result<ClientInner> {
-    let tls = config.tls_config.as_ref();
-    let common_names = tls.and_then(|tls| tls.common_names.clone());
+    ctx.set_application(Some(APP_NAME));
+    let creds = ComputeUserInfo {
+        endpoint: conn_info.endpoint.clone(),
+        inner: ComputeUserInfoNoEndpoint {
+            user: conn_info.username.clone(),
+            options: conn_info.options.clone(),
+        },
+    };
 
-    let params = StartupMessageParams::new([
-        ("user", &conn_info.username),
-        ("database", &conn_info.dbname),
-        ("application_name", APP_NAME),
-        ("options", conn_info.options.as_deref().unwrap_or("")),
-    ]);
-    let creds =
-        auth::ClientCredentials::parse(ctx, &params, Some(&conn_info.hostname), common_names)?;
-
-    let creds =
-        ComputeUserInfo::try_from(creds).map_err(|_| anyhow!("missing endpoint identifier"))?;
     let backend = config.auth_backend.as_ref().map(|_| creds);
-
-    let console_options = neon_options(&params);
 
     if !config.disable_ip_check_for_http {
         let allowed_ips = backend.get_allowed_ips(ctx).await?;
@@ -545,7 +552,7 @@ async fn connect_to_compute(
         }
     }
     let extra = console::ConsoleReqExtra {
-        options: console_options,
+        options: conn_info.options.clone(),
     };
     let node_info = backend
         .wake_compute(ctx, &extra)

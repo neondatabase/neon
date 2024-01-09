@@ -2,7 +2,7 @@
 
 use crate::{
     auth::password_hack::parse_endpoint_param, context::RequestMonitoring, error::UserFacingError,
-    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::neon_options_str,
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::NeonOptions,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -43,7 +43,7 @@ pub struct ClientCredentials {
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<SmolStr>,
 
-    pub cache_key: SmolStr,
+    pub options: NeonOptions,
 }
 
 impl ClientCredentials {
@@ -53,12 +53,27 @@ impl ClientCredentials {
     }
 }
 
+pub fn endpoint_sni<'a>(
+    sni: &'a str,
+    common_names: &HashSet<String>,
+) -> Result<&'a str, ClientCredsParseError> {
+    let Some((subdomain, common_name)) = sni.split_once('.') else {
+        return Err(ClientCredsParseError::UnknownCommonName { cn: sni.into() });
+    };
+    if !common_names.contains(common_name) {
+        return Err(ClientCredsParseError::UnknownCommonName {
+            cn: common_name.into(),
+        });
+    }
+    Ok(subdomain)
+}
+
 impl ClientCredentials {
     pub fn parse(
         ctx: &mut RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
-        common_names: Option<HashSet<String>>,
+        common_names: Option<&HashSet<String>>,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
@@ -87,21 +102,7 @@ impl ClientCredentials {
 
         let project_from_domain = if let Some(sni_str) = sni {
             if let Some(cn) = common_names {
-                let common_name_from_sni = sni_str.split_once('.').map(|(_, domain)| domain);
-
-                let project = common_name_from_sni
-                    .and_then(|domain| {
-                        if cn.contains(domain) {
-                            subdomain_from_sni(sni_str, domain)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| UnknownCommonName {
-                        cn: common_name_from_sni.unwrap_or("").into(),
-                    })?;
-
-                Some(project)
+                Some(SmolStr::from(endpoint_sni(sni_str, cn)?))
             } else {
                 None
             }
@@ -140,17 +141,12 @@ impl ClientCredentials {
             info!("Connection with password hack");
         }
 
-        let cache_key = format!(
-            "{}{}",
-            project.as_deref().unwrap_or(""),
-            neon_options_str(params)
-        )
-        .into();
+        let options = NeonOptions::parse_params(params);
 
         Ok(Self {
             user,
             project,
-            cache_key,
+            options,
         })
     }
 }
@@ -207,12 +203,6 @@ fn project_name_valid(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '-')
 }
 
-fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<SmolStr> {
-    sni.strip_suffix(common_name)?
-        .strip_suffix('.')
-        .map(SmolStr::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,10 +243,10 @@ mod tests {
         let common_names = Some(["localhost".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
-        assert_eq!(creds.cache_key, "foo");
+        assert_eq!(creds.options.get_cache_key("foo"), "foo");
 
         Ok(())
     }
@@ -332,7 +322,7 @@ mod tests {
         let common_names = Some(["localhost".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
 
@@ -346,13 +336,13 @@ mod tests {
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(creds.project.as_deref(), Some("p1"));
 
         Ok(())
@@ -367,7 +357,7 @@ mod tests {
         let common_names = Some(["localhost".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names)
+        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())
             .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
@@ -386,7 +376,7 @@ mod tests {
         let common_names = Some(["example.com".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names)
+        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())
             .expect_err("should fail");
         match err {
             UnknownCommonName { cn } => {
@@ -406,9 +396,12 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
+        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(creds.project.as_deref(), Some("project"));
-        assert_eq!(creds.cache_key, "projectendpoint_type:read_write lsn:0/2");
+        assert_eq!(
+            creds.options.get_cache_key("project"),
+            "project endpoint_type:read_write lsn:0/2"
+        );
 
         Ok(())
     }

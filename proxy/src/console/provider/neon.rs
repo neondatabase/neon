@@ -127,11 +127,11 @@ impl Api {
                     ("project", creds.endpoint.as_str()),
                 ]);
 
-            request_builder = if extra.options.is_empty() {
-                request_builder
-            } else {
-                request_builder.query(&extra.options_as_deep_object())
-            };
+            let options = extra.options_as_deep_object();
+            if !options.is_empty() {
+                request_builder = request_builder.query(&options);
+            }
+
             let request = request_builder.build()?;
 
             info!(url = request.url().as_str(), "sending http request");
@@ -232,18 +232,16 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra,
         creds: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key: &str = &creds.inner.cache_key;
+        let key = creds.inner.options.get_cache_key(&creds.endpoint);
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(key) {
-            info!(key = key, "found cached compute node info");
+        if let Some(cached) = self.caches.node_info.get(&*key) {
+            info!(key = &*key, "found cached compute node info");
             return Ok(cached);
         }
-
-        let key: Arc<str> = key.into();
 
         let permit = self.locks.get_wake_compute_permit(&key).await?;
 

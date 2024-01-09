@@ -22,10 +22,10 @@ use crate::{
 };
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
-use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use regex::Regex;
+use smol_str::SmolStr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -201,7 +201,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let creds = {
         let hostname = mode.hostname(stream.get_ref());
 
-        let common_names = tls.and_then(|tls| tls.common_names.clone());
+        let common_names = tls.map(|tls| &tls.common_names);
         let result = config
             .auth_backend
             .as_ref()
@@ -455,7 +455,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         }
 
         let extra = console::ConsoleReqExtra {
-            options: neon_options(params),
+            options: NeonOptions::parse_params(params),
         };
 
         let user = creds.get_user().to_owned();
@@ -493,29 +493,52 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     }
 }
 
-pub fn neon_options(params: &StartupMessageParams) -> Vec<(String, String)> {
-    #[allow(unstable_name_collisions)]
-    match params.options_raw() {
-        Some(options) => options.filter_map(neon_option).collect(),
-        None => vec![],
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NeonOptions(Vec<(SmolStr, SmolStr)>);
+
+impl NeonOptions {
+    pub fn parse_params(params: &StartupMessageParams) -> Self {
+        params
+            .options_raw()
+            .map(Self::parse_from_iter)
+            .unwrap_or_default()
+    }
+    pub fn parse_options_raw(options: &str) -> Self {
+        Self::parse_from_iter(StartupMessageParams::parse_options_raw(options))
+    }
+
+    fn parse_from_iter<'a>(options: impl Iterator<Item = &'a str>) -> Self {
+        Self(
+            options
+                .filter_map(neon_option)
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        )
+    }
+
+    pub fn get_cache_key(&self, prefix: &str) -> SmolStr {
+        // prefix + format!(" {k}:{v}")
+        // kinda jank because SmolStr is immutable
+        std::iter::once(prefix)
+            .chain(self.0.iter().flat_map(|(k, v)| [" ", &**k, ":", &**v]))
+            .collect()
+    }
+
+    /// https://swagger.io/docs/specification/serialization/ DeepObject format
+    /// paramName[prop1]=value1&paramName[prop2]=value2&....
+    pub fn to_deep_object(&self) -> Vec<(String, SmolStr)> {
+        self.0
+            .iter()
+            .map(|(k, v)| (format!("options[{}]", k), v.clone()))
+            .collect()
     }
 }
 
-pub fn neon_options_str(params: &StartupMessageParams) -> String {
-    #[allow(unstable_name_collisions)]
-    neon_options(params)
-        .iter()
-        .map(|(k, v)| format!("{}:{}", k, v))
-        .sorted() // we sort it to use as cache key
-        .intersperse(" ".to_owned())
-        .collect()
-}
-
-pub fn neon_option(bytes: &str) -> Option<(String, String)> {
+pub fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     static RE: OnceCell<Regex> = OnceCell::new();
     let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
 
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();
-    Some((k.to_owned(), v.to_owned()))
+    Some((k, v))
 }

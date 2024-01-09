@@ -83,7 +83,7 @@ fn generate_tls_config<'a>(
         let mut cert_resolver = CertResolver::new();
         cert_resolver.add_cert(key, vec![cert], true)?;
 
-        let common_names = Some(cert_resolver.get_common_names());
+        let common_names = cert_resolver.get_common_names();
 
         TlsConfig {
             config,
@@ -493,7 +493,9 @@ fn helper_create_connect_info(
     auth::BackendType<'_, ComputeUserInfo>,
 ) {
     let cache = helper_create_cached_node_info();
-    let extra = console::ConsoleReqExtra { options: vec![] };
+    let extra = console::ConsoleReqExtra {
+        options: NeonOptions(vec![]),
+    };
     let creds = auth::BackendType::Test(mechanism);
     (cache, extra, creds)
 }

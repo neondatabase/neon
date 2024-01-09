@@ -28,9 +28,12 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::auth::endpoint_sni;
 use crate::config::HttpConfig;
+use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::proxy::NeonOptions;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -125,6 +128,7 @@ fn get_conn_info(
     ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
+    tls: &TlsConfig,
 ) -> Result<ConnInfo, anyhow::Error> {
     let connection_string = headers
         .get("Neon-Connection-String")
@@ -179,8 +183,10 @@ fn get_conn_info(
         }
     }
 
-    let hostname: SmolStr = hostname.into();
-    ctx.set_endpoint_id(Some(hostname.clone()));
+    let endpoint = endpoint_sni(hostname, &tls.common_names)?;
+
+    let endpoint: SmolStr = endpoint.into();
+    ctx.set_endpoint_id(Some(endpoint.clone()));
 
     let pairs = connection_url.query_pairs();
 
@@ -188,7 +194,7 @@ fn get_conn_info(
 
     for (key, value) in pairs {
         if key == "options" {
-            options = Some(value.into());
+            options = Some(NeonOptions::parse_options_raw(&value));
             break;
         }
     }
@@ -196,14 +202,15 @@ fn get_conn_info(
     Ok(ConnInfo {
         username,
         dbname: dbname.into(),
-        hostname,
+        endpoint,
         password: password.into(),
-        options,
+        options: options.unwrap_or_default(),
     })
 }
 
 // TODO: return different http error codes
 pub async fn handle(
+    tls: &'static TlsConfig,
     config: &'static HttpConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
@@ -212,7 +219,7 @@ pub async fn handle(
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.request_timeout,
-        handle_inner(config, ctx, request, sni_hostname, conn_pool),
+        handle_inner(tls, config, ctx, request, sni_hostname, conn_pool),
     )
     .await;
     let mut response = match result {
@@ -294,6 +301,7 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
+    tls: &'static TlsConfig,
     config: &'static HttpConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
@@ -308,7 +316,7 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(ctx, headers, sni_hostname)?;
+    let conn_info = get_conn_info(ctx, headers, sni_hostname, tls)?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
