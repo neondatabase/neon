@@ -472,6 +472,7 @@ class NeonEnvBuilder:
         self.test_output_dir = test_output_dir
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
+        self.config_init_force: Optional[str] = None
 
         assert test_name.startswith(
             "test_"
@@ -935,7 +936,7 @@ class NeonEnv:
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
-        self.neon_cli.init(cfg)
+        self.neon_cli.init(cfg, force=config.config_init_force)
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
@@ -1423,12 +1424,16 @@ class NeonCli(AbstractNeonCli):
     def init(
         self,
         config: Dict[str, Any],
+        force: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(toml.dumps(config))
             tmp.flush()
 
             cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
+
+            if force is not None:
+                cmd.extend(["--force", force])
 
             storage = self.env.pageserver_remote_storage
 
