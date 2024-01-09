@@ -3210,6 +3210,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
  "utils",
  "workspace_hack",
