@@ -8,6 +8,8 @@ use smol_str::SmolStr;
 use crate::cache::project_info::ProjectInfoCache;
 
 const CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
+const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const INVALIDATION_LAG: std::time::Duration = std::time::Duration::from_secs(20);
 
 struct ConsoleRedisClient {
     client: redis::Client,
@@ -31,63 +33,48 @@ impl ConsoleRedisClient {
 enum Notification {
     #[serde(
         rename = "/allowed_ips_updated",
-        deserialize_with = "deserialize_allowed_ips"
+        deserialize_with = "deserialize_json_string"
     )]
-    AllowedIpsUpdate { project_id: SmolStr },
+    AllowedIpsUpdate {
+        allowed_ips_update: AllowedIpsUpdate,
+    },
     #[serde(
         rename = "/password_updated",
-        deserialize_with = "deserialize_password_updated"
+        deserialize_with = "deserialize_json_string"
     )]
-    PasswordUpdate {
-        project_id: SmolStr,
-        role_name: SmolStr,
-    },
+    PasswordUpdate { password_update: PasswordUpdate },
 }
-
-fn deserialize_allowed_ips<'de, D>(deserializer: D) -> Result<SmolStr, D::Error>
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct AllowedIpsUpdate {
+    #[serde(rename = "project")]
+    project_id: SmolStr,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct PasswordUpdate {
+    #[serde(rename = "project")]
+    project_id: SmolStr,
+    #[serde(rename = "role")]
+    role_name: SmolStr,
+}
+fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
+    T: for<'de2> serde::Deserialize<'de2>,
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    let project = serde_json::from_str::<serde_json::Value>(&s)
-        .map_err(serde::de::Error::custom)?
-        .get("project")
-        .ok_or_else(|| serde::de::Error::custom("no project field"))?
-        .as_str()
-        .ok_or_else(|| serde::de::Error::custom("project is not a string"))?
-        .to_string();
-    Ok(project.into())
-}
-
-fn deserialize_password_updated<'de, D>(deserializer: D) -> Result<(SmolStr, SmolStr), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    let data = serde_json::from_str::<serde_json::Value>(&s).map_err(serde::de::Error::custom)?;
-    let project = data
-        .get("project")
-        .ok_or_else(|| serde::de::Error::custom("no project field"))?
-        .as_str()
-        .ok_or_else(|| serde::de::Error::custom("project is not a string"))?
-        .to_string();
-    let role = data
-        .get("role")
-        .ok_or_else(|| serde::de::Error::custom("no role field"))?
-        .as_str()
-        .ok_or_else(|| serde::de::Error::custom("role is not a string"))?
-        .to_string();
-    Ok((project.into(), role.into()))
+    serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
 }
 
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     use Notification::*;
     match msg {
-        AllowedIpsUpdate { project_id } => cache.invalidate_allowed_ips_for_project(&project_id),
-        PasswordUpdate {
-            project_id,
-            role_name,
-        } => cache.invalidate_role_secret_for_project(&project_id, &role_name),
+        AllowedIpsUpdate { allowed_ips_update } => {
+            cache.invalidate_allowed_ips_for_project(&allowed_ips_update.project_id)
+        }
+        PasswordUpdate { password_update } => cache.invalidate_role_secret_for_project(
+            &password_update.project_id,
+            &password_update.role_name,
+        ),
     }
 }
 
@@ -97,6 +84,7 @@ where
     C: ProjectInfoCache + Send + Sync + 'static,
 {
     let payload: String = msg.get_payload()?;
+    tracing::debug!(?payload, "received a message payload");
 
     let msg: Notification = match serde_json::from_str(&payload) {
         Ok(msg) => msg,
@@ -105,12 +93,13 @@ where
             return Ok(());
         }
     };
-    tracing::trace!(?msg, "received a message");
+    tracing::debug!(?msg, "received a message");
     invalidate_cache(cache.clone(), msg.clone());
     // It might happen that the invalid entry is on the way to be cached.
-    // To make sure that the entry is invalidated, let's repeat the invalidation in 20 seconds.
+    // To make sure that the entry is invalidated, let's repeat the invalidation in INVALIDATION_LAG seconds.
+    // TODO: include the version (or the timestamp) in the message and invalidate only if the entry is cached before the message.
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        tokio::time::sleep(INVALIDATION_LAG).await;
         invalidate_cache(cache, msg.clone());
     });
 
@@ -134,9 +123,9 @@ where
             }
             Err(e) => {
                 tracing::error!(
-                    "failed to connect to redis: {e}, will try to reconnect in 100 seconds"
+                    "failed to connect to redis: {e}, will try to reconnect in {RECONNECT_TIMEOUT:#?}"
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+                tokio::time::sleep(RECONNECT_TIMEOUT).await;
                 continue;
             }
         };
@@ -175,7 +164,9 @@ mod tests {
         assert_eq!(
             result,
             Notification::AllowedIpsUpdate {
-                project_id: project_id.into()
+                allowed_ips_update: AllowedIpsUpdate {
+                    project_id: project_id.into()
+                }
             }
         );
 
@@ -199,8 +190,10 @@ mod tests {
         assert_eq!(
             result,
             Notification::PasswordUpdate {
-                project_id: project_id.into(),
-                role_name: role_name.into()
+                password_update: PasswordUpdate {
+                    project_id: project_id.into(),
+                    role_name: role_name.into()
+                }
             }
         );
 

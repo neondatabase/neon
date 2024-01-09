@@ -368,7 +368,7 @@ pub struct ProjectInfoCacheOptions {
 impl ProjectInfoCacheOptions {
     /// Default options for [`crate::console::provider::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
-        "size=10000,ttl=4m,max_roles=10,gc_interval=10m";
+        "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
