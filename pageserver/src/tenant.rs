@@ -111,7 +111,7 @@ use toml_edit;
 use utils::{
     crashsafe,
     generation::Generation,
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{Lsn, RecordLsn},
 };
 
@@ -370,13 +370,13 @@ impl WalRedoManager {
 pub enum GetTimelineError {
     #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
     NotActive {
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
         state: TimelineState,
     },
     #[error("Timeline {tenant_id}/{timeline_id} was not found")]
     NotFound {
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
     },
 }
@@ -1531,13 +1531,13 @@ impl Tenant {
         let timeline = timelines_accessor
             .get(&timeline_id)
             .ok_or(GetTimelineError::NotFound {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_id: self.tenant_shard_id,
                 timeline_id,
             })?;
 
         if active_only && !timeline.is_active() {
             Err(GetTimelineError::NotActive {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_id: self.tenant_shard_id,
                 timeline_id,
                 state: timeline.current_state(),
             })
@@ -5167,7 +5167,7 @@ mod tests {
                 assert_eq!(
                     e,
                     GetTimelineError::NotFound {
-                        tenant_id: tenant.tenant_shard_id.tenant_id,
+                        tenant_id: tenant.tenant_shard_id,
                         timeline_id: TIMELINE_ID,
                     }
                 )
