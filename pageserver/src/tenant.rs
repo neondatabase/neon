@@ -2566,7 +2566,9 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
+            // Strings for metric labels
             let tid = tenant_shard_id.to_string();
+            let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
                 ([state.into()], matches!(state, TenantState::Broken { .. }))
@@ -2579,13 +2581,15 @@ impl Tenant {
                 // the tenant might be ignored and reloaded, so first remove any previous set
                 // element. it most likely has already been scraped, as these are manual operations
                 // right now. most likely we will add it back very soon.
-                drop(crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid]));
+                drop(
+                    crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid, &shard_id_str]),
+                );
                 false
             } else {
                 // add the id to the set right away, there should not be any updates on the channel
                 // after
                 crate::metrics::BROKEN_TENANTS_SET
-                    .with_label_values(&[&tid])
+                    .with_label_values(&[&tid, &shard_id_str])
                     .set(1);
                 true
             };
@@ -2611,7 +2615,7 @@ impl Tenant {
                     counted_broken = true;
                     // insert the tenant_id (back) into the set
                     crate::metrics::BROKEN_TENANTS_SET
-                        .with_label_values(&[&tid])
+                        .with_label_values(&[&tid, &shard_id_str])
                         .inc();
                 }
             }

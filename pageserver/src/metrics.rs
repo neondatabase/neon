@@ -59,7 +59,7 @@ pub(crate) static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(||
     register_counter_vec!(
         "pageserver_storage_operations_seconds_sum",
         "Total time spent on storage operations with operation, tenant and timeline dimensions",
-        &["operation", "tenant_id", "timeline_id"],
+        &["operation", "tenant_id", "shard_id", "timeline_id"],
     )
     .expect("failed to define a metric")
 });
@@ -68,7 +68,7 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
     register_int_counter_vec!(
         "pageserver_storage_operations_seconds_count",
         "Count of storage operations with operation, tenant and timeline dimensions",
-        &["operation", "tenant_id", "timeline_id"],
+        &["operation", "tenant_id", "shard_id", "timeline_id"],
     )
     .expect("failed to define a metric")
 });
@@ -373,7 +373,7 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_last_record_lsn",
         "Last record LSN grouped by timeline",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -382,7 +382,7 @@ static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_resident_physical_size",
         "The size of the layer files present in the pageserver's filesystem.",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -400,7 +400,7 @@ static REMOTE_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
         "pageserver_remote_physical_size",
         "The size of the layer files present in the remote storage that are listed in the the remote index_part.json.",
         // Corollary: If any files are missing from the index part, they won't be included here.
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -433,7 +433,7 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_current_logical_size",
         "Current logical size grouped by timeline",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define current logical size metric")
 });
@@ -582,7 +582,7 @@ pub(crate) static BROKEN_TENANTS_SET: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_broken_tenants_count",
         "Set of broken tenants",
-        &["tenant_id"]
+        &["tenant_id", "shard_id"]
     )
     .expect("Failed to register pageserver_tenant_states_count metric")
 });
@@ -602,7 +602,7 @@ static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_created_persistent_files_total",
         "Number of files created that are meant to be uploaded to cloud storage",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -611,7 +611,7 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -630,7 +630,7 @@ static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_evictions",
         "Number of layers evicted from the pageserver",
-        &["tenant_id", "timeline_id"]
+        &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -927,7 +927,7 @@ pub(crate) static STORAGE_IO_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_io_operations_bytes_total",
         "Total amount of bytes read/written in IO operations",
-        &["operation", "tenant_id", "timeline_id"]
+        &["operation", "tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -1210,7 +1210,13 @@ static REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::
         "Number of ongoing calls to remote timeline client. \
          Used to populate pageserver_remote_timeline_client_calls_started. \
          This metric is not useful for sampling from Prometheus, but useful in tests.",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+        &[
+            "tenant_id",
+            "shard_id",
+            "timeline_id",
+            "file_kind",
+            "op_kind"
+        ],
     )
     .expect("failed to define a metric")
 });
@@ -1231,22 +1237,23 @@ static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new
     .expect("failed to define a metric")
 });
 
-static REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+static REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER: Lazy<IntCounterVec> =
+    Lazy::new(|| {
+        register_int_counter_vec!(
         "pageserver_remote_timeline_client_bytes_started",
         "Incremented by the number of bytes associated with a remote timeline client operation. \
          The increment happens when the operation is scheduled.",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+        &["tenant_id", "shard_id", "timeline_id", "file_kind", "op_kind"],
     )
-    .expect("failed to define a metric")
-});
+        .expect("failed to define a metric")
+    });
 
 static REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_remote_timeline_client_bytes_finished",
         "Incremented by the number of bytes associated with a remote timeline client operation. \
          The increment happens when the operation finishes (regardless of success/failure/shutdown).",
-        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+        &["tenant_id", "shard_id", "timeline_id", "file_kind", "op_kind"],
     )
     .expect("failed to define a metric")
 });
@@ -1692,14 +1699,19 @@ pub(crate) struct StorageTimeMetrics {
 }
 
 impl StorageTimeMetrics {
-    pub fn new(operation: StorageTimeOperation, tenant_id: &str, timeline_id: &str) -> Self {
+    pub fn new(
+        operation: StorageTimeOperation,
+        tenant_id: &str,
+        shard_id: &str,
+        timeline_id: &str,
+    ) -> Self {
         let operation: &'static str = operation.into();
 
         let timeline_sum = STORAGE_TIME_SUM_PER_TIMELINE
-            .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
+            .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
             .unwrap();
         let timeline_count = STORAGE_TIME_COUNT_PER_TIMELINE
-            .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
+            .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
             .unwrap();
         let global_histogram = STORAGE_TIME_GLOBAL
             .get_metric_with_label_values(&[operation])
@@ -1751,40 +1763,66 @@ impl TimelineMetrics {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
-        let flush_time_histo =
-            StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
-        let compact_time_histo =
-            StorageTimeMetrics::new(StorageTimeOperation::Compact, &tenant_id, &timeline_id);
-        let create_images_time_histo =
-            StorageTimeMetrics::new(StorageTimeOperation::CreateImages, &tenant_id, &timeline_id);
-        let logical_size_histo =
-            StorageTimeMetrics::new(StorageTimeOperation::LogicalSize, &tenant_id, &timeline_id);
+        let flush_time_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::LayerFlush,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
+        let compact_time_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::Compact,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
+        let create_images_time_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::CreateImages,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
+        let logical_size_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::LogicalSize,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
         let imitate_logical_size_histo = StorageTimeMetrics::new(
             StorageTimeOperation::ImitateLogicalSize,
             &tenant_id,
+            &shard_id,
             &timeline_id,
         );
-        let load_layer_map_histo =
-            StorageTimeMetrics::new(StorageTimeOperation::LoadLayerMap, &tenant_id, &timeline_id);
-        let garbage_collect_histo =
-            StorageTimeMetrics::new(StorageTimeOperation::Gc, &tenant_id, &timeline_id);
+        let load_layer_map_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::LoadLayerMap,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
+        let garbage_collect_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::Gc,
+            &tenant_id,
+            &shard_id,
+            &timeline_id,
+        );
         let last_record_gauge = LAST_RECORD_LSN
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        // TODO: we shouldn't expose this metric
         let current_logical_size_gauge = CURRENT_LOGICAL_SIZE
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         let num_persistent_files_created = NUM_PERSISTENT_FILES_CREATED
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         let evictions = EVICTIONS
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
         let evictions_with_low_residence_duration = evictions_with_low_residence_duration_builder
             .build(&tenant_id, &shard_id, &timeline_id);
@@ -1838,15 +1876,17 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
-        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
-            let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+            let _ =
+                RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
         }
-        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ =
+            NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
+        let _ = EVICTIONS.remove_label_values(&[tenant_id, &shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
@@ -1859,20 +1899,29 @@ impl Drop for TimelineMetrics {
         // outlive an individual smgr connection, but not the timeline.
 
         for op in StorageTimeOperation::VARIANTS {
-            let _ =
-                STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
-            let _ =
-                STORAGE_TIME_COUNT_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
+            let _ = STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[
+                op,
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ]);
+            let _ = STORAGE_TIME_COUNT_PER_TIMELINE.remove_label_values(&[
+                op,
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ]);
         }
 
         for op in STORAGE_IO_SIZE_OPERATIONS {
-            let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, timeline_id]);
+            let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
 
         for op in SmgrQueryType::iter() {
             let _ = SMGR_QUERY_TIME_PER_TENANT_TIMELINE.remove_label_values(&[
                 op.into(),
                 tenant_id,
+                shard_id,
                 timeline_id,
             ]);
         }
@@ -1935,6 +1984,7 @@ impl Drop for PerTimelineRemotePhysicalSizeGauge {
 
 pub(crate) struct RemoteTimelineClientMetrics {
     tenant_id: String,
+    shard_id: String,
     timeline_id: String,
     remote_physical_size_gauge: Mutex<Option<PerTimelineRemotePhysicalSizeGauge>>,
     calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
@@ -1946,6 +1996,7 @@ impl RemoteTimelineClientMetrics {
     pub fn new(tenant_shard_id: &TenantShardId, timeline_id: &TimelineId) -> Self {
         RemoteTimelineClientMetrics {
             tenant_id: tenant_shard_id.tenant_id.to_string(),
+            shard_id: format!("{}", tenant_shard_id.shard_slug()),
             timeline_id: timeline_id.to_string(),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
             bytes_started_counter: Mutex::new(HashMap::default()),
@@ -1960,8 +2011,9 @@ impl RemoteTimelineClientMetrics {
             PerTimelineRemotePhysicalSizeGauge::new(
                 REMOTE_PHYSICAL_SIZE
                     .get_metric_with_label_values(&[
-                        &self.tenant_id.to_string(),
-                        &self.timeline_id.to_string(),
+                        &self.tenant_id,
+                        &self.shard_id,
+                        &self.timeline_id,
                     ])
                     .unwrap(),
             )
@@ -1996,8 +2048,9 @@ impl RemoteTimelineClientMetrics {
         let metric = guard.entry(key).or_insert_with(move || {
             REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE
                 .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
+                    &self.tenant_id,
+                    &self.shard_id,
+                    &self.timeline_id,
                     key.0,
                     key.1,
                 ])
@@ -2027,8 +2080,9 @@ impl RemoteTimelineClientMetrics {
         let metric = guard.entry(key).or_insert_with(move || {
             REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER
                 .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
+                    &self.tenant_id,
+                    &self.shard_id,
+                    &self.timeline_id,
                     key.0,
                     key.1,
                 ])
@@ -2047,8 +2101,9 @@ impl RemoteTimelineClientMetrics {
         let metric = guard.entry(key).or_insert_with(move || {
             REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER
                 .get_metric_with_label_values(&[
-                    &self.tenant_id.to_string(),
-                    &self.timeline_id.to_string(),
+                    &self.tenant_id,
+                    &self.shard_id,
+                    &self.timeline_id,
                     key.0,
                     key.1,
                 ])
@@ -2192,6 +2247,7 @@ impl Drop for RemoteTimelineClientMetrics {
     fn drop(&mut self) {
         let RemoteTimelineClientMetrics {
             tenant_id,
+            shard_id,
             timeline_id,
             remote_physical_size_gauge,
             calls_unfinished_gauge,
@@ -2201,6 +2257,7 @@ impl Drop for RemoteTimelineClientMetrics {
         for ((a, b), _) in calls_unfinished_gauge.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_CALLS_UNFINISHED_GAUGE.remove_label_values(&[
                 tenant_id,
+                shard_id,
                 timeline_id,
                 a,
                 b,
@@ -2209,6 +2266,7 @@ impl Drop for RemoteTimelineClientMetrics {
         for ((a, b), _) in bytes_started_counter.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_BYTES_STARTED_COUNTER.remove_label_values(&[
                 tenant_id,
+                shard_id,
                 timeline_id,
                 a,
                 b,
@@ -2217,6 +2275,7 @@ impl Drop for RemoteTimelineClientMetrics {
         for ((a, b), _) in bytes_finished_counter.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_BYTES_FINISHED_COUNTER.remove_label_values(&[
                 tenant_id,
+                shard_id,
                 timeline_id,
                 a,
                 b,
@@ -2224,7 +2283,7 @@ impl Drop for RemoteTimelineClientMetrics {
         }
         {
             let _ = remote_physical_size_gauge; // use to avoid 'unused' warning in desctructuring above
-            let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
+            let _ = REMOTE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
     }
 }
