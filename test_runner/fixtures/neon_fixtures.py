@@ -3286,7 +3286,7 @@ class S3Scrubber:
 def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:
     """Compute the path to a working directory for an individual test."""
     test_name = request.node.name
-    test_dir = top_output_dir / (prefix + test_name.replace("/", "-"))
+    test_dir = top_output_dir / f"{prefix}{test_name.replace('/', '-')}"
 
     # We rerun flaky tests multiple times, use a separate directory for each run.
     if (suffix := getattr(request.node, "execution_count", None)) is not None:
