@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 clap.workspace = true
 futures.workspace = true
 hdrhistogram.workspace = true
