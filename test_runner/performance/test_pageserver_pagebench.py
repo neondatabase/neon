@@ -92,4 +92,6 @@ def test_getpage_throughput(
 
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
+    env.pageserver.stop(immediate=True) # with 20k tenants, we hit neon_local's shutdown timeout of 10 seconds
+
     zenbenchmark.record_pagebench_results("get-page-latest-lsn", results, duration)

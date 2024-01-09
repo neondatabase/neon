@@ -90,7 +90,7 @@ def single_timeline(
 
         work_queue.do(22, tenants, attach_broken)
 
-        env.pageserver.stop()  # clears the failpoint as a side-effect
+        env.pageserver.stop(immediate=True)  # clears the failpoint as a side-effect; immediate to avoid hitting neon_local's timeout
         tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
         log.info(f"python-side on-demand download the layer files into local tenant dir")
         fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
@@ -100,7 +100,7 @@ def single_timeline(
 
     log.info(f"wait for tenants to become active")
     for tenant in tenants:
-        wait_until_tenant_active(ps_http, tenant)
+        wait_until_tenant_active(ps_http, tenant, iterations=ncopies, period=1)
 
     # ensure all layers are resident for predictiable performance
     for tenant in tenants:
