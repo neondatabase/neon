@@ -2225,8 +2225,6 @@ impl Drop for RemoteTimelineClientMetrics {
 pub(crate) trait MeasureRemoteOp: Sized {
     fn measure_remote_op(
         self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         metrics: Arc<RemoteTimelineClientMetrics>,
@@ -2234,8 +2232,6 @@ pub(crate) trait MeasureRemoteOp: Sized {
         let start = Instant::now();
         MeasuredRemoteOp {
             inner: self,
-            tenant_id,
-            timeline_id,
             file_kind,
             op,
             start,
@@ -2251,8 +2247,6 @@ pin_project! {
     {
         #[pin]
         inner: F,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
         file_kind: RemoteOpFileKind,
         op: RemoteOpKind,
         start: Instant,
