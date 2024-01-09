@@ -54,7 +54,10 @@ class NeonBroker:
             else:
                 break  # success
 
-    def stop(self):
+    def stop(self, immediate: bool = False):
         if self.handle is not None:
-            self.handle.terminate()
+            if immediate:
+                self.handle.kill()
+            else:
+                self.handle.terminate()
             self.handle.wait()
