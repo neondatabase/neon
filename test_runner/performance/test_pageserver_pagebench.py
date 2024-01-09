@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
-from typing import List, Tuple
-import pytest
 
+import fixtures.pageserver.many_tenants
+import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -12,8 +12,6 @@ from fixtures.neon_fixtures import (
     SnapshotDir,
     last_flush_lsn_upload,
 )
-from fixtures.types import TenantId, TimelineId
-import fixtures.pageserver.many_tenants
 
 
 @pytest.fixture(scope="function")
@@ -42,7 +40,7 @@ def getpage_throughput_fixture(
         #     last_flush_lsn_upload(env, ep, template_tenant, template_timeline)
         ep = env.endpoints.create_start("main", tenant_id=template_tenant)
         ep.safe_psql("create table foo(b text)")
-        for i in range(0, 8):
+        for _ in range(0, 8):
             ep.safe_psql("insert into foo(b) values ('some text')")
             last_flush_lsn_upload(env, ep, template_tenant, template_timeline)
         ep.stop_and_destroy()

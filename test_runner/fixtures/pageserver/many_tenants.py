@@ -1,9 +1,11 @@
-from dataclasses import dataclass
 import os
 import shutil
 import time
-from typing import Any, Callable, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Tuple
 
+import fixtures.pageserver.remote_storage
+from fixtures import work_queue
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -12,13 +14,10 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.utils import (
     wait_until_all_tenants_state,
-    wait_until_tenant_active,
     wait_until_tenant_state,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
-import fixtures.pageserver.remote_storage
-from fixtures import work_queue
 
 
 @dataclass
@@ -76,12 +75,12 @@ def single_timeline(
             f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}"
         )
 
-        log.info(f"detach template tenant form pageserver")
+        log.info("detach template tenant form pageserver")
         env.pageserver.http_client().tenant_detach(template_tenant)
         log.info(f"duplicating template tenant {ncopies} times in S3")
         tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
-        log.info(f"attach duplicated tenants to pageserver")
+        log.info("attach duplicated tenants to pageserver")
         # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.
         # However, on-demand downloads are quite slow ATM.
         # => do the on-demand downloads in Python.
@@ -107,7 +106,7 @@ def single_timeline(
             immediate=True
         )  # clears the failpoint as a side-effect; immediate to avoid hitting neon_local's timeout
         tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
-        log.info(f"python-side on-demand download the layer files into local tenant dir")
+        log.info("python-side on-demand download the layer files into local tenant dir")
         fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
             env, tenant_timelines
         )
@@ -115,17 +114,17 @@ def single_timeline(
         if save_snapshot:
             env.stop(immediate=True, ps_assert_metric_no_errors=True)
             if neon_env_builder.test_overlay_dir is None:
-                log.info(f"take snapshot using shutil.copytree")
+                log.info("take snapshot using shutil.copytree")
                 shutil.copytree(env.repo_dir, snapshot_dir.path)
             else:
-                log.info(f"take snapshot by using overlayfs upperdir")
+                log.info("take snapshot by using overlayfs upperdir")
                 neon_env_builder.overlay_unmount_and_move(
                     "create-snapshot-repo-dir", snapshot_dir.path
                 )
                 log.info("remove empty repo_dir (previously mountpoint) for snapshot overlay_mount")
                 env.repo_dir.rmdir()
                 # TODO from here on, we should be able to reset / goto top where snapshot_dir.is_initialized()
-                log.info(f"make repo_dir an overlayfs mount of the snapshot we just created")
+                log.info("make repo_dir an overlayfs mount of the snapshot we just created")
                 neon_env_builder.overlay_mount(
                     "repo-dir-after-taking-snapshot", snapshot_dir.path, env.repo_dir
                 )
@@ -135,7 +134,7 @@ def single_timeline(
 
     env.start()
 
-    log.info(f"wait for all tenants to become active")
+    log.info("wait for all tenants to become active")
     wait_until_all_tenants_state(
         ps_http, "Active", iterations=ncopies, period=1, http_error_ok=False
     )

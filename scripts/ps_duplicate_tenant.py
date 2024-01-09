@@ -3,15 +3,14 @@
 import argparse
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
-import sys
-
 sys.path.append("test_runner")
 
-from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.types import TenantId
+from fixtures.pageserver.http import PageserverHttpClient  # noqa: E402
+from fixtures.types import TenantId  # noqa: E402
 
 parser = argparse.ArgumentParser(description="Duplicate tenant script.")
 parser.add_argument("initial_tenant", type=str, help="Initial tenant")

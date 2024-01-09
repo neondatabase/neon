@@ -1,20 +1,20 @@
-from pathlib import Path
 import queue
 import shutil
 import subprocess
 import threading
-from typing import Any, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, List, Tuple
+
+from fixtures import work_queue
 from fixtures.neon_fixtures import (
     NeonEnv,
 )
-from fixtures.types import TenantId, TimelineId
-from fixtures.remote_storage import LocalFsStorage
-from fixtures.log_helper import log
 from fixtures.pageserver.types import (
     InvalidFileName,
     parse_layer_file_name,
 )
-from fixtures import work_queue
+from fixtures.remote_storage import LocalFsStorage
+from fixtures.types import TenantId, TimelineId
 
 
 def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: TenantId):
@@ -68,10 +68,10 @@ def duplicate_tenant(env: NeonEnv, template_tenant: TenantId, ncopies: int) -> L
 def local_layer_name_from_remote_name(remote_name: str) -> str:
     try:
         return parse_layer_file_name(remote_name).to_str()
-    except InvalidFileName:
+    except InvalidFileName as e:
         comps = remote_name.rsplit("-", 1)
         if len(comps) == 1:
-            raise InvalidFileName("no generation suffix found")
+            raise InvalidFileName("no generation suffix found") from e
         else:
             assert len(comps) == 2
             layer_file_name, _generation = comps
@@ -94,7 +94,7 @@ def copy_all_remote_layer_files_to_local_tenant_dir(
         downloads = {}
         for remote_layer in remote_timeline_path.glob("*__*"):
             local_name = local_layer_name_from_remote_name(remote_layer.name)
-            assert not local_name in downloads, "remote storage must have had split brain"
+            assert local_name not in downloads, "remote storage must have had split brain"
             downloads[local_name] = remote_layer
         for local_name, remote_path in downloads.items():
             work.put((remote_path, local_timeline_path / local_name))
