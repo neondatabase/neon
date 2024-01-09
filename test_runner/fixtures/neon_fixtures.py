@@ -25,7 +25,6 @@ from urllib.parse import urlparse
 import asyncpg
 import backoff
 import jwt
-import psutil
 import psycopg2
 import pytest
 import requests
@@ -71,7 +70,6 @@ from fixtures.utils import (
     subprocess_capture,
     wait_until,
 )
-from fixtures import overlayfs
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -598,19 +596,33 @@ class NeonEnvBuilder:
         The overlayfs `upperdir` and `workdir` will be placed in test_overlay_dir.
         """
         assert self.test_overlay_dir
-        assert self.test_output_dir in dstdir.parents # so that teardown & test_overlay_dir fixture work
+        assert (
+            self.test_output_dir in dstdir.parents
+        )  # so that teardown & test_overlay_dir fixture work
         assert srcdir.is_dir()
         dstdir.mkdir(exist_ok=False, parents=False)
         ident_state_dir = self.test_overlay_dir / ident
         upper = ident_state_dir / "upper"
         work = ident_state_dir / "work"
-        ident_state_dir.mkdir(exist_ok=False, parents=False) # exists_ok=False also checks uniqueness in self.overlay_mounts
+        ident_state_dir.mkdir(
+            exist_ok=False, parents=False
+        )  # exists_ok=False also checks uniqueness in self.overlay_mounts
         upper.mkdir()
         work.mkdir()
-        cmd = [ "sudo", "mount", "-t", "overlay", "overlay",
-            "-o", f"lowerdir={srcdir},upperdir={upper},workdir={work}", str(dstdir) ]
+        cmd = [
+            "sudo",
+            "mount",
+            "-t",
+            "overlay",
+            "overlay",
+            "-o",
+            f"lowerdir={srcdir},upperdir={upper},workdir={work}",
+            str(dstdir),
+        ]
         log.info(f"Mounting overlayfs srcdir={srcdir} dstdir={dstdir}: {cmd}")
-        subprocess_capture(self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True)
+        subprocess_capture(
+            self.test_output_dir, cmd, check=True, echo_stderr=True, echo_stdout=True
+        )
         self.overlay_mounts_created_by_us.append((ident, dstdir))
 
     def overlay_cleanup_teardown(self):
@@ -3314,8 +3326,10 @@ def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     """
     return _get_test_dir(request, top_output_dir, "overlay-")
 
+
 def get_test_snapshot_dir_path(request: FixtureRequest, top_output_dir: Path) -> Path:
     return _get_test_dir(request, top_output_dir, "snapshot-")
+
 
 def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return get_test_output_dir(request, top_output_dir) / "repo"
@@ -3352,7 +3366,7 @@ def test_output_dir(
 ) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
-    _ = test_overlay_dir # request it so it can do cleanups
+    _ = test_overlay_dir  # request it so it can do cleanups
 
     # one directory per test
     test_dir = get_test_output_dir(request, top_output_dir)
@@ -3363,6 +3377,7 @@ def test_output_dir(
     yield test_dir
 
     allure_attach_from_dir(test_dir)
+
 
 class SnapshotDir:
     _path: Path
@@ -3392,16 +3407,17 @@ class SnapshotDir:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def test_snapshot_dir(request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path) -> SnapshotDir:
+def test_snapshot_dir(
+    request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
+) -> SnapshotDir:
     """Create the working directory for an individual test."""
 
-    _ = test_overlay_dir # overlay mounts use snapshot dir as the lowerdir => request it so it can unmount stale overlay mounts first
+    _ = test_overlay_dir  # overlay mounts use snapshot dir as the lowerdir => request it so it can unmount stale overlay mounts first
 
     # one directory per test
     snapshot_dir = get_test_snapshot_dir_path(request, top_output_dir)
     log.info(f"test_snapshot_dir is {snapshot_dir}")
     return SnapshotDir(snapshot_dir)
-
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -3418,11 +3434,13 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
     overlay_dir.mkdir(exist_ok=True)
     # unmount stale overlayfs mounts which subdirectories of `overlay_dir/*` as the overlayfs `upperdir` and `workdir`
     for mountpoint in overlayfs.iter_mounts_beneath(get_test_output_dir(request, top_output_dir)):
-        cmd = [ "sudo", "umount", str(mountpoint) ]
-        log.info(f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}")
+        cmd = ["sudo", "umount", str(mountpoint)]
+        log.info(
+            f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}"
+        )
         subprocess.run(cmd, capture_output=True, check=True)
     # the overlayfs `workdir`` is owned by `root`
-    cmd = [ "sudo", "rm", "-rf", str(overlay_dir)]
+    cmd = ["sudo", "rm", "-rf", str(overlay_dir)]
     subprocess.run(cmd, capture_output=True, check=True)
 
     overlay_dir.mkdir()

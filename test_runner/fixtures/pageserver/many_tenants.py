@@ -61,7 +61,9 @@ def single_timeline(
 
         log.info("invoking callback to create template tenant")
         template_tenant, template_timeline, template_config = setup_template(env)
-        log.info(f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}")
+        log.info(
+            f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}"
+        )
 
         log.info(f"detach template tenant form pageserver")
         env.pageserver.http_client().tenant_detach(template_tenant)
@@ -90,7 +92,9 @@ def single_timeline(
 
         work_queue.do(22, tenants, attach_broken)
 
-        env.pageserver.stop(immediate=True)  # clears the failpoint as a side-effect; immediate to avoid hitting neon_local's timeout
+        env.pageserver.stop(
+            immediate=True
+        )  # clears the failpoint as a side-effect; immediate to avoid hitting neon_local's timeout
         tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
         log.info(f"python-side on-demand download the layer files into local tenant dir")
         fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
