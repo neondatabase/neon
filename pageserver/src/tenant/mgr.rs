@@ -2217,7 +2217,6 @@ pub(crate) async fn immediate_gc(
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::shard::TenantShardId;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use tracing::{info_span, Instrument};
@@ -2238,7 +2237,7 @@ mod tests {
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
-        let id = TenantShardId::unsharded(t.tenant_id());
+        let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
         let _e = info_span!("testing", tenant_id = %id).entered();

@@ -1235,7 +1235,7 @@ async fn tenant_create_handler(
 
     json_response(
         StatusCode::CREATED,
-        TenantCreateResponse(new_tenant.tenant_id()),
+        TenantCreateResponse(new_tenant.tenant_shard_id().tenant_id),
     )
 }
 

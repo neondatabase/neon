@@ -1516,10 +1516,6 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::Load)
     }
 
-    pub(crate) fn tenant_id(&self) -> TenantId {
-        self.tenant_shard_id.tenant_id
-    }
-
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
         self.tenant_shard_id
     }
