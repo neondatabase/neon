@@ -14,7 +14,7 @@ def test_migrations(neon_simple_env: NeonEnv):
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
-        assert migration_id[0][0] == 1
+        assert migration_id[0][0] == 2
 
     endpoint.stop()
     endpoint.start()
@@ -22,7 +22,7 @@ def test_migrations(neon_simple_env: NeonEnv):
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
-        assert migration_id[0][0] == 1
+        assert migration_id[0][0] == 2
 
     log_path = endpoint.endpoint_path() / "compute.log"
     with open(log_path, "r") as log_file:

@@ -784,6 +784,7 @@ END $$;
     client.simple_query(query)?;
 
     while current_migration < migrations.len() {
+        info!("Running migration:\n{}\n", migrations[current_migration]);
         client.simple_query(migrations[current_migration])?;
         current_migration += 1;
     }
