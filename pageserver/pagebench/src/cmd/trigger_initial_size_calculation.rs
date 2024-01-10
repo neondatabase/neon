@@ -4,6 +4,8 @@ use humantime::Duration;
 use tokio::task::JoinSet;
 use utils::id::TenantTimelineId;
 
+use pageserver_client::mgmt_api::ForceAwaitLogicalSize;
+
 #[derive(clap::Parser)]
 pub(crate) struct Args {
     #[clap(long, default_value = "http://localhost:9898")]
@@ -57,7 +59,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
         let mgmt_api_client = Arc::clone(&mgmt_api_client);
         js.spawn(async move {
             let info = mgmt_api_client
-                .timeline_info(tl.tenant_id, tl.timeline_id, Some(true))
+                .timeline_info(tl.tenant_id, tl.timeline_id, ForceAwaitLogicalSize::Yes)
                 .await
                 .unwrap();
 
@@ -72,7 +74,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 while !info.current_logical_size_is_accurate {
                     ticker.tick().await;
                     info = mgmt_api_client
-                        .timeline_info(tl.tenant_id, tl.timeline_id, Some(true))
+                        .timeline_info(tl.tenant_id, tl.timeline_id, ForceAwaitLogicalSize::Yes)
                         .await
                         .unwrap();
                 }

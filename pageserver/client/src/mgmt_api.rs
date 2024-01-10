@@ -51,6 +51,11 @@ impl ResponseErrorMessageExt for reqwest::Response {
     }
 }
 
+pub enum ForceAwaitLogicalSize {
+    Yes,
+    No,
+}
+
 impl Client {
     pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
         Self {
@@ -94,7 +99,7 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        force_await_logical_size: Option<bool>,
+        force_await_logical_size: ForceAwaitLogicalSize,
     ) -> Result<pageserver_api::models::TimelineInfo> {
         let uri = format!(
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
@@ -102,8 +107,8 @@ impl Client {
         );
 
         let uri = match force_await_logical_size {
-            Some(force) => format!("{}?force-await-logical-size={}", uri, force),
-            None => uri,
+            ForceAwaitLogicalSize::Yes => format!("{}?force-await-logical-size={}", uri, true),
+            ForceAwaitLogicalSize::No => uri,
         };
 
         self.get(&uri)
