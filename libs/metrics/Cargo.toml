@@ -9,6 +9,6 @@ prometheus.workspace = true
 libc.workspace = true
 once_cell.workspace = true
 chrono.workspace = true
-rustc-hash.workspace = true
+twox-hash = "1.6.3"
 
 workspace_hack.workspace = true
