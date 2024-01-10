@@ -7,9 +7,13 @@ use pageserver_api::{
 };
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
-use postgres_connection::parse_host_port;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+use tokio::process::Command;
 use tracing::instrument;
 use utils::{
     auth::{Claims, Scope},
@@ -22,10 +26,13 @@ pub struct AttachmentService {
     path: PathBuf,
     jwt_token: Option<String>,
     public_key_path: Option<Utf8PathBuf>,
+    postgres_port: u16,
     client: reqwest::Client,
 }
 
 const COMMAND: &str = "attachment_service";
+
+const ATTACHMENT_SERVICE_POSTGRES_VERSION: u32 = 16;
 
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
@@ -181,6 +188,13 @@ impl AttachmentService {
             listen_url.port().unwrap()
         );
 
+        // Convention: NeonEnv in python tests reserves the next port after the control_plane_api
+        // port, for use by our captive postgres.
+        let postgres_port = listen_url
+            .port()
+            .expect("Control plane API setting should always have a port")
+            + 1;
+
         // Assume all pageservers have symmetric auth configuration: this service
         // expects to use one JWT token to talk to all of them.
         let ps_conf = env
@@ -209,6 +223,7 @@ impl AttachmentService {
             listen,
             jwt_token,
             public_key_path,
+            postgres_port,
             client: reqwest::ClientBuilder::new()
                 .build()
                 .expect("Failed to construct http client"),
@@ -220,7 +235,113 @@ impl AttachmentService {
             .expect("non-Unicode path")
     }
 
+    /// PIDFile for the postgres instance used to store attachment service state
+    fn postgres_pid_file(&self) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(
+            self.env
+                .base_data_dir
+                .join("attachment_service_postgres.pid"),
+        )
+        .expect("non-Unicode path")
+    }
+
+    /// Find the directory containing postgres binaries, such as `initdb` and `pg_ctl`
+    ///
+    /// This usually uses ATTACHMENT_SERVICE_POSTGRES_VERSION of postgres, but will fall back
+    /// to other versions if that one isn't found.  Some automated tests create circumstances
+    /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
+    pub async fn get_pg_bin_path(&self) -> anyhow::Result<PathBuf> {
+        let prefer_versions = vec![ATTACHMENT_SERVICE_POSTGRES_VERSION, 15, 14];
+
+        for v in prefer_versions {
+            let path = self.env.pg_bin_dir(v)?;
+            if tokio::fs::try_exists(&path).await? {
+                return Ok(path);
+            }
+        }
+
+        // Fall through
+        anyhow::bail!(
+            "Postgres binaries not found in {}",
+            self.env.pg_distrib_dir.display()
+        );
+    }
+
+    /// Readiness check for our postgres process
+    async fn pg_isready(&self, pg_bin_path: &Path) -> anyhow::Result<bool> {
+        let bin_path = pg_bin_path.join("pg_isready");
+        let args = ["-h", "localhost", "-p", &format!("{}", self.postgres_port)];
+        let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
+
+        Ok(exitcode.success())
+    }
+
     pub async fn start(&self) -> anyhow::Result<()> {
+        // Start a vanilla Postgres process used by the attachment service for persistence.
+        let pg_data_path = self.env.base_data_dir.join("attachment_service_db");
+        let pg_bin_path = self.get_pg_bin_path().await?;
+        let pg_log_path = pg_data_path.join("postgres.log");
+
+        if !tokio::fs::try_exists(&pg_data_path).await? {
+            // Initialize empty database
+            let initdb_path = pg_bin_path.join("initdb");
+            let mut child = Command::new(&initdb_path)
+                .args(["-D", &pg_data_path.to_string_lossy()])
+                .spawn()
+                .expect("Failed to spawn initdb");
+            let status = child.wait().await?;
+            if !status.success() {
+                anyhow::bail!("initdb failed with status {status}");
+            }
+
+            tokio::fs::write(
+                &pg_data_path.join("postgresql.conf"),
+                format!("port = {}", self.postgres_port),
+            )
+            .await?;
+        };
+
+        println!("Starting attachment service database...");
+        let db_start_args = [
+            "-w",
+            "-D",
+            &pg_data_path.to_string_lossy(),
+            "-l",
+            &pg_log_path.to_string_lossy(),
+            "start",
+        ];
+
+        background_process::start_process(
+            "attachment_service_db",
+            &self.env.base_data_dir,
+            &pg_bin_path.join("pg_ctl"),
+            db_start_args,
+            [],
+            background_process::InitialPidFile::Create(self.postgres_pid_file()),
+            || self.pg_isready(&pg_bin_path),
+        )
+        .await?;
+
+        // Run migrations on every startup, in case something changed.
+        // TODO: document/automate for dev environments that they will need diesel CLI
+        let database_url = format!(
+            "postgresql://localhost:{}/attachment_service",
+            self.postgres_port
+        );
+        println!("Running attachment service database setup...");
+        let mut child = Command::new("diesel")
+            // The setup command creates the database if it doesn't exist, and runs migrations
+            .args(["setup"])
+            .env("DATABASE_URL", &database_url)
+            .spawn()
+            .expect("Failed to spawn diesel migration run");
+        let status = child.wait().await?;
+        if !status.success() {
+            anyhow::bail!("diesel migration run failed with status {status}");
+        } else {
+            println!("Ran attachment service migrations")
+        }
+
         let path_str = self.path.to_string_lossy();
 
         let mut args = vec!["-l", &self.listen, "-p", &path_str]
@@ -235,15 +356,18 @@ impl AttachmentService {
             args.push(format!("--public-key={public_key_path}"));
         }
 
-        let result = background_process::start_process(
+        background_process::start_process(
             COMMAND,
             &self.env.base_data_dir,
             &self.env.attachment_service_bin(),
             args,
-            [(
-                "NEON_REPO_DIR".to_string(),
-                self.env.base_data_dir.to_string_lossy().to_string(),
-            )],
+            [
+                (
+                    "NEON_REPO_DIR".to_string(),
+                    self.env.base_data_dir.to_string_lossy().to_string(),
+                ),
+                ("DATABASE_URL".to_string(), database_url),
+            ],
             background_process::InitialPidFile::Create(self.pid_file()),
             || async {
                 match self.status().await {
@@ -252,14 +376,45 @@ impl AttachmentService {
                 }
             },
         )
-        .await;
+        .await?;
 
-        result
+        Ok(())
     }
 
-    pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
-        background_process::stop_process(immediate, COMMAND, &self.pid_file())
+    pub async fn stop(&self, immediate: bool) -> anyhow::Result<()> {
+        background_process::stop_process(immediate, COMMAND, &self.pid_file())?;
+
+        let pg_data_path = self.env.base_data_dir.join("attachment_service_db");
+        let pg_bin_path = self.get_pg_bin_path().await?;
+
+        println!("Stopping attachment service database...");
+        let pg_stop_args = ["-D", &pg_data_path.to_string_lossy(), "stop"];
+        let stop_status = Command::new(pg_bin_path.join("pg_ctl"))
+            .args(pg_stop_args)
+            .spawn()?
+            .wait()
+            .await?;
+        if !stop_status.success() {
+            let pg_status_args = ["-D", &pg_data_path.to_string_lossy(), "status"];
+            let status_exitcode = Command::new(pg_bin_path.join("pg_ctl"))
+                .args(pg_status_args)
+                .spawn()?
+                .wait()
+                .await?;
+
+            // pg_ctl status returns the magic number 3 if postgres is not running: in this case it is
+            // fine that stop failed.  Otherwise it is an error that stop failed.
+            if Some(3) == status_exitcode.code() {
+                println!("Attachment service data base is already stopped");
+                return Ok(());
+            } else {
+                anyhow::bail!("Failed to stop attachment service database: {stop_status}")
+            }
+        }
+
+        Ok(())
     }
+
     /// Simple HTTP request wrapper for calling into attachment service
     async fn dispatch<RQ, RS>(
         &self,

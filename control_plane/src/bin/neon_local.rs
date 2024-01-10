@@ -135,7 +135,7 @@ fn main() -> Result<()> {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
             "start" => rt.block_on(handle_start_all(sub_args, &env)),
-            "stop" => handle_stop_all(sub_args, &env),
+            "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "attachment_service" => rt.block_on(handle_attachment_service(sub_args, &env)),
             "safekeeper" => rt.block_on(handle_safekeeper(sub_args, &env)),
@@ -1144,7 +1144,7 @@ async fn handle_attachment_service(
                 .map(|s| s.as_str())
                 == Some("immediate");
 
-            if let Err(e) = svc.stop(immediate) {
+            if let Err(e) = svc.stop(immediate).await {
                 eprintln!("stop failed: {}", e);
                 exit(1);
             }
@@ -1240,7 +1240,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
         let attachment_service = AttachmentService::from_env(env);
         if let Err(e) = attachment_service.start().await {
             eprintln!("attachment_service start failed: {:#}", e);
-            try_stop_all(env, true);
+            try_stop_all(env, true).await;
             exit(1);
         }
     }
@@ -1252,7 +1252,7 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
             .await
         {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
-            try_stop_all(env, true);
+            try_stop_all(env, true).await;
             exit(1);
         }
     }
@@ -1261,23 +1261,23 @@ async fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> 
         let safekeeper = SafekeeperNode::from_env(env, node);
         if let Err(e) = safekeeper.start(vec![]).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
-            try_stop_all(env, false);
+            try_stop_all(env, false).await;
             exit(1);
         }
     }
     Ok(())
 }
 
-fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+async fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     let immediate =
         sub_match.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
-    try_stop_all(env, immediate);
+    try_stop_all(env, immediate).await;
 
     Ok(())
 }
 
-fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
+async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     // Stop all endpoints
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
@@ -1312,7 +1312,7 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 
     if env.control_plane_api.is_some() {
         let attachment_service = AttachmentService::from_env(env);
-        if let Err(e) = attachment_service.stop(immediate) {
+        if let Err(e) = attachment_service.stop(immediate).await {
             eprintln!("attachment service stop failed: {e:#}");
         }
     }
