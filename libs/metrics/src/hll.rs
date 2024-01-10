@@ -58,11 +58,12 @@ macro_rules! register_hll {
 ///         )
 ///     ) without (hll_list)
 /// )
-/// # See https://en.wikipedia.org/wiki/HyperLogLog#Practical_considerations for estimates on alpha
 /// * alpha
 /// * shards_count
 /// * shards_count
 /// ```
+///
+/// See <https://en.wikipedia.org/wiki/HyperLogLog#Practical_considerations> for estimates on alpha
 #[derive(Clone)]
 pub struct HyperLogLogVec<const N: usize> {
     core: Arc<HyperLogLogVecCore<N>>,
@@ -113,9 +114,9 @@ impl<const N: usize> HyperLogLogVec<N> {
         Ok(Self { core: Arc::new(v) })
     }
 
-    /// `get_metric_with_label_values` returns the [`GenericCounterPair<P>`] for the given slice
+    /// `get_metric_with_label_values` returns the [`HyperLogLog<P>`] for the given slice
     /// of label values (same order as the VariableLabels in Desc). If that combination of
-    /// label values is accessed for the first time, a new [`GenericCounterPair<P>`] is created.
+    /// label values is accessed for the first time, a new [`HyperLogLog<P>`] is created.
     ///
     /// An error is returned if the number of label values is not the same as the
     /// number of VariableLabels in Desc.
@@ -134,12 +135,6 @@ impl<const N: usize> HyperLogLogVec<N> {
 }
 
 impl<const N: usize> HyperLogLogVecCore<N> {
-    /// `get_metric_with_label_values` returns the [`GenericCounterPair<P>`] for the given slice
-    /// of label values (same order as the VariableLabels in Desc). If that combination of
-    /// label values is accessed for the first time, a new [`GenericCounterPair<P>`] is created.
-    ///
-    /// An error is returned if the number of label values is not the same as the
-    /// number of VariableLabels in Desc.
     pub fn get_metric_with_label_values(
         &self,
         vals: &[&str],
@@ -200,11 +195,12 @@ impl<const N: usize> HyperLogLogVecCore<N> {
 ///         )
 ///     )
 /// )
-/// # See https://en.wikipedia.org/wiki/HyperLogLog#Practical_considerations for estimates on alpha
 /// * alpha
 /// * shards_count
 /// * shards_count
 /// ```
+///
+/// See <https://en.wikipedia.org/wiki/HyperLogLog#Practical_considerations> for estimates on alpha
 #[derive(Clone)]
 pub struct HyperLogLog<const N: usize> {
     core: Arc<HyperLogLogCore<N>>,
