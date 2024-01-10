@@ -46,7 +46,7 @@ macro_rules! register_hll {
 
 /// HLL is a probabilistic cardinality measure.
 ///
-/// How to use this time-series for a metric name `my_metrics_total_hll`.
+/// How to use this time-series for a metric name `my_metrics_total_hll`:
 ///
 /// ```promql
 /// # harmonic mean
@@ -54,13 +54,42 @@ macro_rules! register_hll {
 ///     sum (
 ///         2 ^ -(
 ///             # HLL merge operation
-///             max (my_metrics_total_hll{}) by (hll_list, other_labels...)
+///             max (my_metrics_total_hll{}) by (hll_shard, other_labels...)
 ///         )
-///     ) without (hll_list)
+///     ) without (hll_shard)
 /// )
 /// * alpha
 /// * shards_count
 /// * shards_count
+/// ```
+///
+/// If you want an estimate over time, you can use the following query:
+///
+/// ```promql
+/// # harmonic mean
+/// 1 / (
+///     sum (
+///         2 ^ -(
+///             # HLL merge operation
+///             max (
+///                 max_over_time(my_metrics_total_hll{}[$__rate_interval])
+///             ) by (hll_shard, other_labels...)
+///         )
+///     ) without (hll_shard)
+/// )
+/// * alpha
+/// * shards_count
+/// * shards_count
+/// ```
+///
+/// In the case of low cardinality, you might want to use the linear counting approximation:
+///
+/// ```promql
+/// # LinearCounting(m, V) = m log (m / V)
+/// shards_count * ln(shards_count /
+///     # calculate V = how many shards contain a 0
+///     count(max (proxy_connecting_endpoints{}) by (hll_shard, protocol) == 0) without (hll_shard)
+/// )
 /// ```
 ///
 /// See <https://en.wikipedia.org/wiki/HyperLogLog#Practical_considerations> for estimates on alpha
@@ -183,7 +212,7 @@ impl<const N: usize> HyperLogLogVecCore<N> {
 
 /// HLL is a probabilistic cardinality measure.
 ///
-/// How to use this time-series for a metric name `my_metrics_total_hll`.
+/// How to use this time-series for a metric name `my_metrics_total_hll`:
 ///
 /// ```promql
 /// # harmonic mean
@@ -191,13 +220,42 @@ impl<const N: usize> HyperLogLogVecCore<N> {
 ///     sum (
 ///         2 ^ -(
 ///             # HLL merge operation
-///             max (my_metrics_total_hll{}) by (hll_list)
+///             max (my_metrics_total_hll{}) by (hll_shard, other_labels...)
 ///         )
-///     )
+///     ) without (hll_shard)
 /// )
 /// * alpha
 /// * shards_count
 /// * shards_count
+/// ```
+///
+/// If you want an estimate over time, you can use the following query:
+///
+/// ```promql
+/// # harmonic mean
+/// 1 / (
+///     sum (
+///         2 ^ -(
+///             # HLL merge operation
+///             max (
+///                 max_over_time(my_metrics_total_hll{}[$__rate_interval])
+///             ) by (hll_shard, other_labels...)
+///         )
+///     ) without (hll_shard)
+/// )
+/// * alpha
+/// * shards_count
+/// * shards_count
+/// ```
+///
+/// In the case of low cardinality, you might want to use the linear counting approximation:
+///
+/// ```promql
+/// # LinearCounting(m, V) = m log (m / V)
+/// shards_count * ln(shards_count /
+///     # calculate V = how many shards contain a 0
+///     count(max (proxy_connecting_endpoints{}) by (hll_shard, protocol) == 0) without (hll_shard)
+/// )
 /// ```
 ///
 /// See <https://en.wikipedia.org/wiki/HyperLogLog#Practical_considerations> for estimates on alpha
