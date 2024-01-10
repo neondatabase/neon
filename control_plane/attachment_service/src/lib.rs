@@ -7,6 +7,7 @@ mod node;
 pub mod persistence;
 mod reconciler;
 mod scheduler;
+mod schema;
 pub mod service;
 mod tenant_state;
 

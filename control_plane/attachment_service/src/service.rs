@@ -35,7 +35,7 @@ use utils::{
 use crate::{
     compute_hook::ComputeHook,
     node::Node,
-    persistence::{Persistence, TenantShardPersistence},
+    persistence::{DatabaseError, Persistence, TenantShardPersistence},
     scheduler::Scheduler,
     tenant_state::{
         IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
@@ -77,6 +77,19 @@ pub struct Config {
     // All pageservers managed by one instance of this service must have
     // the same public key.
     pub jwt_token: Option<String>,
+}
+
+impl From<DatabaseError> for ApiError {
+    fn from(err: DatabaseError) -> ApiError {
+        match err {
+            DatabaseError::Query(e) => ApiError::InternalServerError(e.into()),
+            // FIXME: ApiError doesn't have an Unavailable variant, but ShuttingDown maps to 503.
+            DatabaseError::Connection(_e) => ApiError::ShuttingDown,
+            DatabaseError::Logical(reason) => {
+                ApiError::InternalServerError(anyhow::anyhow!(reason))
+            }
+        }
+    }
 }
 
 pub struct Service {
@@ -134,7 +147,7 @@ impl Service {
                 // Note that we load generation, but don't care about generation_pageserver.  We will either end up finding
                 // our existing attached location and it will match generation_pageserver, or we will attach somewhere new
                 // and update generation_pageserver in the process.
-                generation: Generation::new(tsp.generation),
+                generation: Generation::new(tsp.generation as u32),
                 policy: serde_json::from_str(&tsp.placement_policy).unwrap(),
                 intent: IntentState::new(),
                 observed: ObservedState::new(),
@@ -344,7 +357,7 @@ impl Service {
                 shard_count: attach_req.tenant_shard_id.shard_count.0 as i32,
                 shard_stripe_size: 0,
                 generation: 0,
-                generation_pageserver: None,
+                generation_pageserver: i64::MAX,
                 placement_policy: serde_json::to_string(&PlacementPolicy::default()).unwrap(),
                 config: serde_json::to_string(&TenantConfig::default()).unwrap(),
             };
@@ -561,7 +574,7 @@ impl Service {
                 shard_count: tenant_shard_id.shard_count.0 as i32,
                 shard_stripe_size: create_req.shard_parameters.stripe_size.0 as i32,
                 generation: 0,
-                generation_pageserver: None,
+                generation_pageserver: i64::MAX,
                 placement_policy: serde_json::to_string(&placement_policy).unwrap(),
                 config: serde_json::to_string(&create_req.config).unwrap(),
             })
@@ -967,10 +980,7 @@ impl Service {
             availability: NodeAvailability::Active,
         };
         // TODO: idempotency if the node already exists in the database
-        self.persistence
-            .insert_node(&new_node)
-            .await
-            .map_err(ApiError::InternalServerError)?;
+        self.persistence.insert_node(&new_node).await?;
 
         let mut locked = self.inner.write().unwrap();
         let mut new_nodes = (*locked.nodes).clone();

@@ -10,6 +10,8 @@ async-trait.workspace = true
 camino.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+diesel = { version = "2.1.4", features = ["postgres"]}
+diesel_migrations = { version = "2.1.0", features = ["postgres"]}
 futures.workspace = true
 git-version.workspace = true
 nix.workspace = true

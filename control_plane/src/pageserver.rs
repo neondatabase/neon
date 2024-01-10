@@ -30,7 +30,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::attachment_service::{self, AttachmentService, NodeRegisterRequest};
+use crate::attachment_service::{AttachmentService, NodeRegisterRequest};
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 

@@ -66,7 +66,12 @@ async fn main() -> anyhow::Result<()> {
         jwt_token: args.jwt_token,
     };
 
-    let persistence = Arc::new(Persistence::new(&args.path).await);
+    let json_path = if args.path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(args.path)
+    };
+    let persistence = Arc::new(Persistence::new(json_path));
 
     let service = Service::spawn(config, persistence).await?;
 
