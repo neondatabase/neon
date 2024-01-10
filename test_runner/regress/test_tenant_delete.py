@@ -573,6 +573,11 @@ def test_tenant_delete_races_timeline_creation(
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
 
+    # Sometimes it ends with "InternalServerError(Cancelled", sometimes with "InternalServerError(Operation was cancelled"
+    CANCELLED_ERROR = (
+        ".*POST.*Cancelled request finished with an error: InternalServerError\\(.*ancelled"
+    )
+
     env.pageserver.allowed_errors.extend(
         [
             # lucky race with stopping from flushing a layer we fail to schedule any uploads
@@ -580,7 +585,7 @@ def test_tenant_delete_races_timeline_creation(
             # We need the http connection close for successful reproduction
             ".*POST.*/timeline.* request was dropped before completing",
             # Timeline creation runs into this error
-            ".*POST.*Cancelled request finished with an error: InternalServerError\\(Cancelled",
+            CANCELLED_ERROR,
         ]
     )
 
@@ -650,9 +655,7 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     # Ensure that creation cancelled and deletion didn't end up in broken state or encountered the leftover temp file
-    assert env.pageserver.log_contains(
-        ".*POST.*Cancelled request finished with an error: InternalServerError\\(Cancelled"
-    )
+    assert env.pageserver.log_contains(CANCELLED_ERROR)
     assert not env.pageserver.log_contains(
         ".*ERROR.*delete_tenant.*Timelines directory is not empty after all timelines deletion"
     )
