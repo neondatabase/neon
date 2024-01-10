@@ -287,9 +287,9 @@ impl<const N: usize> HyperLogLogCore<N> {
             let v = x.swap(0, std::sync::atomic::Ordering::Relaxed);
 
             let mut m = proto::Metric::default();
-            let mut c = proto::Counter::default();
+            let mut c = proto::Gauge::default();
             c.set_value(v as f64);
-            m.set_counter(c);
+            m.set_gauge(c);
 
             let mut labels = Vec::with_capacity(self.labels.len() + 1);
             labels.extend_from_slice(&self.labels);
