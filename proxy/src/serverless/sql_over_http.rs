@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -14,6 +13,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
@@ -29,6 +29,7 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::config::HttpConfig;
+use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
 
 use super::conn_pool::ConnInfo;
@@ -121,6 +122,7 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 }
 
 fn get_conn_info(
+    ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
 ) -> Result<ConnInfo, anyhow::Error> {
@@ -146,10 +148,11 @@ fn get_conn_info(
         .next()
         .ok_or(anyhow::anyhow!("invalid database name"))?;
 
-    let username = connection_url.username();
+    let username = SmolStr::from(connection_url.username());
     if username.is_empty() {
         return Err(anyhow::anyhow!("missing username"));
     }
+    ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
@@ -176,6 +179,9 @@ fn get_conn_info(
         }
     }
 
+    let hostname: SmolStr = hostname.into();
+    ctx.set_endpoint_id(Some(hostname.clone()));
+
     let pairs = connection_url.query_pairs();
 
     let mut options = Option::None;
@@ -188,9 +194,9 @@ fn get_conn_info(
     }
 
     Ok(ConnInfo {
-        username: username.into(),
+        username,
         dbname: dbname.into(),
-        hostname: hostname.into(),
+        hostname,
         password: password.into(),
         options,
     })
@@ -198,23 +204,15 @@ fn get_conn_info(
 
 // TODO: return different http error codes
 pub async fn handle(
+    config: &'static HttpConfig,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
-    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.request_timeout,
-        handle_inner(
-            config,
-            request,
-            sni_hostname,
-            conn_pool,
-            session_id,
-            peer_addr,
-        ),
+        handle_inner(config, ctx, request, sni_hostname, conn_pool),
     )
     .await;
     let mut response = match result {
@@ -297,11 +295,10 @@ pub async fn handle(
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
     config: &'static HttpConfig,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
@@ -311,7 +308,7 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(headers, sni_hostname)?;
+    let conn_info = get_conn_info(ctx, headers, sni_hostname)?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -340,10 +337,12 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
+    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
+    drop(paused);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -359,9 +358,7 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool
-        .get(conn_info, !allow_pool, session_id, peer_addr)
-        .await?;
+    let mut client = conn_pool.get(ctx, conn_info, !allow_pool).await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -449,6 +446,7 @@ async fn handle_inner(
             }
         };
 
+    ctx.log();
     let metrics = client.metrics();
 
     // how could this possibly fail

@@ -15,6 +15,7 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -37,6 +38,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::UpsertLocationError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
@@ -46,7 +48,8 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
+use crate::tenant::SpawnMode;
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
@@ -112,14 +115,6 @@ impl State {
             secondary_controller,
         })
     }
-
-    fn tenant_resources(&self) -> TenantSharedResources {
-        TenantSharedResources {
-            broker_client: self.broker_client.clone(),
-            remote_storage: self.remote_storage.clone(),
-            deletion_queue_client: self.deletion_queue_client.clone(),
-        }
-    }
 }
 
 #[inline(always)]
@@ -175,7 +170,7 @@ impl From<TenantSlotError> for ApiError {
             NotFound(tenant_id) => {
                 ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
-            e @ (AlreadyExists(_, _) | Conflict(_)) => ApiError::Conflict(format!("{e}")),
+            e @ AlreadyExists(_, _) => ApiError::Conflict(format!("{e}")),
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
             }
@@ -190,6 +185,18 @@ impl From<TenantSlotUpsertError> for ApiError {
         match e {
             InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<UpsertLocationError> for ApiError {
+    fn from(e: UpsertLocationError) -> ApiError {
+        use UpsertLocationError::*;
+        match e {
+            BadRequest(e) => ApiError::BadRequest(e),
+            Unavailable(_) => ApiError::ShuttingDown,
+            e @ InProgress => ApiError::Conflict(format!("{e}")),
+            Flush(e) | Other(e) => ApiError::InternalServerError(e),
         }
     }
 }
@@ -680,16 +687,37 @@ async fn tenant_attach_handler(
         )));
     }
 
-    mgr::attach_tenant(
-        state.conf,
-        tenant_id,
-        generation,
-        tenant_conf,
-        state.tenant_resources(),
-        &ctx,
-    )
-    .instrument(info_span!("tenant_attach", %tenant_id))
-    .await?;
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let tenant = state
+        .tenant_manager
+        .upsert_location(
+            tenant_shard_id,
+            location_conf,
+            None,
+            SpawnMode::Normal,
+            &ctx,
+        )
+        .await?;
+
+    let Some(tenant) = tenant else {
+        // This should never happen: indicates a bug in upsert_location
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Upsert succeeded but didn't return tenant!"
+        )));
+    };
+
+    // We might have successfully constructed a Tenant, but it could still
+    // end up in a broken state:
+    if let TenantState::Broken {
+        reason,
+        backtrace: _,
+    } = tenant.current_state()
+    {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Tenant state is Broken: {reason}"
+        )));
+    }
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -1148,16 +1176,25 @@ async fn tenant_create_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let new_tenant = mgr::create_tenant(
-        state.conf,
-        tenant_conf,
-        target_tenant_id,
-        generation,
-        state.tenant_resources(),
-        &ctx,
-    )
-    .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
-    .await?;
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+
+    let new_tenant = state
+        .tenant_manager
+        .upsert_location(
+            target_tenant_id,
+            location_conf,
+            None,
+            SpawnMode::Create,
+            &ctx,
+        )
+        .await?;
+
+    let Some(new_tenant) = new_tenant else {
+        // This should never happen: indicates a bug in upsert_location
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Upsert succeeded but didn't return tenant!"
+        )));
+    };
 
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
@@ -1166,7 +1203,7 @@ async fn tenant_create_handler(
         .await
     {
         // This shouldn't happen because we just created the tenant directory
-        // in tenant::mgr::create_tenant, and there aren't any remote timelines
+        // in upsert_location, and there aren't any remote timelines
         // to load, so, nothing can really fail during load.
         // Don't do cleanup because we don't know how we got here.
         // The tenant will likely be in `Broken` state and subsequent
@@ -1267,12 +1304,14 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, flush, &ctx)
-        .await
-        // TODO: badrequest assumes the caller was asking for something unreasonable, but in
-        // principle we might have hit something like concurrent API calls to the same tenant,
-        // which is not a 400 but a 409.
-        .map_err(ApiError::BadRequest)?;
+        .upsert_location(
+            tenant_shard_id,
+            location_conf,
+            flush,
+            tenant::SpawnMode::Normal,
+            &ctx,
+        )
+        .await?;
 
     if let Some(_flush_ms) = flush {
         match state

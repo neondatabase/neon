@@ -3,6 +3,7 @@ use futures::future::join_all;
 use pageserver::pgdatadir_mapping::key_to_rel_block;
 use pageserver::repository;
 use pageserver_api::key::is_rel_block_key;
+use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::PagestreamGetPageRequest;
 
 use utils::id::TenantTimelineId;
@@ -116,38 +117,42 @@ async fn main_impl(
                     .keyspace(timeline.tenant_id, timeline.timeline_id)
                     .await?;
                 let lsn = partitioning.at_lsn;
-
-                let ranges = partitioning
-                    .keys
-                    .ranges
-                    .iter()
-                    .filter_map(|r| {
-                        let start = r.start;
-                        let end = r.end;
-                        // filter out non-relblock keys
-                        match (is_rel_block_key(&start), is_rel_block_key(&end)) {
-                            (true, true) => Some(KeyRange {
-                                timeline,
-                                timeline_lsn: lsn,
-                                start: start.to_i128(),
-                                end: end.to_i128(),
-                            }),
-                            (true, false) | (false, true) => {
-                                unimplemented!("split up range")
-                            }
-                            (false, false) => None,
+                let start = Instant::now();
+                let mut filtered = KeySpaceAccum::new();
+                // let's hope this is inlined and vectorized...
+                // TODO: turn this loop into a is_rel_block_range() function.
+                for r in partitioning.keys.ranges.iter() {
+                    let mut i = r.start;
+                    while i != r.end {
+                        if is_rel_block_key(&i) {
+                            filtered.add_key(i);
                         }
-                    })
-                    .collect::<Vec<_>>();
+                        i = i.next();
+                    }
+                }
+                let filtered = filtered.to_keyspace();
+                let filter_duration = start.elapsed();
 
-                anyhow::Ok(ranges)
+                anyhow::Ok((
+                    filter_duration,
+                    filtered.ranges.into_iter().map(move |r| KeyRange {
+                        timeline,
+                        timeline_lsn: lsn,
+                        start: r.start.to_i128(),
+                        end: r.end.to_i128(),
+                    }),
+                ))
             }
         });
     }
+    let mut total_filter_duration = Duration::from_secs(0);
     let mut all_ranges: Vec<KeyRange> = Vec::new();
     while let Some(res) = js.join_next().await {
-        all_ranges.extend(res.unwrap().unwrap());
+        let (filter_duration, range) = res.unwrap().unwrap();
+        all_ranges.extend(range);
+        total_filter_duration += filter_duration;
     }
+    info!("filter duration: {}", total_filter_duration.as_secs_f64());
 
     let live_stats = Arc::new(LiveStats::default());
 
@@ -256,6 +261,7 @@ async fn main_impl(
                             let r = &ranges[weights.sample(&mut rng)];
                             let key: i128 = rng.gen_range(r.start..r.end);
                             let key = repository::Key::from_i128(key);
+                            assert!(is_rel_block_key(&key));
                             let (rel_tag, block_no) = key_to_rel_block(key)
                                 .expect("we filter non-rel-block keys out above");
                             PagestreamGetPageRequest {

@@ -115,11 +115,12 @@ pub static ALLOWED_IPS_NUMBER: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
+#[derive(Clone)]
 pub struct LatencyTimer {
     // time since the stopwatch was started
     start: Option<time::Instant>,
     // accumulated time on the stopwatch
-    accumulated: std::time::Duration,
+    pub accumulated: std::time::Duration,
     // label data
     protocol: &'static str,
     cache_miss: bool,
@@ -160,7 +161,12 @@ impl LatencyTimer {
         self.pool_miss = false;
     }
 
-    pub fn success(mut self) {
+    pub fn success(&mut self) {
+        // stop the stopwatch and record the time that we have accumulated
+        let start = self.start.take().expect("latency timer should be started");
+        self.accumulated += start.elapsed();
+
+        // success
         self.outcome = "success";
     }
 }

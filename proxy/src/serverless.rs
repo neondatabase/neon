@@ -17,6 +17,7 @@ pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
+use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -218,13 +219,14 @@ async fn request_handler(
 
         ws_connections.spawn(
             async move {
+                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+
                 if let Err(e) = websocket::serve_websocket(
-                    websocket,
                     config,
+                    &mut ctx,
+                    websocket,
                     &cancel_map,
-                    session_id,
                     host,
-                    peer_addr,
                     endpoint_rate_limiter,
                 )
                 .await
@@ -238,13 +240,14 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response)
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
+        let mut ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
+
         sql_over_http::handle(
+            &config.http_config,
+            &mut ctx,
             request,
             sni_hostname,
             conn_pool,
-            session_id,
-            peer_addr,
-            &config.http_config,
         )
         .await
     } else if request.uri().path() == "/sql" && request.method() == Method::OPTIONS {
