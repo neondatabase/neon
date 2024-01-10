@@ -31,6 +31,7 @@ use utils::measured_stream::MeasuredReader;
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
@@ -279,7 +280,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             $$;"#,
         roles_decl, database_decl,
     );
-    info!("Neon superuser created:\n{}", &query);
+    info!("Neon superuser created:\n{}", inlinify(&query));
     client
         .simple_query(&query)
         .map_err(|e| anyhow::anyhow!(e).context(query))?;
