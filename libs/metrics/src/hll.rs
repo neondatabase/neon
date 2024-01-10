@@ -18,7 +18,6 @@ use prometheus::{
 };
 use rustc_hash::FxHasher;
 
-
 /// Create an [`HyperLogLogVec`] and registers to default registry.
 #[macro_export(local_inner_macros)]
 macro_rules! register_hll_vec {

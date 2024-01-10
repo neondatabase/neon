@@ -28,8 +28,8 @@ use prometheus::{Registry, Result};
 pub mod launch_timestamp;
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
-pub mod metric_vec_duration;
 mod hll;
+pub mod metric_vec_duration;
 pub use hll::{HyperLogLog, HyperLogLogVec};
 
 pub type UIntGauge = GenericGauge<AtomicU64>;
