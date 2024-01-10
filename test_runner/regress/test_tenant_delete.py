@@ -2,6 +2,7 @@ import concurrent.futures
 import enum
 import os
 import shutil
+import time
 from threading import Thread
 
 import pytest
@@ -554,6 +555,7 @@ def test_tenant_delete_concurrent(
     # Zero tenants remain (we deleted the default tenant)
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
 
+
 def test_tenant_delete_races_timeline_creation(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
@@ -576,19 +578,20 @@ def test_tenant_delete_races_timeline_creation(
         [
             # lucky race with stopping from flushing a layer we fail to schedule any uploads
             ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
+            "POST.*/timeline.* request was dropped before completing",
             # Errors logged from our 4xx requests
             f".*{CONFLICT_MESSAGE}.*",
         ]
     )
 
-    BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-runs"
-    DELETE_BEFORE_MAP_REMOVE_FAILPOINT = "tenant-delete-before-map-remove"
+    BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-tar-creation"
+    DELETE_BEFORE_MAP_REMOVE_FAILPOINT = "tenant-delete-before-cleanup-remaining-fs-traces-pausable"
 
     # Wait just before the initdb upload
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
 
     def timeline_create():
-        ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate())
+        ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
 
     Thread(target=timeline_create).start()
 
@@ -596,6 +599,12 @@ def test_tenant_delete_races_timeline_creation(
         assert env.pageserver.log_contains(f"at failpoint {BEFORE_INITDB_UPLOAD_FAILPOINT}")
 
     wait_until(100, 0.1, hit_initdb_upload_failpoint)
+
+    # Wait so that we hit the timeout
+    def dropped_before_completing():
+        assert env.pageserver.log_contains("POST.*/timeline.* request was dropped before completing")
+
+    wait_until(100, 0.1, dropped_before_completing)
 
     ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "pause"))
 
@@ -606,13 +615,16 @@ def test_tenant_delete_races_timeline_creation(
     Thread(target=tenant_delete).start()
 
     log.info(f"waiting for deletion to arrive")
+
     def deletion_arrived():
-        #assert env.pageserver.log_contains(f"Request handled, status: 202 Accepted")
-        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir") # never completes
-        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-deleted-mark")
-        assert env.pageserver.log_contains(f"cfg failpoint: {DELETE_BEFORE_MAP_REMOVE_FAILPOINT} pause")
-        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir")
-        #assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-map-remove")
+        # assert env.pageserver.log_contains(f"Request handled, status: 202 Accepted")
+        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir") # never completes
+        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-deleted-mark")
+        assert env.pageserver.log_contains(
+            f"cfg failpoint: {DELETE_BEFORE_MAP_REMOVE_FAILPOINT} pause"
+        )
+        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir")
+        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-map-remove")
 
     wait_until(100, 0.1, deletion_arrived)
 

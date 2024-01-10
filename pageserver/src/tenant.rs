@@ -3248,6 +3248,8 @@ impl Tenant {
                     "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
                 ));
 
+                pausable_failpoint!("before-initdb-tar-creation");
+
                 let (pgdata_zstd, tar_zst_size) =
                     import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
 
