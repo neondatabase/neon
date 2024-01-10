@@ -1,15 +1,17 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
-use std::sync::Arc;
-
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
+use crate::cache::Cached;
+use crate::console::provider::{CachedAllowedIps, CachedRoleSecret};
+use crate::context::RequestMonitoring;
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
-use crate::{console::provider::CachedRoleSecret, context::RequestMonitoring};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use smol_str::SmolStr;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio_postgres::{config::SslMode, Client};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -98,7 +100,8 @@ impl Api {
         .await?;
         Ok(AuthInfo {
             secret,
-            allowed_ips,
+            allowed_ips: allowed_ips.iter().map(SmolStr::from).collect(),
+            project_id: None,
         })
     }
 
@@ -147,18 +150,22 @@ impl super::Api for Api {
         &self,
         _ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
-    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        Ok(CachedRoleSecret::new_uncached(
-            self.do_get_auth_info(creds).await?.secret,
-        ))
+    ) -> Result<Option<CachedRoleSecret>, GetAuthInfoError> {
+        Ok(self
+            .do_get_auth_info(creds)
+            .await?
+            .secret
+            .map(CachedRoleSecret::new_uncached))
     }
 
     async fn get_allowed_ips(
         &self,
         _ctx: &mut RequestMonitoring,
         creds: &ComputeUserInfo,
-    ) -> Result<Arc<Vec<String>>, GetAuthInfoError> {
-        Ok(Arc::new(self.do_get_auth_info(creds).await?.allowed_ips))
+    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
+        Ok(Cached::new_uncached(Arc::new(
+            self.do_get_auth_info(creds).await?.allowed_ips,
+        )))
     }
 
     #[tracing::instrument(skip_all)]
