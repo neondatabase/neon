@@ -935,7 +935,10 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     This test verifies the invariant stated above. A couple of tricks are involved:
     1. Detach the tenant and re-attach it after the page server is restarted. This circumvents
     the warm-up which forces the initial logical size calculation.
-    2. A fail point is used to block the initial computation of the logical size until forced.
+    2. A fail point (initial-size-calculation-permit-pause) is used to block the initial
+    computation of the logical size until forced.
+    3. A fail point (walreceiver-after-ingest) is used to pause the walreceiver since
+    otherwise it would force the logical size computation.
     """
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
@@ -960,7 +963,9 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     env.pageserver.tenant_detach(tenant_id)
     env.pageserver.stop()
     env.pageserver.start(
-        extra_env_vars={"FAILPOINTS": "initial-size-calculation-permit-pause=pause"}
+        extra_env_vars={
+            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest=pause"
+        }
     )
 
     log.info(f"Re-attaching tenant {tenant_id}...")
@@ -977,8 +982,9 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     time.sleep(2)
     assert_initial_logical_size_not_prioritised()
 
-    client.configure_failpoints(("initial-size-calculation-permit-pause", "delay(250)"))
     details = client.timeline_detail(tenant_id, timeline_id, force_await_initial_logical_size=True)
     assert details["current_logical_size_is_accurate"] is True
 
-    client.configure_failpoints(("initial-size-calculation-permit-pause", "off"))
+    client.configure_failpoints(
+        [("initial-size-calculation-permit-pause", "off"), ("walreceiver-after-ingest", "off")]
+    )
