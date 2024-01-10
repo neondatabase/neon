@@ -587,7 +587,7 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-upload"
-    DELETE_BEFORE_MAP_REMOVE_FAILPOINT = "tenant-delete-before-cleanup-remaining-fs-traces-pausable"
+    DELETE_BEFORE_CLEANUP_FAILPOINT = "tenant-delete-before-cleanup-remaining-fs-traces-pausable"
 
     # Wait just before the initdb upload
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
@@ -615,7 +615,7 @@ def test_tenant_delete_races_timeline_creation(
     # (But timeline creation still continues)
     wait_until(100, 0.1, creation_connection_timet_out)
 
-    ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "pause"))
+    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
 
     def tenant_delete():
         ps_http.tenant_delete(tenant_id)
@@ -624,12 +624,12 @@ def test_tenant_delete_races_timeline_creation(
 
     def deletion_arrived():
         assert env.pageserver.log_contains(
-            f"cfg failpoint: {DELETE_BEFORE_MAP_REMOVE_FAILPOINT} pause"
+            f"cfg failpoint: {DELETE_BEFORE_CLEANUP_FAILPOINT} pause"
         )
 
     wait_until(100, 0.1, deletion_arrived)
 
-    ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "off"))
+    ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "off"))
 
     # Disable the failpoint and wait for deletion to finish
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))

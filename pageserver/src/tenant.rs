@@ -3237,8 +3237,6 @@ impl Tenant {
                 })
                 .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
         } else {
-            pausable_failpoint!("before-initdb-runs");
-
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
@@ -3247,8 +3245,6 @@ impl Tenant {
                 let temp_path = timelines_path.join(format!(
                     "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
                 ));
-
-                pausable_failpoint!("before-initdb-tar-creation");
 
                 let (pgdata_zstd, tar_zst_size) =
                     import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
