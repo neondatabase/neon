@@ -64,10 +64,23 @@ static int max_reconnect_attempts = 60;
 
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
+/*
+ * There is "neon.pageserver_connstring" GUC with PGC_SIGHUP option, allowing to change it using
+ * pg_reload_conf(). It is used by control plane to update pageserver connection string if page server is crashed,
+ * relocated or new shards are added.
+ * It is copied to shared memory because config can not be loaded during query execution and we need to
+ * reestablish connection to page server.
+ *
+ * Copying connection string to shared memory is done by postmaster. And other backends
+ * should check update counter to determine of connection URL is changed and connection needs to be reestablished.
+ * We can not use standard Postgres LW-locks, because postmaster has proc entry and so can not wait
+ * on this primitive. This is why lockless access algorithm is implemented using two atomic counters to enforce
+ * consistent reading of connection string value from shared memory.
+ */
 typedef struct
 {
-	LWLockId	lock;
-	pg_atomic_uint64 update_counter;
+	pg_atomic_uint64 begin_update_counter;
+	pg_atomic_uint64 end_update_counter;
 	char		pageserver_connstring[MAX_PAGESERVER_CONNSTRING_SIZE];
 } PagestoreShmemState;
 
@@ -100,10 +113,9 @@ AssignPageserverConnstring(const char *newval, void *extra)
 {
 	if (!PagestoreShmemIsValid())
 		return;
-	LWLockAcquire(pagestore_shared->lock, LW_EXCLUSIVE);
+	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
 	strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
-	pg_atomic_fetch_add_u64(&pagestore_shared->update_counter, 1);
-	LWLockRelease(pagestore_shared->lock);
+	pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
 }
 
 static bool
@@ -111,18 +123,34 @@ CheckConnstringUpdated()
 {
 	if (!PagestoreShmemIsValid())
 		return false;
-	return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->update_counter);
+	return pagestore_local_counter < pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
 }
 
 static void
 ReloadConnstring()
 {
+	uint64 begin_update_counter;
+	uint64 end_update_counter;
+
 	if (!PagestoreShmemIsValid())
 		return;
-	LWLockAcquire(pagestore_shared->lock, LW_SHARED);
-	strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
-	pagestore_local_counter = pg_atomic_read_u64(&pagestore_shared->update_counter);
-	LWLockRelease(pagestore_shared->lock);
+
+	/*
+	 * There is race condition here between backend and postmaster which can update shard map.
+	 * We recheck update counter after copying shard map to check that configuration was not changed.
+	 */
+	do
+	{
+		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
+		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
+
+		strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
+	}
+	while (begin_update_counter != end_update_counter
+		   || begin_update_counter != pg_atomic_read_u64(&pagestore_shared->begin_update_counter)
+		   || end_update_counter != pg_atomic_read_u64(&pagestore_shared->end_update_counter));
+
+	pagestore_local_counter = end_update_counter;
 }
 
 static bool
@@ -505,8 +533,8 @@ PagestoreShmemInit(void)
 									   &found);
 	if (!found)
 	{
-		pagestore_shared->lock = &(GetNamedLWLockTranche("neon_libpagestore")->lock);
-		pg_atomic_init_u64(&pagestore_shared->update_counter, 0);
+		pg_atomic_init_u64(&pagestore_shared->begin_update_counter, 0);
+		pg_atomic_init_u64(&pagestore_shared->end_update_counter, 0);
 		AssignPageserverConnstring(page_server_connstring, NULL);
 	}
 	LWLockRelease(AddinShmemInitLock);
@@ -531,7 +559,6 @@ pagestore_shmem_request(void)
 #endif
 
 	RequestAddinShmemSpace(PagestoreShmemSize());
-	RequestNamedLWLockTranche("neon_libpagestore", 1);
 }
 
 static void
