@@ -49,7 +49,7 @@ pub struct ConnInfo {
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
     pub fn db_and_user(&self) -> (SmolStr, SmolStr) {
-        (self.dbname.clone(), self.user_info.inner.user.clone())
+        (self.dbname.clone(), self.user_info.user.clone())
     }
 
     pub fn endpoint_cache_key(&self) -> SmolStr {
@@ -63,10 +63,10 @@ impl fmt::Display for ConnInfo {
         write!(
             f,
             "{}@{}/{}?{}",
-            self.user_info.inner.user,
+            self.user_info.user,
             self.user_info.endpoint,
             self.dbname,
-            self.user_info.inner.options.get_cache_key("")
+            self.user_info.options.get_cache_key("")
         )
     }
 }
@@ -574,7 +574,7 @@ async fn connect_to_compute_once(
     let mut session = ctx.session_id;
 
     let (client, mut connection) = config
-        .user(&conn_info.user_info.inner.user)
+        .user(&conn_info.user_info.user)
         .password(&*conn_info.password)
         .dbname(&conn_info.dbname)
         .connect_timeout(timeout)

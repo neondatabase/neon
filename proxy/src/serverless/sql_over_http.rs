@@ -29,7 +29,6 @@ use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
 use crate::auth::backend::ComputeUserInfo;
-use crate::auth::backend::ComputeUserInfoNoEndpoint;
 use crate::auth::endpoint_sni;
 use crate::config::HttpConfig;
 use crate::config::TlsConfig;
@@ -203,10 +202,8 @@ fn get_conn_info(
 
     let user_info = ComputeUserInfo {
         endpoint,
-        inner: ComputeUserInfoNoEndpoint {
-            user: username,
-            options: options.unwrap_or_default(),
-        },
+        user: username,
+        options: options.unwrap_or_default(),
     };
 
     Ok(ConnInfo {

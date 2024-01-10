@@ -489,8 +489,8 @@ fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> (CachedNodeInfo, auth::BackendType<'_, ComputeUserInfo>) {
     let cache = helper_create_cached_node_info();
-    let creds = auth::BackendType::Test(mechanism);
-    (cache, creds)
+    let user_info = auth::BackendType::Test(mechanism);
+    (cache, user_info)
 }
 
 #[tokio::test]
@@ -498,8 +498,8 @@ async fn connect_to_compute_success() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Connect]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -510,8 +510,8 @@ async fn connect_to_compute_retry() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, Wake, Retry, Connect]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -523,8 +523,8 @@ async fn connect_to_compute_non_retry_1() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, Wake, Retry, Fail]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -536,8 +536,8 @@ async fn connect_to_compute_non_retry_2() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Fail, Wake, Retry, Connect]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -553,8 +553,8 @@ async fn connect_to_compute_non_retry_3() {
         Retry, Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
         Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
     ]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -566,8 +566,8 @@ async fn wake_retry() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, WakeRetry, Wake, Connect]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -579,8 +579,8 @@ async fn wake_non_retry() {
     use ConnectAction::*;
     let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, WakeFail]);
-    let (cache, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mut ctx, &mechanism, cache, &creds)
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
