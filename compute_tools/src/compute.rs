@@ -495,7 +495,7 @@ impl ComputeNode {
     pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
-        let sync_handle = maybe_cgexec(&self.pgbin)
+        let mut sync_handle = maybe_cgexec(&self.pgbin)
             .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
@@ -504,17 +504,29 @@ impl ComputeNode {
                 vec![]
             })
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
         SYNC_SAFEKEEPERS_PID.store(sync_handle.id(), Ordering::SeqCst);
 
         // `postgres --sync-safekeepers` will print all log output to stderr and
-        // final LSN to stdout. So we pipe only stdout, while stderr will be automatically
-        // redirected to the caller output.
+        // final LSN to stdout. So we leave stdout to collect LSN, while stderr logs
+        // will be collected in a child thread.
+        let stderr = sync_handle
+            .stderr
+            .take()
+            .expect("stderr should be captured");
+        let logs_handle = handle_postgres_logs(stderr);
+
         let sync_output = sync_handle
             .wait_with_output()
             .expect("postgres --sync-safekeepers failed");
         SYNC_SAFEKEEPERS_PID.store(0, Ordering::SeqCst);
+
+        // Process has exited, so we can join the logs thread.
+        let _ = logs_handle
+            .join()
+            .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
 
         if !sync_output.status.success() {
             anyhow::bail!(
@@ -652,11 +664,12 @@ impl ComputeNode {
 
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
+    /// Returns a handle to the child process and a handle to the logs thread.
     #[instrument(skip_all)]
     pub fn start_postgres(
         &self,
         storage_auth_token: Option<String>,
-    ) -> Result<std::process::Child> {
+    ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
@@ -667,13 +680,18 @@ impl ComputeNode {
             } else {
                 vec![]
             })
+            .stderr(Stdio::piped())
             .spawn()
             .expect("cannot start postgres process");
         PG_PID.store(pg.id(), Ordering::SeqCst);
 
+        // Start a thread to collect logs from stderr.
+        let stderr = pg.stderr.take().expect("stderr should be captured");
+        let logs_handle = handle_postgres_logs(stderr);
+
         wait_for_postgres(&mut pg, pgdata_path)?;
 
-        Ok(pg)
+        Ok((pg, logs_handle))
     }
 
     /// Do initial configuration of the already started Postgres.
@@ -818,7 +836,10 @@ impl ComputeNode {
     }
 
     #[instrument(skip_all)]
-    pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
+    pub fn start_compute(
+        &self,
+        extension_server_port: u16,
+    ) -> Result<(std::process::Child, std::thread::JoinHandle<()>)> {
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
@@ -889,7 +910,7 @@ impl ComputeNode {
         self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
-        let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
+        let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
 
         let config_time = Utc::now();
         if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
@@ -939,7 +960,7 @@ impl ComputeNode {
         };
         info!(?metrics, "compute start finished");
 
-        Ok(pg)
+        Ok(pg_process)
     }
 
     // Look for core dumps and collect backtraces.

@@ -6,12 +6,15 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
+use tokio::io::AsyncBufReadExt;
+use tokio::time::timeout;
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, instrument};
 
@@ -421,6 +424,75 @@ pub async fn tune_pgbouncer(
         // so that they are preserved after pgbouncer restart
         if let Some(pgbouncer_ini_path) = pgbouncer_ini_path {
             update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Spawn a thread that will read Postgres logs from `stderr`, join multiline logs
+/// and send them to the logger. In the future we may also want to add context to
+/// these logs.
+pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+
+        let res = runtime.block_on(async move {
+            let stderr = tokio::process::ChildStderr::from_std(stderr)?;
+            handle_postgres_logs_async(stderr).await
+        });
+        if let Err(e) = res {
+            tracing::error!("error while processing postgres logs: {}", e);
+        }
+    })
+}
+
+/// Read Postgres logs from `stderr` until EOF. Buffer is flushed on one of the following conditions:
+/// - next line starts with timestamp
+/// - EOF
+/// - no new lines were written for the last second
+async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Result<()> {
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let timeout_duration = Duration::from_secs(1);
+    let ts_regex =
+        regex::Regex::new(r"^\d+-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").expect("regex is valid");
+
+    let mut buf = vec![];
+    loop {
+        let next_line = timeout(timeout_duration, lines.next_line()).await;
+
+        // we should flush lines from the buffer if we cannot continue reading multiline message
+        let should_flush_buf = match next_line {
+            // Flushing if new line starts with timestamp
+            Ok(Ok(Some(ref line))) => ts_regex.is_match(line),
+            // Flushing on EOF, timeout or error
+            _ => true,
+        };
+
+        if !buf.is_empty() && should_flush_buf {
+            // join multiline message into a single line, separated by unicode Zero Width Space.
+            // "PG:" suffix is used to distinguish postgres logs from other logs.
+            let combined = format!("PG:{}\n", buf.join("\u{200B}"));
+            buf.clear();
+
+            // sync write to stderr to avoid interleaving with other logs
+            use std::io::Write;
+            let res = std::io::stderr().lock().write_all(combined.as_bytes());
+            if let Err(e) = res {
+                tracing::error!("error while writing to stderr: {}", e);
+            }
+        }
+
+        // if not timeout, append line to the buffer
+        if next_line.is_ok() {
+            match next_line?? {
+                Some(line) => buf.push(line),
+                // EOF
+                None => break,
+            };
         }
     }
 
