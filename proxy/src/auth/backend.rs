@@ -39,7 +39,7 @@ use tracing::{error, info, warn};
 /// * When `T` is `()`, it's just a regular auth backend selector
 ///   which we use in [`crate::config::ProxyConfig`].
 ///
-/// * However, when we substitute `T` with [`ClientCredentials`],
+/// * However, when we substitute `T` with [`ComputeUserInfoMaybeEndpoint`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
 pub enum BackendType<'a, T> {
