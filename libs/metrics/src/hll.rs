@@ -84,7 +84,7 @@ impl<const N: usize> core::Collector for HyperLogLogVec<N> {
         let mut m = proto::MetricFamily::default();
         m.set_name(self.core.desc.fq_name.clone());
         m.set_help(self.core.desc.help.clone());
-        m.set_field_type(proto::MetricType::UNTYPED);
+        m.set_field_type(proto::MetricType::GAUGE);
 
         let mut metrics = Vec::new();
         for child in self.core.children.read().unwrap().values() {
@@ -258,7 +258,7 @@ impl<const N: usize> core::Collector for HyperLogLog<N> {
         let mut m = proto::MetricFamily::default();
         m.set_name(self.core.desc.fq_name.clone());
         m.set_help(self.core.desc.help.clone());
-        m.set_field_type(proto::MetricType::UNTYPED);
+        m.set_field_type(proto::MetricType::GAUGE);
 
         let mut metrics = Vec::new();
         self.core.collect_into(&mut metrics);
