@@ -2,7 +2,6 @@ import concurrent.futures
 import enum
 import os
 import shutil
-import time
 from threading import Thread
 
 import pytest
@@ -27,6 +26,7 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import RemoteStorageKind, available_s3_storages, s3_storage
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import run_pg_bench_small, wait_until
+from requests.exceptions import ReadTimeout
 
 
 def test_tenant_delete_smoke(
@@ -570,7 +570,6 @@ def test_tenant_delete_races_timeline_creation(
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
 
@@ -578,20 +577,27 @@ def test_tenant_delete_races_timeline_creation(
         [
             # lucky race with stopping from flushing a layer we fail to schedule any uploads
             ".*layer flush task.+: could not flush frozen layer: update_metadata_file",
-            "POST.*/timeline.* request was dropped before completing",
+            # We need the http connection close for successful reproduction
+            ".*POST.*/timeline.* request was dropped before completing",
+            # Timeline creation runs into this error
+            ".*POST.*Cancelled request finished with an error: InternalServerError\\(Cancelled",
             # Errors logged from our 4xx requests
             f".*{CONFLICT_MESSAGE}.*",
         ]
     )
 
-    BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-tar-creation"
+    BEFORE_INITDB_UPLOAD_FAILPOINT = "before-initdb-upload"
     DELETE_BEFORE_MAP_REMOVE_FAILPOINT = "tenant-delete-before-cleanup-remaining-fs-traces-pausable"
 
     # Wait just before the initdb upload
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "pause"))
 
     def timeline_create():
-        ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
+        try:
+            ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
+            AssertionError()
+        except ReadTimeout:
+            pass
 
     Thread(target=timeline_create).start()
 
@@ -600,37 +606,30 @@ def test_tenant_delete_races_timeline_creation(
 
     wait_until(100, 0.1, hit_initdb_upload_failpoint)
 
-    # Wait so that we hit the timeout
-    def dropped_before_completing():
-        assert env.pageserver.log_contains("POST.*/timeline.* request was dropped before completing")
+    def creation_connection_timet_out():
+        assert env.pageserver.log_contains(
+            "POST.*/timeline.* request was dropped before completing"
+        )
 
-    wait_until(100, 0.1, dropped_before_completing)
+    # Wait so that we hit the timeout and the connection is dropped
+    # (But timeline creation still continues)
+    wait_until(100, 0.1, creation_connection_timet_out)
 
     ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "pause"))
 
     def tenant_delete():
-        # Send the initial deletion request
         ps_http.tenant_delete(tenant_id)
 
     Thread(target=tenant_delete).start()
 
-    log.info(f"waiting for deletion to arrive")
-
     def deletion_arrived():
-        # assert env.pageserver.log_contains(f"Request handled, status: 202 Accepted")
-        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir") # never completes
-        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-deleted-mark")
         assert env.pageserver.log_contains(
             f"cfg failpoint: {DELETE_BEFORE_MAP_REMOVE_FAILPOINT} pause"
         )
-        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-remove-tenant-dir")
-        # assert env.pageserver.log_contains(f"at failpoint tenant-delete-before-map-remove")
 
     wait_until(100, 0.1, deletion_arrived)
 
     ps_http.configure_failpoints((DELETE_BEFORE_MAP_REMOVE_FAILPOINT, "off"))
-
-    log.info(f"deletion arrived!")
 
     # Disable the failpoint and wait for deletion to finish
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
@@ -647,6 +646,14 @@ def test_tenant_delete_races_timeline_creation(
                 str(tenant_id),
             )
         ),
+    )
+
+    # Ensure that creation cancelled and deletion didn't end up in broken state or encountered the leftover temp file
+    assert env.pageserver.log_contains(
+        ".*POST.*Cancelled request finished with an error: InternalServerError\\(Cancelled"
+    )
+    assert not env.pageserver.log_contains(
+        ".*ERROR.*delete_tenant.*Timelines directory is not empty after all timelines deletion"
     )
 
     # Zero tenants remain (we deleted the default tenant)
