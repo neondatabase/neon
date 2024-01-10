@@ -2730,6 +2730,7 @@ dependencies = [
  "libc",
  "once_cell",
  "prometheus",
+ "rustc-hash",
  "workspace_hack",
 ]
 
