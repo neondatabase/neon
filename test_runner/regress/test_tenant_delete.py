@@ -120,9 +120,9 @@ FAILPOINTS = [
     "tenant-delete-before-create-local-mark",
     "tenant-delete-before-background",
     "tenant-delete-before-polling-ongoing-deletions",
-    "tenant-deleteore-cleanup-remaining-fs-traces",
+    "tenant-delete-before-cleanup-remaining-fs-traces",
     "tenant-delete-before-remove-timelines-dir",
-    "tenant-delete-before-remove-deleted-mark-bef",
+    "tenant-delete-before-remove-deleted-mark",
     "tenant-delete-before-remove-tenant-dir",
     # Some failpoints from timeline deletion
     "timeline-delete-before-index-deleted-at",
