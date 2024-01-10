@@ -254,22 +254,6 @@ impl AttachmentService {
         )
         .await;
 
-        // TODO: shouldn't we bail if we fail to spawn the process?
-        for ps_conf in &self.env.pageservers {
-            let (pg_host, pg_port) =
-                parse_host_port(&ps_conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
-            let (http_host, http_port) = parse_host_port(&ps_conf.listen_http_addr)
-                .expect("Unable to parse listen_http_addr");
-            self.node_register(NodeRegisterRequest {
-                node_id: ps_conf.id,
-                listen_pg_addr: pg_host.to_string(),
-                listen_pg_port: pg_port.unwrap_or(5432),
-                listen_http_addr: http_host.to_string(),
-                listen_http_port: http_port.unwrap_or(80),
-            })
-            .await?;
-        }
-
         result
     }
 

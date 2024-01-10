@@ -30,6 +30,7 @@ use utils::{
     lsn::Lsn,
 };
 
+use crate::attachment_service::{self, AttachmentService, NodeRegisterRequest};
 use crate::local_env::PageServerConf;
 use crate::{background_process, local_env::LocalEnv};
 
@@ -244,7 +245,24 @@ impl PageServerNode {
                 }
             },
         )
-        .await
+        .await?;
+
+        let attachment_service = AttachmentService::from_env(&self.env);
+        let (pg_host, pg_port) =
+            parse_host_port(&self.conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
+        let (http_host, http_port) =
+            parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
+        attachment_service
+            .node_register(NodeRegisterRequest {
+                node_id: self.conf.id,
+                listen_pg_addr: pg_host.to_string(),
+                listen_pg_port: pg_port.unwrap_or(5432),
+                listen_http_addr: http_host.to_string(),
+                listen_http_port: http_port.unwrap_or(80),
+            })
+            .await?;
+
+        Ok(())
     }
 
     fn pageserver_basic_args<'a>(
