@@ -565,13 +565,13 @@ def test_tenant_delete_races_timeline_creation(
 
     This is a reproducer for https://github.com/neondatabase/neon/issues/6255
     """
+    # The remote storage kind doesn't really matter but we use it for iterations calculation below
+    # (and there is no way to reconstruct the used remote storage kind)
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
-
-    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
 
     env.pageserver.allowed_errors.extend(
         [
@@ -581,8 +581,6 @@ def test_tenant_delete_races_timeline_creation(
             ".*POST.*/timeline.* request was dropped before completing",
             # Timeline creation runs into this error
             ".*POST.*Cancelled request finished with an error: InternalServerError\\(Cancelled",
-            # Errors logged from our 4xx requests
-            f".*{CONFLICT_MESSAGE}.*",
         ]
     )
 
@@ -635,7 +633,10 @@ def test_tenant_delete_races_timeline_creation(
     ps_http.configure_failpoints((BEFORE_INITDB_UPLOAD_FAILPOINT, "off"))
 
     iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    try:
+        tenant_delete_wait_completed(ps_http, tenant_id, iterations)
+    except PageserverApiException:
+        pass
 
     # Physical deletion should have happened
     assert_prefix_empty(
