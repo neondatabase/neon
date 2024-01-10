@@ -6634,6 +6634,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tungstenite",
+ "twox-hash",
  "url",
  "uuid",
  "zstd",
