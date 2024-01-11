@@ -266,7 +266,7 @@ fn trim_end(data: &[u8]) -> &[u8] {
 /// and modify the response headers appropriately.
 ///
 /// This function also does not look at the `Connection` or `Upgrade` headers.
-/// To check if a request is a websocket upgrade request, you can use [`is_upgrade2_request`].
+/// To check if a request is a websocket connect request, you can use [`is_connect_request`].
 /// Alternatively you can inspect the `Connection` and `Upgrade` headers manually.
 ///
 pub fn connect<B>(
