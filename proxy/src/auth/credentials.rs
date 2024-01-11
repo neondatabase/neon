@@ -56,7 +56,7 @@ impl ComputeUserInfoMaybeEndpoint {
 pub fn endpoint_sni<'a>(
     sni: &'a str,
     common_names: &HashSet<String>,
-) -> Result<&'a str, ComputeUserInfoParseError> {
+) -> Result<(&'a str, &'a str), ComputeUserInfoParseError> {
     let Some((subdomain, common_name)) = sni.split_once('.') else {
         return Err(ComputeUserInfoParseError::UnknownCommonName { cn: sni.into() });
     };
@@ -65,7 +65,7 @@ pub fn endpoint_sni<'a>(
             cn: common_name.into(),
         });
     }
-    Ok(subdomain)
+    Ok((subdomain, common_name))
 }
 
 impl ComputeUserInfoMaybeEndpoint {
@@ -102,7 +102,7 @@ impl ComputeUserInfoMaybeEndpoint {
 
         let project_from_domain = if let Some(sni_str) = sni {
             if let Some(cn) = common_names {
-                Some(SmolStr::from(endpoint_sni(sni_str, cn)?))
+                Some(SmolStr::from(endpoint_sni(sni_str, cn)?.0))
             } else {
                 None
             }

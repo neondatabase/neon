@@ -500,3 +500,21 @@ def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
         "select array['foo'::foo, 'bar'::foo, 'baz'::foo] as data",
     )
     assert response["rows"][0]["data"] == ["foo", "bar", "baz"]
+
+def test_sql_over_http_different_endpoint(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
+        connstr = f"postgresql://http:http@my-endpoint.{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps({"query": sql, "params": params}),
+            headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    rows = q("select 42 as answer")["rows"]
+    assert rows == [{"answer": 42}]

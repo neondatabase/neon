@@ -170,21 +170,20 @@ fn get_conn_info(
     let hostname = connection_url
         .host_str()
         .ok_or(anyhow::anyhow!("no host"))?;
+    let (endpoint, common_name) = endpoint_sni(hostname, &tls.common_names)?;
 
     let host_header = headers
         .get("host")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.split(':').next());
 
-    if hostname != sni_hostname {
+    if !sni_hostname.ends_with(common_name) {
         return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
     } else if let Some(h) = host_header {
-        if h != hostname {
+        if !h.ends_with(common_name) {
             return Err(anyhow::anyhow!("mismatched host header and hostname"));
         }
     }
-
-    let endpoint = endpoint_sni(hostname, &tls.common_names)?;
 
     let endpoint: SmolStr = endpoint.into();
     ctx.set_endpoint_id(Some(endpoint.clone()));
