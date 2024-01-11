@@ -300,6 +300,7 @@ struct PageServerHandler {
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
 
+    /// See [`Self::cache_timeline`]
     shard_timelines: HashMap<ShardIndex, HandlerTimeline>,
 }
 
@@ -967,7 +968,18 @@ impl PageServerHandler {
         Err(key)
     }
 
-    fn store_timeline(
+    /// Having looked up the [`Timeline`] instance for a particular shard, cache it to enable
+    /// use in future requests without having to traverse [`crate::tenant::mgr::TenantManager`]
+    /// again.
+    ///
+    /// Note that all the Timelines in this cache are for the same timeline_id: they're differ
+    /// in which shard they belong to.  When we serve a getpage@lsn request, we choose a shard
+    /// based on key.
+    ///
+    /// The typical size of this cache is 1, as we generally create shards to distribute work
+    /// across pageservers, so don't tend to have multiple shards for the same tenant on the
+    /// same pageserver.
+    fn cache_timeline(
         &mut self,
         timeline: Arc<Timeline>,
     ) -> Result<&Arc<Timeline>, GetActiveTimelineError> {
@@ -1002,7 +1014,7 @@ impl PageServerHandler {
             .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Page(key))
             .await?;
 
-        self.store_timeline(timeline)
+        self.cache_timeline(timeline)
     }
 
     async fn get_timeline_shard_zero(
@@ -1026,7 +1038,7 @@ impl PageServerHandler {
             let timeline = self
                 .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
                 .await?;
-            Ok(self.store_timeline(timeline)?)
+            Ok(self.cache_timeline(timeline)?)
         }
     }
 
