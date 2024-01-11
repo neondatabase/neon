@@ -56,6 +56,7 @@ use super::TenantSharedResources;
 /// that way we avoid having to carefully switch a tenant's ingestion etc on and off during
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
+#[derive(Clone)]
 pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary(Arc<SecondaryTenant>),
@@ -1185,6 +1186,17 @@ impl TenantManager {
                 if !state.cancel.is_cancelled() {
                     func(tenant_id, state)
                 }
+            }
+        }
+    }
+
+    /// Total list of all tenant slots: this includes attached, secondary, and InProgress.
+    pub(crate) fn list(&self) -> Vec<(TenantShardId, TenantSlot)> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.iter().map(|(k, v)| (*k, v.clone())).collect()
             }
         }
     }

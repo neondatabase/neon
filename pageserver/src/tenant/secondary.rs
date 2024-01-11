@@ -14,7 +14,7 @@ use self::{
 
 use super::{config::SecondaryLocationConfig, mgr::TenantManager};
 
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{models, shard::TenantShardId};
 use remote_storage::GenericRemoteStorage;
 
 use tokio_util::sync::CancellationToken;
@@ -109,6 +109,27 @@ impl SecondaryTenant {
 
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
+    }
+
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
+        let conf = self.detail.lock().unwrap().config.clone();
+
+        let conf = models::LocationConfigSecondary { warm: conf.warm };
+
+        models::LocationConfig {
+            mode: models::LocationConfigMode::Secondary,
+            generation: None,
+            secondary_conf: Some(conf),
+            shard_number: self.tenant_shard_id.shard_number.0,
+            shard_count: self.tenant_shard_id.shard_count.0,
+            // Shard stripe size is not set in secondary mode
+            shard_stripe_size: u32::default(),
+            // TenantConfig is for attached tenants, not set in secondary mode
+            tenant_conf: models::TenantConfig::default(),
+        }
     }
 }
 

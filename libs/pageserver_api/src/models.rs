@@ -288,6 +288,8 @@ pub struct LocationConfig {
     /// If attaching, in what generation?
     #[serde(default)]
     pub generation: Option<u32>,
+
+    // If requesting mode `Secondary`, configuration for that.
     #[serde(default)]
     pub secondary_conf: Option<LocationConfigSecondary>,
 
@@ -300,9 +302,13 @@ pub struct LocationConfig {
     #[serde(default)]
     pub shard_stripe_size: u32,
 
-    // If requesting mode `Secondary`, configuration for that.
-    // Custom storage configuration for the tenant, if any
+    // If requesting an Attached mode, supply configuration here
     pub tenant_conf: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LocationConfigListResponse {
+    pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -553,6 +553,38 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
     }
 }
 
+/// This is a conversion from our internal tenant config object to the one used
+/// in external APIs.
+impl From<TenantConfOpt> for models::TenantConfig {
+    fn from(value: TenantConfOpt) -> Self {
+        fn humantime(d: Duration) -> String {
+            format!("{}s", d.as_secs())
+        }
+        Self {
+            checkpoint_distance: value.checkpoint_distance,
+            checkpoint_timeout: value.checkpoint_timeout.map(humantime),
+            compaction_target_size: value.compaction_target_size,
+            compaction_period: value.compaction_period.map(humantime),
+            compaction_threshold: value.compaction_threshold,
+            gc_horizon: value.gc_horizon,
+            gc_period: value.gc_period.map(humantime),
+            image_creation_threshold: value.image_creation_threshold,
+            pitr_interval: value.pitr_interval.map(humantime),
+            walreceiver_connect_timeout: value.walreceiver_connect_timeout.map(humantime),
+            lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
+            max_lsn_wal_lag: value.max_lsn_wal_lag,
+            trace_read_requests: value.trace_read_requests,
+            eviction_policy: value.eviction_policy,
+            min_resident_size_override: value.min_resident_size_override,
+            evictions_low_residence_duration_metric_threshold: value
+                .evictions_low_residence_duration_metric_threshold
+                .map(humantime),
+            gc_feedback: value.gc_feedback,
+            heatmap_period: value.heatmap_period.map(humantime),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
