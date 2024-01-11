@@ -173,7 +173,7 @@ fn get_conn_info(
         .and_then(|h| h.split(':').next());
 
     // sni_hostname has to be either the same as hostname or the one used in serverless driver.
-    if sni_hostname != SERVERLESS_DRIVER_SNI_HOSTNAME || sni_hostname != hostname {
+    if sni_hostname != SERVERLESS_DRIVER_SNI_HOSTNAME && sni_hostname != hostname {
         return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
     } else if let Some(h) = host_header {
         if h != hostname {
