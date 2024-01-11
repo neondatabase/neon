@@ -411,6 +411,14 @@ async fn client(
     while let Some(req) =
         tokio::select! { work = work.recv() => { work } , _ = cancel.cancelled() => { return; } }
     {
+        // 20k tenants pageserver can't handle 1 req/second
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = cancel.cancelled() => {
+                return;
+            }
+        }
+
         let start = Instant::now();
 
         let res = tokio::select! {

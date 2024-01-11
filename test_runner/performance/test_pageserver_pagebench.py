@@ -23,6 +23,9 @@ def getpage_throughput_fixture(
     pg_bin: PgBin,
     test_snapshot_dir: SnapshotDir,
 ) -> fixtures.pageserver.many_tenants.SingleTimeline:
+
+    neon_env_builder.pageserver_config_override = "max_file_descriptors=500000;page_cache_size=16384"
+
     def setup_template(env: NeonEnv):
         # create our template tenant
         config = {
@@ -63,6 +66,9 @@ def test_getpage_throughput(
 ):
     env = getpage_throughput_fixture.env
     ps_http = env.pageserver.http_client()
+
+    import pdb
+    pdb.set_trace()
 
     # run the benchmark with one client per timeline, each doing 10k requests to random keys.
     duration = "10s"
