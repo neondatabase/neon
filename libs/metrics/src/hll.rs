@@ -130,6 +130,7 @@ impl<const N: usize> HyperLogLogVec<N> {
     /// [`Opts`] and partitioned by the given label names. At least one label name must be
     /// provided.
     pub fn new(opts: Opts, label_names: &[&str]) -> prometheus::Result<Self> {
+        assert!(N.is_power_of_two());
         let variable_names = label_names.iter().map(|s| (*s).to_owned()).collect();
         let opts = opts.variable_labels(variable_names);
 
@@ -267,6 +268,7 @@ pub struct HyperLogLog<const N: usize> {
 impl<const N: usize> HyperLogLog<N> {
     /// Create a [`HyperLogLog`] with the `name` and `help` arguments.
     pub fn new<S1: Into<String>, S2: Into<String>>(name: S1, help: S2) -> prometheus::Result<Self> {
+        assert!(N.is_power_of_two());
         let opts = Opts::new(name, help);
         Self::with_opts(opts)
     }
@@ -294,11 +296,9 @@ impl<const N: usize> HyperLogLog<N> {
     }
 
     fn record(&self, hash: u64) {
-        assert!(N.is_power_of_two());
         let p = N.ilog2() as u8;
         let j = hash & (N as u64 - 1);
-        let w = hash >> p;
-        let rho = get_rho(w, 64 - p);
+        let rho = (hash >> p).leading_zeros() as u8 + 1 - p;
         self.core.shards[j as usize].fetch_max(rho, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -394,10 +394,4 @@ fn make_label_pairs(
     }
     label_pairs.sort();
     Ok(label_pairs)
-}
-
-fn get_rho(w: u64, max_width: u8) -> u8 {
-    let rho = max_width - (64 - u8::try_from(w.leading_zeros()).unwrap()) + 1;
-    assert!(0 < rho && rho < 65);
-    rho
 }
