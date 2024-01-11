@@ -55,6 +55,7 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const SERVERLESS_DRIVER_SNI_HOSTNAME: &str = "api";
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -171,7 +172,8 @@ fn get_conn_info(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.split(':').next());
 
-    if hostname != sni_hostname {
+    // sni_hostname has to be either the same as hostname or the one used in serverless driver.
+    if sni_hostname != SERVERLESS_DRIVER_SNI_HOSTNAME || sni_hostname != hostname {
         return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
     } else if let Some(h) = host_header {
         if h != hostname {
