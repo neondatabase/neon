@@ -2390,19 +2390,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tungstenite"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc7dcb1ab67cd336f468a12491765672e61a3b6b148634dbfe2fe8acd3fe7d9"
-dependencies = [
- "hyper",
- "pin-project-lite",
- "tokio",
- "tokio-tungstenite",
- "tungstenite",
-]
-
-[[package]]
 name = "iana-time-zone"
 version = "0.1.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3895,7 +3882,6 @@ dependencies = [
  "hostname",
  "humantime",
  "hyper",
- "hyper-tungstenite",
  "ipnet",
  "itertools",
  "md5",
@@ -3941,11 +3927,13 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
+ "tungstenite",
  "url",
  "utils",
  "uuid",
