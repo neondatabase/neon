@@ -41,14 +41,14 @@ impl UserFacingError for ConnectionError {
             Postgres(err) => match err.as_db_error() {
                 Some(err) => {
                     let msg = err.message();
-                    let msg = if msg.starts_with("unsupported startup parameter: ")
+
+                    if msg.starts_with("unsupported startup parameter: ")
                         || msg.starts_with("unsupported startup parameter in options: ")
                     {
                         format!("{msg}. Please use unpooled connection or remove this parameter from the startup package. More info: https://neon.tech/docs/connect/connection-errors#unsupported-startup-parameter")
                     } else {
                         msg.to_owned()
-                    };
-                    msg
+                    }
                 }
                 None => err.to_string(),
             },
