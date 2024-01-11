@@ -1005,20 +1005,21 @@ impl PageServerHandler {
         self.store_timeline(timeline)
     }
 
-    fn have_timeline_shard_zero_cache(&self) -> bool {
-        if let Some((idx, _tl)) = self.shard_timelines.iter().next() {
-            idx.shard_number == ShardNumber(0)
-        } else {
-            false
-        }
-    }
-
     async fn get_timeline_shard_zero(
         &mut self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> anyhow::Result<&Arc<Timeline>, GetActiveTimelineError> {
-        if self.have_timeline_shard_zero_cache() {
+        // This is a borrow-checker workaround: we can't return from inside of the  `if let Some` because
+        // that would be an immutable-borrow-self return, whereas later in the function we will use a mutable
+        // ref to salf.  So instead, we first build a bool, and then return while not borrowing self.
+        let have_cached = if let Some((idx, _tl)) = self.shard_timelines.iter().next() {
+            idx.shard_number == ShardNumber(0)
+        } else {
+            false
+        };
+
+        if have_cached {
             let entry = self.shard_timelines.iter().next().unwrap();
             Ok(&entry.1.timeline)
         } else {
