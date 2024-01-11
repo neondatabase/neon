@@ -8,7 +8,9 @@ mod websocket;
 
 pub use conn_pool::GlobalConnPoolOptions;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
+use hyper::ext::Protocol;
+use hyper::upgrade::OnUpgrade;
 use hyper::StatusCode;
 use metrics::IntCounterPairGuard;
 use rand::rngs::StdRng;
@@ -154,6 +156,7 @@ pub async fn task_main(
     );
 
     hyper::Server::builder(accept::from_stream(tls_listener))
+        .http2_enable_connect_protocol()
         .serve(make_svc)
         .with_graceful_shutdown(cancellation_token.cancelled())
         .await?;
@@ -246,6 +249,25 @@ async fn request_handler(
 
         // Return the response so the spawned future can continue.
         Ok(response)
+    } else if request.method() == Method::CONNECT {
+        // request.
+        dbg!(request.headers());
+        let _upgrade = request
+            .extensions_mut()
+            .remove::<OnUpgrade>()
+            .context("missing upgrade")
+            .map_err(ApiError::InternalServerError)?;
+        let protocol = request
+            .extensions_mut()
+            .remove::<Protocol>()
+            .context("missing protocol")
+            .map_err(ApiError::InternalServerError)?;
+
+        tracing::info!(protocol = protocol.as_str(), "http2 connect???");
+
+        Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "not yet supported"
+        )))
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
         let mut ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
 
