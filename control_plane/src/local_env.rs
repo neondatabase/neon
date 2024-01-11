@@ -427,7 +427,7 @@ impl LocalEnv {
                     );
                 }
                 InitForceMode::EmptyDirOk => {
-                    for res in std::fs::read_dir(base_path)? {
+                    if let Some(res) = std::fs::read_dir(base_path)?.next() {
                         res.context("check if directory is empty")?;
                         anyhow::bail!("directory not empty: {base_path:?}");
                     }
