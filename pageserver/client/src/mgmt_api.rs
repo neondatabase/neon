@@ -210,8 +210,11 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
-    pub async fn tenant_reset(&self, tenant_id: TenantId) -> Result<()> {
-        let uri = format!("{}/v1/tenant/{}/reset", self.mgmt_api_endpoint, tenant_id);
+    pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{}/reset",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
         self.request(Method::POST, &uri, ())
             .await?
             .json()
