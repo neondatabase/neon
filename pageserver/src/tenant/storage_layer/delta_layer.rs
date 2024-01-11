@@ -320,8 +320,8 @@ impl DeltaLayer {
             .metadata()
             .context("get file metadata to determine size")?;
 
-        // TODO(sharding): we must get the TenantShardId from the path instead of reading the Summary.
-        // we should also validate the path against the Summary, as both should contain the same tenant, timeline, key, lsn.
+        // This function is never used for constructing layers in a running pageserver,
+        // so it does not need an accurate TenantShardId.
         let tenant_shard_id = TenantShardId::unsharded(summary.tenant_id);
 
         Ok(DeltaLayer {

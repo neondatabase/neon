@@ -15,6 +15,7 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
     TenantLoadRequest, TenantLocationConfigRequest,
@@ -25,6 +26,7 @@ use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
+use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -36,6 +38,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
+use crate::tenant::mgr::UpsertLocationError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
@@ -45,7 +48,8 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::Timeline;
-use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, TenantSharedResources};
+use crate::tenant::SpawnMode;
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
@@ -65,9 +69,6 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
-
-// Imports only used for testing APIs
-use pageserver_api::models::ConfigureFailpointsRequest;
 
 // For APIs that require an Active tenant, how long should we block waiting for that state?
 // This is not functionally necessary (clients will retry), but avoids generating a lot of
@@ -114,14 +115,6 @@ impl State {
             secondary_controller,
         })
     }
-
-    fn tenant_resources(&self) -> TenantSharedResources {
-        TenantSharedResources {
-            broker_client: self.broker_client.clone(),
-            remote_storage: self.remote_storage.clone(),
-            deletion_queue_client: self.deletion_queue_client.clone(),
-        }
-    }
 }
 
 #[inline(always)]
@@ -154,6 +147,7 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::AncestorStopping(_) => {
                 ApiError::ResourceUnavailable(format!("{pre}").into())
             }
+            PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
         }
     }
@@ -176,7 +170,7 @@ impl From<TenantSlotError> for ApiError {
             NotFound(tenant_id) => {
                 ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
-            e @ (AlreadyExists(_, _) | Conflict(_)) => ApiError::Conflict(format!("{e}")),
+            e @ AlreadyExists(_, _) => ApiError::Conflict(format!("{e}")),
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
             }
@@ -191,6 +185,18 @@ impl From<TenantSlotUpsertError> for ApiError {
         match e {
             InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
+        }
+    }
+}
+
+impl From<UpsertLocationError> for ApiError {
+    fn from(e: UpsertLocationError) -> ApiError {
+        use UpsertLocationError::*;
+        match e {
+            BadRequest(e) => ApiError::BadRequest(e),
+            Unavailable(_) => ApiError::ShuttingDown,
+            e @ InProgress => ApiError::Conflict(format!("{e}")),
+            Flush(e) | Other(e) => ApiError::InternalServerError(e),
         }
     }
 }
@@ -308,6 +314,7 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
             SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
             e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
+            Cancelled => ApiError::ShuttingDown,
         }
     }
 }
@@ -316,11 +323,21 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
+    force_await_initial_logical_size: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let mut info = build_timeline_info_common(timeline, ctx).await?;
+    if force_await_initial_logical_size {
+        timeline.clone().await_initial_logical_size().await
+    }
+
+    let mut info = build_timeline_info_common(
+        timeline,
+        ctx,
+        tenant::timeline::GetLogicalSizePriority::Background,
+    )
+    .await?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
@@ -337,6 +354,7 @@ async fn build_timeline_info(
 async fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
     ctx: &RequestContext,
+    logical_size_task_priority: tenant::timeline::GetLogicalSizePriority,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
     let initdb_lsn = timeline.initdb_lsn;
@@ -359,8 +377,7 @@ async fn build_timeline_info_common(
         Lsn(0) => None,
         lsn @ Lsn(_) => Some(lsn),
     };
-    let current_logical_size =
-        timeline.get_current_logical_size(tenant::timeline::GetLogicalSizePriority::User, ctx);
+    let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn_projected = timeline
@@ -471,7 +488,7 @@ async fn timeline_create_handler(
         .await {
             Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
-                let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
+                let timeline_info = build_timeline_info_common(&new_timeline, &ctx, tenant::timeline::GetLogicalSizePriority::User)
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
@@ -507,6 +524,8 @@ async fn timeline_list_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -520,6 +539,7 @@ async fn timeline_list_handler(
             let timeline_info = build_timeline_info(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
+                force_await_initial_logical_size.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -547,6 +567,8 @@ async fn timeline_detail_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -562,6 +584,7 @@ async fn timeline_detail_handler(
         let timeline_info = build_timeline_info(
             &timeline,
             include_non_incremental_logical_size.unwrap_or(false),
+            force_await_initial_logical_size.unwrap_or(false),
             &ctx,
         )
         .await
@@ -680,16 +703,37 @@ async fn tenant_attach_handler(
         )));
     }
 
-    mgr::attach_tenant(
-        state.conf,
-        tenant_id,
-        generation,
-        tenant_conf,
-        state.tenant_resources(),
-        &ctx,
-    )
-    .instrument(info_span!("tenant_attach", %tenant_id))
-    .await?;
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let tenant = state
+        .tenant_manager
+        .upsert_location(
+            tenant_shard_id,
+            location_conf,
+            None,
+            SpawnMode::Normal,
+            &ctx,
+        )
+        .await?;
+
+    let Some(tenant) = tenant else {
+        // This should never happen: indicates a bug in upsert_location
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Upsert succeeded but didn't return tenant!"
+        )));
+    };
+
+    // We might have successfully constructed a Tenant, but it could still
+    // end up in a broken state:
+    if let TenantState::Broken {
+        reason,
+        backtrace: _,
+    } = tenant.current_state()
+    {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Tenant state is Broken: {reason}"
+        )));
+    }
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -886,7 +930,9 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    mgr::delete_tenant(state.conf, state.remote_storage.clone(), tenant_shard_id)
+    state
+        .tenant_manager
+        .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard = %tenant_shard_id.shard_slug()
@@ -1146,16 +1192,25 @@ async fn tenant_create_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let new_tenant = mgr::create_tenant(
-        state.conf,
-        tenant_conf,
-        target_tenant_id,
-        generation,
-        state.tenant_resources(),
-        &ctx,
-    )
-    .instrument(info_span!("tenant_create", tenant_id = %target_tenant_id))
-    .await?;
+    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+
+    let new_tenant = state
+        .tenant_manager
+        .upsert_location(
+            target_tenant_id,
+            location_conf,
+            None,
+            SpawnMode::Create,
+            &ctx,
+        )
+        .await?;
+
+    let Some(new_tenant) = new_tenant else {
+        // This should never happen: indicates a bug in upsert_location
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "Upsert succeeded but didn't return tenant!"
+        )));
+    };
 
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
@@ -1164,7 +1219,7 @@ async fn tenant_create_handler(
         .await
     {
         // This shouldn't happen because we just created the tenant directory
-        // in tenant::mgr::create_tenant, and there aren't any remote timelines
+        // in upsert_location, and there aren't any remote timelines
         // to load, so, nothing can really fail during load.
         // Don't do cleanup because we don't know how we got here.
         // The tenant will likely be in `Broken` state and subsequent
@@ -1265,12 +1320,31 @@ async fn put_tenant_location_config_handler(
 
     state
         .tenant_manager
-        .upsert_location(tenant_shard_id, location_conf, flush, &ctx)
-        .await
-        // TODO: badrequest assumes the caller was asking for something unreasonable, but in
-        // principle we might have hit something like concurrent API calls to the same tenant,
-        // which is not a 400 but a 409.
-        .map_err(ApiError::BadRequest)?;
+        .upsert_location(
+            tenant_shard_id,
+            location_conf,
+            flush,
+            tenant::SpawnMode::Normal,
+            &ctx,
+        )
+        .await?;
+
+    if let Some(_flush_ms) = flush {
+        match state
+            .secondary_controller
+            .upload_tenant(tenant_shard_id)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!("Uploaded heatmap during flush");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to flush heatmap: {e}");
+            }
+        }
+    } else {
+        tracing::info!("No flush requested when configuring");
+    }
 
     json_response(StatusCode::OK, ())
 }
@@ -1286,34 +1360,6 @@ async fn handle_tenant_break(
         .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
 
     tenant.set_broken("broken from test".to_owned()).await;
-
-    json_response(StatusCode::OK, ())
-}
-
-async fn failpoints_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    if !fail::has_failpoints() {
-        return Err(ApiError::BadRequest(anyhow!(
-            "Cannot manage failpoints because pageserver was compiled without failpoints support"
-        )));
-    }
-
-    let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
-    for fp in failpoints {
-        info!("cfg failpoint: {} {}", fp.name, fp.actions);
-
-        // We recognize one extra "action" that's not natively recognized
-        // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = crate::failpoint_support::apply_failpoint(&fp.name, &fp.actions);
-
-        if let Err(err_msg) = cfg_result {
-            return Err(ApiError::BadRequest(anyhow!(
-                "Failed to configure failpoints: {err_msg}"
-            )));
-        }
-    }
 
     json_response(StatusCode::OK, ())
 }
@@ -1566,19 +1612,22 @@ async fn disk_usage_eviction_run(
     struct Config {
         /// How many bytes to evict before reporting that pressure is relieved.
         evict_bytes: u64,
+
+        #[serde(default)]
+        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
     struct Usage {
         // remains unchanged after instantiation of the struct
-        config: Config,
+        evict_bytes: u64,
         // updated by `add_available_bytes`
         freed_bytes: u64,
     }
 
     impl crate::disk_usage_eviction_task::Usage for Usage {
         fn has_pressure(&self) -> bool {
-            self.config.evict_bytes > self.freed_bytes
+            self.evict_bytes > self.freed_bytes
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {
@@ -1589,7 +1638,7 @@ async fn disk_usage_eviction_run(
     let config = json_request::<Config>(&mut r).await?;
 
     let usage = Usage {
-        config,
+        evict_bytes: config.evict_bytes,
         freed_bytes: 0,
     };
 
@@ -1604,7 +1653,11 @@ async fn disk_usage_eviction_run(
     let state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state, storage, usage, &cancel,
+        &state,
+        storage,
+        usage,
+        config.eviction_order,
+        &cancel,
     )
     .await;
 
@@ -1624,6 +1677,21 @@ async fn secondary_upload_handler(
     state
         .secondary_controller
         .upload_tenant(tenant_shard_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn secondary_download_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    state
+        .secondary_controller
+        .download_tenant(tenant_shard_id)
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -1897,6 +1965,9 @@ pub fn make_router(
         })
         .put("/v1/deletion_queue/flush", |r| {
             api_handler(r, deletion_queue_flush)
+        })
+        .post("/v1/tenant/:tenant_shard_id/secondary/download", |r| {
+            api_handler(r, secondary_download_handler)
         })
         .put("/v1/tenant/:tenant_shard_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)

@@ -17,7 +17,9 @@ use utils::id::TenantId;
 
 #[derive(Serialize)]
 pub struct MetadataSummary {
-    count: usize,
+    tenant_count: usize,
+    timeline_count: usize,
+    timeline_shard_count: usize,
     with_errors: HashSet<TenantShardTimelineId>,
     with_warnings: HashSet<TenantShardTimelineId>,
     with_orphans: HashSet<TenantShardTimelineId>,
@@ -87,7 +89,9 @@ impl MinMaxHisto {
 impl MetadataSummary {
     fn new() -> Self {
         Self {
-            count: 0,
+            tenant_count: 0,
+            timeline_count: 0,
+            timeline_shard_count: 0,
             with_errors: HashSet::new(),
             with_warnings: HashSet::new(),
             with_orphans: HashSet::new(),
@@ -112,7 +116,7 @@ impl MetadataSummary {
     }
 
     fn update_data(&mut self, data: &S3TimelineBlobData) {
-        self.count += 1;
+        self.timeline_shard_count += 1;
         if let BlobDataParseResult::Parsed {
             index_part,
             index_part_generation: _,
@@ -158,16 +162,20 @@ impl MetadataSummary {
         );
 
         format!(
-            "Timelines: {0}
-With errors: {1}
-With warnings: {2}
-With orphan layers: {3}
+            "Tenants: {}
+Timelines: {}
+Timeline-shards: {}
+With errors: {}
+With warnings: {}
+With orphan layers: {}
 Index versions: {version_summary}
-Timeline size bytes: {4}
-Layer size bytes: {5}
-Timeline layer count: {6}
+Timeline size bytes: {}
+Layer size bytes: {}
+Timeline layer count: {}
 ",
-            self.count,
+            self.tenant_count,
+            self.timeline_count,
+            self.timeline_shard_count,
             self.with_errors.len(),
             self.with_warnings.len(),
             self.with_orphans.len(),
@@ -182,15 +190,22 @@ Timeline layer count: {6}
     }
 
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.timeline_shard_count == 0
     }
 }
 
 /// Scan the pageserver metadata in an S3 bucket, reporting errors and statistics.
-pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<MetadataSummary> {
+pub async fn scan_metadata(
+    bucket_config: BucketConfig,
+    tenant_ids: Vec<TenantShardId>,
+) -> anyhow::Result<MetadataSummary> {
     let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver)?;
 
-    let tenants = stream_tenants(&s3_client, &target);
+    let tenants = if tenant_ids.is_empty() {
+        futures::future::Either::Left(stream_tenants(&s3_client, &target))
+    } else {
+        futures::future::Either::Right(futures::stream::iter(tenant_ids.into_iter().map(Ok)))
+    };
 
     // How many tenants to process in parallel.  We need to be mindful of pageservers
     // accessing the same per tenant prefixes, so use a lower setting than pageservers.
@@ -226,8 +241,12 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
         mut tenant_objects: TenantObjectListing,
         timelines: Vec<(TenantShardTimelineId, S3TimelineBlobData)>,
     ) {
+        summary.tenant_count += 1;
+
+        let mut timeline_ids = HashSet::new();
         let mut timeline_generations = HashMap::new();
         for (ttid, data) in timelines {
+            timeline_ids.insert(ttid.timeline_id);
             // Stash the generation of each timeline, for later use identifying orphan layers
             if let BlobDataParseResult::Parsed {
                 index_part: _index_part,
@@ -244,6 +263,8 @@ pub async fn scan_metadata(bucket_config: BucketConfig) -> anyhow::Result<Metada
                 branch_cleanup_and_check_errors(&ttid, &mut tenant_objects, None, None, Some(data));
             summary.update_analysis(&ttid, &analysis);
         }
+
+        summary.timeline_count += timeline_ids.len();
 
         // Identifying orphan layers must be done on a tenant-wide basis, because individual
         // shards' layers may be referenced by other shards.

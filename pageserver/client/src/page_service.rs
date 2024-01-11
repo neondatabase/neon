@@ -115,15 +115,8 @@ impl PagestreamClient {
 
     pub async fn getpage(
         &mut self,
-        key: RelTagBlockNo,
-        lsn: Lsn,
+        req: PagestreamGetPageRequest,
     ) -> anyhow::Result<PagestreamGetPageResponse> {
-        let req = PagestreamGetPageRequest {
-            latest: false,
-            rel: key.rel_tag,
-            blkno: key.block_no,
-            lsn,
-        };
         let req = PagestreamFeMessage::GetPage(req);
         let req: bytes::Bytes = req.serialize();
         // let mut req = tokio_util::io::ReaderStream::new(&req);

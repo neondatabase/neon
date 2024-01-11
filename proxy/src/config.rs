@@ -1,4 +1,4 @@
-use crate::{auth, rate_limiter::RateBucketInfo};
+use crate::{auth, rate_limiter::RateBucketInfo, serverless::GlobalConnPoolOptions};
 use anyhow::{bail, ensure, Context, Ok};
 use rustls::{sign, Certificate, PrivateKey};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,7 @@ pub struct ProxyConfig {
     pub require_client_ip: bool,
     pub disable_ip_check_for_http: bool,
     pub endpoint_rps_limit: Vec<RateBucketInfo>,
+    pub region: String,
 }
 
 #[derive(Debug)]
@@ -31,13 +32,13 @@ pub struct MetricCollectionConfig {
 
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
-    pub common_names: Option<HashSet<String>>,
+    pub common_names: HashSet<String>,
     pub cert_resolver: Arc<CertResolver>,
 }
 
 pub struct HttpConfig {
-    pub timeout: tokio::time::Duration,
-    pub pool_opt_in: bool,
+    pub request_timeout: tokio::time::Duration,
+    pub pool_options: GlobalConnPoolOptions,
 }
 
 pub struct AuthenticationConfig {
@@ -96,7 +97,7 @@ pub fn configure_tls(
 
     Ok(TlsConfig {
         config,
-        common_names: Some(common_names),
+        common_names,
         cert_resolver,
     })
 }
@@ -343,6 +344,69 @@ impl CacheOptions {
 }
 
 impl FromStr for CacheOptions {
+    type Err = anyhow::Error;
+
+    fn from_str(options: &str) -> Result<Self, Self::Err> {
+        let error = || format!("failed to parse cache options '{options}'");
+        Self::parse(options).with_context(error)
+    }
+}
+
+/// Helper for cmdline cache options parsing.
+#[derive(Debug)]
+pub struct ProjectInfoCacheOptions {
+    /// Max number of entries.
+    pub size: usize,
+    /// Entry's time-to-live.
+    pub ttl: Duration,
+    /// Max number of roles per endpoint.
+    pub max_roles: usize,
+    /// Gc interval.
+    pub gc_interval: Duration,
+}
+
+impl ProjectInfoCacheOptions {
+    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    pub const CACHE_DEFAULT_OPTIONS: &'static str =
+        "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
+
+    /// Parse cache options passed via cmdline.
+    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
+    fn parse(options: &str) -> anyhow::Result<Self> {
+        let mut size = None;
+        let mut ttl = None;
+        let mut max_roles = None;
+        let mut gc_interval = None;
+
+        for option in options.split(',') {
+            let (key, value) = option
+                .split_once('=')
+                .with_context(|| format!("bad key-value pair: {option}"))?;
+
+            match key {
+                "size" => size = Some(value.parse()?),
+                "ttl" => ttl = Some(humantime::parse_duration(value)?),
+                "max_roles" => max_roles = Some(value.parse()?),
+                "gc_interval" => gc_interval = Some(humantime::parse_duration(value)?),
+                unknown => bail!("unknown key: {unknown}"),
+            }
+        }
+
+        // TTL doesn't matter if cache is always empty.
+        if let Some(0) = size {
+            ttl.get_or_insert(Duration::default());
+        }
+
+        Ok(Self {
+            size: size.context("missing `size`")?,
+            ttl: ttl.context("missing `ttl`")?,
+            max_roles: max_roles.context("missing `max_roles`")?,
+            gc_interval: gc_interval.context("missing `gc_interval`")?,
+        })
+    }
+}
+
+impl FromStr for ProjectInfoCacheOptions {
     type Err = anyhow::Error;
 
     fn from_str(options: &str) -> Result<Self, Self::Err> {

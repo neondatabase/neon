@@ -42,9 +42,10 @@ def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
 # Please do not alter the label for the query, as it is used to identify it.
 # Labels for ClickBench queries match the labels in ClickBench reports
 # on https://benchmark.clickhouse.com/ (the DB size may differ).
+#
+# Disable auto formatting for the list of queries so that it's easier to read
+# fmt: off
 QUERIES: Tuple[LabelledQuery, ...] = (
-    # Disable `black` formatting for the list of queries so that it's easier to read
-    # fmt: off
     ### ClickBench queries:
     LabelledQuery("Q0",  r"SELECT COUNT(*) FROM hits;"),
     LabelledQuery("Q1",  r"SELECT COUNT(*) FROM hits WHERE AdvEngineID <> 0;"),
@@ -96,8 +97,8 @@ QUERIES: Tuple[LabelledQuery, ...] = (
     # LabelledQuery("NQ0", r"..."),
     # LabelledQuery("NQ1", r"..."),
     # ...
-    # fmt: on
 )
+# fmt: on
 
 EXPLAIN_STRING: str = "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS, SETTINGS, FORMAT JSON)"
 
@@ -151,7 +152,9 @@ def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare, scale: 
     An OLAP-style ClickHouse benchmark
 
     Based on https://github.com/ClickHouse/ClickBench/tree/c00135ca5b6a0d86fedcdbf998fdaa8ed85c1c3b/aurora-postgresql
-    The DB prepared manually in advance
+    The DB prepared manually in advance.
+    Important: after intial data load, run `VACUUM (DISABLE_PAGE_SKIPPING, FREEZE, ANALYZE) hits;`
+    to ensure that Postgres optimizer chooses the same plans as RDS and Aurora.
     """
     explain: bool = os.getenv("TEST_OLAP_COLLECT_EXPLAIN", "false").lower() == "true"
 

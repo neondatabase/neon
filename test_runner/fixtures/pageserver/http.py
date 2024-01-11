@@ -326,6 +326,10 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/heatmap_upload")
         self.verbose_error(res)
 
+    def tenant_secondary_download(self, tenant_id: TenantId):
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/download")
+        self.verbose_error(res)
+
     def set_tenant_config(self, tenant_id: TenantId, config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
         res = self.put(
@@ -361,9 +365,9 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res, dict)
         assert TenantId(res["id"]) == tenant_id
         size = res["size"]
-        assert type(size) == int
+        assert isinstance(size, int)
         inputs = res["inputs"]
-        assert type(inputs) is dict
+        assert isinstance(inputs, dict)
         return (size, inputs)
 
     def tenant_size_debug(self, tenant_id: TenantId) -> str:
@@ -437,6 +441,7 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
+        force_await_initial_logical_size: bool = False,
         **kwargs,
     ) -> Dict[Any, Any]:
         params = {}
@@ -444,6 +449,8 @@ class PageserverHttpClient(requests.Session):
             params["include-non-incremental-logical-size"] = "true"
         if include_timeline_dir_layer_file_size_sum:
             params["include-timeline-dir-layer-file-size-sum"] = "true"
+        if force_await_initial_logical_size:
+            params["force-await-initial-logical-size"] = "true"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
@@ -714,7 +721,7 @@ class PageserverHttpClient(requests.Session):
         )
         self.verbose_error(res)
 
-        assert res.status_code == 200
+        assert res.status_code in (200, 304)
 
     def evict_all_layers(self, tenant_id: TenantId, timeline_id: TimelineId):
         info = self.layer_map_info(tenant_id, timeline_id)

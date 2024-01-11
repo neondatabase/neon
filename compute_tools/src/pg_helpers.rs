@@ -6,12 +6,17 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Child;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
-use tracing::{debug, instrument};
+use tokio::io::AsyncBufReadExt;
+use tokio::time::timeout;
+use tokio_postgres::NoTls;
+use tracing::{debug, error, info, instrument};
 
 use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
@@ -356,6 +361,140 @@ pub fn create_pgdata(pgdata: &str) -> Result<()> {
     let _ok = fs::remove_dir_all(pgdata);
     fs::create_dir(pgdata)?;
     fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
+
+    Ok(())
+}
+
+/// Update pgbouncer.ini with provided options
+pub fn update_pgbouncer_ini(
+    pgbouncer_config: HashMap<String, String>,
+    pgbouncer_ini_path: &str,
+) -> Result<()> {
+    let mut conf = Ini::load_from_file(pgbouncer_ini_path)?;
+    let section = conf.section_mut(Some("pgbouncer")).unwrap();
+
+    for (option_name, value) in pgbouncer_config.iter() {
+        section.insert(option_name, value);
+    }
+
+    conf.write_to_file(pgbouncer_ini_path)?;
+    Ok(())
+}
+
+/// Tune pgbouncer.
+/// 1. Apply new config using pgbouncer admin console
+/// 2. Add new values to pgbouncer.ini to preserve them after restart
+pub async fn tune_pgbouncer(
+    pgbouncer_settings: Option<HashMap<String, String>>,
+    pgbouncer_connstr: &str,
+    pgbouncer_ini_path: Option<String>,
+) -> Result<()> {
+    if let Some(pgbouncer_config) = pgbouncer_settings {
+        // Apply new config
+        let connect_result = tokio_postgres::connect(pgbouncer_connstr, NoTls).await;
+        let (client, connection) = connect_result.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+
+        for (option_name, value) in pgbouncer_config.iter() {
+            info!(
+                "Applying pgbouncer setting change: {} = {}",
+                option_name, value
+            );
+            let query = format!("SET {} = {}", option_name, value);
+
+            let result = client.simple_query(&query).await;
+
+            info!("Applying pgbouncer setting change: {}", query);
+            info!("pgbouncer setting change result: {:?}", result);
+
+            if let Err(err) = result {
+                // Don't fail on error, just print it into log
+                error!(
+                    "Failed to apply pgbouncer setting change: {},  {}",
+                    query, err
+                );
+            };
+        }
+
+        // save values to pgbouncer.ini
+        // so that they are preserved after pgbouncer restart
+        if let Some(pgbouncer_ini_path) = pgbouncer_ini_path {
+            update_pgbouncer_ini(pgbouncer_config, &pgbouncer_ini_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Spawn a thread that will read Postgres logs from `stderr`, join multiline logs
+/// and send them to the logger. In the future we may also want to add context to
+/// these logs.
+pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+
+        let res = runtime.block_on(async move {
+            let stderr = tokio::process::ChildStderr::from_std(stderr)?;
+            handle_postgres_logs_async(stderr).await
+        });
+        if let Err(e) = res {
+            tracing::error!("error while processing postgres logs: {}", e);
+        }
+    })
+}
+
+/// Read Postgres logs from `stderr` until EOF. Buffer is flushed on one of the following conditions:
+/// - next line starts with timestamp
+/// - EOF
+/// - no new lines were written for the last second
+async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Result<()> {
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let timeout_duration = Duration::from_secs(1);
+    let ts_regex =
+        regex::Regex::new(r"^\d+-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").expect("regex is valid");
+
+    let mut buf = vec![];
+    loop {
+        let next_line = timeout(timeout_duration, lines.next_line()).await;
+
+        // we should flush lines from the buffer if we cannot continue reading multiline message
+        let should_flush_buf = match next_line {
+            // Flushing if new line starts with timestamp
+            Ok(Ok(Some(ref line))) => ts_regex.is_match(line),
+            // Flushing on EOF, timeout or error
+            _ => true,
+        };
+
+        if !buf.is_empty() && should_flush_buf {
+            // join multiline message into a single line, separated by unicode Zero Width Space.
+            // "PG:" suffix is used to distinguish postgres logs from other logs.
+            let combined = format!("PG:{}\n", buf.join("\u{200B}"));
+            buf.clear();
+
+            // sync write to stderr to avoid interleaving with other logs
+            use std::io::Write;
+            let res = std::io::stderr().lock().write_all(combined.as_bytes());
+            if let Err(e) = res {
+                tracing::error!("error while writing to stderr: {}", e);
+            }
+        }
+
+        // if not timeout, append line to the buffer
+        if next_line.is_ok() {
+            match next_line?? {
+                Some(line) => buf.push(line),
+                // EOF
+                None => break,
+            };
+        }
+    }
 
     Ok(())
 }

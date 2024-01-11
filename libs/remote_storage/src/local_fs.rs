@@ -18,7 +18,7 @@ use tokio_util::io::ReaderStream;
 use tracing::*;
 use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
-use crate::{Download, DownloadError, Listing, ListingMode, RemotePath};
+use crate::{Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath};
 
 use super::{RemoteStorage, StorageMetadata};
 
@@ -331,6 +331,8 @@ impl RemoteStorage for LocalFs {
                 .map_err(DownloadError::Other)?;
             Ok(Download {
                 metadata,
+                last_modified: None,
+                etag: None,
                 download_stream: Box::pin(source),
             })
         } else {
@@ -372,17 +374,17 @@ impl RemoteStorage for LocalFs {
                 .await
                 .map_err(DownloadError::Other)?;
 
-            Ok(match end_exclusive {
-                Some(end_exclusive) => Download {
-                    metadata,
-                    download_stream: Box::pin(ReaderStream::new(
-                        source.take(end_exclusive - start_inclusive),
-                    )),
-                },
-                None => Download {
-                    metadata,
-                    download_stream: Box::pin(ReaderStream::new(source)),
-                },
+            let download_stream: DownloadStream = match end_exclusive {
+                Some(end_exclusive) => Box::pin(ReaderStream::new(
+                    source.take(end_exclusive - start_inclusive),
+                )),
+                None => Box::pin(ReaderStream::new(source)),
+            };
+            Ok(Download {
+                metadata,
+                last_modified: None,
+                etag: None,
+                download_stream,
             })
         } else {
             Err(DownloadError::NotFound)
@@ -405,6 +407,20 @@ impl RemoteStorage for LocalFs {
         for path in paths {
             self.delete(path).await?
         }
+        Ok(())
+    }
+
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+        let from_path = from.with_base(&self.storage_root);
+        let to_path = to.with_base(&self.storage_root);
+        create_target_directory(&to_path).await?;
+        fs::copy(&from_path, &to_path).await.with_context(|| {
+            format!(
+                "Failed to copy file from '{from_path}' to '{to_path}'",
+                from_path = from_path,
+                to_path = to_path
+            )
+        })?;
         Ok(())
     }
 }

@@ -117,6 +117,8 @@ impl AzureBlobStorage {
     ) -> Result<Download, DownloadError> {
         let mut response = builder.into_stream();
 
+        let mut etag = None;
+        let mut last_modified = None;
         let mut metadata = HashMap::new();
         // TODO give proper streaming response instead of buffering into RAM
         // https://github.com/neondatabase/neon/issues/5563
@@ -124,6 +126,13 @@ impl AzureBlobStorage {
         let mut bufs = Vec::new();
         while let Some(part) = response.next().await {
             let part = part.map_err(to_download_error)?;
+            let etag_str: &str = part.blob.properties.etag.as_ref();
+            if etag.is_none() {
+                etag = Some(etag.unwrap_or_else(|| etag_str.to_owned()));
+            }
+            if last_modified.is_none() {
+                last_modified = Some(part.blob.properties.last_modified.into());
+            }
             if let Some(blob_meta) = part.blob.metadata {
                 metadata.extend(blob_meta.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
             }
@@ -136,6 +145,8 @@ impl AzureBlobStorage {
         }
         Ok(Download {
             download_stream: Box::pin(futures::stream::iter(bufs.into_iter().map(Ok))),
+            etag,
+            last_modified,
             metadata: Some(StorageMetadata(metadata)),
         })
     }
@@ -310,6 +321,12 @@ impl RemoteStorage for AzureBlobStorage {
             self.delete(path).await?;
         }
         Ok(())
+    }
+
+    async fn copy(&self, _from: &RemotePath, _to: &RemotePath) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "copy for azure blob storage is not implemented"
+        ))
     }
 }
 

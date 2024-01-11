@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::config;
+use crate::logger::inlinify;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
@@ -662,7 +663,11 @@ pub fn handle_grants(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> 
             $$;"
         .to_string();
 
-        info!("grant query for db {} : {}", &db.name, &grant_query);
+        info!(
+            "grant query for db {} : {}",
+            &db.name,
+            inlinify(&grant_query)
+        );
         db_client.simple_query(&grant_query)?;
     }
 

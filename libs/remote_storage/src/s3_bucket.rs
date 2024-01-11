@@ -16,6 +16,7 @@ use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider,
     meta::credentials::CredentialsProviderChain,
+    profile::ProfileFileCredentialsProvider,
     provider_config::ProviderConfig,
     retry::{RetryConfigBuilder, RetryMode},
     web_identity_token::WebIdentityTokenCredentialsProvider,
@@ -74,20 +75,29 @@ impl S3Bucket {
 
         let region = Some(Region::new(aws_config.bucket_region.clone()));
 
+        let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
             CredentialsProviderChain::first_try(
                 "env",
                 EnvironmentVariableCredentialsProvider::new(),
             )
+            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+            .or_else(
+                "profile-sso",
+                ProfileFileCredentialsProvider::builder()
+                    .configure(&provider_conf)
+                    .build(),
+            )
             // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
             // needed to access remote extensions bucket
-            .or_else("token", {
-                let provider_conf = ProviderConfig::without_region().with_region(region.clone());
+            .or_else(
+                "token",
                 WebIdentityTokenCredentialsProvider::builder()
                     .configure(&provider_conf)
-                    .build()
-            })
+                    .build(),
+            )
             // uses imds v2
             .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
@@ -221,6 +231,8 @@ impl S3Bucket {
         match get_object {
             Ok(object_output) => {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
+                let etag = object_output.e_tag.clone();
+                let last_modified = object_output.last_modified.and_then(|t| t.try_into().ok());
 
                 let body = object_output.body;
                 let body = ByteStreamAsStream::from(body);
@@ -229,6 +241,8 @@ impl S3Bucket {
 
                 Ok(Download {
                     metadata,
+                    etag,
+                    last_modified,
                     download_stream: Box::pin(body),
                 })
             }
@@ -466,6 +480,38 @@ impl RemoteStorage for S3Bucket {
             .set_metadata(metadata.map(|m| m.0))
             .content_length(from_size_bytes.try_into()?)
             .body(bytes_stream)
+            .send()
+            .await;
+
+        let started_at = ScopeGuard::into_inner(started_at);
+        metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+
+        res?;
+
+        Ok(())
+    }
+
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+        let kind = RequestKind::Copy;
+        let _guard = self.permit(kind).await;
+
+        let started_at = start_measuring_requests(kind);
+
+        // we need to specify bucket_name as a prefix
+        let copy_source = format!(
+            "{}/{}",
+            self.bucket_name,
+            self.relative_path_to_s3_object(from)
+        );
+
+        let res = self
+            .client
+            .copy_object()
+            .bucket(self.bucket_name.clone())
+            .key(self.relative_path_to_s3_object(to))
+            .copy_source(copy_source)
             .send()
             .await;
 

@@ -229,6 +229,7 @@ use crate::{
     tenant::upload_queue::{
         UploadOp, UploadQueue, UploadQueueInitialized, UploadQueueStopped, UploadTask,
     },
+    TENANT_HEATMAP_BASENAME,
 };
 
 use utils::id::{TenantId, TimelineId};
@@ -818,8 +819,25 @@ impl RemoteTimelineClient {
     fn schedule_deletion_of_unlinked0(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-        with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
+        mut with_metadata: Vec<(LayerFileName, LayerFileMetadata)>,
     ) {
+        // Filter out any layers which were not created by this tenant shard.  These are
+        // layers that originate from some ancestor shard after a split, and may still
+        // be referenced by other shards. We are free to delete them locally and remove
+        // them from our index (and would have already done so when we reach this point
+        // in the code), but we may not delete them remotely.
+        with_metadata.retain(|(name, meta)| {
+            let retain = meta.shard.shard_number == self.tenant_shard_id.shard_number
+                && meta.shard.shard_count == self.tenant_shard_id.shard_count;
+            if !retain {
+                tracing::debug!(
+                    "Skipping deletion of ancestor-shard layer {name}, from shard {}",
+                    meta.shard
+                );
+            }
+            retain
+        });
+
         for (name, meta) in &with_metadata {
             info!(
                 "scheduling deletion of layer {}{} (shard {})",
@@ -1724,11 +1742,11 @@ pub fn remote_index_path(
     .expect("Failed to construct path")
 }
 
-pub const HEATMAP_BASENAME: &str = "heatmap-v1.json";
-
 pub(crate) fn remote_heatmap_path(tenant_shard_id: &TenantShardId) -> RemotePath {
-    RemotePath::from_string(&format!("tenants/{tenant_shard_id}/{HEATMAP_BASENAME}"))
-        .expect("Failed to construct path")
+    RemotePath::from_string(&format!(
+        "tenants/{tenant_shard_id}/{TENANT_HEATMAP_BASENAME}"
+    ))
+    .expect("Failed to construct path")
 }
 
 /// Given the key of an index, parse out the generation part of the name
@@ -1885,7 +1903,7 @@ mod tests {
         fn span(&self) -> tracing::Span {
             tracing::info_span!(
                 "test",
-                tenant_id = %self.harness.tenant_id,
+                tenant_id = %self.harness.tenant_shard_id.tenant_id,
                 timeline_id = %TIMELINE_ID
             )
         }
@@ -2192,15 +2210,6 @@ mod tests {
 
         let index_part_bytes = serde_json::to_vec(&example_index_part).unwrap();
 
-        let timeline_path = test_state.harness.timeline_path(&TIMELINE_ID);
-        let remote_timeline_dir = test_state.harness.remote_fs_dir.join(
-            timeline_path
-                .strip_prefix(&test_state.harness.conf.workdir)
-                .unwrap(),
-        );
-
-        std::fs::create_dir_all(remote_timeline_dir).expect("creating test dir should work");
-
         let index_path = test_state.harness.remote_fs_dir.join(
             remote_index_path(
                 &test_state.harness.tenant_shard_id,
@@ -2209,6 +2218,10 @@ mod tests {
             )
             .get_path(),
         );
+
+        std::fs::create_dir_all(index_path.parent().unwrap())
+            .expect("creating test dir should work");
+
         eprintln!("Writing {index_path}");
         std::fs::write(&index_path, index_part_bytes).unwrap();
         example_index_part

@@ -13,6 +13,7 @@ use bytes::{Buf, Bytes};
 use pageserver::{
     config::PageServerConf, repository::Key, walrecord::NeonWalRecord, walredo::PostgresRedoManager,
 };
+use pageserver_api::shard::TenantShardId;
 use utils::{id::TenantId, lsn::Lsn};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -26,9 +27,9 @@ fn redo_scenarios(c: &mut Criterion) {
 
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
     let conf = Box::leak(Box::new(conf));
-    let tenant_id = TenantId::generate();
+    let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
 
-    let manager = PostgresRedoManager::new(conf, tenant_id);
+    let manager = PostgresRedoManager::new(conf, tenant_shard_id);
 
     let manager = Arc::new(manager);
 

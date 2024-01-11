@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -14,6 +13,7 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
@@ -28,8 +28,13 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::endpoint_sni;
 use crate::config::HttpConfig;
+use crate::config::TlsConfig;
+use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::proxy::NeonOptions;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -121,8 +126,10 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 }
 
 fn get_conn_info(
+    ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
+    tls: &TlsConfig,
 ) -> Result<ConnInfo, anyhow::Error> {
     let connection_string = headers
         .get("Neon-Connection-String")
@@ -146,10 +153,11 @@ fn get_conn_info(
         .next()
         .ok_or(anyhow::anyhow!("invalid database name"))?;
 
-    let username = connection_url.username();
+    let username = SmolStr::from(connection_url.username());
     if username.is_empty() {
         return Err(anyhow::anyhow!("missing username"));
     }
+    ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
@@ -176,45 +184,47 @@ fn get_conn_info(
         }
     }
 
+    let endpoint = endpoint_sni(hostname, &tls.common_names)?;
+
+    let endpoint: SmolStr = endpoint.into();
+    ctx.set_endpoint_id(Some(endpoint.clone()));
+
     let pairs = connection_url.query_pairs();
 
     let mut options = Option::None;
 
     for (key, value) in pairs {
         if key == "options" {
-            options = Some(value.into());
+            options = Some(NeonOptions::parse_options_raw(&value));
             break;
         }
     }
 
+    let user_info = ComputeUserInfo {
+        endpoint,
+        user: username,
+        options: options.unwrap_or_default(),
+    };
+
     Ok(ConnInfo {
-        username: username.into(),
+        user_info,
         dbname: dbname.into(),
-        hostname: hostname.into(),
         password: password.into(),
-        options,
     })
 }
 
 // TODO: return different http error codes
 pub async fn handle(
+    tls: &'static TlsConfig,
+    config: &'static HttpConfig,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
-    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
-        config.timeout,
-        handle_inner(
-            config,
-            request,
-            sni_hostname,
-            conn_pool,
-            session_id,
-            peer_addr,
-        ),
+        config.request_timeout,
+        handle_inner(tls, config, ctx, request, sni_hostname, conn_pool),
     )
     .await;
     let mut response = match result {
@@ -278,7 +288,7 @@ pub async fn handle(
         Err(_) => {
             let message = format!(
                 "HTTP-Connection timed out, execution time exeeded {} seconds",
-                config.timeout.as_secs()
+                config.request_timeout.as_secs()
             );
             error!(message);
             json_response(
@@ -296,12 +306,12 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
+    tls: &'static TlsConfig,
     config: &'static HttpConfig,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
@@ -311,7 +321,7 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(headers, sni_hostname)?;
+    let conn_info = get_conn_info(ctx, headers, sni_hostname, tls)?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -320,7 +330,8 @@ async fn handle_inner(
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
-    let allow_pool = !config.pool_opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
+    let allow_pool =
+        !config.pool_options.opt_in || headers.get(&ALLOW_POOL) == Some(&HEADER_VALUE_TRUE);
 
     // isolation level, read only and deferrable
 
@@ -339,10 +350,12 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
+    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
+    drop(paused);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -358,9 +371,7 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool
-        .get(&conn_info, !allow_pool, session_id, peer_addr)
-        .await?;
+    let mut client = conn_pool.get(ctx, conn_info, !allow_pool).await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -448,6 +459,7 @@ async fn handle_inner(
             }
         };
 
+    ctx.log();
     let metrics = client.metrics();
 
     // how could this possibly fail

@@ -12,7 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
@@ -33,6 +33,7 @@ use tracing::*;
 use utils::backoff;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::failpoint_support;
 use utils::fs_ext;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
@@ -55,6 +56,7 @@ use self::timeline::uninit::TimelineUninitMark;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::TimelineResources;
+use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
@@ -126,6 +128,13 @@ macro_rules! pausable_failpoint {
             })
             .await
             .expect("spawn_blocking");
+        }
+    };
+    ($name:literal, $cond:expr) => {
+        if cfg!(feature = "testing") {
+            if $cond {
+                pausable_failpoint!($name)
+            }
         }
     };
 }
@@ -594,10 +603,9 @@ impl Tenant {
         mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        // TODO(sharding): make WalRedoManager shard-aware
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
-            tenant_shard_id.tenant_id,
+            tenant_shard_id,
         )));
 
         let TenantSharedResources {
@@ -890,7 +898,7 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
-        crate::failpoint_support::sleep_millis_async!("before-attaching-tenant");
+        failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
         let preload = match preload {
             Some(p) => p,
@@ -1002,7 +1010,7 @@ impl Tenant {
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
 
-        crate::failpoint_support::sleep_millis_async!("attach-before-activate");
+        failpoint_support::sleep_millis_async!("attach-before-activate", &self.cancel);
 
         info!("Done");
 
@@ -1144,10 +1152,9 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         reason: String,
     ) -> Arc<Tenant> {
-        // TODO(sharding): make WalRedoManager shard-aware
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
-            tenant_shard_id.tenant_id,
+            tenant_shard_id,
         )));
         Arc::new(Tenant::new(
             TenantState::Broken {
@@ -1759,7 +1766,15 @@ impl Tenant {
                     // decoding the new WAL might need to look up previous pages, relation
                     // sizes etc. and that would get confused if the previous page versions
                     // are not in the repository yet.
-                    ancestor_timeline.wait_lsn(*lsn, ctx).await?;
+                    ancestor_timeline
+                        .wait_lsn(*lsn, ctx)
+                        .await
+                        .map_err(|e| match e {
+                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState) => {
+                                CreateTimelineError::AncestorLsn(anyhow::anyhow!(e))
+                            }
+                            WaitLsnError::Shutdown => CreateTimelineError::ShuttingDown,
+                        })?;
                 }
 
                 self.branch_timeline(
@@ -2027,6 +2042,13 @@ impl Tenant {
         // But the tenant background loops are joined-on in our caller.
         // It's mesed up.
         // we just ignore the failure to stop
+
+        // If we're still attaching, fire the cancellation token early to drop out: this
+        // will prevent us flushing, but ensures timely shutdown if some I/O during attach
+        // is very slow.
+        if matches!(self.current_state(), TenantState::Attaching) {
+            self.cancel.cancel();
+        }
 
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
@@ -2726,6 +2748,10 @@ impl Tenant {
 "#
         .to_string();
 
+        fail::fail_point!("tenant-config-before-write", |_| {
+            anyhow::bail!("tenant-config-before-write");
+        });
+
         // Convert the config to a toml file.
         conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
 
@@ -2839,9 +2865,7 @@ impl Tenant {
             }
         };
 
-        crate::failpoint_support::sleep_millis_async!(
-            "gc_iteration_internal_after_getting_gc_timelines"
-        );
+        failpoint_support::sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
         // If there is nothing to GC, we don't want any messages in the INFO log.
         if !gc_timelines.is_empty() {
@@ -3134,6 +3158,7 @@ impl Tenant {
 
     /// For unit tests, make this visible so that other modules can directly create timelines
     #[cfg(test)]
+    #[tracing::instrument(fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))]
     pub(crate) async fn bootstrap_timeline_test(
         &self,
         timeline_id: TimelineId,
@@ -3643,140 +3668,6 @@ fn remove_timeline_and_uninit_mark(
     Ok(())
 }
 
-pub(crate) async fn create_tenant_files(
-    conf: &'static PageServerConf,
-    location_conf: &LocationConf,
-    tenant_shard_id: &TenantShardId,
-) -> anyhow::Result<Utf8PathBuf> {
-    let target_tenant_directory = conf.tenant_path(tenant_shard_id);
-    anyhow::ensure!(
-        !target_tenant_directory
-            .try_exists()
-            .context("check existence of tenant directory")?,
-        "tenant directory already exists",
-    );
-
-    let temporary_tenant_dir =
-        path_with_suffix_extension(&target_tenant_directory, TEMP_FILE_SUFFIX);
-    debug!("Creating temporary directory structure in {temporary_tenant_dir}");
-
-    // top-level dir may exist if we are creating it through CLI
-    crashsafe::create_dir_all(&temporary_tenant_dir).with_context(|| {
-        format!("could not create temporary tenant directory {temporary_tenant_dir}")
-    })?;
-
-    let creation_result = try_create_target_tenant_dir(
-        conf,
-        location_conf,
-        tenant_shard_id,
-        &temporary_tenant_dir,
-        &target_tenant_directory,
-    )
-    .await;
-
-    if creation_result.is_err() {
-        error!(
-            "Failed to create directory structure for tenant {tenant_shard_id}, cleaning tmp data"
-        );
-        if let Err(e) = fs::remove_dir_all(&temporary_tenant_dir) {
-            error!("Failed to remove temporary tenant directory {temporary_tenant_dir:?}: {e}")
-        } else if let Err(e) = crashsafe::fsync(&temporary_tenant_dir) {
-            error!(
-                "Failed to fsync removed temporary tenant directory {temporary_tenant_dir:?}: {e}"
-            )
-        }
-    }
-
-    creation_result?;
-
-    Ok(target_tenant_directory)
-}
-
-async fn try_create_target_tenant_dir(
-    conf: &'static PageServerConf,
-    location_conf: &LocationConf,
-    tenant_shard_id: &TenantShardId,
-    temporary_tenant_dir: &Utf8Path,
-    target_tenant_directory: &Utf8Path,
-) -> Result<(), anyhow::Error> {
-    let temporary_tenant_timelines_dir = rebase_directory(
-        &conf.timelines_path(tenant_shard_id),
-        target_tenant_directory,
-        temporary_tenant_dir,
-    )
-    .with_context(|| format!("resolve tenant {tenant_shard_id} temporary timelines dir"))?;
-    let temporary_legacy_tenant_config_path = rebase_directory(
-        &conf.tenant_config_path(tenant_shard_id),
-        target_tenant_directory,
-        temporary_tenant_dir,
-    )
-    .with_context(|| format!("resolve tenant {tenant_shard_id} temporary config path"))?;
-    let temporary_tenant_config_path = rebase_directory(
-        &conf.tenant_location_config_path(tenant_shard_id),
-        target_tenant_directory,
-        temporary_tenant_dir,
-    )
-    .with_context(|| format!("resolve tenant {tenant_shard_id} temporary config path"))?;
-
-    Tenant::persist_tenant_config_at(
-        tenant_shard_id,
-        &temporary_tenant_config_path,
-        &temporary_legacy_tenant_config_path,
-        location_conf,
-    )
-    .await?;
-
-    crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
-        format!(
-            "create tenant {} temporary timelines directory {}",
-            tenant_shard_id, temporary_tenant_timelines_dir,
-        )
-    })?;
-    fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
-        anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
-    });
-
-    // Make sure the current tenant directory entries are durable before renaming.
-    // Without this, a crash may reorder any of the directory entry creations above.
-    crashsafe::fsync(temporary_tenant_dir)
-        .with_context(|| format!("sync temporary tenant directory {temporary_tenant_dir:?}"))?;
-
-    fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
-        format!(
-            "move tenant {} temporary directory {} into the permanent one {}",
-            tenant_shard_id, temporary_tenant_dir, target_tenant_directory
-        )
-    })?;
-    let target_dir_parent = target_tenant_directory.parent().with_context(|| {
-        format!(
-            "get tenant {} dir parent for {}",
-            tenant_shard_id, target_tenant_directory,
-        )
-    })?;
-    crashsafe::fsync(target_dir_parent).with_context(|| {
-        format!(
-            "fsync renamed directory's parent {} for tenant {}",
-            target_dir_parent, tenant_shard_id,
-        )
-    })?;
-
-    Ok(())
-}
-
-fn rebase_directory(
-    original_path: &Utf8Path,
-    base: &Utf8Path,
-    new_base: &Utf8Path,
-) -> anyhow::Result<Utf8PathBuf> {
-    let relative_path = original_path.strip_prefix(base).with_context(|| {
-        format!(
-            "Failed to strip base prefix '{}' off path '{}'",
-            base, original_path
-        )
-    })?;
-    Ok(new_base.join(relative_path))
-}
-
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
 /// to get bootstrap data for timeline initialization.
 async fn run_initdb(
@@ -3871,6 +3762,7 @@ pub async fn dump_layerfile_from_path(
 #[cfg(test)]
 pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
+    use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
     use pageserver_api::shard::ShardIndex;
     use std::fs;
@@ -3938,8 +3830,6 @@ pub(crate) mod harness {
     pub struct TenantHarness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
-        // TODO(sharding): remove duplicative `tenant_id` in favor of access to tenant_shard_id
-        pub(crate) tenant_id: TenantId,
         pub tenant_shard_id: TenantShardId,
         pub generation: Generation,
         pub shard: ShardIndex,
@@ -4001,7 +3891,6 @@ pub(crate) mod harness {
             Ok(Self {
                 conf,
                 tenant_conf,
-                tenant_id,
                 tenant_shard_id,
                 generation: Generation::new(0xdeadbeef),
                 shard: ShardIndex::unsharded(),

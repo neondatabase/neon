@@ -1,3 +1,4 @@
+import concurrent.futures
 import math
 import queue
 import random
@@ -24,6 +25,7 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
+    wait_tenant_status_404,
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
@@ -776,6 +778,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     def get_tenant_states():
         states = {}
+        log.info(f"Tenant ids: {tenant_ids}")
         for tenant_id in tenant_ids:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
             states[tenant_id] = tenant["state"]["slug"]
@@ -872,3 +875,116 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
         pageserver_http.get_metric_value("pageserver_tenant_startup_scheduled_total") == n_tenants
     )
     assert pageserver_http.get_metric_value("pageserver_tenant_startup_complete_total") == n_tenants
+
+    # Check that tenant deletion proactively wakes tenants: this is done separately to the main
+    # body of the test because it will disrupt tenant counts
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
+    )
+
+    wait_until(10, 1, at_least_one_active)
+    delete_tenant_id = list(
+        [(tid, s) for (tid, s) in get_tenant_states().items() if s == "Attaching"]
+    )[0][0]
+
+    # Deleting a stuck tenant should prompt it to go active
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        log.info("Starting background delete")
+
+        def delete_tenant():
+            env.pageserver.http_client().tenant_delete(delete_tenant_id)
+
+        background_delete = executor.submit(delete_tenant)
+
+        # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
+        # logical size is paused in a failpoint.  So instead we will use a log observation to check that
+        # on-demand activation was triggered by the tenant deletion
+        log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000}}: Activating tenant \\(on-demand\\).*"
+
+        def activated_on_demand():
+            assert env.pageserver.log_contains(log_match) is not None
+
+        log.info(f"Waiting for activation message '{log_match}'")
+        try:
+            wait_until(10, 1, activated_on_demand)
+        finally:
+            log.info("Clearing failpoint")
+            pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
+
+        # Deletion should complete successfully now that failpoint is unblocked
+        log.info("Joining background delete")
+        background_delete.result(timeout=10)
+
+        # Poll for deletion to complete
+        wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
+        tenant_ids.remove(delete_tenant_id)
+
+    # Check that all the stuck tenants proceed to active (apart from the one that deletes)
+    wait_until(10, 1, all_active)
+    assert len(get_tenant_states()) == n_tenants - 1
+
+
+def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
+    """
+    /v1/tenant/:tenant_shard_id/timeline and /v1/tenant/:tenant_shard_id
+    should not bump the priority of the initial logical size computation
+    background task, unless the force-await-initial-logical-size query param
+    is set to true.
+
+    This test verifies the invariant stated above. A couple of tricks are involved:
+    1. Detach the tenant and re-attach it after the page server is restarted. This circumvents
+    the warm-up which forces the initial logical size calculation.
+    2. A fail point (initial-size-calculation-permit-pause) is used to block the initial
+    computation of the logical size until forced.
+    3. A fail point (walreceiver-after-ingest) is used to pause the walreceiver since
+    otherwise it would force the logical size computation.
+    """
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    # load in some data
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    endpoint.safe_psql_many(
+        [
+            "CREATE TABLE foo (x INTEGER)",
+            "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
+        ]
+    )
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    # restart with failpoint inside initial size calculation task
+    log.info(f"Detaching tenant {tenant_id} and stopping pageserver...")
+
+    endpoint.stop()
+    env.pageserver.tenant_detach(tenant_id)
+    env.pageserver.stop()
+    env.pageserver.start(
+        extra_env_vars={
+            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest=pause"
+        }
+    )
+
+    log.info(f"Re-attaching tenant {tenant_id}...")
+    env.pageserver.tenant_attach(tenant_id)
+
+    # kick off initial size calculation task (the response we get here is the estimated size)
+    def assert_initial_logical_size_not_prioritised():
+        details = client.timeline_detail(tenant_id, timeline_id)
+        assert details["current_logical_size_is_accurate"] is False
+
+    assert_initial_logical_size_not_prioritised()
+
+    # ensure that's actually the case
+    time.sleep(2)
+    assert_initial_logical_size_not_prioritised()
+
+    details = client.timeline_detail(tenant_id, timeline_id, force_await_initial_logical_size=True)
+    assert details["current_logical_size_is_accurate"] is True
+
+    client.configure_failpoints(
+        [("initial-size-calculation-permit-pause", "off"), ("walreceiver-after-ingest", "off")]
+    )

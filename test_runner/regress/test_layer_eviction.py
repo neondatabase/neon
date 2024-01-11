@@ -102,9 +102,7 @@ def test_basic_eviction(
         ), f"Did not expect to find {local_layer} layer after evicting"
 
     empty_layers = list(filter(lambda path: path.name != "metadata", timeline_path.glob("*")))
-    assert (
-        not empty_layers
-    ), f"After evicting all layers, timeline {tenant_id}/{timeline_id} should have no layers locally, but got: {empty_layers}"
+    assert not empty_layers, f"After evicting all layers, timeline {tenant_id}/{timeline_id} should have no layers locally, but got: {empty_layers}"
 
     evicted_layer_map_info = client.layer_map_info(tenant_id=tenant_id, timeline_id=timeline_id)
     assert (

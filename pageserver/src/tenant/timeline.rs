@@ -373,15 +373,20 @@ pub struct GcInfo {
 }
 
 /// An error happened in a get() operation.
-#[derive(thiserror::Error)]
-pub enum PageReconstructError {
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum PageReconstructError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 
+    #[error("Ancestor LSN wait error: {0}")]
+    AncestorLsnTimeout(#[from] WaitLsnError),
+
     /// The operation was cancelled
+    #[error("Cancelled")]
     Cancelled,
 
     /// The ancestor of this is being stopped
+    #[error("ancestor timeline {0} is being stopped")]
     AncestorStopping(TimelineId),
 
     /// An error happened replaying WAL records
@@ -400,32 +405,6 @@ enum FlushLayerError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-}
-
-impl std::fmt::Debug for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Other(err) => err.fmt(f),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::AncestorStopping(timeline_id) => {
-                write!(f, "ancestor timeline {timeline_id} is being stopped")
-            }
-            Self::WalRedo(err) => err.fmt(f),
-        }
-    }
-}
-
-impl std::fmt::Display for PageReconstructError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            Self::Other(err) => err.fmt(f),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::AncestorStopping(timeline_id) => {
-                write!(f, "ancestor timeline {timeline_id} is being stopped")
-            }
-            Self::WalRedo(err) => err.fmt(f),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -450,6 +429,21 @@ impl std::fmt::Debug for Timeline {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "Timeline<{}>", self.timeline_id)
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum WaitLsnError {
+    // Called on a timeline which is shutting down
+    #[error("Shutdown")]
+    Shutdown,
+
+    // Called on an timeline not in active state or shutting down
+    #[error("Bad state (not active)")]
+    BadState,
+
+    // Timeout expired while waiting for LSN to catch up with goal.
+    #[error("{0}")]
+    Timeout(String),
 }
 
 /// Public interface functions
@@ -486,7 +480,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get(
+    pub(crate) async fn get(
         &self,
         key: Key,
         lsn: Lsn,
@@ -495,6 +489,11 @@ impl Timeline {
         if !lsn.is_valid() {
             return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
         }
+
+        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
+        // already checked the key against the shard_identity when looking up the Timeline from
+        // page_service.
+        debug_assert!(!self.shard_identity.is_key_disposable(&key));
 
         // XXX: structured stats collection for layer eviction here.
         trace!(
@@ -629,24 +628,28 @@ impl Timeline {
     /// You should call this before any of the other get_* or list_* functions. Calling
     /// those functions with an LSN that has been processed yet is an error.
     ///
-    pub async fn wait_lsn(
+    pub(crate) async fn wait_lsn(
         &self,
         lsn: Lsn,
         _ctx: &RequestContext, /* Prepare for use by cancellation */
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
+    ) -> Result<(), WaitLsnError> {
+        if self.cancel.is_cancelled() {
+            return Err(WaitLsnError::Shutdown);
+        } else if !self.is_active() {
+            return Err(WaitLsnError::BadState);
+        }
 
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
-        anyhow::ensure!(
+        debug_assert!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverManager),
             "wait_lsn cannot be called in WAL receiver"
         );
-        anyhow::ensure!(
+        debug_assert!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionHandler),
             "wait_lsn cannot be called in WAL receiver"
         );
-        anyhow::ensure!(
+        debug_assert!(
             task_mgr::current_task_kind() != Some(TaskKind::WalReceiverConnectionPoller),
             "wait_lsn cannot be called in WAL receiver"
         );
@@ -660,18 +663,22 @@ impl Timeline {
         {
             Ok(()) => Ok(()),
             Err(e) => {
-                // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
-                drop(_timer);
-                let walreceiver_status = self.walreceiver_status();
-                Err(anyhow::Error::new(e).context({
-                    format!(
+                use utils::seqwait::SeqWaitError::*;
+                match e {
+                    Shutdown => Err(WaitLsnError::Shutdown),
+                    Timeout => {
+                        // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
+                        drop(_timer);
+                        let walreceiver_status = self.walreceiver_status();
+                        Err(WaitLsnError::Timeout(format!(
                         "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
                         lsn,
                         self.get_last_record_lsn(),
                         self.get_disk_consistent_lsn(),
                         walreceiver_status,
-                    )
-                }))
+                    )))
+                    }
+                }
             }
         }
     }
@@ -1459,6 +1466,7 @@ impl Timeline {
                 max_lsn_wal_lag,
                 auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
                 availability_zone: self.conf.availability_zone.clone(),
+                ingest_batch_size: self.conf.ingest_batch_size,
             },
             broker_client,
             ctx,
@@ -2223,13 +2231,13 @@ impl Timeline {
                     return Err(layer_traversal_error(
                         if cfg!(test) {
                             format!(
-                                "could not find data for key {} at LSN {}, for request at LSN {}\n{}",
-                                key, cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
+                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}\n{}",
+                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
                             )
                         } else {
                             format!(
-                                "could not find data for key {} at LSN {}, for request at LSN {}",
-                                key, cont_lsn, request_lsn
+                                "could not find data for key {} (shard {:?}) at LSN {}, for request at LSN {}",
+                                key, self.shard_identity.get_shard_number(&key), cont_lsn, request_lsn
                             )
                         },
                         traversal_path,
@@ -2289,11 +2297,12 @@ impl Timeline {
                 ancestor
                     .wait_lsn(timeline.ancestor_lsn, ctx)
                     .await
-                    .with_context(|| {
-                        format!(
-                            "wait for lsn {} on ancestor timeline_id={}",
-                            timeline.ancestor_lsn, ancestor.timeline_id
-                        )
+                    .map_err(|e| match e {
+                        e @ WaitLsnError::Timeout(_) => PageReconstructError::AncestorLsnTimeout(e),
+                        WaitLsnError::Shutdown => PageReconstructError::Cancelled,
+                        e @ WaitLsnError::BadState => {
+                            PageReconstructError::Other(anyhow::anyhow!(e))
+                        }
                     })?;
 
                 timeline_owned = ancestor;
@@ -2471,9 +2480,27 @@ impl Timeline {
         Ok(())
     }
 
-    async fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
-        let layer = self.get_layer_for_write(lsn).await?;
-        layer.put_tombstone(key_range, lsn).await?;
+    async fn put_values(
+        &self,
+        values: &HashMap<Key, Vec<(Lsn, Value)>>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        // Pick the first LSN in the batch to get the layer to write to.
+        for lsns in values.values() {
+            if let Some((lsn, _)) = lsns.first() {
+                let layer = self.get_layer_for_write(*lsn).await?;
+                layer.put_values(values, ctx).await?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn put_tombstones(&self, tombstones: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        if let Some((_, lsn)) = tombstones.first() {
+            let layer = self.get_layer_for_write(*lsn).await?;
+            layer.put_tombstones(tombstones).await?;
+        }
         Ok(())
     }
 
@@ -3035,6 +3062,15 @@ impl Timeline {
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
+                        if self.shard_identity.is_key_disposable(&key) {
+                            debug!(
+                                "Dropping key {} during compaction (it belongs on shard {:?})",
+                                key,
+                                self.shard_identity.get_shard_number(&key)
+                            );
+                            key = key.next();
+                            continue;
+                        }
                         let img = match self.get(key, lsn, ctx).await {
                             Ok(img) => img,
                             Err(err) => {
@@ -3061,6 +3097,7 @@ impl Timeline {
                                 }
                             }
                         };
+
                         image_layer_writer.put_image(key, &img).await?;
                         key = key.next();
                     }
@@ -3094,11 +3131,13 @@ impl Timeline {
             .await
             .context("fsync of newly created layer files")?;
 
-        par_fsync::par_fsync_async(&[self
-            .conf
-            .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
-        .await
-        .context("fsync of timeline dir")?;
+        if !all_paths.is_empty() {
+            par_fsync::par_fsync_async(&[self
+                .conf
+                .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
+            .await
+            .context("fsync of timeline dir")?;
+        }
 
         let mut guard = self.layers.write().await;
 
@@ -3631,7 +3670,15 @@ impl Timeline {
                 )))
             });
 
-            writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+            if !self.shard_identity.is_key_disposable(&key) {
+                writer.as_mut().unwrap().put_value(key, lsn, value).await?;
+            } else {
+                debug!(
+                    "Dropping key {} during compaction (it belongs on shard {:?})",
+                    key,
+                    self.shard_identity.get_shard_number(&key)
+                );
+            }
 
             if !new_layers.is_empty() {
                 fail_point!("after-timeline-compacted-first-L1");
@@ -4186,7 +4233,7 @@ impl Timeline {
                     .context("Failed to reconstruct a page image:")
                 {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::from(e)),
+                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
 
                 if img.len() == page_cache::PAGE_SZ {
@@ -4529,8 +4576,16 @@ impl<'a> TimelineWriter<'a> {
         self.tl.put_value(key, lsn, value, ctx).await
     }
 
-    pub async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
-        self.tl.put_tombstone(key_range, lsn).await
+    pub(crate) async fn put_batch(
+        &self,
+        batch: &HashMap<Key, Vec<(Lsn, Value)>>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.tl.put_values(batch, ctx).await
+    }
+
+    pub(crate) async fn delete_batch(&self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+        self.tl.put_tombstones(batch).await
     }
 
     /// Track the end of the latest digested WAL record.
@@ -4541,11 +4596,11 @@ impl<'a> TimelineWriter<'a> {
     /// 'lsn' must be aligned. This wakes up any wait_lsn() callers waiting for
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
-    pub fn finish_write(&self, new_lsn: Lsn) {
+    pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         self.tl.finish_write(new_lsn);
     }
 
-    pub fn update_current_logical_size(&self, delta: i64) {
+    pub(crate) fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
     }
 }

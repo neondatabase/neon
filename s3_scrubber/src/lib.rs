@@ -15,10 +15,13 @@ use anyhow::Context;
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
+use aws_config::profile::ProfileFileCredentialsProvider;
+use aws_config::retry::RetryConfig;
 use aws_config::sso::SsoCredentialsProvider;
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::Region;
+use aws_sdk_s3::config::{AsyncSleep, Region, SharedAsyncSleep};
 use aws_sdk_s3::{Client, Config};
+use aws_smithy_async::rt::sleep::TokioSleep;
 
 use clap::ValueEnum;
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
@@ -255,6 +258,11 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         let chain = CredentialsProviderChain::first_try(
             "env",
             EnvironmentVariableCredentialsProvider::new(),
+        )
+        // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
+        .or_else(
+            "profile-sso",
+            ProfileFileCredentialsProvider::builder().build(),
         );
 
         // Use SSO if we were given an account ID
@@ -265,7 +273,7 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
                     .account_id(sso_account)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
-                    .region(Region::from_static("eu-central-1"))
+                    .region(bucket_region.clone())
                     .build(),
             ),
             None => chain,
@@ -277,9 +285,13 @@ pub fn init_s3_client(account_id: Option<String>, bucket_region: Region) -> Clie
         )
     };
 
+    let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
+
     let mut builder = Config::builder()
         .behavior_version(BehaviorVersion::v2023_11_09())
         .region(bucket_region)
+        .retry_config(RetryConfig::adaptive().with_max_attempts(3))
+        .sleep_impl(SharedAsyncSleep::from(sleep_impl))
         .credentials_provider(credentials_provider);
 
     if let Ok(endpoint) = env::var("AWS_ENDPOINT_URL") {

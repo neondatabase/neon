@@ -114,16 +114,21 @@ impl KeySpaceAccum {
         }
     }
 
+    #[inline(always)]
     pub fn add_key(&mut self, key: Key) {
         self.add_range(singleton_range(key))
     }
 
+    #[inline(always)]
     pub fn add_range(&mut self, range: Range<Key>) {
         match self.accum.as_mut() {
             Some(accum) => {
                 if range.start == accum.end {
                     accum.end = range.end;
                 } else {
+                    // TODO: to efficiently support small sharding stripe sizes, we should avoid starting
+                    // a new range here if the skipped region was all keys that don't belong on this shard.
+                    // (https://github.com/neondatabase/neon/issues/6247)
                     assert!(range.start > accum.end);
                     self.ranges.push(accum.clone());
                     *accum = range;
