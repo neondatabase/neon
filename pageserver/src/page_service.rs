@@ -651,7 +651,7 @@ impl PageServerHandler {
                     });
 
                     pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-                    self.flush_cancellable(pgb, None).await?;
+                    self.flush_cancellable(pgb, &tenant.cancel).await?;
                 }
             }
         }
