@@ -501,6 +501,7 @@ def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
     )
     assert response["rows"][0]["data"] == ["foo", "bar", "baz"]
 
+
 def test_sql_over_http_different_endpoint(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 
