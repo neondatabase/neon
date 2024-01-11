@@ -8,12 +8,17 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream};
-use hyper::upgrade::Upgraded;
-use hyper_tungstenite::{tungstenite::Message, WebSocketStream};
+use hyper::{ext::Protocol, upgrade::Upgraded, Body, Method, Request, Response};
 use pin_project_lite::pin_project;
+use tokio_tungstenite::WebSocketStream;
+use tungstenite::{
+    error::{Error as WSError, ProtocolError},
+    handshake::derive_accept_key,
+    protocol::{Role, WebSocketConfig},
+    Message,
+};
 
 use std::{
-    future::IntoFuture,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -133,9 +138,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    websocket: impl IntoFuture<
-        Output = Result<WebSocketStream<Upgraded>, hyper_tungstenite::tungstenite::Error>,
-    >,
+    websocket: HyperWebsocket,
     cancel_map: &CancelMap,
     hostname: Option<String>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -153,19 +156,202 @@ pub async fn serve_websocket(
     Ok(())
 }
 
+/// Try to upgrade a received `hyper::Request` to a websocket connection.
+///
+/// The function returns a HTTP response and a future that resolves to the websocket stream.
+/// The response body *MUST* be sent to the client before the future can be resolved.
+///
+/// This functions checks `Sec-WebSocket-Key` and `Sec-WebSocket-Version` headers.
+/// It does not inspect the `Origin`, `Sec-WebSocket-Protocol` or `Sec-WebSocket-Extensions` headers.
+/// You can inspect the headers manually before calling this function,
+/// and modify the response headers appropriately.
+///
+/// This function also does not look at the `Connection` or `Upgrade` headers.
+/// To check if a request is a websocket upgrade request, you can use [`is_upgrade_request`].
+/// Alternatively you can inspect the `Connection` and `Upgrade` headers manually.
+///
+pub fn upgrade<B>(
+    mut request: impl std::borrow::BorrowMut<Request<B>>,
+    config: Option<WebSocketConfig>,
+) -> Result<(Response<Body>, HyperWebsocket), ProtocolError> {
+    let request = request.borrow_mut();
+
+    let key = request
+        .headers()
+        .get("Sec-WebSocket-Key")
+        .ok_or(ProtocolError::MissingSecWebSocketKey)?;
+    if request
+        .headers()
+        .get("Sec-WebSocket-Version")
+        .map(|v| v.as_bytes())
+        != Some(b"13")
+    {
+        return Err(ProtocolError::MissingSecWebSocketVersionHeader);
+    }
+
+    let response = Response::builder()
+        .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
+        .header(hyper::header::CONNECTION, "upgrade")
+        .header(hyper::header::UPGRADE, "websocket")
+        .header("Sec-WebSocket-Accept", &derive_accept_key(key.as_bytes()))
+        .body(Body::from("switching to websocket protocol"))
+        .expect("bug: failed to build response");
+
+    let stream = HyperWebsocket {
+        inner: hyper::upgrade::on(request),
+        config,
+    };
+
+    Ok((response, stream))
+}
+
+/// Check if a request is a websocket upgrade request.
+///
+/// If the `Upgrade` header lists multiple protocols,
+/// this function returns true if of them are `"websocket"`,
+/// If the server supports multiple upgrade protocols,
+/// it would be more appropriate to try each listed protocol in order.
+pub fn is_upgrade_request<B>(request: &hyper::Request<B>) -> bool {
+    header_contains_value(request.headers(), hyper::header::CONNECTION, "Upgrade")
+        && header_contains_value(request.headers(), hyper::header::UPGRADE, "websocket")
+}
+
+/// Check if there is a header of the given name containing the wanted value.
+fn header_contains_value(
+    headers: &hyper::HeaderMap,
+    header: impl hyper::header::AsHeaderName,
+    value: impl AsRef<[u8]>,
+) -> bool {
+    let value = value.as_ref();
+    for header in headers.get_all(header) {
+        if header
+            .as_bytes()
+            .split(|&c| c == b',')
+            .any(|x| trim(x).eq_ignore_ascii_case(value))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn trim(data: &[u8]) -> &[u8] {
+    trim_end(trim_start(data))
+}
+
+fn trim_start(data: &[u8]) -> &[u8] {
+    if let Some(start) = data.iter().position(|x| !x.is_ascii_whitespace()) {
+        &data[start..]
+    } else {
+        b""
+    }
+}
+
+fn trim_end(data: &[u8]) -> &[u8] {
+    if let Some(last) = data.iter().rposition(|x| !x.is_ascii_whitespace()) {
+        &data[..last + 1]
+    } else {
+        b""
+    }
+}
+
+/// Try to upgrade a received `hyper::Request` to a websocket connection.
+///
+/// The function returns a HTTP response and a future that resolves to the websocket stream.
+/// The response body *MUST* be sent to the client before the future can be resolved.
+///
+/// This functions checks `Sec-WebSocket-Version` header.
+/// It does not inspect the `Origin`, `Sec-WebSocket-Protocol` or `Sec-WebSocket-Extensions` headers.
+/// You can inspect the headers manually before calling this function,
+/// and modify the response headers appropriately.
+///
+/// This function also does not look at the `Connection` or `Upgrade` headers.
+/// To check if a request is a websocket upgrade request, you can use [`is_upgrade2_request`].
+/// Alternatively you can inspect the `Connection` and `Upgrade` headers manually.
+///
+pub fn connect<B>(
+    mut request: impl std::borrow::BorrowMut<Request<B>>,
+    config: Option<WebSocketConfig>,
+) -> Result<(Response<Body>, HyperWebsocket), ProtocolError> {
+    let request = request.borrow_mut();
+
+    if request
+        .headers()
+        .get("Sec-WebSocket-Version")
+        .map(|v| v.as_bytes())
+        != Some(b"13")
+    {
+        return Err(ProtocolError::MissingSecWebSocketVersionHeader);
+    }
+
+    let response = Response::builder()
+        .status(hyper::StatusCode::OK)
+        .body(Body::from("switching to websocket protocol"))
+        .expect("bug: failed to build response");
+
+    let stream = HyperWebsocket {
+        inner: hyper::upgrade::on(request),
+        config,
+    };
+
+    Ok((response, stream))
+}
+
+/// Check if a request is a websocket connect request.
+pub fn is_connect_request<B>(request: &hyper::Request<B>) -> bool {
+    request.method() == Method::CONNECT
+        && request
+            .extensions()
+            .get::<Protocol>()
+            .is_some_and(|protocol| protocol.as_str() == "websocket")
+}
+
+pin_project_lite::pin_project! {
+    /// A future that resolves to a websocket stream when the associated connection completes.
+    #[derive(Debug)]
+    pub struct HyperWebsocket {
+        #[pin]
+        inner: hyper::upgrade::OnUpgrade,
+        config: Option<WebSocketConfig>
+    }
+}
+
+impl std::future::Future for HyperWebsocket {
+    type Output = Result<WebSocketStream<hyper::upgrade::Upgraded>, WSError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
+        let this = self.project();
+        let upgraded = match this.inner.poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(x) => x,
+        };
+
+        let upgraded =
+            upgraded.map_err(|_| WSError::Protocol(ProtocolError::HandshakeIncomplete))?;
+
+        let stream = WebSocketStream::from_raw_socket(upgraded, Role::Server, None);
+        tokio::pin!(stream);
+
+        // The future returned by `from_raw_socket` is always ready.
+        // Not sure why it is a future in the first place.
+        match stream.as_mut().poll(cx) {
+            Poll::Pending => unreachable!("from_raw_socket should always be created ready"),
+            Poll::Ready(x) => Poll::Ready(Ok(x)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::pin;
 
     use futures::{SinkExt, StreamExt};
-    use hyper_tungstenite::{
-        tungstenite::{protocol::Role, Message},
-        WebSocketStream,
-    };
     use tokio::{
         io::{duplex, AsyncReadExt, AsyncWriteExt},
         task::JoinSet,
     };
+    use tokio_tungstenite::WebSocketStream;
+    use tungstenite::{protocol::Role, Message};
 
     use super::WebSocketRw;
 
