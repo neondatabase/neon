@@ -192,7 +192,7 @@ impl OpenFiles {
         // old file.
         //
         if let Some(old_file) = slot_guard.file.take() {
-            // the normal path of dropping VirtualFile uses `Close`, use `CloseByReplace` here to
+            // the normal path of dropping VirtualFile uses "close", use "close-by-replace" here to
             // distinguish the two.
             STORAGE_IO_TIME_METRIC
                 .get(StorageIoOperation::CloseByReplace)
@@ -348,7 +348,7 @@ impl VirtualFile {
         let parts = path_str.split('/').collect::<Vec<&str>>();
         let tenant_id;
         let timeline_id;
-        if parts.len() > 5 && parts[parts.len() - 5] == "tenants" {
+        if parts.len() > 5 && parts[parts.len() - 5] == TENANTS_SEGMENT_NAME {
             tenant_id = parts[parts.len() - 4].to_string();
             timeline_id = parts[parts.len() - 2].to_string();
         } else {
@@ -768,7 +768,7 @@ impl Drop for VirtualFile {
         fn clean_slot(slot: &Slot, mut slot_guard: RwLockWriteGuard<'_, SlotInner>, tag: u64) {
             if slot_guard.tag == tag {
                 slot.recently_used.store(false, Ordering::Relaxed);
-                // there is also the `CloseByReplace` operation for closes done on eviction for
+                // there is also operation "close-by-replace" for closes done on eviction for
                 // comparison.
                 if let Some(fd) = slot_guard.file.take() {
                     STORAGE_IO_TIME_METRIC
