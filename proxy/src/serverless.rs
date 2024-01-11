@@ -258,18 +258,9 @@ async fn request_handler(
         let (response, websocket) =
             upgrade_http2(&mut request).map_err(|e| ApiError::BadRequest(e.into()))?;
 
-        let host = request
-            .headers()
-            .get("neon-endpoint")
-            .map(|t| t.to_str())
-            .transpose()
-            .map_err(|e| ApiError::BadRequest(e.into()))?
-            .map(|s| s.to_owned())
-            .or(host);
-
         ws_connections.spawn(
             async move {
-                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "ws", &config.region);
+                let mut ctx = RequestMonitoring::new(session_id, peer_addr, "ws2", &config.region);
 
                 if let Err(e) = websocket::serve_websocket(
                     config,
@@ -332,13 +323,13 @@ pin_project_lite::pin_project! {
 /// The function returns a HTTP response and a future that resolves to the websocket stream.
 /// The response body *MUST* be sent to the client before the future can be resolved.
 ///
-/// This functions checks `Sec-WebSocket-Key` and `Sec-WebSocket-Version` headers.
+/// This functions checks `Sec-WebSocket-Version` header.
 /// It does not inspect the `Origin`, `Sec-WebSocket-Protocol` or `Sec-WebSocket-Extensions` headers.
 /// You can inspect the headers manually before calling this function,
 /// and modify the response headers appropriately.
 ///
 /// This function also does not look at the `Connection` or `Upgrade` headers.
-/// To check if a request is a websocket upgrade request, you can use [`is_upgrade_request`].
+/// To check if a request is a websocket upgrade request, you can use [`is_upgrade2_request`].
 /// Alternatively you can inspect the `Connection` and `Upgrade` headers manually.
 ///
 fn upgrade_http2<B>(
@@ -367,12 +358,7 @@ fn upgrade_http2<B>(
     Ok((response, stream))
 }
 
-/// Check if a request is a websocket upgrade request.
-///
-/// If the `Upgrade` header lists multiple protocols,
-/// this function returns true if of them are `"websocket"`,
-/// If the server supports multiple upgrade protocols,
-/// it would be more appropriate to try each listed protocol in order.
+/// Check if a request is a websocket connect request.
 pub fn is_upgrade2_request<B>(request: &hyper::Request<B>) -> bool {
     request.method() == Method::CONNECT
         && request
