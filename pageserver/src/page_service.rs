@@ -300,7 +300,12 @@ struct PageServerHandler {
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
 
-    /// See [`Self::cache_timeline`]
+    /// See [`Self::cache_timeline`] for usage.
+    ///
+    /// Note on size: the typical size of this map is 1.  The largest size we expect
+    /// to see is the number of shards divided by the number of pageservers (typically < 2),
+    /// or the ratio used when splitting shards (i.e. how many children created from one)
+    /// parent shard, where a "large" number might be ~8.
     shard_timelines: HashMap<ShardIndex, HandlerTimeline>,
 }
 
