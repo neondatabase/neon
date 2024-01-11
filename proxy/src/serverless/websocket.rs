@@ -9,10 +9,11 @@ use crate::{
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream};
 use hyper::upgrade::Upgraded;
-use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
+use hyper_tungstenite::{tungstenite::Message, WebSocketStream};
 use pin_project_lite::pin_project;
 
 use std::{
+    future::IntoFuture,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -132,7 +133,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
     ctx: &mut RequestMonitoring,
-    websocket: HyperWebsocket,
+    websocket: impl IntoFuture<
+        Output = Result<WebSocketStream<Upgraded>, hyper_tungstenite::tungstenite::Error>,
+    >,
     cancel_map: &CancelMap,
     hostname: Option<String>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,

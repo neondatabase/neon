@@ -58,7 +58,7 @@ pub fn endpoint_sni<'a>(
     common_names: &HashSet<String>,
 ) -> Result<(&'a str, &'a str), ComputeUserInfoParseError> {
     let Some((subdomain, common_name)) = sni.split_once('.') else {
-        return Err(ComputeUserInfoParseError::UnknownCommonName { cn: sni.into() });
+        return Ok((sni, ""));
     };
     if !common_names.contains(common_name) {
         return Err(ComputeUserInfoParseError::UnknownCommonName {
