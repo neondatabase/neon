@@ -162,9 +162,10 @@ fn wait_for_postgres_start(compute: &ComputeNode) {
 fn get_database_stats(cli: &mut Client) -> anyhow::Result<(f64, i64)> {
     // Filter out `postgres` database as `compute_ctl` and other monitoring tools
     // like `postgres_exporter` use it to query Postgres statistics.
+    // Use explicit 8 bytes type casts to match Rust types.
     let stats = cli.query_one(
-        "SELECT coalesce(sum(active_time), 0.0) AS total_active_time,
-            coalesce(sum(sessions), 0) AS total_sessions
+        "SELECT coalesce(sum(active_time), 0.0)::float8 AS total_active_time,
+            coalesce(sum(sessions), 0)::bigint AS total_sessions
         FROM pg_stat_database
         WHERE datname NOT IN (
                 'postgres',
