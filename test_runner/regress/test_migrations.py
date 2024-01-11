@@ -22,7 +22,7 @@ def test_migrations(neon_simple_env: NeonEnv):
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
-        assert "INFO start_compute:apply_config:handle_migrations: Ran 2 migrations" in logs
+        assert "INFO handle_migrations: Ran 2 migrations" in logs
 
     endpoint.stop()
     endpoint.start()
@@ -34,4 +34,4 @@ def test_migrations(neon_simple_env: NeonEnv):
 
     with open(log_path, "r") as log_file:
         logs = log_file.read()
-        assert "INFO start_compute:apply_config:handle_migrations: Ran 0 migrations" in logs
+        assert "INFO handle_migrations: Ran 0 migrations" in logs
