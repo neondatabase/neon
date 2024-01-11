@@ -11,16 +11,21 @@
 //! src/backend/storage/file/fd.c
 //!
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
+
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use utils::fs_ext;
+
+mod open_options;
+pub(crate) use open_options::*;
 
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
@@ -315,7 +320,10 @@ impl VirtualFile {
         // NB: there is also StorageIoOperation::OpenAfterReplace which is for the case
         // where our caller doesn't get to use the returned VirtualFile before its
         // slot gets re-used by someone else.
-        let file = observe_duration!(StorageIoOperation::Open, open_options.open(path))?;
+        let file = observe_duration!(
+            StorageIoOperation::Open,
+            open_options.open(path.as_std_path()).await
+        )?;
 
         // Strip all options other than read and write.
         //
@@ -453,7 +461,7 @@ impl VirtualFile {
         // of the virtual file descriptor cache.
         let file = observe_duration!(
             StorageIoOperation::OpenAfterReplace,
-            self.open_options.open(&self.path)
+            self.open_options.open(self.path.as_std_path()).await
         )?;
 
         // Store the File in the slot and update the handle in the VirtualFile
@@ -815,7 +823,9 @@ mod tests {
     #[tokio::test]
     async fn test_physical_files() -> Result<(), Error> {
         test_files("physical_files", |path, open_options| async move {
-            Ok(MaybeVirtualFile::File(open_options.open(path)?))
+            Ok(MaybeVirtualFile::File(
+                open_options.open(path.as_std_path()).await?,
+            ))
         })
         .await
     }

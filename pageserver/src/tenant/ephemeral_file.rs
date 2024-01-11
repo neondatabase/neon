@@ -5,11 +5,11 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use std::cmp::min;
-use std::fs::OpenOptions;
+
 use std::io::{self, ErrorKind};
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicU64;
@@ -47,7 +47,10 @@ impl EphemeralFile {
 
         let file = VirtualFile::open_with_options(
             &filename,
-            OpenOptions::new().read(true).write(true).create(true),
+            virtual_file::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true),
         )
         .await?;
 
