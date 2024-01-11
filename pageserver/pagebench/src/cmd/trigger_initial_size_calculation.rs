@@ -58,10 +58,21 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     for tl in timelines {
         let mgmt_api_client = Arc::clone(&mgmt_api_client);
         js.spawn(async move {
-            let info = mgmt_api_client
-                .timeline_info(tl.tenant_id, tl.timeline_id, ForceAwaitLogicalSize::Yes)
-                .await
-                .unwrap();
+
+            // detach-attach to attach with emptied initial logical size cache
+            mgmt_api_client.tenant_reset(tl.tenant_id).await.unwrap();
+
+            let info = loop {
+                let res = mgmt_api_client
+                    .timeline_info(tl.tenant_id, tl.timeline_id, ForceAwaitLogicalSize::Yes)
+                    .await;
+                match res {
+                    Ok(info) => break info,
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1).into()).await;
+                    }
+                }
+            };
 
             // Polling should not be strictly required here since we await
             // for the initial logical size, however it's possible for the request
