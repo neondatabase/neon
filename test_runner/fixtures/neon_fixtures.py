@@ -757,7 +757,7 @@ class NeonEnvBuilder:
                 immediate=True,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
-                ps_assert_metric_no_errors=(exc_type is not None),
+                ps_assert_metric_no_errors=(exc_type is None),
             )
             cleanup_error = None
 
