@@ -387,6 +387,11 @@ impl PageServerHandler {
         // that cost every time we check for cancellation.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
+        // This function is never called concurrently with code that adds timelines to shard_timelines,
+        // which is enforced by the borrow checker (the future returned by this function carries the
+        // immutable &self).  So it's fine to evaluate shard_timelines after the sleep, we don't risk
+        // missing any inserts to the map.
+
         let mut futs = self
             .shard_timelines
             .values()
@@ -403,21 +408,20 @@ impl PageServerHandler {
             .any(|ht| ht.timeline.cancel.is_cancelled() || ht.timeline.is_stopping())
     }
 
+    /// This function always respects cancellation of any timeline in `[Self::shard_timelines]`.  Pass in
+    /// a cancellation token at the next scope up (such as a tenant cancellation token) to ensure we respect
+    /// cancellation if there aren't any timelines in the cache.
+    ///
+    /// If calling from a function that doesn't use the `[Self::shard_timelines]` cache, then pass in the
+    /// timeline cancellation token.
     async fn flush_cancellable<IO>(
         &self,
         pgb: &mut PostgresBackend<IO>,
-        cancel: Option<&CancellationToken>,
+        cancel: &CancellationToken,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        let general_cancel = async {
-            match cancel {
-                Some(c) => c.cancelled().await,
-                None => task_mgr::shutdown_token().cancelled().await,
-            }
-        };
-
         tokio::select!(
             flush_r = pgb.flush() => {
                 Ok(flush_r?)
@@ -425,7 +429,7 @@ impl PageServerHandler {
             _ = self.timeline_cancelled() => {
                 Err(QueryError::Shutdown)
             }
-            _ = general_cancel => {
+            _ = cancel.cancelled() => {
                 Err(QueryError::Shutdown)
             }
         )
@@ -484,7 +488,7 @@ impl PageServerHandler {
                         let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
                         // error can't happen here, ErrorResponse serialization should be always ok
                         pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                        self.flush_cancellable(pgb, Some(cancel)).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                        self.flush_cancellable(pgb, cancel).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                         Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                     }
                     Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
@@ -533,7 +537,7 @@ impl PageServerHandler {
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        self.flush_cancellable(pgb, Some(&tenant.cancel)).await?;
+        self.flush_cancellable(pgb, &tenant.cancel).await?;
 
         let metrics = metrics::SmgrQueryTimePerTimeline::new(&tenant_id, &timeline_id);
 
@@ -701,7 +705,7 @@ impl PageServerHandler {
         // Import basebackup provided via CopyData
         info!("importing basebackup");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        self.flush_cancellable(pgb, Some(&tenant.cancel)).await?;
+        self.flush_cancellable(pgb, &tenant.cancel).await?;
 
         let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &tenant.cancel)));
         timeline
@@ -757,7 +761,7 @@ impl PageServerHandler {
         // Import wal provided via CopyData
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        self.flush_cancellable(pgb, None).await?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
         let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &timeline.cancel)));
         import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
@@ -1110,7 +1114,7 @@ impl PageServerHandler {
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
-        self.flush_cancellable(pgb, None).await?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
@@ -1162,7 +1166,7 @@ impl PageServerHandler {
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
-        self.flush_cancellable(pgb, None).await?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         let basebackup_after = started
             .elapsed()
