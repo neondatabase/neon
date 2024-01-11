@@ -6,7 +6,7 @@ pub const SCRAM_KEY_LEN: usize = 32;
 /// One of the keys derived from the [password](super::password::SaltedPassword).
 /// We use the same structure for all keys, i.e.
 /// `ClientKey`, `StoredKey`, and `ServerKey`.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 #[repr(transparent)]
 pub struct ScramKey {
     bytes: [u8; SCRAM_KEY_LEN],
