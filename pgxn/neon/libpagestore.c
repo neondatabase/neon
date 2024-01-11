@@ -71,7 +71,8 @@ static int max_reconnect_attempts = 60;
  * It is copied to shared memory because config can not be loaded during query execution and we need to
  * reestablish connection to page server.
  *
- * Copying connection string to shared memory is done by postmaster. And other backends
+ * Copying connection string to shared memory is done by postmaster (because other backends can reload config only after the end of query execution,
+ * but to complete query they may need to reestablish connection with page server). And other backends
  * should check update counter to determine of connection URL is changed and connection needs to be reestablished.
  * We can not use standard Postgres LW-locks, because postmaster doesn't have a proc entry and so can not wait
  * on this primitive. This is why lockless access algorithm is implemented using two atomic counters to enforce
@@ -111,7 +112,10 @@ CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
-	if (!PagestoreShmemIsValid())
+	/*
+	 * We want to update connection string in shared memorty only my postmaster.
+	 */
+	if (!PagestoreShmemIsValid() || MyProcPid != PostmasterPid)
 		return;
 	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
 	strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
