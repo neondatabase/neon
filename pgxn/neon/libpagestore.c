@@ -73,7 +73,7 @@ static int max_reconnect_attempts = 60;
  *
  * Copying connection string to shared memory is done by postmaster. And other backends
  * should check update counter to determine of connection URL is changed and connection needs to be reestablished.
- * We can not use standard Postgres LW-locks, because postmaster has proc entry and so can not wait
+ * We can not use standard Postgres LW-locks, because postmaster doesn't have a proc entry and so can not wait
  * on this primitive. This is why lockless access algorithm is implemented using two atomic counters to enforce
  * consistent reading of connection string value from shared memory.
  */
