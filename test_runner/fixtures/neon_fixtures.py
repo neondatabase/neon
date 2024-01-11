@@ -10,12 +10,14 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from functools import cached_property, partial
+from fcntl import LOCK_EX, LOCK_UN, flock
+from functools import cached_property
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
@@ -49,7 +51,10 @@ from fixtures.pageserver.allowed_errors import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.types import IndexPartDump
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
@@ -424,6 +429,7 @@ class NeonEnvBuilder:
         pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
+        top_output_dir: Path,
         test_output_dir: Path,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
@@ -473,6 +479,7 @@ class NeonEnvBuilder:
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
+        self.top_output_dir = top_output_dir
 
         assert test_name.startswith(
             "test_"
@@ -519,6 +526,64 @@ class NeonEnvBuilder:
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
+
+    def build_and_use_snapshot(
+        self, global_ident: str, create_env_for_snapshot: Callable[[NeonEnvBuilder], NeonEnv]
+    ) -> NeonEnv:
+        if os.getenv("CI", "false") == "true":
+            log.info("do not use snapshots in ephemeral CI environment")
+            env = create_env_for_snapshot(self)
+            env.stop(immediate=True, ps_assert_metric_no_errors=False)
+            return env
+
+        with shared_snapshot_dir(self.top_output_dir, global_ident) as snapshot_dir:
+            if snapshot_dir.is_initialized():
+                return self.from_repo_dir(snapshot_dir.path)
+            else:
+                self._build_and_use_snapshot_impl(snapshot_dir, create_env_for_snapshot)
+                assert snapshot_dir.is_initialized()
+                return self.from_repo_dir(snapshot_dir.path)
+
+    def _build_and_use_snapshot_impl(
+        self,
+        snapshot_dir: SnapshotDirLocked,
+        create_env_for_snapshot: Callable[[NeonEnvBuilder], NeonEnv],
+    ):
+        if snapshot_dir.path.exists():
+            shutil.rmtree(snapshot_dir.path)
+
+        if self.test_overlay_dir is not None:
+            # Make repo_dir an overlayfs mount with lowerdir being the empty snapshot_dir.
+            # When we're done filling up repo_dir, tear everything down, unmount the overlayfs, and use
+            # the upperdir as the snapshot. This is equivalent to docker `FROM scratch`.
+            assert not self.repo_dir.exists()
+            assert self.repo_dir.parent.exists()
+            snapshot_dir.path.mkdir()
+            self.overlay_mount("create-snapshot-repo-dir", snapshot_dir.path, self.repo_dir)
+            self.config_init_force = "empty-dir-ok"
+
+        env = create_env_for_snapshot(self)
+        assert self.env is not None
+        assert self.env == env
+
+        # shut down everything for snapshot
+        env.stop(immediate=True, ps_assert_metric_no_errors=True)
+
+        # TODO: all kinds of assertions to ensure the env is unused
+
+        if self.test_overlay_dir is None:
+            log.info("take snapshot using shutil.copytree")
+            shutil.copytree(env.repo_dir, snapshot_dir.path)
+        else:
+            log.info("take snapshot by using overlayfs upperdir")
+            self.overlay_unmount_and_move("create-snapshot-repo-dir", snapshot_dir.path)
+            log.info("remove empty repo_dir (previously mountpoint) for snapshot overlay_mount")
+            env.repo_dir.rmdir()
+            # TODO from here on, we should be able to reset / goto top where snapshot_dir.is_initialized()
+            log.info("make repo_dir an overlayfs mount of the snapshot we just created")
+        snapshot_dir.set_initialized()
+
+        self.env = None  # so that from_repo_dir works again (TODO review: is this safe?)
 
     def from_repo_dir(
         self,
@@ -1113,6 +1178,7 @@ def _shared_simple_env(
         shutil.rmtree(repo_dir, ignore_errors=True)
 
     with NeonEnvBuilder(
+        top_output_dir=top_output_dir,
         repo_dir=repo_dir,
         port_distributor=port_distributor,
         broker=default_broker,
@@ -1161,6 +1227,7 @@ def neon_env_builder(
     run_id: uuid.UUID,
     request: FixtureRequest,
     test_overlay_dir: Path,
+    top_output_dir: Path,
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1180,6 +1247,7 @@ def neon_env_builder(
 
     # Return the builder to the caller
     with NeonEnvBuilder(
+        top_output_dir=top_output_dir,
         repo_dir=Path(repo_dir),
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
@@ -3390,10 +3458,6 @@ def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
     return _get_test_dir(request, top_output_dir, "overlay-")
 
 
-def get_test_snapshot_dir_path(request: FixtureRequest, top_output_dir: Path) -> Path:
-    return _get_test_dir(request, top_output_dir, "snapshot-")
-
-
 def get_shared_snapshot_dir_path(top_output_dir: Path, snapshot_name: str) -> Path:
     return top_output_dir / "shared-snapshots" / snapshot_name
 
@@ -3446,55 +3510,73 @@ def test_output_dir(
     allure_attach_from_dir(test_dir)
 
 
+class FileAndThreadLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.thread_lock = threading.Lock()
+        self.fd: Optional[int] = None
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_CREAT | os.O_WRONLY)
+        # lock thread lock before file lock so that there's no race
+        # around flocking / funlocking the file lock
+        self.thread_lock.acquire()
+        flock(self.fd, LOCK_EX)
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        assert self.fd is not None
+        assert self.thread_lock.locked()  # ... by us
+        flock(self.fd, LOCK_UN)
+        self.thread_lock.release()
+        os.close(self.fd)
+        self.fd = None
+
+
+class SnapshotDirLocked:
+    def __init__(self, parent: SnapshotDir):
+        self._parent = parent
+
+    def is_initialized(self):
+        # TODO: in the future, take a `tag` as argument and store it in the marker in set_initialized.
+        # Then, in this function, compare marker file contents with the tag to invalidate the snapshot if the tag changed.
+        return self._parent._marker_file_path.exists()
+
+    def set_initialized(self):
+        self._parent._marker_file_path.write_text("")
+
+    @property
+    def path(self) -> Path:
+        return self._parent._path / "snapshot"
+
+
 class SnapshotDir:
     _path: Path
 
     def __init__(self, path: Path):
         self._path = path
-        if not self._path.exists():
-            self._path.mkdir(parents=True)
-        else:
-            assert self._path.is_dir()
+        assert self._path.is_dir()
+        self._lock = FileAndThreadLock(self._lock_file_path)
 
     @property
-    def path(self) -> Path:
-        return self._path / "snapshot"
+    def _lock_file_path(self) -> Path:
+        return self._path / "initializing.flock"
 
     @property
     def _marker_file_path(self) -> Path:
         return self._path / "initialized.marker"
 
-    def is_initialized(self):
-        # TODO: in the future, take a `tag` as argument and store it in the marker in set_initialized.
-        # Then, in this function, compare marker file contents with the tag to invalidate the snapshot if the tag changed.
-        return self._marker_file_path.exists()
+    def __enter__(self) -> SnapshotDirLocked:
+        self._lock.__enter__()
+        return SnapshotDirLocked(self)
 
-    def set_initialized(self):
-        self._marker_file_path.write_text("")
-
-
-@pytest.fixture(scope="function", autouse=True)
-def test_snapshot_dir(
-    request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
-) -> SnapshotDir:
-    """Create the working directory for an individual test."""
-
-    _ = test_overlay_dir  # overlay mounts use snapshot dir as the lowerdir => request it so it can unmount stale overlay mounts first
-
-    # one directory per test
-    snapshot_dir = get_test_snapshot_dir_path(request, top_output_dir)
-    log.info(f"test_snapshot_dir is {snapshot_dir}")
-    return SnapshotDir(snapshot_dir)
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self._lock.__exit__(exc_type, exc_value, exc_traceback)
 
 
-@pytest.fixture(scope="function")
-def shared_snapshot_dir_fn(top_output_dir: Path) -> Callable[[str], SnapshotDir]:
-    def f(top_output_dir, name):
-        snapshot_dir = get_shared_snapshot_dir_path(top_output_dir, name)
-
-        return SnapshotDir(snapshot_dir)
-
-    return partial(f, top_output_dir)
+def shared_snapshot_dir(top_output_dir, ident: str) -> SnapshotDir:
+    snapshot_dir_path = get_shared_snapshot_dir_path(top_output_dir, ident)
+    snapshot_dir_path.mkdir(exist_ok=True, parents=True)
+    return SnapshotDir(snapshot_dir_path)
 
 
 @pytest.fixture(scope="function", autouse=True)

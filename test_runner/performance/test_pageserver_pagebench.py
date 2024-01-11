@@ -1,30 +1,23 @@
 import json
-import os
 from pathlib import Path
-from typing import Callable
 
 import fixtures.pageserver.many_tenants as many_tenants
 import pytest
-from _pytest.fixtures import FixtureRequest
 from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    SnapshotDir,
     last_flush_lsn_upload,
 )
+from fixtures.pageserver.utils import wait_until_all_tenants_state
 
 
-@pytest.fixture(scope="function")
-@pytest.mark.timeout(1000)
-def getpage_throughput_fixture(
+def many_small_tenants_snapshot(
     neon_env_builder: NeonEnvBuilder,
-    pg_bin: PgBin,
-    shared_snapshot_dir_fn: Callable[[str], SnapshotDir],
-    request: FixtureRequest,
-) -> many_tenants.SingleTimeline:
+    n_tenants: int,
+) -> NeonEnv:
     def setup_template(env: NeonEnv):
         # create our template tenant
         config = {
@@ -50,25 +43,40 @@ def getpage_throughput_fixture(
         ep.stop_and_destroy()
         return (template_tenant, template_timeline, config)
 
-    n_tenants = request.param
-    save_snapshot = os.getenv("CI", "false") != "true"
-    snapshot_dir = shared_snapshot_dir_fn(f"{n_tenants}-tenants")
-    return many_tenants.single_timeline(
-        neon_env_builder,
-        snapshot_dir,
-        setup_template,
-        n_tenants,
-        save_snapshot,
+    def doit(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
+        return many_tenants.single_timeline(neon_env_builder, setup_template, n_tenants)
+
+    env = neon_env_builder.build_and_use_snapshot(f"many-small-tenants-{n_tenants}", doit)
+
+    env.start()
+    ps_http = env.pageserver.http_client()
+
+    log.info("wait for all tenants to become active")
+    wait_until_all_tenants_state(
+        ps_http, "Active", iterations=n_tenants, period=1, http_error_ok=False
     )
 
+    # ensure all layers are resident for predictiable performance
+    tenants = [info["id"] for info in ps_http.tenant_list()]
+    for tenant in tenants:
+        for timeline in ps_http.tenant_status(tenant)["timelines"]:
+            info = ps_http.layer_map_info(tenant, timeline)
+            for layer in info.historic_layers:
+                assert not layer.remote
 
-@pytest.mark.parametrize("getpage_throughput_fixture", [20000], ids=["20k-tenants"], indirect=True)
+    log.info("ready")
+
+    return env
+
+
+@pytest.mark.parametrize("n_tenants", [2, 10])
 def test_getpage_throughput(
-    getpage_throughput_fixture: many_tenants.SingleTimeline,
+    neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
+    n_tenants: int,
 ):
-    env = getpage_throughput_fixture.env
+    env = many_small_tenants_snapshot(neon_env_builder, n_tenants)
     ps_http = env.pageserver.http_client()
 
     # run the benchmark with one client per timeline, each doing 10k requests to random keys.
