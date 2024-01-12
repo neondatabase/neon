@@ -500,3 +500,13 @@ def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
         "select array['foo'::foo, 'bar'::foo, 'baz'::foo] as data",
     )
     assert response["rows"][0]["data"] == ["foo", "bar", "baz"]
+
+
+@pytest.mark.asyncio
+async def test_sql_over_http2(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    resp = await static_proxy.http2_query(
+        "select 42 as answer", [], user="http", password="http", expected_code=200
+    )
+    assert resp["rows"] == [{"answer": 42}]

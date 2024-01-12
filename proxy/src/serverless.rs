@@ -107,6 +107,7 @@ pub async fn task_main(
             let client_addr = io.client_addr();
             let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
+            let protocol = tls.alpn_protocol().map(|s| String::from_utf8_lossy(s).into_owned());
             let conn_pool = conn_pool.clone();
             let ws_connections = ws_connections.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -120,6 +121,7 @@ pub async fn task_main(
                 Ok(MetricService::new(hyper::service::service_fn(
                     move |req: Request<Body>| {
                         let sni_name = sni_name.clone();
+                        let protocol = protocol.clone();
                         let conn_pool = conn_pool.clone();
                         let ws_connections = ws_connections.clone();
                         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
@@ -144,6 +146,7 @@ pub async fn task_main(
                                 "serverless",
                                 session = %session_id,
                                 %peer_addr,
+                                http_protocol = ?protocol,
                             ))
                             .await
                         }

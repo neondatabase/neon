@@ -39,6 +39,7 @@ types-pytest-lazy-fixture = "^0.6.3.3"
 pytest-split = "^0.8.1"
 zstandard = "^0.21.0"
 websockets = "^12.0"
+httpx = {extras = ["http2"], version = "^0.26.0"}
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.3.0"
