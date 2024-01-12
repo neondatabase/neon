@@ -516,24 +516,27 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-    pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
+    pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
         while !buf.is_empty() {
             match self.read_at(buf, offset).await {
-                Ok(0) => {
-                    return Err(Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "failed to fill whole buffer",
-                    ))
-                }
+                Ok(0) => break,
                 Ok(n) => {
-                    buf = &mut buf[n..];
+                    let tmp = buf;
+                    buf = &mut tmp[n..];
                     offset += n as u64;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
         }
-        Ok(())
+        if !buf.is_empty() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
