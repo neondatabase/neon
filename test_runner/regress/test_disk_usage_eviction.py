@@ -76,9 +76,15 @@ class EvictionOrder(str, enum.Enum):
         if self == EvictionOrder.ABSOLUTE_ORDER:
             return {"type": "AbsoluteAccessed"}
         elif self == EvictionOrder.RELATIVE_ORDER_EQUAL:
-            return {"type": "RelativeAccessed", "args": {"highest_layer_count_loses_first": False}}
+            return {
+                "type": "RelativeAccessed",
+                "args": {"highest_layer_count_loses_first": False},
+            }
         elif self == EvictionOrder.RELATIVE_ORDER_SPARE:
-            return {"type": "RelativeAccessed", "args": {"highest_layer_count_loses_first": True}}
+            return {
+                "type": "RelativeAccessed",
+                "args": {"highest_layer_count_loses_first": True},
+            }
         else:
             raise RuntimeError(f"not implemented: {self}")
 
@@ -101,7 +107,10 @@ class EvictionEnv:
 
     def timelines_du(self, pageserver: NeonPageserver) -> Tuple[int, int, int]:
         return poor_mans_du(
-            self.neon_env, [(tid, tlid) for tid, tlid in self.timelines], pageserver, verbose=False
+            self.neon_env,
+            [(tid, tlid) for tid, tlid in self.timelines],
+            pageserver,
+            verbose=False,
         )
 
     def du_by_timeline(self, pageserver: NeonPageserver) -> Dict[Tuple[TenantId, TimelineId], int]:
@@ -134,7 +143,13 @@ class EvictionEnv:
                     _avg = cur.fetchone()
 
     def pageserver_start_with_disk_usage_eviction(
-        self, pageserver: NeonPageserver, period, max_usage_pct, min_avail_bytes, mock_behavior, eviction_order: EvictionOrder
+        self,
+        pageserver: NeonPageserver,
+        period,
+        max_usage_pct,
+        min_avail_bytes,
+        mock_behavior,
+        eviction_order: EvictionOrder,
     ):
         disk_usage_config = {
             "period": period,
@@ -291,10 +306,16 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
     healthy_tenant_id, healthy_timeline_id = env.timelines[1]
 
     broken_size_pre, _, _ = poor_mans_du(
-        env.neon_env, [(broken_tenant_id, broken_timeline_id)], env.pageserver, verbose=True
+        env.neon_env,
+        [(broken_tenant_id, broken_timeline_id)],
+        env.pageserver,
+        verbose=True,
     )
     healthy_size_pre, _, _ = poor_mans_du(
-        env.neon_env, [(healthy_tenant_id, healthy_timeline_id)], env.pageserver, verbose=True
+        env.neon_env,
+        [(healthy_tenant_id, healthy_timeline_id)],
+        env.pageserver,
+        verbose=True,
     )
 
     # try to evict everything, then validate that broken tenant wasn't touched
@@ -304,10 +325,16 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
     log.info(f"{response}")
 
     broken_size_post, _, _ = poor_mans_du(
-        env.neon_env, [(broken_tenant_id, broken_timeline_id)], env.pageserver, verbose=True
+        env.neon_env,
+        [(broken_tenant_id, broken_timeline_id)],
+        env.pageserver,
+        verbose=True,
     )
     healthy_size_post, _, _ = poor_mans_du(
-        env.neon_env, [(healthy_tenant_id, healthy_timeline_id)], env.pageserver, verbose=True
+        env.neon_env,
+        [(healthy_tenant_id, healthy_timeline_id)],
+        env.pageserver,
+        verbose=True,
     )
 
     assert broken_size_pre == broken_size_post, "broken tenant should not be touched"
