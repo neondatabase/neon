@@ -27,6 +27,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
     // Define `client` outside of the loop to reuse existing connection if it's active.
     let mut client = Client::connect(connstr, NoTls);
 
+    let mut sleep = false;
     let mut prev_active_time: Option<f64> = None;
     let mut prev_sessions: Option<i64> = None;
 
@@ -37,8 +38,14 @@ fn watch_compute_activity(compute: &ComputeNode) {
     }
 
     loop {
-        // Should be outside of the mutex lock to allow others to read while we sleep.
-        thread::sleep(MONITOR_CHECK_INTERVAL);
+        // We use `continue` a lot, so it's more convenient to sleep at the top of the loop.
+        // But skip the first sleep, so we can connect to Postgres immediately.
+        if sleep {
+            // Should be outside of the mutex lock to allow others to read while we sleep.
+            thread::sleep(MONITOR_CHECK_INTERVAL);
+        } else {
+            sleep = true;
+        }
 
         match &mut client {
             Ok(cli) => {
