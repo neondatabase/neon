@@ -446,6 +446,7 @@ class NeonEnvBuilder:
         preserve_database_files: bool = False,
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
+        pageserver_virtual_file_io_engine: Optional[str] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -480,6 +481,8 @@ class NeonEnvBuilder:
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
+
+        self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
         assert test_name.startswith(
             "test_"
@@ -995,6 +998,8 @@ class NeonEnv:
             self, config.auth_enabled
         )
 
+        self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
+
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
             "default_tenant_id": str(self.initial_tenant),
@@ -1026,6 +1031,9 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
             }
+            if self.pageserver_virtual_file_io_engine is not None:
+                ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
+
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
                 NeonPageserver(
