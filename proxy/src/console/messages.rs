@@ -15,6 +15,7 @@ pub struct ConsoleError {
 pub struct GetRoleSecret {
     pub role_secret: Box<str>,
     pub allowed_ips: Option<Vec<Box<str>>>,
+    pub project_id: Option<Box<str>>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -207,10 +208,15 @@ mod tests {
             "role_secret": "secret",
         });
         let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
-        // Empty `allowed_ips` field.
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
+        });
+        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        let json = json!({
+            "role_secret": "secret",
+            "allowed_ips": ["8.8.8.8"],
+            "project_id": "project",
         });
         let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
 

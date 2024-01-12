@@ -3131,11 +3131,13 @@ impl Timeline {
             .await
             .context("fsync of newly created layer files")?;
 
-        par_fsync::par_fsync_async(&[self
-            .conf
-            .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
-        .await
-        .context("fsync of timeline dir")?;
+        if !all_paths.is_empty() {
+            par_fsync::par_fsync_async(&[self
+                .conf
+                .timeline_path(&self.tenant_shard_id, &self.timeline_id)])
+            .await
+            .context("fsync of timeline dir")?;
+        }
 
         let mut guard = self.layers.write().await;
 

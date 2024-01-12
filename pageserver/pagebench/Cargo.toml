@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 clap.workspace = true
 futures.workspace = true
 hdrhistogram.workspace = true
@@ -18,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 pageserver = { path = ".." }
 pageserver_client.workspace = true
