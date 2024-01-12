@@ -22,6 +22,7 @@
 #[strum(serialize_all = "kebab-case")]
 pub enum IoEngineKind {
     StdFs,
+    TokioEpollUring,
 }
 
 static IO_ENGINE: once_cell::sync::OnceCell<IoEngineKind> = once_cell::sync::OnceCell::new();
@@ -89,6 +90,19 @@ impl IoEngineKind {
                 #[allow(dropping_references)]
                 drop(dst);
                 ((file_guard, buf), res)
+            }
+            IoEngineKind::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.read(file_guard, offset, buf).await;
+                (
+                    resources,
+                    res.map_err(|e| match e {
+                        tokio_epoll_uring::Error::Op(e) => e,
+                        tokio_epoll_uring::Error::System(system) => {
+                            std::io::Error::new(std::io::ErrorKind::Other, system)
+                        }
+                    }),
+                )
             }
         }
     }
