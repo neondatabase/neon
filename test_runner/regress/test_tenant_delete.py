@@ -598,7 +598,7 @@ def test_tenant_delete_races_timeline_creation(
     def timeline_create():
         try:
             ps_http.timeline_create(env.pg_version, tenant_id, TimelineId.generate(), timeout=1)
-            AssertionError()
+            raise RuntimeError("creation succeeded even though it shouldn't")
         except ReadTimeout:
             pass
 
