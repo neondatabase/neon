@@ -13,6 +13,7 @@
 
 use anyhow::{bail, Context};
 use camino::Utf8Path;
+use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
@@ -3177,6 +3178,58 @@ impl Tenant {
         .await
     }
 
+    async fn upload_initdb(
+        &self,
+        timelines_path: &Utf8PathBuf,
+        pgdata_path: &Utf8PathBuf,
+        timeline_id: &TimelineId,
+    ) -> anyhow::Result<()> {
+        let Some(storage) = &self.remote_storage else {
+            // No remote storage?  No upload.
+            return Ok(());
+        };
+
+        let temp_path = timelines_path.join(format!(
+            "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
+        ));
+
+        let (pgdata_zstd, tar_zst_size) =
+            import_datadir::create_tar_zst(pgdata_path, &temp_path).await?;
+        backoff::retry(
+            || async {
+                self::remote_timeline_client::upload_initdb_dir(
+                    storage,
+                    &self.tenant_shard_id.tenant_id,
+                    timeline_id,
+                    pgdata_zstd.try_clone().await?,
+                    tar_zst_size,
+                    &self.cancel,
+                )
+                .await
+            },
+            |_| false,
+            3,
+            u32::MAX,
+            "persist_initdb_tar_zst",
+            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+        )
+        .await?;
+
+        tokio::fs::remove_file(&temp_path)
+            .await
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    // If something else already removed the file, ignore the error
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .with_context(|| format!("tempfile removal {temp_path}"))?;
+
+        Ok(())
+    }
+
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
@@ -3248,44 +3301,9 @@ impl Tenant {
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
-            if let Some(storage) = &self.remote_storage {
-                let temp_path = timelines_path.join(format!(
-                    "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
-                ));
-
-                let (pgdata_zstd, tar_zst_size) =
-                    import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
-                backoff::retry(
-                    || async {
-                        self::remote_timeline_client::upload_initdb_dir(
-                            storage,
-                            &self.tenant_shard_id.tenant_id,
-                            &timeline_id,
-                            pgdata_zstd.try_clone().await?,
-                            tar_zst_size,
-                            &self.cancel,
-                        )
-                        .await
-                    },
-                    |_| false,
-                    3,
-                    u32::MAX,
-                    "persist_initdb_tar_zst",
-                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
-                )
-                .await?;
-
-                tokio::fs::remove_file(&temp_path)
-                    .await
-                    .or_else(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
-                            // If something else already removed the file, ignore the error
-                            Ok(())
-                        } else {
-                            Err(e)
-                        }
-                    })
-                    .with_context(|| format!("tempfile removal {temp_path}"))?;
+            if self.tenant_shard_id().is_zero() {
+                self.upload_initdb(&timelines_path, &pgdata_path, &timeline_id)
+                    .await?;
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
