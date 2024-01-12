@@ -92,11 +92,10 @@ impl EphemeralFile {
                 page_cache::ReadBufResult::Found(guard) => {
                     return Ok(BlockLease::PageReadGuard(guard))
                 }
-                page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                    let buf: &mut [u8] = write_guard.deref_mut();
-                    debug_assert_eq!(buf.len(), PAGE_SZ);
-                    self.file
-                        .read_exact_at(&mut buf[..], blknum as u64 * PAGE_SZ as u64)
+                page_cache::ReadBufResult::NotFound(write_guard) => {
+                    let write_guard = self
+                        .file
+                        .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64)
                         .await?;
                     let read_guard = write_guard.mark_valid();
                     return Ok(BlockLease::PageReadGuard(read_guard));
