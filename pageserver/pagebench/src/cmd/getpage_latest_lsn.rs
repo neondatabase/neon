@@ -351,10 +351,10 @@ async fn main_impl(
 
     let work_sender_task = tokio::spawn(work_sender);
 
-    info!("waiting for everything to become ready");
-    start_work_barrier.wait().await;
-    info!("work started");
     if let Some(runtime) = args.runtime {
+        info!("waiting for everything to become ready");
+        start_work_barrier.wait().await;
+        info!("work started");
         tokio::time::sleep(runtime.into()).await;
         info!("runtime over, signalling cancellation");
         cancel.cancel();
