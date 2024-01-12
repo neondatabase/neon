@@ -609,14 +609,14 @@ def test_tenant_delete_races_timeline_creation(
 
     wait_until(100, 0.1, hit_initdb_upload_failpoint)
 
-    def creation_connection_timet_out():
+    def creation_connection_timed_out():
         assert env.pageserver.log_contains(
             "POST.*/timeline.* request was dropped before completing"
         )
 
     # Wait so that we hit the timeout and the connection is dropped
     # (But timeline creation still continues)
-    wait_until(100, 0.1, creation_connection_timet_out)
+    wait_until(100, 0.1, creation_connection_timed_out)
 
     ps_http.configure_failpoints((DELETE_BEFORE_CLEANUP_FAILPOINT, "pause"))
 
