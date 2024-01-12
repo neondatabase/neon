@@ -1,9 +1,8 @@
-import asyncio
 import ssl
 
 import pytest
-from fixtures.neon_fixtures import NeonProxy
 import websockets
+from fixtures.neon_fixtures import NeonProxy
 
 
 @pytest.mark.asyncio
