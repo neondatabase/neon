@@ -1,6 +1,6 @@
 //! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
 
-use std::path::Path;
+use std::{os::fd::OwnedFd, path::Path};
 
 #[derive(Debug, Clone)]
 pub struct OpenOptions(std::fs::OpenOptions);
@@ -41,11 +41,8 @@ impl OpenOptions {
         self
     }
 
-    pub(in crate::virtual_file) async fn open(
-        &self,
-        path: &Path,
-    ) -> std::io::Result<std::fs::File> {
-        self.0.open(path)
+    pub(in crate::virtual_file) async fn open(&self, path: &Path) -> std::io::Result<OwnedFd> {
+        self.0.open(path).map(|file| file.into())
     }
 }
 
