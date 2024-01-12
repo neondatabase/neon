@@ -61,6 +61,7 @@ sync_wrapper.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio-epoll-uring.workspace = true
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 tokio-stream.workspace = true
