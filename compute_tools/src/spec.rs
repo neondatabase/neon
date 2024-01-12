@@ -242,7 +242,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
     info!(
-        "handling cluster spec roles (total {}):",
+        "handling cluster spec roles (total {})",
         spec.cluster.roles.len()
     );
     for role in &spec.cluster.roles {
@@ -510,7 +510,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let existing_dbs = get_existing_dbs(client)?;
 
     info!(
-        "handling cluster spec databases (total {}):",
+        "handling cluster spec databases (total {})",
         spec.cluster.databases.len()
     );
     for db in &spec.cluster.databases {
