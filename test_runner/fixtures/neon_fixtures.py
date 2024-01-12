@@ -2490,7 +2490,7 @@ class NeonProxy(PgProtocol):
         ) as client:
             response = await client.post(
                 f"https://{self.domain}:{self.external_http_port}/sql",
-                data=json.dumps({"query": query, "params": args}),
+                json={"query": query, "params": args},
                 headers={
                     "Content-Type": "application/sql",
                     "Neon-Connection-String": connstr,
