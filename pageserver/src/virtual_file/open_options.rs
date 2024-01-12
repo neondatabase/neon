@@ -1,3 +1,5 @@
+//! Enum-dispatch to the `OpenOptions` type of the respective [`super::IoEngineKind`];
+
 use std::path::Path;
 
 #[derive(Debug, Clone)]
