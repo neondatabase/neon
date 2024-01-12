@@ -12,12 +12,14 @@
 //!
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
+use crate::page_cache::PageWriteGuard;
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use tokio_epoll_uring::IoBufMut;
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
@@ -113,6 +115,37 @@ struct SlotInner {
 
     /// the underlying file
     file: Option<OwnedFd>,
+}
+
+/// Impl of [`tokio_epoll_uring::IoBuf`] and [`tokio_epoll_uring::IoBufMut`] for [`PageWriteGuard`].
+struct PageWriteGuardBuf {
+    page: PageWriteGuard<'static>,
+    init_up_to: usize,
+}
+// Safety: the [`PageWriteGuard`] gives us exclusive ownership of the page cache slot,
+// and the location remains stable even if [`Self`] or the [`PageWriteGuard`] is moved.
+unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
+    fn stable_ptr(&self) -> *const u8 {
+        self.page.as_ptr()
+    }
+    fn bytes_init(&self) -> usize {
+        self.init_up_to
+    }
+    fn bytes_total(&self) -> usize {
+        self.page.len()
+    }
+}
+// Safety: see above, plus: the ownership of [`PageWriteGuard`] means exclusive access,
+// hence it's safe to hand out the `stable_mut_ptr()`.
+unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        self.page.as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        assert!(pos <= self.page.len());
+        self.init_up_to = pos;
+    }
 }
 
 impl OpenFiles {
@@ -515,28 +548,28 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-    pub async fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
-        while !buf.is_empty() {
-            match self.read_at(buf, offset).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    let tmp = buf;
-                    buf = &mut tmp[n..];
-                    offset += n as u64;
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        if !buf.is_empty() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "failed to fill whole buffer",
-            ))
-        } else {
-            Ok(())
-        }
+    pub async fn read_exact_at<B>(&self, buf: B, offset: u64) -> Result<B, Error>
+    where
+        B: IoBufMut + Send,
+    {
+        let (buf, res) =
+            read_exact_at_impl(buf, offset, |buf, offset| self.read_at(buf, offset)).await;
+        res.map(|()| buf)
+    }
+
+    /// Like [`Self::read_exact_at`] but for [`PageWriteGuard`].
+    pub async fn read_exact_at_page(
+        &self,
+        page: PageWriteGuard<'static>,
+        offset: u64,
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        let buf = PageWriteGuardBuf {
+            page,
+            init_up_to: 0,
+        };
+        let res = self.read_exact_at(buf, offset).await;
+        res.map(|PageWriteGuardBuf { page, .. }| page)
+            .map_err(|e| Error::new(ErrorKind::Other, e))
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
@@ -586,15 +619,41 @@ impl VirtualFile {
         Ok(n)
     }
 
-    pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let result = with_file!(self, StorageIoOperation::Read, |file_guard| file_guard
-            .with_std_file(|std_file| std_file.read_at(buf, offset)));
+    pub(crate) async fn read_at<B>(&self, mut buf: B, offset: u64) -> (B, Result<usize, Error>)
+    where
+        B: tokio_epoll_uring::BoundedBufMut + Send,
+    {
+        let (buf, result) = async move {
+            let file_guard = match self.lock_file().await {
+                Err(e) => return (buf, Err(e)),
+                Ok(file_guard) => file_guard,
+            };
+            observe_duration!(StorageIoOperation::Read, {
+                // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
+                };
+                let res = file_guard.with_std_file(|std_file| std_file.read_at(dst, offset));
+                if let Ok(nbytes) = &res {
+                    assert!(*nbytes <= buf.bytes_total());
+                    // SAFETY: see above assertion
+                    unsafe {
+                        buf.set_init(*nbytes);
+                    }
+                }
+                #[allow(dropping_references)]
+                drop(dst);
+                drop(file_guard);
+                (buf, res)
+            })
+        }
+        .await;
         if let Ok(size) = result {
             STORAGE_IO_SIZE
                 .with_label_values(&["read", &self.tenant_id, &self.shard_id, &self.timeline_id])
                 .add(size as i64);
         }
-        result
+        (buf, result)
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
@@ -607,6 +666,193 @@ impl VirtualFile {
                 .add(size as i64);
         }
         result
+    }
+}
+
+// Adapted from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
+pub async fn read_exact_at_impl<B, F, Fut>(
+    buf: B,
+    mut offset: u64,
+    mut read_at: F,
+) -> (B, std::io::Result<()>)
+where
+    B: IoBufMut + Send,
+    F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
+    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
+{
+    use tokio_epoll_uring::BoundedBuf;
+    let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full(); // includes all the uninitialized memory
+    while buf.bytes_total() != 0 {
+        let res;
+        (buf, res) = read_at(buf, offset).await;
+        match res {
+            Ok(0) => break,
+            Ok(n) => {
+                buf = buf.slice(n..);
+                offset += n as u64;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return (buf.into_inner(), Err(e)),
+        }
+    }
+    // NB: don't use `buf.is_empty()` here; it is from the
+    // `impl Deref for Slice { Target = [u8] }`; the the &[u8]
+    // returned by it only covers the initialized portion of `buf`.
+    // Whereas we're interested in ensuring that we filled the entire
+    // buffer that the user passed in.
+    if buf.bytes_total() != 0 {
+        (
+            buf.into_inner(),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            )),
+        )
+    } else {
+        assert_eq!(buf.len(), buf.bytes_total());
+        (buf.into_inner(), Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod test_read_exact_at_impl {
+
+    use std::{collections::VecDeque, sync::Arc};
+
+    use tokio_epoll_uring::{BoundedBuf, BoundedBufMut};
+
+    use super::read_exact_at_impl;
+
+    struct Expectation {
+        offset: u64,
+        bytes_total: usize,
+        result: std::io::Result<Vec<u8>>,
+    }
+    struct MockReadAt {
+        expectations: VecDeque<Expectation>,
+    }
+
+    impl MockReadAt {
+        async fn read_at(
+            &mut self,
+            mut buf: tokio_epoll_uring::Slice<Vec<u8>>,
+            offset: u64,
+        ) -> (tokio_epoll_uring::Slice<Vec<u8>>, std::io::Result<usize>) {
+            let exp = self
+                .expectations
+                .pop_front()
+                .expect("read_at called but we have no expectations left");
+            assert_eq!(exp.offset, offset);
+            assert_eq!(exp.bytes_total, buf.bytes_total());
+            match exp.result {
+                Ok(bytes) => {
+                    assert!(bytes.len() <= buf.bytes_total());
+                    buf.put_slice(&bytes);
+                    (buf, Ok(bytes.len()))
+                }
+                Err(e) => (buf, Err(e)),
+            }
+        }
+    }
+
+    impl Drop for MockReadAt {
+        fn drop(&mut self) {
+            assert_eq!(self.expectations.len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_basic() {
+        let buf = Vec::with_capacity(5);
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::from(vec![Expectation {
+                offset: 0,
+                bytes_total: 5,
+                result: Ok(vec![b'a', b'b', b'c', b'd', b'e']),
+            }]),
+        }));
+        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(buf, vec![b'a', b'b', b'c', b'd', b'e']);
+    }
+
+    #[tokio::test]
+    async fn test_empty_buf_issues_no_syscall() {
+        let buf = Vec::new();
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::new(),
+        }));
+        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_two_read_at_calls_needed_until_buf_filled() {
+        let buf = Vec::with_capacity(4);
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::from(vec![
+                Expectation {
+                    offset: 0,
+                    bytes_total: 4,
+                    result: Ok(vec![b'a', b'b']),
+                },
+                Expectation {
+                    offset: 2,
+                    bytes_total: 2,
+                    result: Ok(vec![b'c', b'd']),
+                },
+            ]),
+        }));
+        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(buf, vec![b'a', b'b', b'c', b'd']);
+    }
+
+    #[tokio::test]
+    async fn test_eof_before_buffer_full() {
+        let buf = Vec::with_capacity(3);
+        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
+            expectations: VecDeque::from(vec![
+                Expectation {
+                    offset: 0,
+                    bytes_total: 3,
+                    result: Ok(vec![b'a']),
+                },
+                Expectation {
+                    offset: 1,
+                    bytes_total: 2,
+                    result: Ok(vec![b'b']),
+                },
+                Expectation {
+                    offset: 2,
+                    bytes_total: 1,
+                    result: Ok(vec![]),
+                },
+            ]),
+        }));
+        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
+            let mock_read_at = Arc::clone(&mock_read_at);
+            async move { mock_read_at.lock().await.read_at(buf, offset).await }
+        })
+        .await;
+        let Err(err) = res else {
+            panic!("should return an error");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(format!("{err}"), "failed to fill whole buffer");
+        // buffer contents on error are unspecified
     }
 }
 
@@ -658,16 +904,19 @@ impl VirtualFile {
         blknum: u32,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
-        let mut buf = [0; PAGE_SZ];
-        self.read_exact_at(&mut buf, blknum as u64 * (PAGE_SZ as u64))
+        let buf = vec![0; PAGE_SZ];
+        let buf = self
+            .read_exact_at(buf, blknum as u64 * (PAGE_SZ as u64))
             .await?;
-        Ok(std::sync::Arc::new(buf).into())
+        Ok(crate::tenant::block_io::BlockLease::Vec(buf))
     }
 
     async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<(), Error> {
+        let mut tmp = vec![0; 128];
         loop {
-            let mut tmp = [0; 128];
-            match self.read_at(&mut tmp, self.pos).await {
+            let res;
+            (tmp, res) = self.read_at(tmp, self.pos).await;
+            match res {
                 Ok(0) => return Ok(()),
                 Ok(n) => {
                     self.pos += n as u64;
@@ -791,10 +1040,10 @@ mod tests {
     }
 
     impl MaybeVirtualFile {
-        async fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        async fn read_exact_at(&self, mut buf: Vec<u8>, offset: u64) -> Result<Vec<u8>, Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset).await,
-                MaybeVirtualFile::File(file) => file.read_exact_at(buf, offset),
+                MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
             }
         }
         async fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
@@ -836,8 +1085,8 @@ mod tests {
 
         // Helper function to slurp a portion of a file into a string
         async fn read_string_at(&mut self, pos: u64, len: usize) -> Result<String, Error> {
-            let mut buf = vec![0; len];
-            self.read_exact_at(&mut buf, pos).await?;
+            let buf = vec![0; len];
+            let buf = self.read_exact_at(buf, pos).await?;
             Ok(String::from_utf8(buf).unwrap())
         }
     }
@@ -1013,11 +1262,11 @@ mod tests {
         for _threadno in 0..THREADS {
             let files = files.clone();
             let hdl = rt.spawn(async move {
-                let mut buf = [0u8; SIZE];
+                let mut buf = vec![0u8; SIZE];
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
                     let f = &files[rng.gen_range(0..files.len())];
-                    f.read_exact_at(&mut buf, 0).await.unwrap();
+                    buf = f.read_exact_at(buf, 0).await.unwrap();
                     assert!(buf == SAMPLE);
                 }
             });
