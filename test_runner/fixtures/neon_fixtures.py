@@ -743,7 +743,7 @@ class NeonEnvBuilder:
         Unmount the overlayfs mounts created by `self.overlay_mount()`.
         Supposed to be called during env teardown.
         """
-        if not self.test_overlay_dir:
+        if self.test_overlay_dir is None:
             return
         while len(self.overlay_mounts_created_by_us) > 0:
             (ident, mountpoint) = self.overlay_mounts_created_by_us.pop()
@@ -3500,8 +3500,6 @@ def test_output_dir(
 ) -> Iterator[Path]:
     """Create the working directory for an individual test."""
 
-    _ = test_overlay_dir  # request it so it can do cleanups
-
     # one directory per test
     test_dir = get_test_output_dir(request, top_output_dir)
     log.info(f"test_output_dir is {test_dir}")
@@ -3582,14 +3580,18 @@ def shared_snapshot_dir(top_output_dir, ident: str) -> SnapshotDir:
     return SnapshotDir(snapshot_dir_path)
 
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(scope="function")
 def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
-    """Create the overlay state directory for an individual test."""
+    """
+    Idempotently create a test's overlayfs mount state directory.
+    If the functionality isn't enabled via env var, returns None.
 
-    if not os.getenv("NEON_ENV_FROM_REPO_DIR_USE_OVERLAYFS"):
+    The procedure cleans up after previous runs that were aborted (e.g. due to Ctrl-C, OOM kills, etc).
+    """
+
+    if os.getenv("NEON_ENV_BUILDER_FROM_REPO_DIR_USE_OVERLAYFS") is None:
         return None
 
-    # one directory per test
     overlay_dir = get_test_overlay_dir(request, top_output_dir)
     log.info(f"test_overlay_dir is {overlay_dir}")
 
@@ -3601,7 +3603,7 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
             f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}"
         )
         subprocess.run(cmd, capture_output=True, check=True)
-    # the overlayfs `workdir`` is owned by `root`
+    # the overlayfs `workdir`` is owned by `root`, shutil.rmtree won't work.
     cmd = ["sudo", "rm", "-rf", str(overlay_dir)]
     subprocess.run(cmd, capture_output=True, check=True)
 
