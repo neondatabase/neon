@@ -436,103 +436,59 @@ mod tests {
             * 32.0
     }
 
-    #[test]
-    fn test_cardinality_small() {
+    fn test_cardinality(n: usize) -> ([usize; 3], [f64; 3]) {
         let hll = HyperLogLogVec::<32>::new(Opts::new("foo", "bar"), &["x"]).unwrap();
 
-        let zipf = Zipf::new(100, 1.2f64).unwrap();
+        let zipf = Zipf::new(n as u64, 1.2f64).unwrap();
         let mut iter = StdRng::seed_from_u64(0x2024_0112).sample_iter(zipf);
         let mut set_a = HashSet::new();
         let mut set_b = HashSet::new();
 
-        for x in iter.by_ref().take(100) {
+        for x in iter.by_ref().take(n) {
             set_a.insert(x.to_bits());
             hll.with_label_values(&["a"]).measure(&x.to_bits());
         }
-        for x in iter.by_ref().take(100) {
+        for x in iter.by_ref().take(n) {
             set_b.insert(x.to_bits());
             hll.with_label_values(&["b"]).measure(&x.to_bits());
         }
         let merge = &set_a | &set_b;
-
-        assert_eq!(merge.len(), 46);
-        assert_eq!(set_a.len(), 30);
-        assert_eq!(set_b.len(), 32);
 
         let metrics = collect(&hll);
         let len = get_cardinality(&metrics, |_| true);
         let len_a = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "a");
         let len_b = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "b");
 
-        assert!(51.3 < len && len < 51.4);
-        assert!(44.0 < len_a && len_a < 44.1);
-        assert!(39.0 < len_b && len_b < 39.1);
+        ([merge.len(), set_a.len(), set_b.len()], [len, len_a, len_b])
+    }
+
+    #[test]
+    fn test_cardinality_small() {
+        let (actual, estimate) = test_cardinality(100);
+
+        assert_eq!(actual, [46, 30, 32]);
+        assert!(51.3 < estimate[0] && estimate[0] < 51.4);
+        assert!(44.0 < estimate[1] && estimate[1] < 44.1);
+        assert!(39.0 < estimate[2] && estimate[2] < 39.1);
     }
 
     #[test]
     fn test_cardinality_medium() {
-        let hll = HyperLogLogVec::<32>::new(Opts::new("foo", "bar"), &["x"]).unwrap();
+        let (actual, estimate) = test_cardinality(10000);
 
-        let zipf = Zipf::new(10000, 1.2f64).unwrap();
-        let mut iter = StdRng::seed_from_u64(0x2024_0112).sample_iter(zipf);
-        let mut set_a = HashSet::new();
-        let mut set_b = HashSet::new();
-
-        for x in iter.by_ref().take(10000) {
-            set_a.insert(x.to_bits());
-            hll.with_label_values(&["a"]).measure(&x.to_bits());
-        }
-        for x in iter.by_ref().take(10000) {
-            set_b.insert(x.to_bits());
-            hll.with_label_values(&["b"]).measure(&x.to_bits());
-        }
-        let merge = &set_a | &set_b;
-
-        assert_eq!(merge.len(), 2529);
-        assert_eq!(set_a.len(), 1618);
-        assert_eq!(set_b.len(), 1629);
-
-        let metrics = collect(&hll);
-        let len = get_cardinality(&metrics, |_| true);
-        let len_a = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "a");
-        let len_b = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "b");
-
-        assert!(2309.1 < len && len < 2309.2);
-        assert!(1566.6 < len_a && len_a < 1566.7);
-        assert!(1629.5 < len_b && len_b < 1629.6);
+        assert_eq!(actual, [2529, 1618, 1629]);
+        assert!(2309.1 < estimate[0] && estimate[0] < 2309.2);
+        assert!(1566.6 < estimate[1] && estimate[1] < 1566.7);
+        assert!(1629.5 < estimate[2] && estimate[2] < 1629.6);
     }
 
     #[test]
     fn test_cardinality_large() {
-        let hll = HyperLogLogVec::<32>::new(Opts::new("foo", "bar"), &["x"]).unwrap();
+        let (actual, estimate) = test_cardinality(1_000_000);
 
-        let zipf = Zipf::new(1_000_000, 1.2f64).unwrap();
-        let mut iter = StdRng::seed_from_u64(0x2024_0112).sample_iter(zipf);
-        let mut set_a = HashSet::new();
-        let mut set_b = HashSet::new();
-
-        for x in iter.by_ref().take(1_000_000) {
-            set_a.insert(x.to_bits());
-            hll.with_label_values(&["a"]).measure(&x.to_bits());
-        }
-        for x in iter.by_ref().take(1_000_000) {
-            set_b.insert(x.to_bits());
-            hll.with_label_values(&["b"]).measure(&x.to_bits());
-        }
-        let merge = &set_a | &set_b;
-
-        assert_eq!(merge.len(), 129077);
-        assert_eq!(set_a.len(), 79579);
-        assert_eq!(set_b.len(), 79630);
-
-        let metrics = collect(&hll);
-        let len = get_cardinality(&metrics, |_| true);
-        let len_a = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "a");
-        let len_b = get_cardinality(&metrics, |l| l.get_label()[0].get_value() == "b");
-
-        dbg!(len, len_a, len_b);
-        assert!(126067.2 < len && len < 126067.3);
-        assert!(83076.8 < len_a && len_a < 83076.9);
-        assert!(64251.2 < len_b && len_b < 64251.3);
+        assert_eq!(actual, [129077, 79579, 79630]);
+        assert!(126067.2 < estimate[0] && estimate[0] < 126067.3);
+        assert!(83076.8 < estimate[1] && estimate[1] < 83076.9);
+        assert!(64251.2 < estimate[2] && estimate[2] < 64251.3);
     }
 }
