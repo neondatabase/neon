@@ -14,7 +14,7 @@ use crate::walrecord::NeonWalRecord;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes};
 use pageserver_api::key::is_rel_block_key;
-use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};
@@ -26,9 +26,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::{bin_ser::BeSer, lsn::Lsn};
-
-/// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
-pub type BlockNumber = u32;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -1863,21 +1860,6 @@ pub fn is_inherited_key(key: Key) -> bool {
     key != AUX_FILES_KEY
 }
 
-/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
-pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
-    Ok(match key.field1 {
-        0x00 => (
-            RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            },
-            key.field6,
-        ),
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
 pub fn is_rel_fsm_block_key(key: Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
 }
