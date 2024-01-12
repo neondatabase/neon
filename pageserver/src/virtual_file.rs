@@ -28,7 +28,9 @@ use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use utils::fs_ext;
 
+mod io_engine;
 mod open_options;
+pub use io_engine::IoEngineKind;
 pub(crate) use open_options::*;
 
 ///
@@ -645,41 +647,29 @@ impl VirtualFile {
         Ok(n)
     }
 
-    pub(crate) async fn read_at<B>(&self, mut buf: B, offset: u64) -> (B, Result<usize, Error>)
+    pub(crate) async fn read_at<B>(&self, buf: B, offset: u64) -> (B, Result<usize, Error>)
     where
         B: tokio_epoll_uring::BoundedBufMut + Send,
     {
-        let (buf, result) = async move {
-            let file_guard = match self.lock_file().await {
-                Err(e) => return (buf, Err(e)),
-                Ok(file_guard) => file_guard,
-            };
-            observe_duration!(StorageIoOperation::Read, {
-                // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
-                };
-                let res = file_guard.with_std_file(|std_file| std_file.read_at(dst, offset));
-                if let Ok(nbytes) = &res {
-                    assert!(*nbytes <= buf.bytes_total());
-                    // SAFETY: see above assertion
-                    unsafe {
-                        buf.set_init(*nbytes);
-                    }
-                }
-                #[allow(dropping_references)]
-                drop(dst);
-                drop(file_guard);
-                (buf, res)
-            })
-        }
-        .await;
-        if let Ok(size) = result {
-            STORAGE_IO_SIZE
-                .with_label_values(&["read", &self.tenant_id, &self.shard_id, &self.timeline_id])
-                .add(size as i64);
-        }
-        (buf, result)
+        let file_guard = match self.lock_file().await {
+            Ok(file_guard) => file_guard,
+            Err(e) => return (buf, Err(e)),
+        };
+
+        observe_duration!(StorageIoOperation::Read, {
+            let ((_file_guard, buf), res) = io_engine::get().read_at(file_guard, offset, buf).await;
+            if let Ok(size) = res {
+                STORAGE_IO_SIZE
+                    .with_label_values(&[
+                        "read",
+                        &self.tenant_id,
+                        &self.shard_id,
+                        &self.timeline_id,
+                    ])
+                    .add(size as i64);
+            }
+            (buf, res)
+        })
     }
 
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize, Error> {
@@ -831,10 +821,12 @@ impl OpenFiles {
 /// Initialize the virtual file module. This must be called once at page
 /// server startup.
 ///
-pub fn init(num_slots: usize) {
+#[cfg(not(test))]
+pub fn init(num_slots: usize, engine: IoEngineKind) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
+    io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }
 
