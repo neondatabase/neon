@@ -456,7 +456,7 @@ pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()>
 /// - no new lines were written for the last second
 async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Result<()> {
     let mut lines = tokio::io::BufReader::new(stderr).lines();
-    let timeout_duration = Duration::from_secs(1);
+    let timeout_duration = Duration::from_millis(100);
     let ts_regex =
         regex::Regex::new(r"^\d+-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").expect("regex is valid");
 
