@@ -293,7 +293,7 @@ fn main() -> Result<()> {
     let pg = match compute.start_compute(extension_server_port) {
         Ok(pg) => Some(pg),
         Err(err) => {
-            error!("could not start the compute node: {:?}", err);
+            error!("could not start the compute node: {:#}", err);
             let mut state = compute.state.lock().unwrap();
             state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
