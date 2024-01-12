@@ -1803,17 +1803,6 @@ class Pagectl(AbstractNeonCli):
         return IndexPartDump.from_json(parsed)
 
 
-# class GetpageBenchLibpq(AbstractNeonCli):
-#     """
-#     A typed wrapper around the `getpage_bench_libpq` CLI.
-#     """
-#
-#     COMMAND = "getpage_bench_libpq"
-#
-#     def run(self):
-#         pass
-
-
 class NeonAttachmentService:
     def __init__(self, env: NeonEnv):
         self.env = env
