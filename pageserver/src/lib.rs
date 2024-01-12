@@ -1,3 +1,4 @@
+#![recursion_limit = "300"]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod auth;

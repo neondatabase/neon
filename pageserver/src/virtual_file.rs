@@ -21,7 +21,7 @@ use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use tokio_epoll_uring::IoBufMut;
 
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -884,6 +884,13 @@ impl FileGuard {
         let res = with(&mut file);
         let _ = file.into_raw_fd();
         res
+    }
+}
+
+impl tokio_epoll_uring::IoFd for FileGuard {
+    unsafe fn as_fd(&self) -> RawFd {
+        let owned_fd: &OwnedFd = self.as_ref();
+        owned_fd.as_raw_fd()
     }
 }
 
