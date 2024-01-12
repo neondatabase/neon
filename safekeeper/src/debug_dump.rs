@@ -22,14 +22,13 @@ use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::safekeeper::SafeKeeperState;
-use crate::safekeeper::SafekeeperMemState;
 use crate::safekeeper::TermHistory;
-use crate::SafeKeeperConf;
-
 use crate::send_wal::WalSenderState;
+use crate::state::TimelineMemState;
+use crate::state::TimelinePersistentState;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
 
 /// Various filters that influence the resulting JSON output.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -143,7 +142,7 @@ pub struct Config {
 pub struct Timeline {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
-    pub control_file: Option<SafeKeeperState>,
+    pub control_file: Option<TimelinePersistentState>,
     pub memory: Option<Memory>,
     pub disk_content: Option<DiskContent>,
 }
@@ -158,7 +157,7 @@ pub struct Memory {
     pub num_computes: u32,
     pub last_removed_segno: XLogSegNo,
     pub epoch_start_lsn: Lsn,
-    pub mem_state: SafekeeperMemState,
+    pub mem_state: TimelineMemState,
 
     // PhysicalStorage state.
     pub write_lsn: Lsn,

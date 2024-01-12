@@ -1638,7 +1638,9 @@ pub(crate) async fn list_tenants(
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state(), tenant.generation())),
+            TenantSlot::Attached(tenant) => {
+                Some((*id, tenant.current_state(), tenant.generation()))
+            }
             TenantSlot::Secondary(_) => None,
             TenantSlot::InProgress(_) => None,
         })

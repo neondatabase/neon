@@ -875,7 +875,7 @@ class NeonEnvBuilder:
                 immediate=True,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
-                ps_assert_metric_no_errors=(exc_type is not None),
+                ps_assert_metric_no_errors=(exc_type is None),
             )
             cleanup_error = None
 
@@ -1060,6 +1060,9 @@ class NeonEnv:
             safekeeper.start()
 
     def stop(self, immediate=False, ps_assert_metric_no_errors=False):
+        """
+        After this method returns, there should be no child processes running.
+        """
         self.endpoints.stop_all()
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
@@ -1068,7 +1071,7 @@ class NeonEnv:
                 pageserver.assert_no_metric_errors()
             pageserver.stop(immediate=immediate)
         self.attachment_service.stop(immediate=immediate)
-        self.broker.stop()
+        self.broker.stop(immediate=immediate)
 
     @property
     def pageserver(self) -> NeonPageserver:

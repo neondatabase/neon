@@ -49,6 +49,11 @@ impl ResponseErrorMessageExt for reqwest::Response {
     }
 }
 
+pub enum ForceAwaitLogicalSize {
+    Yes,
+    No,
+}
+
 impl Client {
     pub fn new(mgmt_api_endpoint: String, jwt: Option<&str>) -> Self {
         Self {
@@ -92,11 +97,18 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        force_await_logical_size: ForceAwaitLogicalSize,
     ) -> Result<pageserver_api::models::TimelineInfo> {
         let uri = format!(
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             self.mgmt_api_endpoint
         );
+
+        let uri = match force_await_logical_size {
+            ForceAwaitLogicalSize::Yes => format!("{}?force-await-logical-size={}", uri, true),
+            ForceAwaitLogicalSize::No => uri,
+        };
+
         self.get(&uri)
             .await?
             .json()
@@ -204,6 +216,18 @@ impl Client {
             self.mgmt_api_endpoint, tenant_id
         );
         self.request(Method::POST, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{}/reset",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.request(Method::POST, &uri, ())
             .await?
             .json()
             .await

@@ -1500,7 +1500,8 @@ impl From<GetActiveTenantError> for QueryError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
-            GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+            GetActiveTenantError::Cancelled
+            | GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
                 QueryError::Shutdown
             }
             e => QueryError::Other(anyhow::anyhow!(e)),
