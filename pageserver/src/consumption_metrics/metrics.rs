@@ -196,7 +196,7 @@ pub(super) async fn collect_all_metrics(
         }
     };
 
-    let tenants = futures::stream::iter(tenants).filter_map(|(id, state)| async move {
+    let tenants = futures::stream::iter(tenants).filter_map(|(id, state, _)| async move {
         if state != TenantState::Active || !id.is_zero() {
             None
         } else {
