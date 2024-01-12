@@ -77,11 +77,6 @@ impl Key {
         key
     }
 
-    pub fn sub_unoptimized_checked_panicking(&self, x: u32) -> Key {
-        let key = self.to_i128();
-        Self::from_i128(key.checked_sub(x.into()).unwrap())
-    }
-
     pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
