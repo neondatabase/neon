@@ -43,32 +43,31 @@ pub async fn list_dir(path: impl AsRef<Path>) -> anyhow::Result<Vec<String>> {
 ///
 /// The idempotency implies that we return `Ok(())`` even if the file is already gone or has never existed,
 /// unlike `remove_dir_all` from std/tokio.
-pub async fn remove_dir_all<CF: Fn() -> io::Error>(
-    path: impl AsRef<Utf8Path>,
-    cancel: crate::backoff::Cancel<io::Error, CF>,
-) -> io::Result<()> {
-    crate::backoff::retry(
-        || async {
-            match tokio::fs::remove_dir_all(path.as_ref()).await {
-                // If the directory is gone, we are done.
-                Err(e) if e.kind() == io::ErrorKind::NotFound && !path.as_ref().exists() => Ok(()),
-                other => other,
-            }
-        },
-        |err| {
-            if err.kind() == io::ErrorKind::NotFound {
-                // We got a not found error and the directory still exists.
-                // This was likely due to a removal we are racing with, so retry.
-                return false;
-            }
-            true
-        },
-        3,
-        u32::MAX,
-        "directory removal",
-        cancel,
-    )
-    .await
+pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    fn strip_not_found<T>(v: io::Result<T>) -> Option<io::Result<T>> {
+        match v {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            other => Some(other),
+        }
+    }
+    let Some(list) = strip_not_found(std::fs::read_dir(path)) else {
+        return Ok(());
+    };
+    for entry in list? {
+        let Some(entry) = strip_not_found(entry) else {
+            continue;
+        };
+        let entry = entry?;
+        let Some(file_type) = strip_not_found(entry.file_type()) else {
+            continue;
+        };
+        if file_type?.is_dir() {
+            remove_dir_all(entry.path())?;
+        } else {
+            strip_not_found(std::fs::remove_file(entry.path())).unwrap_or(Ok(()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn ignore_not_found(e: io::Error) -> io::Result<()> {
