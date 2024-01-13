@@ -2,6 +2,7 @@
 use std::{fs, io, path::Path};
 
 use anyhow::Context;
+use camino::Utf8Path;
 
 pub trait PathExt {
     /// Returns an error if `self` is not a directory.
@@ -36,6 +37,38 @@ pub async fn list_dir(path: impl AsRef<Path>) -> anyhow::Result<Vec<String>> {
     }
 
     Ok(content)
+}
+
+/// Version of [`std::fs::remove_dir_all`] that is idempotent and tolerates parallel removals of the same path or sub-paths
+///
+/// The idempotency implies that we return `Ok(())`` even if the file is already gone or has never existed,
+/// unlike `remove_dir_all` from std/tokio.
+pub async fn remove_dir_all<CF: Fn() -> io::Error>(
+    path: impl AsRef<Utf8Path>,
+    cancel: crate::backoff::Cancel<io::Error, CF>,
+) -> io::Result<()> {
+    crate::backoff::retry(
+        || async {
+            match tokio::fs::remove_dir_all(path.as_ref()).await {
+                // If the directory is gone, we are done.
+                Err(e) if e.kind() == io::ErrorKind::NotFound && !path.as_ref().exists() => Ok(()),
+                other => other,
+            }
+        },
+        |err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                // We got a not found error and the directory still exists.
+                // This was likely due to a removal we are racing with, so retry.
+                return false;
+            }
+            true
+        },
+        3,
+        u32::MAX,
+        "directory removal",
+        cancel,
+    )
+    .await
 }
 
 pub fn ignore_not_found(e: io::Error) -> io::Result<()> {

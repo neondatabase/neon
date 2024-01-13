@@ -3198,7 +3198,7 @@ impl Tenant {
         ));
 
         scopeguard::defer! {
-            if let Err(e) = fs::remove_file(&temp_path) {
+            if let Err(e) = utils::fs_ext::remove_dir_all(&temp_path, backoff::Cancel::new(CancellationToken::new(), || panic!())).await {
                 error!("Failed to remove temporary initdb archive '{temp_path}': {e}");
             }
         }
