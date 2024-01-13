@@ -145,7 +145,8 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     Ok(r) => match r.try_get::<&str, i64>("count") {
                         Ok(num_workers) => {
                             if num_workers > 0 {
-                                last_active = Some(Utc::now());
+                                compute.update_last_active(Some(Utc::now()));
+                                continue;
                             }
                         }
                         Err(e) => {
