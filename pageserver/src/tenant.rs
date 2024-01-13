@@ -3197,8 +3197,17 @@ impl Tenant {
             "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
         ));
 
+        scopeguard::defer! {
+            if let Err(e) = fs::remove_file(&temp_path) {
+                error!("Failed to remove temporary initdb archive '{temp_path}': {e}");
+            }
+        }
+
         let (pgdata_zstd, tar_zst_size) =
             import_datadir::create_tar_zst(pgdata_path, &temp_path).await?;
+
+        pausable_failpoint!("before-initdb-upload");
+
         backoff::retry(
             || async {
                 self::remote_timeline_client::upload_initdb_dir(
@@ -3218,18 +3227,6 @@ impl Tenant {
             backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
         )
         .await?;
-
-        tokio::fs::remove_file(&temp_path)
-            .await
-            .or_else(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    // If something else already removed the file, ignore the error
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-            .with_context(|| format!("tempfile removal {temp_path}"))?;
 
         Ok(())
     }
@@ -3283,23 +3280,18 @@ impl Tenant {
                 )
                 .await
                 .context("download initdb tar")?;
+
+            scopeguard::defer! {
+                if let Err(e) = fs::remove_file(&initdb_tar_zst_path) {
+                    error!("Failed to remove temporary initdb archive '{initdb_tar_zst_path}': {e}");
+                }
+            }
+
             let buf_read =
                 BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
             import_datadir::extract_tar_zst(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
-
-            tokio::fs::remove_file(&initdb_tar_zst_path)
-                .await
-                .or_else(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        // If something else already removed the file, ignore the error
-                        Ok(())
-                    } else {
-                        Err(e)
-                    }
-                })
-                .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
