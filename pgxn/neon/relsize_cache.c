@@ -203,13 +203,16 @@ forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
-		bool        found = false;
+		RelSizeEntry *entry;
 		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
-		hash_search(relsize_hash, &tag, HASH_REMOVE, &found);
-		if (found)
+		entry = hash_search(relsize_hash, &tag, HASH_REMOVE, NULL);
+		if (entry)
+		{
+			dlist_delete(&entry->lru_node);
 			relsize_ctl->size -= 1;
+		}
 		LWLockRelease(relsize_lock);
 	}
 }
