@@ -79,6 +79,8 @@ pub const XLOG_XACT_PREPARE: u8 = 0x10;
 pub const XLOG_XACT_ABORT: u8 = 0x20;
 pub const XLOG_XACT_COMMIT_PREPARED: u8 = 0x30;
 pub const XLOG_XACT_ABORT_PREPARED: u8 = 0x40;
+pub const XLOG_XACT_ASSIGNMENT: u8 = 0x50;
+pub const XLOG_XACT_INVALIDATIONS: u8 = 0x60;
 
 // From srlu.h
 pub const SLRU_PAGES_PER_SEGMENT: u32 = 32;
@@ -102,12 +104,6 @@ pub const XACT_XINFO_HAS_TWOPHASE: u32 = 1u32 << 4;
 // pub const XACT_XINFO_HAS_ORIGIN: u32 = 1u32 << 5;
 // pub const XACT_XINFO_HAS_AE_LOCKS: u32 = 1u32 << 6;
 // pub const XACT_XINFO_HAS_GID: u32 = 1u32 << 7;
-
-// From pg_control.h and rmgrlist.h
-pub const XLOG_NEXTOID: u8 = 0x30;
-pub const XLOG_SWITCH: u8 = 0x40;
-pub const XLOG_FPI_FOR_HINT: u8 = 0xA0;
-pub const XLOG_FPI: u8 = 0xB0;
 
 // From multixact.h
 pub const FIRST_MULTIXACT_ID: u32 = 1;
@@ -136,12 +132,20 @@ pub const MULTIXACT_MEMBERS_PER_PAGE: u16 =
 pub const XLOG_HEAP_INSERT: u8 = 0x00;
 pub const XLOG_HEAP_DELETE: u8 = 0x10;
 pub const XLOG_HEAP_UPDATE: u8 = 0x20;
+pub const XLOG_HEAP_TRUNCATE: u8 = 0x30;
 pub const XLOG_HEAP_HOT_UPDATE: u8 = 0x40;
+pub const XLOG_HEAP_CONFIRM: u8 = 0x50;
 pub const XLOG_HEAP_LOCK: u8 = 0x60;
+pub const XLOG_HEAP_INPLACE: u8 = 0x70;
 pub const XLOG_HEAP_INIT_PAGE: u8 = 0x80;
+pub const XLOG_HEAP2_REWRITE: u8 = 0x00;
+pub const XLOG_HEAP2_PRUNE: u8 = 0x10;
+pub const XLOG_HEAP2_VACUUM: u8 = 0x20;
+pub const XLOG_HEAP2_FREEZE_PAGE: u8 = 0x30;
 pub const XLOG_HEAP2_VISIBLE: u8 = 0x40;
 pub const XLOG_HEAP2_MULTI_INSERT: u8 = 0x50;
 pub const XLOG_HEAP2_LOCK_UPDATED: u8 = 0x60;
+pub const XLOG_HEAP2_NEW_CID: u8 = 0x70;
 pub const XLH_LOCK_ALL_FROZEN_CLEARED: u8 = 0x01;
 pub const XLH_INSERT_ALL_FROZEN_SET: u8 = (1 << 5) as u8;
 pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
@@ -164,7 +168,20 @@ pub const RM_RELMAP_ID: u8 = 7;
 pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
+pub const RM_BTREE_ID: u8 = 11;
+pub const RM_HASH_ID: u8 = 12;
+pub const RM_GIN_ID: u8 = 13;
+pub const RM_GIST_ID: u8 = 14;
+pub const RM_SEQ_ID: u8 = 15;
+pub const RM_SPGIST_ID: u8 = 16;
+pub const RM_BRIN_ID: u8 = 17;
+pub const RM_COMMIT_TS_ID: u8 = 18;
+pub const RM_REPLORIGIN_ID: u8 = 19;
+pub const RM_GENERIC_ID: u8 = 20;
 pub const RM_LOGICALMSG_ID: u8 = 21;
+
+// from relmapper.h
+pub const XLOG_RELMAP_UPDATE: u8 = 0x0;
 
 // from neon_rmgr.h
 pub const RM_NEON_ID: u8 = 134;
@@ -215,8 +232,22 @@ pub const INVALID_TRANSACTION_ID: u32 = 0;
 pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
 pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
+/* pg_control.h */
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
+pub const XLOG_NOOP: u8 = 0x20;
+pub const XLOG_NEXTOID: u8 = 0x30;
+pub const XLOG_SWITCH: u8 = 0x40;
+pub const XLOG_BACKUP_END: u8 = 0x50;
+pub const XLOG_PARAMETER_CHANGE: u8 = 0x60;
+pub const XLOG_RESTORE_POINT: u8 = 0x70;
+pub const XLOG_FPW_CHANGE: u8 = 0x80;
+pub const XLOG_END_OF_RECOVERY: u8 = 0x90;
+pub const XLOG_FPI_FOR_HINT: u8 = 0xA0;
+pub const XLOG_FPI: u8 = 0xB0;
+/* 0xC0 is used in Postgres 9.5-11 */
+pub const XLOG_OVERWRITE_CONTRECORD: u8 = 0xD0;
+
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
 

@@ -26,7 +26,7 @@ use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 use utils::failpoint_support;
@@ -52,6 +52,85 @@ pub struct WalIngest {
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum GenericIngestRecordOutcome {
+    Noop,
+    // Generic ingest stored something about this record in the repository.
+    Stored,
+}
+
+impl GenericIngestRecordOutcome {
+    fn stored_or(self, other: GenericIngestRecordOutcome) -> Self {
+        match (self, other) {
+            (Self::Noop, Self::Noop) => Self::Noop,
+            (Self::Stored, Self::Noop) => Self::Stored,
+            (Self::Noop, Self::Stored) => Self::Stored,
+            (Self::Stored, Self::Stored) => Self::Stored,
+        }
+    }
+}
+
+enum CheckpointIngestOutcome {
+    Noop,
+    // Ingest stored a checkpoint in the repository.
+    Stored,
+}
+
+enum SpecialTreatmentOutcome {
+    Noop,
+    // Special treatment ingest stored something about this record in the repository.
+    Stored,
+    UnknownRecordType,
+}
+
+enum ClearVisibilityMapFlagsOutcome {
+    Noop,
+    Stored,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HeapamRecordSpecialTreatmentError {
+    #[error("unknown postgres version {0}")]
+    UnknownPgVersion(u32),
+    #[error("unknown resource manager")]
+    UnknownRmgr,
+    #[error("unknown record type")]
+    UnknownRecordType,
+    #[error(transparent)]
+    EmitWalRecord(anyhow::Error),
+}
+
+impl HeapamRecordSpecialTreatmentError {
+    fn is_unknown(&self) -> bool {
+        match self {
+            HeapamRecordSpecialTreatmentError::UnknownPgVersion(_)
+            | HeapamRecordSpecialTreatmentError::UnknownRmgr
+            | HeapamRecordSpecialTreatmentError::UnknownRecordType => true,
+            HeapamRecordSpecialTreatmentError::EmitWalRecord(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum NeonmgrRecordSpecialTreatmentError {
+    #[error("Neon RMGR has no known compatibility with PostgreSQL version {0}")]
+    IncompatiblePgVersion(u32),
+    #[error("Unknown WAL record type for Neon RMGR: {info}")]
+    UnknownRecordType { info: u8 },
+    #[error(transparent)]
+    EmitWalRecord(anyhow::Error),
+}
+
+impl NeonmgrRecordSpecialTreatmentError {
+    fn is_unknown(&self) -> bool {
+        match self {
+            NeonmgrRecordSpecialTreatmentError::IncompatiblePgVersion(_)
+            | NeonmgrRecordSpecialTreatmentError::UnknownRecordType { .. } => true,
+            NeonmgrRecordSpecialTreatmentError::EmitWalRecord(_) => false,
+        }
+    }
 }
 
 impl WalIngest {
@@ -106,17 +185,42 @@ impl WalIngest {
             self.checkpoint_modified = true;
         }
 
-        match decoded.xl_rmid {
+        impl From<ClearVisibilityMapFlagsOutcome> for SpecialTreatmentOutcome {
+            fn from(value: ClearVisibilityMapFlagsOutcome) -> Self {
+                match value {
+                    ClearVisibilityMapFlagsOutcome::Noop => Self::Noop,
+                    ClearVisibilityMapFlagsOutcome::Stored => Self::Stored,
+                }
+            }
+        }
+
+        #[allow(clippy::if_same_then_else)]
+        let special_treatment_outcome = match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
                 // without registering them with the standard mechanism.
                 self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
-                    .await?;
+                    .await
+                    .map(SpecialTreatmentOutcome::from)
+                    .or_else(|e| {
+                        if e.is_unknown() {
+                            Ok(SpecialTreatmentOutcome::UnknownRecordType)
+                        } else {
+                            Err(e)
+                        }
+                    })?
             }
-            pg_constants::RM_NEON_ID => {
-                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
-                    .await?;
-            }
+            pg_constants::RM_NEON_ID => self
+                .ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                .await
+                .map(SpecialTreatmentOutcome::from)
+                .or_else(|e| {
+                    if e.is_unknown() {
+                        Ok(SpecialTreatmentOutcome::UnknownRecordType)
+                    } else {
+                        Err(e)
+                    }
+                })?,
             // Handle other special record types
             pg_constants::RM_SMGR_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -124,11 +228,13 @@ impl WalIngest {
                 if info == pg_constants::XLOG_SMGR_CREATE {
                     let create = XlSmgrCreate::decode(&mut buf);
                     self.ingest_xlog_smgr_create(modification, &create, ctx)
-                        .await?;
+                        .await?
                 } else if info == pg_constants::XLOG_SMGR_TRUNCATE {
                     let truncate = XlSmgrTruncate::decode(&mut buf);
                     self.ingest_xlog_smgr_truncate(modification, &truncate, ctx)
-                        .await?;
+                        .await?
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_DBASE_ID => {
@@ -141,19 +247,26 @@ impl WalIngest {
                         debug!("XLOG_DBASE_CREATE v14");
 
                         self.ingest_xlog_dbase_create(modification, &createdb, ctx)
-                            .await?;
+                            .await?
                     } else if info == postgres_ffi::v14::bindings::XLOG_DBASE_DROP {
                         let dropdb = XlDropDatabase::decode(&mut buf);
+                        // HEIKKI: I think 0 tablespaces cannot happen.
+                        let mut outcome = SpecialTreatmentOutcome::Noop;
                         for tablespace_id in dropdb.tablespace_ids {
                             trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
                             modification
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
+                            outcome = SpecialTreatmentOutcome::Stored;
                         }
+                        outcome
+                    } else {
+                        SpecialTreatmentOutcome::UnknownRecordType
                     }
                 } else if pg_version == 15 {
                     if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                        SpecialTreatmentOutcome::Noop
                     } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY {
                         // The XLOG record was renamed between v14 and v15,
                         // but the record format is the same.
@@ -161,19 +274,26 @@ impl WalIngest {
                         debug!("XLOG_DBASE_CREATE_FILE_COPY");
                         let createdb = XlCreateDatabase::decode(&mut buf);
                         self.ingest_xlog_dbase_create(modification, &createdb, ctx)
-                            .await?;
+                            .await?
                     } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_DROP {
                         let dropdb = XlDropDatabase::decode(&mut buf);
+                        // HEIKKI: I think 0 tablespaces cannot happen.
+                        let mut outcome = SpecialTreatmentOutcome::Noop;
                         for tablespace_id in dropdb.tablespace_ids {
                             trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
                             modification
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
+                            outcome = SpecialTreatmentOutcome::Stored;
                         }
+                        outcome
+                    } else {
+                        SpecialTreatmentOutcome::UnknownRecordType
                     }
                 } else if pg_version == 16 {
                     if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                        SpecialTreatmentOutcome::Noop
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY {
                         // The XLOG record was renamed between v14 and v15,
                         // but the record format is the same.
@@ -182,19 +302,29 @@ impl WalIngest {
                         let createdb = XlCreateDatabase::decode(&mut buf);
                         self.ingest_xlog_dbase_create(modification, &createdb, ctx)
                             .await?;
+                        SpecialTreatmentOutcome::Noop
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_DROP {
                         let dropdb = XlDropDatabase::decode(&mut buf);
+                        let mut outcome = SpecialTreatmentOutcome::Noop;
+                        // HEIKKI: I think 0 tablespaces cannot happen.
                         for tablespace_id in dropdb.tablespace_ids {
                             trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
                             modification
                                 .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
                                 .await?;
+                            outcome = SpecialTreatmentOutcome::Stored;
                         }
+                        outcome
+                    } else {
+                        SpecialTreatmentOutcome::UnknownRecordType
                     }
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_TBLSPC_ID => {
                 trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
+                SpecialTreatmentOutcome::Noop
             }
             pg_constants::RM_CLOG_ID => {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
@@ -211,12 +341,13 @@ impl WalIngest {
                         ZERO_PAGE.clone(),
                         ctx,
                     )
-                    .await?;
-                } else {
-                    assert!(info == pg_constants::CLOG_TRUNCATE);
+                    .await?
+                } else if info == pg_constants::CLOG_TRUNCATE {
                     let xlrec = XlClogTruncate::decode(&mut buf);
                     self.ingest_clog_truncate_record(modification, &xlrec, ctx)
-                        .await?;
+                        .await?
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_XACT_ID => {
@@ -231,7 +362,7 @@ impl WalIngest {
                         info == pg_constants::XLOG_XACT_COMMIT,
                         ctx,
                     )
-                    .await?;
+                    .await?
                 } else if info == pg_constants::XLOG_XACT_COMMIT_PREPARED
                     || info == pg_constants::XLOG_XACT_ABORT_PREPARED
                 {
@@ -254,10 +385,18 @@ impl WalIngest {
                     modification
                         .drop_twophase_file(parsed_xact.xid, ctx)
                         .await?;
+                    SpecialTreatmentOutcome::Stored
                 } else if info == pg_constants::XLOG_XACT_PREPARE {
                     modification
                         .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
                         .await?;
+                    SpecialTreatmentOutcome::Stored
+                } else if info == pg_constants::XLOG_XACT_ASSIGNMENT {
+                    SpecialTreatmentOutcome::Noop
+                } else if info == pg_constants::XLOG_XACT_INVALIDATIONS {
+                    SpecialTreatmentOutcome::Noop
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_MULTIXACT_ID => {
@@ -276,6 +415,7 @@ impl WalIngest {
                         ctx,
                     )
                     .await?;
+                    SpecialTreatmentOutcome::Stored
                 } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
                     let pageno = buf.get_u32_le();
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -289,19 +429,31 @@ impl WalIngest {
                         ctx,
                     )
                     .await?;
+                    SpecialTreatmentOutcome::Stored
                 } else if info == pg_constants::XLOG_MULTIXACT_CREATE_ID {
                     let xlrec = XlMultiXactCreate::decode(&mut buf);
                     self.ingest_multixact_create_record(modification, &xlrec)?;
+                    SpecialTreatmentOutcome::Stored
                 } else if info == pg_constants::XLOG_MULTIXACT_TRUNCATE_ID {
                     let xlrec = XlMultiXactTruncate::decode(&mut buf);
                     self.ingest_multixact_truncate_record(modification, &xlrec, ctx)
                         .await?;
+                    SpecialTreatmentOutcome::Stored
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_RELMAP_ID => {
-                let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
-                    .await?;
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+                if info == pg_constants::XLOG_RELMAP_UPDATE {
+                    let xlrec = XlRelmapUpdate::decode(&mut buf);
+                    self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                        .await?;
+                    SpecialTreatmentOutcome::Stored
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
+                }
             }
             pg_constants::RM_XLOG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -311,6 +463,9 @@ impl WalIngest {
                     if self.checkpoint.nextOid != next_oid {
                         self.checkpoint.nextOid = next_oid;
                         self.checkpoint_modified = true;
+                        SpecialTreatmentOutcome::Stored
+                    } else {
+                        SpecialTreatmentOutcome::Noop
                     }
                 } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
                     || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
@@ -331,7 +486,35 @@ impl WalIngest {
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
                         self.checkpoint_modified = true;
+                        SpecialTreatmentOutcome::Stored
+                    } else {
+                        SpecialTreatmentOutcome::Noop
                     }
+                } else if info == pg_constants::XLOG_FPI || info == pg_constants::XLOG_FPI_FOR_HINT
+                {
+                    // These records are importan for us, bu they are handled by
+                    // generic ingest_decoded_block() function below. They don't need
+                    // any special handling.
+                    //
+                    // HEIKKI: Is Noop the right code for that case?
+                    SpecialTreatmentOutcome::Noop
+                } else if info == pg_constants::XLOG_NOOP
+                    || info == pg_constants::XLOG_NEXTOID
+                    || info == pg_constants::XLOG_SWITCH
+                    || info == pg_constants::XLOG_BACKUP_END
+                    || info == pg_constants::XLOG_PARAMETER_CHANGE
+                    || info == pg_constants::XLOG_RESTORE_POINT
+                    || info == pg_constants::XLOG_FPW_CHANGE
+                    || info == pg_constants::XLOG_END_OF_RECOVERY
+                {
+                    SpecialTreatmentOutcome::Noop
+                } else if info == pg_constants::XLOG_OVERWRITE_CONTRECORD {
+                    // HEIKKI: I suspect we're not handling these correctly.
+                    // See https://github.com/neondatabase/neon/issues/934
+                    // Given that, not sure what the right outcome is.
+                    todo!()
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
             pg_constants::RM_LOGICALMSG_ID => {
@@ -347,17 +530,41 @@ impl WalIngest {
                         // we could peek into the message and only pause if it contains
                         // a particular string, for example, but this is enough for now.
                         failpoint_support::sleep_millis_async!("wal-ingest-logical-message-sleep");
+                        SpecialTreatmentOutcome::Noop
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
+                        SpecialTreatmentOutcome::Stored
+                    } else {
+                        SpecialTreatmentOutcome::Noop
                     }
+                } else {
+                    SpecialTreatmentOutcome::UnknownRecordType
                 }
             }
-            _x => {
-                // TODO: should probably log & fail here instead of blindly
-                // doing something without understanding the protocol
-            }
-        }
+            pg_constants::RM_STANDBY_ID => SpecialTreatmentOutcome::Noop,
 
+            // All of these are handled by the generic ingest_decoded_block function
+            pg_constants::RM_BTREE_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_HASH_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_GIN_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_GIST_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_SEQ_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_SPGIST_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_BRIN_ID => SpecialTreatmentOutcome::Noop,
+            pg_constants::RM_GENERIC_ID => SpecialTreatmentOutcome::Noop,
+
+            // We don't support the commit-ts tracking in neon. No harm if we see
+            // these records though.
+            pg_constants::RM_COMMIT_TS_ID => SpecialTreatmentOutcome::Noop,
+
+            // These are related to logical replication. I don't know if we should
+            // do something with them. @knizhnik?
+            pg_constants::RM_REPLORIGIN_ID => SpecialTreatmentOutcome::Noop,
+
+            _x => SpecialTreatmentOutcome::UnknownRecordType,
+        };
+
+        let mut ingest_outcome = GenericIngestRecordOutcome::Noop;
         // Iterate through all the blocks that the record modifies, and
         // "put" a separate copy of the record for each block.
         for blk in decoded.blocks.iter() {
@@ -383,28 +590,70 @@ impl WalIngest {
                 if self.shard.is_zero() {
                     // Shard 0 tracks relation sizes.  Although we will not store this block, we will observe
                     // its blkno in case it implicitly extends a relation.
-                    self.observe_decoded_block(modification, blk, ctx).await?;
+                    let outcome = self.observe_decoded_block(modification, blk, ctx).await?;
+                    ingest_outcome = ingest_outcome.stored_or(outcome);
                 }
 
                 continue;
             }
-            self.ingest_decoded_block(modification, lsn, decoded, blk, ctx)
+            let outcome = self
+                .ingest_decoded_block(modification, lsn, decoded, blk, ctx)
                 .await?;
+            ingest_outcome = ingest_outcome.stored_or(outcome);
         }
 
         // If checkpoint data was updated, store the new version in the repository
-        if self.checkpoint_modified {
+        let checkpoint_outcome = if self.checkpoint_modified {
             let new_checkpoint_bytes = self.checkpoint.encode()?;
-
             modification.put_checkpoint(new_checkpoint_bytes)?;
             self.checkpoint_modified = false;
+            CheckpointIngestOutcome::Stored
+        } else {
+            CheckpointIngestOutcome::Noop
+        };
+
+        let did_actual_modifications = modification.len() > prev_len;
+
+        match (
+            special_treatment_outcome,
+            ingest_outcome,
+            checkpoint_outcome,
+        ) {
+            (
+                SpecialTreatmentOutcome::Noop,
+                GenericIngestRecordOutcome::Noop,
+                CheckpointIngestOutcome::Noop,
+            ) => {
+                // TODO: https://github.com/neondatabase/neon/issues/5962
+                // => figure out what to do so that we still advance last_record_lsn
+
+                if did_actual_modifications {
+                    warn!("internal inconsistency: have modifications despite all outcomes indicating no-op");
+                }
+            }
+            (SpecialTreatmentOutcome::Stored, _, _)
+            | (_, GenericIngestRecordOutcome::Stored, _)
+            | (_, _, CheckpointIngestOutcome::Stored) => {
+                // TODO: https://github.com/neondatabase/neon/issues/5962
+                // => assert that indeed last_record_lsn is this record's LSN
+
+                if !did_actual_modifications {
+                    warn!("internal inconsistency: outcomes indicate modifications but did_actual_modifications=false");
+                }
+            }
+            (
+                SpecialTreatmentOutcome::UnknownRecordType,
+                GenericIngestRecordOutcome::Noop,
+                CheckpointIngestOutcome::Noop,
+            ) => {
+                // This case is like all-noops, but, we should make noise about the unknown record type.
+            }
         }
 
         // Note that at this point this record is only cached in the modification
         // until commit() is called to flush the data into the repository and update
         // the latest LSN.
-
-        Ok(modification.len() > prev_len)
+        Ok(did_actual_modifications)
     }
 
     /// Do not store this block, but observe it for the purposes of updating our relation size state.
@@ -413,7 +662,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         blk: &DecodedBkpBlock,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<GenericIngestRecordOutcome, PageReconstructError> {
         let rel = RelTag {
             spcnode: blk.rnode_spcnode,
             dbnode: blk.rnode_dbnode,
@@ -431,7 +680,7 @@ impl WalIngest {
         decoded: &DecodedWALRecord,
         blk: &DecodedBkpBlock,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<GenericIngestRecordOutcome, PageReconstructError> {
         let rel = RelTag {
             spcnode: blk.rnode_spcnode,
             dbnode: blk.rnode_dbnode,
@@ -485,7 +734,7 @@ impl WalIngest {
             self.put_rel_wal_record(modification, rel, blk.blkno, rec, ctx)
                 .await?;
         }
-        Ok(())
+        Ok(GenericIngestRecordOutcome::Stored) // we always put in either of above branches
     }
 
     async fn ingest_heapam_record(
@@ -494,7 +743,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         decoded: &DecodedWALRecord,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<ClearVisibilityMapFlagsOutcome, HeapamRecordSpecialTreatmentError> {
         // Handle VM bit updates that are implicitly part of heap records.
 
         // First, look at the record to determine which VM bits need
@@ -504,6 +753,7 @@ impl WalIngest {
         let mut old_heap_blkno: Option<u32> = None;
         let mut flags = pg_constants::VISIBILITYMAP_VALID_BITS;
 
+        #[allow(clippy::if_same_then_else)]
         match modification.tline.pg_version {
             14 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
@@ -543,6 +793,19 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
+                        // per comment in heap_redo:
+                        // TRUNCATE is a no-op because the actions are already logged as
+                        // SMGR WAL records.  TRUNCATE WAL record only exists for logical
+                        // decoding.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP_CONFIRM
+                        || info == pg_constants::XLOG_HEAP_INPLACE
+                    {
+                        // these don't update the FSM or VM, so no special handling needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else {
+                        return Err(HeapamRecordSpecialTreatmentError::UnknownRecordType);
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -567,9 +830,26 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_REWRITE
+                        || info == pg_constants::XLOG_HEAP2_NEW_CID
+                    {
+                        // related to logical replication, we can ignore in storage
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP2_PRUNE
+                        || info == pg_constants::XLOG_HEAP2_VACUUM
+                        || info == pg_constants::XLOG_HEAP2_FREEZE_PAGE
+                    {
+                        // these don't update the VM, so no special handling needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP2_VISIBLE {
+                        // This updates the VM, but the VM page is registered as a normal
+                        // block in the WAL record, so no special handling is needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else {
+                        return Err(HeapamRecordSpecialTreatmentError::UnknownRecordType);
                     }
                 } else {
-                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                    return Err(HeapamRecordSpecialTreatmentError::UnknownRmgr);
                 }
             }
             15 => {
@@ -610,6 +890,19 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
+                        // per comment in heap_redo:
+                        // TRUNCATE is a no-op because the actions are already logged as
+                        // SMGR WAL records.  TRUNCATE WAL record only exists for logical
+                        // decoding.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP_CONFIRM
+                        || info == pg_constants::XLOG_HEAP_INPLACE
+                    {
+                        // these don't update the FSM or VM, so no special handling needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else {
+                        return Err(HeapamRecordSpecialTreatmentError::UnknownRecordType);
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -634,9 +927,26 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_REWRITE
+                        || info == pg_constants::XLOG_HEAP2_NEW_CID
+                    {
+                        // related to logical replication, we can ignore in storage
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP2_PRUNE
+                        || info == pg_constants::XLOG_HEAP2_VACUUM
+                        || info == pg_constants::XLOG_HEAP2_FREEZE_PAGE
+                    {
+                        // these don't update the VM, so no special handling needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP2_VISIBLE {
+                        // This updates the VM, but the VM page is registered as a normal
+                        // block in the WAL record, so no special handling is needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else {
+                        return Err(HeapamRecordSpecialTreatmentError::UnknownRecordType);
                     }
                 } else {
-                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                    return Err(HeapamRecordSpecialTreatmentError::UnknownRmgr);
                 }
             }
             16 => {
@@ -677,6 +987,19 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP_TRUNCATE {
+                        // per comment in heap_redo:
+                        // TRUNCATE is a no-op because the actions are already logged as
+                        // SMGR WAL records.  TRUNCATE WAL record only exists for logical
+                        // decoding.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP_CONFIRM
+                        || info == pg_constants::XLOG_HEAP_INPLACE
+                    {
+                        // these don't update the FSM or VM, so no special handling needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else {
+                        return Err(HeapamRecordSpecialTreatmentError::UnknownRecordType);
                     }
                 } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
@@ -701,13 +1024,34 @@ impl WalIngest {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
+                    } else if info == pg_constants::XLOG_HEAP2_REWRITE
+                        || info == pg_constants::XLOG_HEAP2_NEW_CID
+                    {
+                        // related to logical replication, we can ignore in storage
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP2_PRUNE
+                        || info == pg_constants::XLOG_HEAP2_VACUUM
+                        || info == pg_constants::XLOG_HEAP2_FREEZE_PAGE
+                    {
+                        // these don't update the VM, so no special handling needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else if info == pg_constants::XLOG_HEAP2_VISIBLE {
+                        // This updates the VM, but the VM page is registered as a normal
+                        // block in the WAL record, so no special handling is needed.
+                        return Ok(ClearVisibilityMapFlagsOutcome::Noop);
+                    } else {
+                        return Err(HeapamRecordSpecialTreatmentError::UnknownRecordType);
                     }
                 } else {
-                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                    return Err(HeapamRecordSpecialTreatmentError::UnknownRmgr);
                 }
             }
-            _ => {}
-        }
+            pg_version => {
+                return Err(HeapamRecordSpecialTreatmentError::UnknownPgVersion(
+                    pg_version,
+                ));
+            }
+        };
 
         // Clear the VM bits if required.
         if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
@@ -718,80 +1062,108 @@ impl WalIngest {
                 relnode: decoded.blocks[0].rnode_relnode,
             };
 
-            let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-            let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
+            Ok(self
+                .clear_visibility_map_bits(
+                    modification,
+                    vm_rel,
+                    new_heap_blkno,
+                    old_heap_blkno,
+                    flags,
+                    ctx,
+                )
+                .await
+                .map_err(HeapamRecordSpecialTreatmentError::EmitWalRecord)?)
+        } else {
+            Ok(ClearVisibilityMapFlagsOutcome::Noop)
+        }
+    }
 
-            // Sometimes, Postgres seems to create heap WAL records with the
-            // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-            // not set. In fact, it's possible that the VM page does not exist at all.
-            // In that case, we don't want to store a record to clear the VM bit;
-            // replaying it would fail to find the previous image of the page, because
-            // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-            // record if it doesn't.
-            let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-            if let Some(blknum) = new_vm_blk {
-                if blknum >= vm_size {
-                    new_vm_blk = None;
-                }
+    /// Write NeonWalRecord::ClearVisibilityMapFlags records for clearing the VM bits
+    /// corresponding to new_heap_blkno and old_heap_blkno.
+    async fn clear_visibility_map_bits(
+        &mut self,
+        modification: &mut DatadirModification<'_>,
+        vm_rel: RelTag,
+        new_heap_blkno: Option<u32>,
+        old_heap_blkno: Option<u32>,
+        flags: u8,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ClearVisibilityMapFlagsOutcome> {
+        // Determine the VM pages containing the old and the new heap block.
+        //
+        // Sometimes, Postgres seems to create heap WAL records with the
+        // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
+        // not set. In fact, it's possible that the VM page does not exist at all.
+        // In that case, we don't want to store a record to clear the VM bit;
+        // replaying it would fail to find the previous image of the page, because
+        // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
+        // record if it doesn't.
+        let vm_size = get_relsize(modification, vm_rel, ctx).await?;
+        let heap_to_vm_blk = |heap_blkno| {
+            let vm_blk = pg_constants::HEAPBLK_TO_MAPBLOCK(heap_blkno);
+            if vm_blk >= vm_size {
+                None
+            } else {
+                Some(vm_blk)
             }
-            if let Some(blknum) = old_vm_blk {
-                if blknum >= vm_size {
-                    old_vm_blk = None;
-                }
-            }
+        };
+        let new_vm_blk = new_heap_blkno.map(heap_to_vm_blk).flatten();
+        let old_vm_blk = old_heap_blkno.map(heap_to_vm_blk).flatten();
 
-            if new_vm_blk.is_some() || old_vm_blk.is_some() {
-                if new_vm_blk == old_vm_blk {
-                    // An UPDATE record that needs to clear the bits for both old and the
-                    // new page, both of which reside on the same VM page.
+        let mut outcome = ClearVisibilityMapFlagsOutcome::Noop;
+        if new_vm_blk.is_some() || old_vm_blk.is_some() {
+            if new_vm_blk == old_vm_blk {
+                // An UPDATE record that needs to clear the bits for both old and the
+                // new page, both of which reside on the same VM page.
+                self.put_rel_wal_record(
+                    modification,
+                    vm_rel,
+                    new_vm_blk.unwrap(),
+                    NeonWalRecord::ClearVisibilityMapFlags {
+                        new_heap_blkno,
+                        old_heap_blkno,
+                        flags,
+                    },
+                    ctx,
+                )
+                .await?;
+                outcome = ClearVisibilityMapFlagsOutcome::Stored;
+            } else {
+                // Clear VM bits for one heap page, or for two pages that reside on
+                // different VM pages.
+                if let Some(new_vm_blk) = new_vm_blk {
                     self.put_rel_wal_record(
                         modification,
                         vm_rel,
-                        new_vm_blk.unwrap(),
+                        new_vm_blk,
                         NeonWalRecord::ClearVisibilityMapFlags {
                             new_heap_blkno,
+                            old_heap_blkno: None,
+                            flags,
+                        },
+                        ctx,
+                    )
+                    .await?;
+                    outcome = ClearVisibilityMapFlagsOutcome::Stored;
+                }
+                if let Some(old_vm_blk) = old_vm_blk {
+                    self.put_rel_wal_record(
+                        modification,
+                        vm_rel,
+                        old_vm_blk,
+                        NeonWalRecord::ClearVisibilityMapFlags {
+                            new_heap_blkno: None,
                             old_heap_blkno,
                             flags,
                         },
                         ctx,
                     )
                     .await?;
-                } else {
-                    // Clear VM bits for one heap page, or for two pages that reside on
-                    // different VM pages.
-                    if let Some(new_vm_blk) = new_vm_blk {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            new_vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno,
-                                old_heap_blkno: None,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    }
-                    if let Some(old_vm_blk) = old_vm_blk {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            old_vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno: None,
-                                old_heap_blkno,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    }
+                    outcome = ClearVisibilityMapFlagsOutcome::Stored;
                 }
             }
-        }
-
-        Ok(())
+        };
+        anyhow::Ok(outcome)
     }
 
     async fn ingest_neonrmgr_record(
@@ -800,7 +1172,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         decoded: &DecodedWALRecord,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<ClearVisibilityMapFlagsOutcome, NeonmgrRecordSpecialTreatmentError> {
         // Handle VM bit updates that are implicitly part of heap records.
 
         // First, look at the record to determine which VM bits need
@@ -871,98 +1243,31 @@ impl WalIngest {
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
                         }
                     }
-                    info => bail!("Unknown WAL record type for Neon RMGR: {}", info),
-                }
-            }
-            _ => bail!(
-                "Neon RMGR has no known compatibility with PostgreSQL version {}",
-                pg_version
-            ),
-        }
-
-        // Clear the VM bits if required.
-        if new_heap_blkno.is_some() || old_heap_blkno.is_some() {
-            let vm_rel = RelTag {
-                forknum: VISIBILITYMAP_FORKNUM,
-                spcnode: decoded.blocks[0].rnode_spcnode,
-                dbnode: decoded.blocks[0].rnode_dbnode,
-                relnode: decoded.blocks[0].rnode_relnode,
-            };
-
-            let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-            let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-
-            // Sometimes, Postgres seems to create heap WAL records with the
-            // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-            // not set. In fact, it's possible that the VM page does not exist at all.
-            // In that case, we don't want to store a record to clear the VM bit;
-            // replaying it would fail to find the previous image of the page, because
-            // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-            // record if it doesn't.
-            let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-            if let Some(blknum) = new_vm_blk {
-                if blknum >= vm_size {
-                    new_vm_blk = None;
-                }
-            }
-            if let Some(blknum) = old_vm_blk {
-                if blknum >= vm_size {
-                    old_vm_blk = None;
-                }
-            }
-
-            if new_vm_blk.is_some() || old_vm_blk.is_some() {
-                if new_vm_blk == old_vm_blk {
-                    // An UPDATE record that needs to clear the bits for both old and the
-                    // new page, both of which reside on the same VM page.
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk.unwrap(),
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                } else {
-                    // Clear VM bits for one heap page, or for two pages that reside on
-                    // different VM pages.
-                    if let Some(new_vm_blk) = new_vm_blk {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            new_vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno,
-                                old_heap_blkno: None,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
-                    }
-                    if let Some(old_vm_blk) = old_vm_blk {
-                        self.put_rel_wal_record(
-                            modification,
-                            vm_rel,
-                            old_vm_blk,
-                            NeonWalRecord::ClearVisibilityMapFlags {
-                                new_heap_blkno: None,
-                                old_heap_blkno,
-                                flags,
-                            },
-                            ctx,
-                        )
-                        .await?;
+                    info => {
+                        return Err(NeonmgrRecordSpecialTreatmentError::UnknownRecordType { info })
                     }
                 }
             }
+            v => return Err(NeonmgrRecordSpecialTreatmentError::IncompatiblePgVersion(v)),
         }
 
-        Ok(())
+        let vm_rel = RelTag {
+            forknum: VISIBILITYMAP_FORKNUM,
+            spcnode: decoded.blocks[0].rnode_spcnode,
+            dbnode: decoded.blocks[0].rnode_dbnode,
+            relnode: decoded.blocks[0].rnode_relnode,
+        };
+        Ok(self
+            .clear_visibility_map_bits(
+                modification,
+                vm_rel,
+                new_heap_blkno,
+                old_heap_blkno,
+                flags,
+                ctx,
+            )
+            .await
+            .map_err(NeonmgrRecordSpecialTreatmentError::EmitWalRecord)?)
     }
 
     /// Subroutine of ingest_record(), to handle an XLOG_DBASE_CREATE record.
@@ -971,7 +1276,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rec: &XlCreateDatabase,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SpecialTreatmentOutcome> {
         let db_id = rec.db_id;
         let tablespace_id = rec.tablespace_id;
         let src_db_id = rec.src_db_id;
@@ -1048,7 +1353,7 @@ impl WalIngest {
             "Created database {}/{}, copied {} blocks in {} rels",
             tablespace_id, db_id, num_blocks_copied, num_rels_copied
         );
-        Ok(())
+        Ok(SpecialTreatmentOutcome::Stored) // we always store something in this method
     }
 
     async fn ingest_xlog_smgr_create(
@@ -1056,7 +1361,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rec: &XlSmgrCreate,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SpecialTreatmentOutcome> {
         let rel = RelTag {
             spcnode: rec.rnode.spcnode,
             dbnode: rec.rnode.dbnode,
@@ -1064,7 +1369,7 @@ impl WalIngest {
             forknum: rec.forknum,
         };
         self.put_rel_creation(modification, rel, ctx).await?;
-        Ok(())
+        Ok(SpecialTreatmentOutcome::Stored)
     }
 
     /// Subroutine of ingest_record(), to handle an XLOG_SMGR_TRUNCATE record.
@@ -1075,10 +1380,12 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         rec: &XlSmgrTruncate,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SpecialTreatmentOutcome> {
         let spcnode = rec.rnode.spcnode;
         let dbnode = rec.rnode.dbnode;
         let relnode = rec.rnode.relnode;
+
+        let mut outcome = SpecialTreatmentOutcome::Noop;
 
         if (rec.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
             let rel = RelTag {
@@ -1089,6 +1396,7 @@ impl WalIngest {
             };
             self.put_rel_truncation(modification, rel, rec.blkno, ctx)
                 .await?;
+            outcome = SpecialTreatmentOutcome::Stored;
         }
         if (rec.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
             let rel = RelTag {
@@ -1105,12 +1413,14 @@ impl WalIngest {
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
                 modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
                 fsm_physical_page_no += 1;
+                outcome = SpecialTreatmentOutcome::Stored;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
             if nblocks > fsm_physical_page_no {
                 // check if something to do: FSM is larger than truncate position
                 self.put_rel_truncation(modification, rel, fsm_physical_page_no, ctx)
                     .await?;
+                outcome = SpecialTreatmentOutcome::Stored;
             }
         }
         if (rec.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
@@ -1127,15 +1437,17 @@ impl WalIngest {
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
                 modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
                 vm_page_no += 1;
+                outcome = SpecialTreatmentOutcome::Stored;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
             if nblocks > vm_page_no {
                 // check if something to do: VM is larger than truncate position
                 self.put_rel_truncation(modification, rel, vm_page_no, ctx)
                     .await?;
+                outcome = SpecialTreatmentOutcome::Stored;
             }
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Subroutine of ingest_record(), to handle an XLOG_XACT_* records.
@@ -1146,7 +1458,7 @@ impl WalIngest {
         parsed: &XlXactParsedRecord,
         is_commit: bool,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SpecialTreatmentOutcome> {
         // Record update of CLOG pages
         let mut pageno = parsed.xid / pg_constants::CLOG_XACTS_PER_PAGE;
         let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
@@ -1210,7 +1522,7 @@ impl WalIngest {
                 }
             }
         }
-        Ok(())
+        Ok(SpecialTreatmentOutcome::Stored) // because we call put_slru_wal_record unconditionally
     }
 
     async fn ingest_clog_truncate_record(
@@ -1218,7 +1530,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         xlrec: &XlClogTruncate,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SpecialTreatmentOutcome> {
         info!(
             "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
             xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
@@ -1234,6 +1546,7 @@ impl WalIngest {
         self.checkpoint.oldestXid = xlrec.oldest_xid;
         self.checkpoint.oldestXidDB = xlrec.oldest_xid_db;
         self.checkpoint_modified = true;
+        let outcome = SpecialTreatmentOutcome::Stored; // because we set checkpoint_modified to `true`
 
         // TODO Treat AdvanceOldestClogXid() or write a comment why we don't need it
 
@@ -1248,7 +1561,7 @@ impl WalIngest {
         // See SimpleLruTruncate() in slru.c
         if clogpage_precedes(latest_page_number, xlrec.pageno) {
             info!("could not truncate directory pg_xact apparent wraparound");
-            return Ok(());
+            return Ok(outcome);
         }
 
         // Iterate via SLRU CLOG segments and drop segments that we're ready to truncate
@@ -1271,7 +1584,7 @@ impl WalIngest {
             }
         }
 
-        Ok(())
+        Ok(outcome) // because we set checkpoint_modified unconditionally
     }
 
     fn ingest_multixact_create_record(
@@ -1477,7 +1790,9 @@ impl WalIngest {
         rel: RelTag,
         blknum: BlockNumber,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<GenericIngestRecordOutcome, PageReconstructError> {
+        let mut outcome = GenericIngestRecordOutcome::Noop;
+
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
@@ -1504,6 +1819,7 @@ impl WalIngest {
                 .put_rel_creation(rel, 0, ctx)
                 .await
                 .context("Relation Error")?;
+            outcome = GenericIngestRecordOutcome::Stored;
             0
         } else {
             modification
@@ -1515,6 +1831,7 @@ impl WalIngest {
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
             modification.put_rel_extend(rel, new_nblocks, ctx).await?;
+            outcome = GenericIngestRecordOutcome::Stored;
 
             let mut key = rel_block_to_key(rel, blknum);
             // fill the gap with zeros
@@ -1528,7 +1845,7 @@ impl WalIngest {
                 modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
             }
         }
-        Ok(())
+        Ok(outcome)
     }
 
     async fn put_slru_page_image(
@@ -1539,11 +1856,11 @@ impl WalIngest {
         blknum: BlockNumber,
         img: Bytes,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> Result<SpecialTreatmentOutcome> {
         self.handle_slru_extend(modification, kind, segno, blknum, ctx)
             .await?;
         modification.put_slru_page_image(kind, segno, blknum, img)?;
-        Ok(())
+        Ok(SpecialTreatmentOutcome::Stored)
     }
 
     async fn handle_slru_extend(
