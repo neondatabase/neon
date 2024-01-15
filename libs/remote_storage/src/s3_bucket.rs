@@ -6,6 +6,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -28,7 +29,7 @@ use aws_sdk_s3::{
     config::{AsyncSleep, Builder, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
     operation::get_object::GetObjectError,
-    types::{Delete, ObjectIdentifier},
+    types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion},
     Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
@@ -297,35 +298,29 @@ impl S3Bucket {
                 .req_seconds
                 .observe_elapsed(kind, &resp, started_at);
 
-            match resp {
-                Ok(resp) => {
-                    metrics::BUCKET_METRICS
-                        .deleted_objects_total
-                        .inc_by(chunk.len() as u64);
-                    if let Some(errors) = resp.errors {
-                        // Log a bounded number of the errors within the response:
-                        // these requests can carry 1000 keys so logging each one
-                        // would be too verbose, especially as errors may lead us
-                        // to retry repeatedly.
-                        const LOG_UP_TO_N_ERRORS: usize = 10;
-                        for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
-                            tracing::warn!(
-                                "DeleteObjects key {} failed: {}: {}",
-                                e.key.as_ref().map(Cow::from).unwrap_or("".into()),
-                                e.code.as_ref().map(Cow::from).unwrap_or("".into()),
-                                e.message.as_ref().map(Cow::from).unwrap_or("".into())
-                            );
-                        }
+            let resp = resp?;
+            metrics::BUCKET_METRICS
+                .deleted_objects_total
+                .inc_by(chunk.len() as u64);
+            if let Some(errors) = resp.errors {
+                // Log a bounded number of the errors within the response:
+                // these requests can carry 1000 keys so logging each one
+                // would be too verbose, especially as errors may lead us
+                // to retry repeatedly.
+                const LOG_UP_TO_N_ERRORS: usize = 10;
+                for e in errors.iter().take(LOG_UP_TO_N_ERRORS) {
+                    tracing::warn!(
+                        "DeleteObjects key {} failed: {}: {}",
+                        e.key.as_ref().map(Cow::from).unwrap_or("".into()),
+                        e.code.as_ref().map(Cow::from).unwrap_or("".into()),
+                        e.message.as_ref().map(Cow::from).unwrap_or("".into())
+                    );
+                }
 
-                        return Err(anyhow::format_err!(
-                            "Failed to delete {} objects",
-                            errors.len()
-                        ));
-                    }
-                }
-                Err(e) => {
-                    return Err(e.into());
-                }
+                return Err(anyhow::format_err!(
+                    "Failed to delete {} objects",
+                    errors.len()
+                ));
             }
         }
         Ok(())
@@ -641,11 +636,13 @@ impl RemoteStorage for S3Bucket {
         &self,
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
+        done_if_after: SystemTime,
     ) -> anyhow::Result<()> {
         let kind = RequestKind::TimeTravel;
         let _guard = self.permit(kind).await;
 
         let timestamp = DateTime::from(timestamp);
+        let done_if_after = DateTime::from(done_if_after);
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let prefix = prefix
@@ -660,61 +657,78 @@ impl RemoteStorage for S3Bucket {
             .send()
             .await?;
 
-        let mut oids = Vec::with_capacity(list.versions().len());
+        let mut versions_deletes = list
+            .versions()
+            .iter()
+            .map(VerOrDelete::Version)
+            .chain(list.delete_markers().iter().map(VerOrDelete::DeleteMarker))
+            .collect::<Vec<_>>();
 
-        for version in list.versions() {
+        versions_deletes.sort_unstable_by_key(|vd| (vd.key(), vd.last_modified()));
+
+        let mut hm_vd = HashMap::<_, Vec<_>>::new();
+
+        for vd in versions_deletes {
+            let last_modified = vd.last_modified();
+            let version_id = vd.version_id();
+            let key = vd.key();
             let (Some(last_modified), Some(version_id), Some(key)) =
-                (version.last_modified, &version.version_id, &version.key)
+                (last_modified, version_id, key)
             else {
                 anyhow::bail!(
                     "One (or more) of last_modified, key, and id is None. \
                     Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
-                    version.last_modified, version.key, version.version_id
+                    last_modified, key,version_id
                 );
             };
-            tracing::info!("Considering version for deletion, last_modified={last_modified}, timestamp={timestamp}, key={key}, version_id={version_id}");
-            if last_modified <= timestamp {
-                tracing::info!("    -> not deleting as {last_modified} <= {timestamp}");
+            hm_vd
+                .entry(key)
+                .or_default()
+                .push((vd, last_modified, version_id));
+        }
+        for (key, versions) in hm_vd {
+            let (last_vd, last_last_modified, _version_id) = versions.last().unwrap();
+            if last_last_modified > &&done_if_after {
+                tracing::info!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
-            tracing::info!("    -> deleting");
-
-            oids.push(
-                ObjectIdentifier::builder()
-                    .set_key(Some(key.to_owned()))
-                    .set_version_id(Some(version_id.to_owned()))
-                    .build()?,
-            );
-        }
-
-        for delete_marker in list.delete_markers() {
-            let (Some(last_modified), Some(version_id), Some(key)) = (
-                delete_marker.last_modified,
-                &delete_marker.version_id,
-                &delete_marker.key,
-            ) else {
-                anyhow::bail!(
-                    "One (or more) of last_modified, key, and id is None. \
-                    Is versioning enabled in the bucket? last_modified={:?} key={:?} version_id={:?}",
-                    delete_marker.last_modified, delete_marker.key, delete_marker.version_id
-                );
-            };
-            tracing::info!("Considering version for deletion, last_modified={last_modified}, timestamp={timestamp}, key={key}, version_id={version_id}");
-            if last_modified <= timestamp {
-                tracing::info!("    -> not deleting as {last_modified} <= {timestamp}");
+            // the version we want to restore to.
+            let version_to_restore_to =
+                match versions.binary_search_by_key(&timestamp, |tpl| *tpl.1) {
+                    Ok(v) => v,
+                    Err(e) => e,
+                };
+            if version_to_restore_to == versions.len() {
+                tracing::info!("Key {key} has no changes since timestamp, skipping");
                 continue;
             }
-            tracing::info!("    -> deleting");
+            match &versions[version_to_restore_to - 1] {
+                (VerOrDelete::Version(_), _last_modified, version_id) => {
+                    // Restore the state to the last version by copying
+                    let source_id = format!("{key}?versionId={version_id}");
 
-            oids.push(
-                ObjectIdentifier::builder()
-                    .set_key(Some(key.to_owned()))
-                    .set_version_id(Some(version_id.to_owned()))
-                    .build()?,
-            );
+                    self.client
+                        .copy_object()
+                        .bucket(self.bucket_name.clone())
+                        .key(key)
+                        .copy_source(source_id)
+                        .send()
+                        .await?;
+                }
+                (VerOrDelete::DeleteMarker(_), _last_modified, version_id) => {
+                    if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
+                        // Key has since been deleted (but there was some history), no need to do anything
+                    } else {
+                        let oid = ObjectIdentifier::builder()
+                            .key(key.to_owned())
+                            .version_id(version_id.to_owned())
+                            .build()?;
+                        self.delete_oids(kind, &[oid]).await?;
+                    }
+                }
+            }
         }
-
-        self.delete_oids(kind, &oids).await
+        Ok(())
     }
 }
 
@@ -738,6 +752,32 @@ fn start_measuring_requests(
             started_at,
         )
     })
+}
+
+enum VerOrDelete<'a> {
+    Version(&'a ObjectVersion),
+    DeleteMarker(&'a DeleteMarkerEntry),
+}
+
+impl<'a> VerOrDelete<'a> {
+    fn last_modified(&self) -> Option<&'a DateTime> {
+        match self {
+            VerOrDelete::Version(v) => v.last_modified(),
+            VerOrDelete::DeleteMarker(v) => v.last_modified(),
+        }
+    }
+    fn version_id(&self) -> Option<&'a str> {
+        match self {
+            VerOrDelete::Version(v) => v.version_id(),
+            VerOrDelete::DeleteMarker(v) => v.version_id(),
+        }
+    }
+    fn key(&self) -> Option<&'a str> {
+        match self {
+            VerOrDelete::Version(v) => v.key(),
+            VerOrDelete::DeleteMarker(v) => v.key(),
+        }
+    }
 }
 
 #[cfg(test)]

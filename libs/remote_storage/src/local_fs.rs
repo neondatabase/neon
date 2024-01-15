@@ -429,6 +429,7 @@ impl RemoteStorage for LocalFs {
         &self,
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
+        _done_if_after: SystemTime,
     ) -> anyhow::Result<()> {
         unimplemented!()
     }

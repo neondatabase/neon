@@ -216,6 +216,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
+        done_if_after: SystemTime,
     ) -> anyhow::Result<()>;
 }
 
@@ -398,12 +399,13 @@ impl GenericRemoteStorage {
         &self,
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
+        done_if_after: SystemTime,
     ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.time_travel_recover(prefix, timestamp).await,
-            Self::AwsS3(s) => s.time_travel_recover(prefix, timestamp).await,
-            Self::AzureBlob(s) => s.time_travel_recover(prefix, timestamp).await,
-            Self::Unreliable(s) => s.time_travel_recover(prefix, timestamp).await,
+            Self::LocalFs(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
+            Self::AwsS3(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
+            Self::AzureBlob(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
+            Self::Unreliable(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
         }
     }
 }

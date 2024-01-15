@@ -334,6 +334,7 @@ impl RemoteStorage for AzureBlobStorage {
         &self,
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
+        _done_if_after: SystemTime,
     ) -> anyhow::Result<()> {
         // TODO use Azure point in time recovery feature for this
         // https://learn.microsoft.com/en-us/azure/storage/blobs/point-in-time-restore-overview

@@ -221,8 +221,11 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     let t2 = time_point().await;
     println!("at t2: {t2_files:?}");
 
+    // A timestamp after all the other timestamps
+    let t_final = time_point().await;
+
     // No changes after recovery to t2 (no-op)
-    ctx.client.time_travel_recover(None, t2).await?;
+    ctx.client.time_travel_recover(None, t2, t_final).await?;
     let t2_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t2: {t2_files_recovered:?}");
     assert_eq!(t2_files, t2_files_recovered);
@@ -230,7 +233,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     assert_eq!(path2_recovered_t2, new_data.as_bytes());
 
     // after recovery to t1: path1 is back, path2 has the old content
-    ctx.client.time_travel_recover(None, t1).await?;
+    ctx.client.time_travel_recover(None, t1, t_final).await?;
     let t1_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t1: {t1_files_recovered:?}");
     assert_eq!(t1_files, t1_files_recovered);
@@ -238,7 +241,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledS3) -> anyhow::Resu
     assert_eq!(path2_recovered_t1, old_data.as_bytes());
 
     // after recovery to t0: everything is gone except for path1
-    ctx.client.time_travel_recover(None, t0).await?;
+    ctx.client.time_travel_recover(None, t0, t_final).await?;
     let t0_files_recovered = list_files(&ctx.client).await?;
     println!("after recovery to t0: {t0_files_recovered:?}");
     assert_eq!(t0_files, t0_files_recovered);
