@@ -65,6 +65,11 @@ pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
         .with_label_values(&[loop_kind.as_static_str()])
         .guard();
 
+    pausable_failpoint!(
+        "initial-size-calculation-permit-pause",
+        loop_kind == BackgroundLoopKind::InitialLogicalSizeCalculation
+    );
+
     match CONCURRENT_BACKGROUND_TASKS.acquire().await {
         Ok(permit) => permit,
         Err(_closed) => unreachable!("we never close the semaphore"),

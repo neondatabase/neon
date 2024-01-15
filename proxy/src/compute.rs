@@ -39,7 +39,17 @@ impl UserFacingError for ConnectionError {
             // This helps us drop irrelevant library-specific prefixes.
             // TODO: propagate severity level and other parameters.
             Postgres(err) => match err.as_db_error() {
-                Some(err) => err.message().to_owned(),
+                Some(err) => {
+                    let msg = err.message();
+
+                    if msg.starts_with("unsupported startup parameter: ")
+                        || msg.starts_with("unsupported startup parameter in options: ")
+                    {
+                        format!("{msg}. Please use unpooled connection or remove this parameter from the startup package. More details: https://neon.tech/docs/connect/connection-errors#unsupported-startup-parameter")
+                    } else {
+                        msg.to_owned()
+                    }
+                }
                 None => err.to_string(),
             },
             WakeComputeError(err) => err.to_string_client(),

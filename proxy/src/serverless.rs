@@ -17,6 +17,7 @@ pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio_util::task::TaskTracker;
 
+use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
 use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
@@ -69,14 +70,14 @@ pub async fn task_main(
         }
     });
 
-    let tls_config = config.tls_config.as_ref().map(|cfg| cfg.to_server_config());
-    let tls_acceptor: tokio_rustls::TlsAcceptor = match tls_config {
-        Some(config) => config.into(),
+    let tls_config = match config.tls_config.as_ref() {
+        Some(config) => config,
         None => {
             warn!("TLS config is missing, WebSocket Secure server will not be started");
             return Ok(());
         }
     };
+    let tls_acceptor: tokio_rustls::TlsAcceptor = tls_config.to_server_config().into();
 
     let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
     let _ = addr_incoming.set_nodelay(true);
@@ -126,6 +127,7 @@ pub async fn task_main(
                             request_handler(
                                 req,
                                 config,
+                                tls_config,
                                 conn_pool,
                                 ws_connections,
                                 cancel_map,
@@ -195,6 +197,7 @@ where
 async fn request_handler(
     mut request: Request<Body>,
     config: &'static ProxyConfig,
+    tls: &'static TlsConfig,
     conn_pool: Arc<conn_pool::GlobalConnPool>,
     ws_connections: TaskTracker,
     cancel_map: Arc<CancelMap>,
@@ -243,6 +246,7 @@ async fn request_handler(
         let mut ctx = RequestMonitoring::new(session_id, peer_addr, "http", &config.region);
 
         sql_over_http::handle(
+            tls,
             &config.http_config,
             &mut ctx,
             request,

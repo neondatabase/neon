@@ -32,7 +32,7 @@ pub struct MetricCollectionConfig {
 
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
-    pub common_names: Option<HashSet<String>>,
+    pub common_names: HashSet<String>,
     pub cert_resolver: Arc<CertResolver>,
 }
 
@@ -97,7 +97,7 @@ pub fn configure_tls(
 
     Ok(TlsConfig {
         config,
-        common_names: Some(common_names),
+        common_names,
         cert_resolver,
     })
 }

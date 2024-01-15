@@ -21,7 +21,8 @@ use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
 use crate::safekeeper::{
     AppendRequest, AppendRequestHeader, ProposerAcceptorMessage, ProposerElected,
 };
-use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermLsn};
+use crate::safekeeper::{Term, TermHistory, TermLsn};
+use crate::state::TimelinePersistentState;
 use crate::timeline::Timeline;
 use crate::GlobalTimelines;
 use postgres_backend::PostgresBackend;
@@ -56,7 +57,7 @@ pub struct AppendLogicalMessage {
 #[derive(Debug, Serialize)]
 struct AppendResult {
     // safekeeper state after append
-    state: SafeKeeperState,
+    state: TimelinePersistentState,
     // info about new record in the WAL
     inserted_wal: InsertedWAL,
 }

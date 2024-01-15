@@ -32,6 +32,9 @@ pub struct RelTag {
     pub relnode: Oid,
 }
 
+/// Block number within a relation or SLRU. This matches PostgreSQL's BlockNumber type.
+pub type BlockNumber = u32;
+
 impl PartialOrd for RelTag {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))

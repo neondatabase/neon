@@ -15,6 +15,7 @@ use serde_json::Map;
 use serde_json::Value;
 use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
+use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -28,9 +29,13 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::endpoint_sni;
 use crate::config::HttpConfig;
+use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::proxy::NeonOptions;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -125,6 +130,7 @@ fn get_conn_info(
     ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
+    tls: &TlsConfig,
 ) -> Result<ConnInfo, anyhow::Error> {
     let connection_string = headers
         .get("Neon-Connection-String")
@@ -179,8 +185,10 @@ fn get_conn_info(
         }
     }
 
-    let hostname: SmolStr = hostname.into();
-    ctx.set_endpoint_id(Some(hostname.clone()));
+    let endpoint = endpoint_sni(hostname, &tls.common_names)?;
+
+    let endpoint: SmolStr = endpoint.into();
+    ctx.set_endpoint_id(Some(endpoint.clone()));
 
     let pairs = connection_url.query_pairs();
 
@@ -188,22 +196,27 @@ fn get_conn_info(
 
     for (key, value) in pairs {
         if key == "options" {
-            options = Some(value.into());
+            options = Some(NeonOptions::parse_options_raw(&value));
             break;
         }
     }
 
+    let user_info = ComputeUserInfo {
+        endpoint,
+        user: username,
+        options: options.unwrap_or_default(),
+    };
+
     Ok(ConnInfo {
-        username,
+        user_info,
         dbname: dbname.into(),
-        hostname,
         password: password.into(),
-        options,
     })
 }
 
 // TODO: return different http error codes
 pub async fn handle(
+    tls: &'static TlsConfig,
     config: &'static HttpConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
@@ -212,14 +225,14 @@ pub async fn handle(
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.request_timeout,
-        handle_inner(config, ctx, request, sni_hostname, conn_pool),
+        handle_inner(tls, config, ctx, request, sni_hostname, conn_pool),
     )
     .await;
     let mut response = match result {
         Ok(r) => match r {
             Ok(r) => r,
             Err(e) => {
-                let message = format!("{:?}", e);
+                let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
                     .and_then(|e| e.as_db_error());
@@ -232,7 +245,25 @@ pub async fn handle(
                         .unwrap_or_default()
                 }
 
-                // TODO(conrad): db_error.position()
+                if let Some(db_error) = db_error {
+                    db_error.message().clone_into(&mut message);
+                }
+
+                let position = db_error.and_then(|db| db.position());
+                let (position, internal_position, internal_query) = match position {
+                    Some(ErrorPosition::Original(position)) => (
+                        Value::String(position.to_string()),
+                        Value::Null,
+                        Value::Null,
+                    ),
+                    Some(ErrorPosition::Internal { position, query }) => (
+                        Value::Null,
+                        Value::String(position.to_string()),
+                        Value::String(query.clone()),
+                    ),
+                    None => (Value::Null, Value::Null, Value::Null),
+                };
+
                 let code = get(db_error, |db| db.code().code());
                 let severity = get(db_error, |db| db.severity());
                 let detail = get(db_error, |db| db.detail());
@@ -244,7 +275,7 @@ pub async fn handle(
                 let datatype = get(db_error, |db| db.datatype());
                 let constraint = get(db_error, |db| db.constraint());
                 let file = get(db_error, |db| db.file());
-                let line = get(db_error, |db| db.line());
+                let line = get(db_error, |db| db.line().map(|l| l.to_string()));
                 let routine = get(db_error, |db| db.routine());
 
                 error!(
@@ -259,12 +290,15 @@ pub async fn handle(
                         "code": code,
                         "detail": detail,
                         "hint": hint,
+                        "position": position,
+                        "internalPosition": internal_position,
+                        "internalQuery": internal_query,
                         "severity": severity,
                         "where": where_,
                         "table": table,
                         "column": column,
                         "schema": schema,
-                        "datatype": datatype,
+                        "dataType": datatype,
                         "constraint": constraint,
                         "file": file,
                         "line": line,
@@ -294,6 +328,7 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
+    tls: &'static TlsConfig,
     config: &'static HttpConfig,
     ctx: &mut RequestMonitoring,
     request: Request<Body>,
@@ -308,7 +343,7 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(ctx, headers, sni_hostname)?;
+    let conn_info = get_conn_info(ctx, headers, sni_hostname, tls)?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.

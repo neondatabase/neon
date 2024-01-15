@@ -28,6 +28,7 @@ pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
 pub mod send_wal;
+pub mod state;
 pub mod timeline;
 pub mod wal_backup;
 pub mod wal_service;
