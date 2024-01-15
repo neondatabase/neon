@@ -225,7 +225,7 @@ fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Err
     let (_, hostname_rest) = hostname
         .split_once('.')
         .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
-    return Ok(sni_hostname_rest == hostname_rest
+    Ok(sni_hostname_rest == hostname_rest
         && sni_hostname_first == SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART);
 }
 
