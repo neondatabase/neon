@@ -3581,7 +3581,7 @@ def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[
     The procedure cleans up after previous runs that were aborted (e.g. due to Ctrl-C, OOM kills, etc).
     """
 
-    if os.getenv("NEON_ENV_BUILDER_FROM_REPO_DIR_USE_OVERLAYFS") is None:
+    if os.getenv("NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS") is None:
         return None
 
     overlay_dir = get_test_overlay_dir(request, top_output_dir)
