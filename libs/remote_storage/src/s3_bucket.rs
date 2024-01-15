@@ -703,13 +703,6 @@ impl RemoteStorage for S3Bucket {
                 tracing::info!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
-            tracing::info!(
-                "Key {key} has version list: {}",
-                versions
-                    .iter()
-                    .map(|v| format!("{:?} ", v.1))
-                    .collect::<String>()
-            );
             // the version we want to restore to.
             let version_to_restore_to =
                 match versions.binary_search_by_key(&timestamp, |tpl| *tpl.1) {
