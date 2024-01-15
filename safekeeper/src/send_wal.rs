@@ -83,8 +83,17 @@ impl StandbyReply {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StandbyFeedback {
-    reply: StandbyReply,
-    hs_feedback: HotStandbyFeedback,
+    pub reply: StandbyReply,
+    pub hs_feedback: HotStandbyFeedback,
+}
+
+impl StandbyFeedback {
+    pub fn empty() -> Self {
+        StandbyFeedback {
+            reply: StandbyReply::empty(),
+            hs_feedback: HotStandbyFeedback::empty(),
+        }
+    }
 }
 
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
@@ -142,9 +151,9 @@ impl WalSenders {
     }
 
     /// Get aggregated pageserver and hot standby feedback (we send them to compute).
-    pub fn get_feedbacks(self: &Arc<WalSenders>) -> (PageserverFeedback, HotStandbyFeedback) {
+    pub fn get_feedbacks(self: &Arc<WalSenders>) -> (PageserverFeedback, StandbyFeedback) {
         let shared = self.mutex.lock();
-        (shared.agg_ps_feedback, shared.agg_hs_feedback)
+        (shared.agg_ps_feedback, shared.agg_standby_feedback)
     }
 
     /// Record new pageserver feedback, update aggregated values.
@@ -182,7 +191,7 @@ impl WalSenders {
                 })
             }
         }
-        shared.update_hs_feedback();
+        shared.update_reply_feedback();
     }
 
     /// Get remote_consistent_lsn reported by the pageserver. Returns None if
@@ -200,13 +209,13 @@ impl WalSenders {
     fn unregister(self: &Arc<WalSenders>, id: WalSenderId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
-        shared.update_hs_feedback();
+        shared.update_reply_feedback();
     }
 }
 
 struct WalSendersShared {
     // aggregated over all walsenders value
-    agg_hs_feedback: HotStandbyFeedback,
+    agg_standby_feedback: StandbyFeedback,
     // aggregated over all walsenders value
     agg_ps_feedback: PageserverFeedback,
     slots: Vec<Option<WalSenderState>>,
@@ -215,7 +224,7 @@ struct WalSendersShared {
 impl WalSendersShared {
     fn new() -> Self {
         WalSendersShared {
-            agg_hs_feedback: HotStandbyFeedback::empty(),
+            agg_standby_feedback: StandbyFeedback::empty(),
             agg_ps_feedback: PageserverFeedback::empty(),
             slots: Vec::new(),
         }
@@ -233,8 +242,9 @@ impl WalSendersShared {
 
     /// Update aggregated hot standy feedback. We just take min of valid xmins
     /// and ts.
-    fn update_hs_feedback(&mut self) {
+    fn update_reply_feedback(&mut self) {
         let mut agg = HotStandbyFeedback::empty();
+        let mut reply_agg = StandbyReply::empty();
         for ws_state in self.slots.iter().flatten() {
             if let ReplicationFeedback::Standby(standby_feedback) = ws_state.feedback {
                 let hs_feedback = standby_feedback.hs_feedback;
@@ -257,9 +267,41 @@ impl WalSendersShared {
                     }
                     agg.ts = min(agg.ts, hs_feedback.ts);
                 }
+                let reply = standby_feedback.reply;
+                if reply.write_lsn != Lsn::INVALID {
+                    if reply_agg.write_lsn != Lsn::INVALID {
+                        reply_agg.write_lsn = Lsn::min(reply_agg.write_lsn, reply.write_lsn);
+                    } else {
+                        reply_agg.write_lsn = reply.write_lsn;
+                    }
+                }
+                if reply.flush_lsn != Lsn::INVALID {
+                    if reply_agg.flush_lsn != Lsn::INVALID {
+                        reply_agg.flush_lsn = Lsn::min(reply_agg.flush_lsn, reply.flush_lsn);
+                    } else {
+                        reply_agg.flush_lsn = reply.flush_lsn;
+                    }
+                }
+                if reply.apply_lsn != Lsn::INVALID {
+                    if reply_agg.apply_lsn != Lsn::INVALID {
+                        reply_agg.apply_lsn = Lsn::min(reply_agg.apply_lsn, reply.apply_lsn);
+                    } else {
+                        reply_agg.apply_lsn = reply.apply_lsn;
+                    }
+                }
+                if reply.reply_ts != 0 {
+                    if reply_agg.reply_ts != 0 {
+                        reply_agg.reply_ts = TimestampTz::min(reply_agg.reply_ts, reply.reply_ts);
+                    } else {
+                        reply_agg.reply_ts = reply.reply_ts;
+                    }
+                }
             }
         }
-        self.agg_hs_feedback = agg;
+        self.agg_standby_feedback = StandbyFeedback {
+            reply: reply_agg,
+            hs_feedback: agg,
+        };
     }
 
     /// Update aggregated pageserver feedback. LSNs (last_received,
@@ -764,8 +806,11 @@ mod tests {
     fn test_hs_feedback_no_valid() {
         let mut wss = WalSendersShared::new();
         push_feedback(&mut wss, hs_feedback(1, INVALID_FULL_TRANSACTION_ID));
-        wss.update_hs_feedback();
-        assert_eq!(wss.agg_hs_feedback.xmin, INVALID_FULL_TRANSACTION_ID);
+        wss.update_reply_feedback();
+        assert_eq!(
+            wss.agg_standby_feedback.hs_feedback.xmin,
+            INVALID_FULL_TRANSACTION_ID
+        );
     }
 
     #[test]
@@ -774,8 +819,8 @@ mod tests {
         push_feedback(&mut wss, hs_feedback(1, INVALID_FULL_TRANSACTION_ID));
         push_feedback(&mut wss, hs_feedback(1, 42));
         push_feedback(&mut wss, hs_feedback(1, 64));
-        wss.update_hs_feedback();
-        assert_eq!(wss.agg_hs_feedback.xmin, 42);
+        wss.update_reply_feedback();
+        assert_eq!(wss.agg_standby_feedback.hs_feedback.xmin, 42);
     }
 
     // form pageserver feedback with given last_record_lsn / tli size and the

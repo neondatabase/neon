@@ -553,6 +553,10 @@ impl ConnectionManagerState {
     fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
         WALRECEIVER_BROKER_UPDATES.inc();
 
+        self.timeline
+            .standby_flush_lsn
+            .store(Lsn(timeline_update.standby_flush_lsn));
+
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(
             new_safekeeper_id,
@@ -561,7 +565,6 @@ impl ConnectionManagerState {
                 latest_update: Utc::now().naive_utc(),
             },
         );
-
         if old_entry.is_none() {
             info!("New SK node was added: {new_safekeeper_id}");
             WALRECEIVER_CANDIDATES_ADDED.inc();
@@ -920,6 +923,7 @@ mod tests {
                 remote_consistent_lsn: 0,
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
+                standby_flush_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
                 http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,

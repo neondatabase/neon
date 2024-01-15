@@ -50,6 +50,8 @@ pub struct SkTimelineInfo {
     pub safekeeper_connstr: Option<String>,
     #[serde(default)]
     pub http_connstr: Option<String>,
+    #[serde(default = "lsn_invalid")]
+    pub standby_flush_lsn: Lsn,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
