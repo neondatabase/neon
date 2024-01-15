@@ -22,6 +22,7 @@
 #[strum(serialize_all = "kebab-case")]
 pub enum IoEngineKind {
     StdFs,
+    #[cfg(target_os = "linux")]
     TokioEpollUring,
 }
 
@@ -91,6 +92,7 @@ impl IoEngineKind {
                 drop(dst);
                 ((file_guard, buf), res)
             }
+            #[cfg(target_os = "linux")]
             IoEngineKind::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
