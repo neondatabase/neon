@@ -571,8 +571,8 @@ class NeonEnvBuilder:
         # TODO: all kinds of assertions to ensure the env is unused
 
         if self.test_overlay_dir is None:
-            log.info("take snapshot using shutil.copytree")
-            shutil.copytree(env.repo_dir, snapshot_dir.path)
+            log.info("take snapshot by moving repo dir")
+            env.repo_dir.rename(snapshot_dir.path)
         else:
             log.info("take snapshot by using overlayfs upperdir")
             self.overlay_unmount_and_move("create-snapshot-repo-dir", snapshot_dir.path)
@@ -580,6 +580,7 @@ class NeonEnvBuilder:
             env.repo_dir.rmdir()
             # TODO from here on, we should be able to reset / goto top where snapshot_dir.is_initialized()
             log.info("make repo_dir an overlayfs mount of the snapshot we just created")
+        assert not env.repo_dir.exists(), "both branches above should remove it"
         snapshot_dir.set_initialized()
 
         self.env = None  # so that from_repo_dir works again (TODO review: is this safe?)
