@@ -59,7 +59,7 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-const SERVERLESS_DRIVER_SNI_HOSTNAME: &str = "api";
+const SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART: &str = "api";
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -178,10 +178,10 @@ fn get_conn_info(
         .and_then(|h| h.split(':').next());
 
     // sni_hostname has to be either the same as hostname or the one used in serverless driver.
-    if sni_hostname != SERVERLESS_DRIVER_SNI_HOSTNAME && sni_hostname != hostname {
+    if !check_matches(&sni_hostname, hostname)? {
         return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
     } else if let Some(h) = host_header {
-        if h != hostname {
+        if h != sni_hostname {
             return Err(anyhow::anyhow!("mismatched host header and hostname"));
         }
     }
@@ -213,6 +213,20 @@ fn get_conn_info(
         dbname: dbname.into(),
         password: password.into(),
     })
+}
+
+fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Error> {
+    if sni_hostname == hostname {
+        return Ok(true);
+    }
+    let (sni_hostname_first, sni_hostname_rest) = sni_hostname
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected sni format."))?;
+    let (_, hostname_rest) = hostname
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
+    return Ok(sni_hostname_rest == hostname_rest
+        && sni_hostname_first == SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART);
 }
 
 // TODO: return different http error codes
