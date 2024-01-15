@@ -15,6 +15,7 @@ use serde_json::Map;
 use serde_json::Value;
 use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
+use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -231,7 +232,7 @@ pub async fn handle(
         Ok(r) => match r {
             Ok(r) => r,
             Err(e) => {
-                let message = format!("{:?}", e);
+                let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
                     .and_then(|e| e.as_db_error());
@@ -244,7 +245,25 @@ pub async fn handle(
                         .unwrap_or_default()
                 }
 
-                // TODO(conrad): db_error.position()
+                if let Some(db_error) = db_error {
+                    db_error.message().clone_into(&mut message);
+                }
+
+                let position = db_error.and_then(|db| db.position());
+                let (position, internal_position, internal_query) = match position {
+                    Some(ErrorPosition::Original(position)) => (
+                        Value::String(position.to_string()),
+                        Value::Null,
+                        Value::Null,
+                    ),
+                    Some(ErrorPosition::Internal { position, query }) => (
+                        Value::Null,
+                        Value::String(position.to_string()),
+                        Value::String(query.clone()),
+                    ),
+                    None => (Value::Null, Value::Null, Value::Null),
+                };
+
                 let code = get(db_error, |db| db.code().code());
                 let severity = get(db_error, |db| db.severity());
                 let detail = get(db_error, |db| db.detail());
@@ -256,7 +275,7 @@ pub async fn handle(
                 let datatype = get(db_error, |db| db.datatype());
                 let constraint = get(db_error, |db| db.constraint());
                 let file = get(db_error, |db| db.file());
-                let line = get(db_error, |db| db.line());
+                let line = get(db_error, |db| db.line().map(|l| l.to_string()));
                 let routine = get(db_error, |db| db.routine());
 
                 error!(
@@ -271,12 +290,15 @@ pub async fn handle(
                         "code": code,
                         "detail": detail,
                         "hint": hint,
+                        "position": position,
+                        "internalPosition": internal_position,
+                        "internalQuery": internal_query,
                         "severity": severity,
                         "where": where_,
                         "table": table,
                         "column": column,
                         "schema": schema,
-                        "datatype": datatype,
+                        "dataType": datatype,
                         "constraint": constraint,
                         "file": file,
                         "line": line,
