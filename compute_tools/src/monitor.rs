@@ -137,6 +137,28 @@ fn watch_compute_activity(compute: &ComputeNode) {
                         continue;
                     }
                 }
+                //
+                // Do not suspend compute if autovacuum is running
+                //
+                let autovacuum_count_query = "select count(*) from pg_stat_activity where backend_type = 'autovacuum worker'";
+                match cli.query_one(autovacuum_count_query, &[]) {
+                    Ok(r) => match r.try_get::<&str, i64>("count") {
+                        Ok(num_workers) => {
+                            if num_workers > 0 {
+                                compute.update_last_active(Some(Utc::now()));
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("failed to parse autovacuum workers count: {:?}", e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        warn!("failed to get list of autovacuum workers: {:?}", e);
+                        continue;
+                    }
+                }
             }
             Err(e) => {
                 debug!("could not connect to Postgres: {}, retrying", e);

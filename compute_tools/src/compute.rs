@@ -280,7 +280,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             $$;"#,
         roles_decl, database_decl,
     );
-    info!("Neon superuser created:\n{}", inlinify(&query));
+    info!("Neon superuser created: {}", inlinify(&query));
     client
         .simple_query(&query)
         .map_err(|e| anyhow::anyhow!(e).context(query))?;
