@@ -537,12 +537,11 @@ class NeonEnvBuilder:
             return env
 
         with shared_snapshot_dir(self.top_output_dir, global_ident) as snapshot_dir:
-            if snapshot_dir.is_initialized():
-                return self.from_repo_dir(snapshot_dir.path)
-            else:
+            if not snapshot_dir.is_initialized():
                 self._build_and_use_snapshot_impl(snapshot_dir, create_env_for_snapshot)
                 assert snapshot_dir.is_initialized()
-                return self.from_repo_dir(snapshot_dir.path)
+
+            return self.from_repo_dir(snapshot_dir.path)
 
     def _build_and_use_snapshot_impl(
         self,

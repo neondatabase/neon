@@ -21,8 +21,7 @@ def single_timeline(
     ncopies: int,
 ) -> NeonEnv:
     """
-    Create (or rehydrate from `snapshot_dir`) an env with `ncopies` copies
-    of a template tenant with a single timeline.
+    Create `ncopies` duplicates of a template tenant that has a single timeline.
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
