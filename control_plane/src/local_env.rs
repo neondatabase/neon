@@ -5,6 +5,7 @@
 
 use anyhow::{bail, ensure, Context};
 
+use clap::ValueEnum;
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,31 @@ impl Default for SafekeeperConf {
             backup_threads: None,
             auth_enabled: false,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum InitForceMode {
+    MustNotExist,
+    EmptyDirOk,
+    RemoveAllContents,
+}
+
+impl ValueEnum for InitForceMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            Self::MustNotExist,
+            Self::EmptyDirOk,
+            Self::RemoveAllContents,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(match self {
+            InitForceMode::MustNotExist => "must-not-exist",
+            InitForceMode::EmptyDirOk => "empty-dir-ok",
+            InitForceMode::RemoveAllContents => "remove-all-contents",
+        }))
     }
 }
 
@@ -384,7 +410,7 @@ impl LocalEnv {
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self, pg_version: u32, force: bool) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32, force: &InitForceMode) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -393,25 +419,34 @@ impl LocalEnv {
         );
 
         if base_path.exists() {
-            if force {
-                println!("removing all contents of '{}'", base_path.display());
-                // instead of directly calling `remove_dir_all`, we keep the original dir but removing
-                // all contents inside. This helps if the developer symbol links another directory (i.e.,
-                // S3 local SSD) to the `.neon` base directory.
-                for entry in std::fs::read_dir(base_path)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_dir() {
-                        fs::remove_dir_all(&path)?;
-                    } else {
-                        fs::remove_file(&path)?;
+            match force {
+                InitForceMode::MustNotExist => {
+                    bail!(
+                        "directory '{}' already exists. Perhaps already initialized?",
+                        base_path.display()
+                    );
+                }
+                InitForceMode::EmptyDirOk => {
+                    if let Some(res) = std::fs::read_dir(base_path)?.next() {
+                        res.context("check if directory is empty")?;
+                        anyhow::bail!("directory not empty: {base_path:?}");
                     }
                 }
-            } else {
-                bail!(
-                    "directory '{}' already exists. Perhaps already initialized? (Hint: use --force to remove all contents)",
-                    base_path.display()
-                );
+                InitForceMode::RemoveAllContents => {
+                    println!("removing all contents of '{}'", base_path.display());
+                    // instead of directly calling `remove_dir_all`, we keep the original dir but removing
+                    // all contents inside. This helps if the developer symbol links another directory (i.e.,
+                    // S3 local SSD) to the `.neon` base directory.
+                    for entry in std::fs::read_dir(base_path)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.is_dir() {
+                            fs::remove_dir_all(&path)?;
+                        } else {
+                            fs::remove_file(&path)?;
+                        }
+                    }
+                }
             }
         }
 

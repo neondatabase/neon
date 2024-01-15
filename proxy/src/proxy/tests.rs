@@ -7,11 +7,12 @@ use super::retry::ShouldRetry;
 use super::*;
 use crate::auth::backend::{ComputeUserInfo, TestBackend};
 use crate::config::CertResolver;
-use crate::console::{CachedNodeInfo, NodeInfo};
+use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::proxy::retry::{retry_after, NUM_RETRIES_CONNECT};
 use crate::{auth, http, sasl, scram};
 use async_trait::async_trait;
 use rstest::rstest;
+use smol_str::SmolStr;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
 use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
@@ -82,7 +83,7 @@ fn generate_tls_config<'a>(
         let mut cert_resolver = CertResolver::new();
         cert_resolver.add_cert(key, vec![cert], true)?;
 
-        let common_names = Some(cert_resolver.get_common_names());
+        let common_names = cert_resolver.get_common_names();
 
         TlsConfig {
             config,
@@ -425,6 +426,7 @@ impl ConnectMechanism for TestConnectMechanism {
 
     async fn connect_once(
         &self,
+        _ctx: &mut RequestMonitoring,
         _node_info: &console::CachedNodeInfo,
         _timeout: std::time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
@@ -469,7 +471,7 @@ impl TestBackend for TestConnectMechanism {
         }
     }
 
-    fn get_allowed_ips(&self) -> Result<Arc<Vec<String>>, console::errors::GetAuthInfoError> {
+    fn get_allowed_ips(&self) -> Result<Vec<SmolStr>, console::errors::GetAuthInfoError> {
         unimplemented!("not used in tests")
     }
 }
@@ -485,27 +487,19 @@ fn helper_create_cached_node_info() -> CachedNodeInfo {
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> (
-    CachedNodeInfo,
-    console::ConsoleReqExtra,
-    auth::BackendType<'_, ComputeUserInfo>,
-) {
+) -> (CachedNodeInfo, auth::BackendType<'_, ComputeUserInfo>) {
     let cache = helper_create_cached_node_info();
-    let extra = console::ConsoleReqExtra {
-        session_id: uuid::Uuid::new_v4(),
-        application_name: "TEST".into(),
-        options: vec![],
-    };
-    let creds = auth::BackendType::Test(mechanism);
-    (cache, extra, creds)
+    let user_info = auth::BackendType::Test(mechanism);
+    (cache, user_info)
 }
 
 #[tokio::test]
 async fn connect_to_compute_success() {
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Connect]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -514,9 +508,10 @@ async fn connect_to_compute_success() {
 #[tokio::test]
 async fn connect_to_compute_retry() {
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, Wake, Retry, Connect]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -526,9 +521,10 @@ async fn connect_to_compute_retry() {
 #[tokio::test]
 async fn connect_to_compute_non_retry_1() {
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, Wake, Retry, Fail]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -538,9 +534,10 @@ async fn connect_to_compute_non_retry_1() {
 #[tokio::test]
 async fn connect_to_compute_non_retry_2() {
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Fail, Wake, Retry, Connect]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -551,12 +548,13 @@ async fn connect_to_compute_non_retry_2() {
 async fn connect_to_compute_non_retry_3() {
     assert_eq!(NUM_RETRIES_CONNECT, 16);
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![
         Retry, Wake, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry, Retry,
         Retry, Retry, Retry, Retry, /* the 17th time */ Retry,
     ]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();
@@ -566,9 +564,10 @@ async fn connect_to_compute_non_retry_3() {
 #[tokio::test]
 async fn wake_retry() {
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, WakeRetry, Wake, Connect]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap();
     mechanism.verify();
@@ -578,9 +577,10 @@ async fn wake_retry() {
 #[tokio::test]
 async fn wake_non_retry() {
     use ConnectAction::*;
+    let mut ctx = RequestMonitoring::test();
     let mechanism = TestConnectMechanism::new(vec![Retry, WakeFail]);
-    let (cache, extra, creds) = helper_create_connect_info(&mechanism);
-    connect_to_compute(&mechanism, cache, &extra, &creds, LatencyTimer::new("test"))
+    let (cache, user_info) = helper_create_connect_info(&mechanism);
+    connect_to_compute(&mut ctx, &mechanism, cache, &user_info)
         .await
         .unwrap_err();
     mechanism.verify();

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use futures::Future;
 use pageserver_api::{
     control_api::{
         ReAttachRequest, ReAttachResponse, ValidateRequest, ValidateRequestTenant, ValidateResponse,
@@ -28,13 +29,14 @@ pub enum RetryForeverError {
     ShuttingDown,
 }
 
-#[async_trait::async_trait]
 pub trait ControlPlaneGenerationsApi {
-    async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError>;
-    async fn validate(
+    fn re_attach(
+        &self,
+    ) -> impl Future<Output = Result<HashMap<TenantShardId, Generation>, RetryForeverError>> + Send;
+    fn validate(
         &self,
         tenants: Vec<(TenantShardId, Generation)>,
-    ) -> Result<HashMap<TenantShardId, bool>, RetryForeverError>;
+    ) -> impl Future<Output = Result<HashMap<TenantShardId, bool>, RetryForeverError>> + Send;
 }
 
 impl ControlPlaneClient {
@@ -123,7 +125,6 @@ impl ControlPlaneClient {
     }
 }
 
-#[async_trait::async_trait]
 impl ControlPlaneGenerationsApi for ControlPlaneClient {
     /// Block until we get a successful response, or error out if we are shut down
     async fn re_attach(&self) -> Result<HashMap<TenantShardId, Generation>, RetryForeverError> {

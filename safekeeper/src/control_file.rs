@@ -13,12 +13,15 @@ use std::time::Instant;
 
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
-use crate::safekeeper::{SafeKeeperState, SK_FORMAT_VERSION, SK_MAGIC};
+use crate::state::TimelinePersistentState;
 use utils::{bin_ser::LeSer, id::TenantTimelineId};
 
 use crate::SafeKeeperConf;
 
 use std::convert::TryInto;
+
+pub const SK_MAGIC: u32 = 0xcafeceefu32;
+pub const SK_FORMAT_VERSION: u32 = 7;
 
 // contains persistent metadata for safekeeper
 const CONTROL_FILE_NAME: &str = "safekeeper.control";
@@ -29,9 +32,9 @@ pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.
 #[async_trait::async_trait]
-pub trait Storage: Deref<Target = SafeKeeperState> {
+pub trait Storage: Deref<Target = TimelinePersistentState> {
     /// Persist safekeeper state on disk and update internal state.
-    async fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
+    async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()>;
 
     /// Timestamp of last persist.
     fn last_persist_at(&self) -> Instant;
@@ -44,7 +47,7 @@ pub struct FileStorage {
     conf: SafeKeeperConf,
 
     /// Last state persisted to disk.
-    state: SafeKeeperState,
+    state: TimelinePersistentState,
     /// Not preserved across restarts.
     last_persist_at: Instant,
 }
@@ -68,7 +71,7 @@ impl FileStorage {
     pub fn create_new(
         timeline_dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
-        state: SafeKeeperState,
+        state: TimelinePersistentState,
     ) -> Result<FileStorage> {
         let store = FileStorage {
             timeline_dir,
@@ -81,7 +84,7 @@ impl FileStorage {
     }
 
     /// Check the magic/version in the on-disk data and deserialize it, if possible.
-    fn deser_sk_state(buf: &mut &[u8]) -> Result<SafeKeeperState> {
+    fn deser_sk_state(buf: &mut &[u8]) -> Result<TimelinePersistentState> {
         // Read the version independent part
         let magic = ReadBytesExt::read_u32::<LittleEndian>(buf)?;
         if magic != SK_MAGIC {
@@ -93,7 +96,7 @@ impl FileStorage {
         }
         let version = ReadBytesExt::read_u32::<LittleEndian>(buf)?;
         if version == SK_FORMAT_VERSION {
-            let res = SafeKeeperState::des(buf)?;
+            let res = TimelinePersistentState::des(buf)?;
             return Ok(res);
         }
         // try to upgrade
@@ -104,13 +107,15 @@ impl FileStorage {
     pub fn load_control_file_conf(
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
-    ) -> Result<SafeKeeperState> {
+    ) -> Result<TimelinePersistentState> {
         let path = conf.timeline_dir(ttid).join(CONTROL_FILE_NAME);
         Self::load_control_file(path)
     }
 
     /// Read in the control file.
-    pub fn load_control_file<P: AsRef<Path>>(control_file_path: P) -> Result<SafeKeeperState> {
+    pub fn load_control_file<P: AsRef<Path>>(
+        control_file_path: P,
+    ) -> Result<TimelinePersistentState> {
         let mut control_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -153,7 +158,7 @@ impl FileStorage {
 }
 
 impl Deref for FileStorage {
-    type Target = SafeKeeperState;
+    type Target = TimelinePersistentState;
 
     fn deref(&self) -> &Self::Target {
         &self.state
@@ -165,7 +170,7 @@ impl Storage for FileStorage {
     /// Persists state durably to the underlying storage.
     ///
     /// For a description, see <https://lwn.net/Articles/457667/>.
-    async fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+    async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
         let _timer = PERSIST_CONTROL_FILE_SECONDS.start_timer();
 
         // write data to safekeeper.control.partial
@@ -242,7 +247,7 @@ impl Storage for FileStorage {
 mod test {
     use super::FileStorage;
     use super::*;
-    use crate::{safekeeper::SafeKeeperState, SafeKeeperConf};
+    use crate::SafeKeeperConf;
     use anyhow::Result;
     use utils::{id::TenantTimelineId, lsn::Lsn};
 
@@ -257,7 +262,7 @@ mod test {
     async fn load_from_control_file(
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
-    ) -> Result<(FileStorage, SafeKeeperState)> {
+    ) -> Result<(FileStorage, TimelinePersistentState)> {
         fs::create_dir_all(conf.timeline_dir(ttid))
             .await
             .expect("failed to create timeline dir");
@@ -270,11 +275,11 @@ mod test {
     async fn create(
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
-    ) -> Result<(FileStorage, SafeKeeperState)> {
+    ) -> Result<(FileStorage, TimelinePersistentState)> {
         fs::create_dir_all(conf.timeline_dir(ttid))
             .await
             .expect("failed to create timeline dir");
-        let state = SafeKeeperState::empty();
+        let state = TimelinePersistentState::empty();
         let timeline_dir = conf.timeline_dir(ttid);
         let storage = FileStorage::create_new(timeline_dir, conf, state.clone())?;
         Ok((storage, state))

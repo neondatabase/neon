@@ -3,14 +3,14 @@ use proxy::auth;
 use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
+use proxy::config::ProjectInfoCacheOptions;
 use proxy::console;
-use proxy::console::provider::AllowedIpsCache;
-use proxy::console::provider::NodeInfoCache;
-use proxy::console::provider::RoleSecretCache;
+use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
 use proxy::rate_limiter::EndpointRateLimiter;
 use proxy::rate_limiter::RateBucketInfo;
 use proxy::rate_limiter::RateLimiterConfig;
+use proxy::redis::notifications;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
 
@@ -44,6 +44,9 @@ enum AuthBackend {
 #[derive(Parser)]
 #[command(version = GIT_VERSION, about)]
 struct ProxyCliArgs {
+    /// Name of the region this proxy is deployed in
+    #[clap(long, default_value_t = String::new())]
+    region: String,
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
@@ -133,6 +136,15 @@ struct ProxyCliArgs {
     /// disable ip check for http requests. If it is too time consuming, it could be turned off.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_ip_check_for_http: bool,
+    /// redis url for notifications.
+    #[clap(long)]
+    redis_notifications: Option<String>,
+    /// cache for `project_info` (use `size=0` to disable)
+    #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
+    project_info_cache: String,
+
+    #[clap(flatten)]
+    parquet_upload: ParquetUploadArgs,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -221,6 +233,11 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    client_tasks.spawn(proxy::context::parquet::worker(
+        cancellation_token.clone(),
+        args.parquet_upload,
+    ));
+
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(cancellation_token));
@@ -229,6 +246,15 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(metrics_config) = &config.metric_collection {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
+    }
+
+    if let auth::BackendType::Console(api, _) = &config.auth_backend {
+        let cache = api.caches.project_info.clone();
+        if let Some(url) = args.redis_notifications {
+            info!("Starting redis notifications listener ({url})");
+            maintenance_tasks.spawn(notifications::task_main(url.to_owned(), cache.clone()));
+        }
+        maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
     }
 
     let maintenance = loop {
@@ -296,32 +322,17 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let auth_backend = match &args.auth_backend {
         AuthBackend::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
-            let allowed_ips_cache_config: CacheOptions = args.allowed_ips_cache.parse()?;
-            let role_secret_cache_config: CacheOptions = args.role_secret_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
-            info!("Using AllowedIpsCache (wake_compute) with options={allowed_ips_cache_config:?}");
-            info!("Using RoleSecretCache (wake_compute) with options={role_secret_cache_config:?}");
-            let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                node_info: NodeInfoCache::new(
-                    "node_info_cache",
-                    wake_compute_cache_config.size,
-                    wake_compute_cache_config.ttl,
-                    true,
-                ),
-                allowed_ips: AllowedIpsCache::new(
-                    "allowed_ips_cache",
-                    allowed_ips_cache_config.size,
-                    allowed_ips_cache_config.ttl,
-                    false,
-                ),
-                role_secret: RoleSecretCache::new(
-                    "role_secret_cache",
-                    role_secret_cache_config.size,
-                    role_secret_cache_config.ttl,
-                    false,
-                ),
-            }));
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+            )));
 
             let config::WakeComputeLockOptions {
                 shards,
@@ -380,6 +391,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         require_client_ip: args.require_client_ip,
         disable_ip_check_for_http: args.disable_ip_check_for_http,
         endpoint_rps_limit,
+        // TODO: add this argument
+        region: args.region.clone(),
     }));
 
     Ok(config)
