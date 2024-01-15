@@ -58,7 +58,8 @@ def duplicate_tenant(env: NeonEnv, template_tenant: TenantId, ncopies: int) -> L
 
     new_tenants: List[TenantId] = [TenantId.generate() for _ in range(0, ncopies)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        return list(executor.map(work, new_tenants))
+        executor.map(work, new_tenants)
+    return new_tenants
 
 
 def local_layer_name_from_remote_name(remote_name: str) -> str:
