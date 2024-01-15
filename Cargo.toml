@@ -150,6 +150,8 @@ test-context = "0.1"
 thiserror = "1.0"
 tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
 tokio = { version = "1.17", features = ["macros"] }
+#tokio-epoll-uring = { path = "../tokio-epoll-uring/tokio-epoll-uring" }
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/macos-usage" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.10.0"
 tokio-rustls = "0.24"
@@ -172,12 +174,6 @@ x509-parser = "0.15"
 ## TODO replace this with tracing
 env_logger = "0.10"
 log = "0.4"
-
-## tokio-epoll-uring
-#tokio-epoll-uring = { path = "../tokio-epoll-uring/tokio-epoll-uring" }
-#uring-common = { path = "../tokio-epoll-uring/uring-common" }
-tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/macos-usage" }
-uring-common = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "problame/macos-usage" }
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }

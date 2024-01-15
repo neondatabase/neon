@@ -72,7 +72,7 @@ impl IoEngineKind {
         mut buf: B,
     ) -> ((FileGuard, B), std::io::Result<usize>)
     where
-        B: uring_common::buf::BoundedBufMut + Send,
+        B: tokio_epoll_uring::BoundedBufMut + Send,
     {
         match self {
             IoEngineKind::StdFs => {

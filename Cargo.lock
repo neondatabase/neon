@@ -3333,7 +3333,6 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
- "uring-common",
  "url",
  "utils",
  "walkdir",
@@ -5484,7 +5483,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#d605aa7b912247ce443234ad322277e758f886c5"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#81d4714517d07d250ecbba93c039195bd10d0979"
 dependencies = [
  "futures",
  "once_cell",
@@ -6050,7 +6049,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#d605aa7b912247ce443234ad322277e758f886c5"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#81d4714517d07d250ecbba93c039195bd10d0979"
 dependencies = [
  "io-uring",
  "libc",

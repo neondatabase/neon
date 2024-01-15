@@ -18,7 +18,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
-use uring_common::buf::IoBufMut;
+use tokio_epoll_uring::IoBufMut;
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -124,7 +124,7 @@ struct PageWriteGuardBuf {
 }
 // Safety: the [`PageWriteGuard`] gives us exclusive ownership of the page cache slot,
 // and the location remains stable even if [`Self`] or the [`PageWriteGuard`] is moved.
-unsafe impl uring_common::buf::IoBuf for PageWriteGuardBuf {
+unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
     fn stable_ptr(&self) -> *const u8 {
         self.page.as_ptr()
     }
@@ -137,7 +137,7 @@ unsafe impl uring_common::buf::IoBuf for PageWriteGuardBuf {
 }
 // Safety: see above, plus: the ownership of [`PageWriteGuard`] means exclusive access,
 // hence it's safe to hand out the `stable_mut_ptr()`.
-unsafe impl uring_common::buf::IoBufMut for PageWriteGuardBuf {
+unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.page.as_mut_ptr()
     }
@@ -548,8 +548,8 @@ impl VirtualFile {
     where
         B: IoBufMut + Send,
     {
-        use uring_common::buf::BoundedBuf;
-        let mut buf: uring_common::buf::Slice<B> = buf.slice_full();
+        use tokio_epoll_uring::BoundedBuf;
+        let mut buf: tokio_epoll_uring::Slice<B> = buf.slice_full();
         while buf.bytes_total() != 0 {
             let res;
             (buf, res) = self.read_at(buf, offset).await;
@@ -637,7 +637,7 @@ impl VirtualFile {
 
     pub(crate) async fn read_at<B>(&self, buf: B, offset: u64) -> (B, Result<usize, Error>)
     where
-        B: uring_common::buf::BoundedBufMut + Send,
+        B: tokio_epoll_uring::BoundedBufMut + Send,
     {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -709,7 +709,7 @@ impl FileGuard {
     }
 }
 
-impl uring_common::io_fd::IoFd for FileGuard {
+impl tokio_epoll_uring::IoFd for FileGuard {
     unsafe fn as_fd(&self) -> RawFd {
         let owned_fd: &OwnedFd = self.as_ref();
         owned_fd.as_raw_fd()
