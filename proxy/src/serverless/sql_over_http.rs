@@ -226,7 +226,7 @@ fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Err
         .split_once('.')
         .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
     Ok(sni_hostname_rest == hostname_rest
-        && sni_hostname_first == SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART);
+        && sni_hostname_first == SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART)
 }
 
 // TODO: return different http error codes
