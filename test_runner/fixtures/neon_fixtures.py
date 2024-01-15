@@ -472,6 +472,7 @@ class NeonEnvBuilder:
         self.test_output_dir = test_output_dir
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
+        self.config_init_force: Optional[str] = None
 
         assert test_name.startswith(
             "test_"
@@ -753,20 +754,12 @@ class NeonEnvBuilder:
         # Stop all the nodes.
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
-            self.env.endpoints.stop_all()
-            for sk in self.env.safekeepers:
-                sk.stop(immediate=True)
-
-            for pageserver in self.env.pageservers:
+            self.env.stop(
+                immediate=True,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
-                if exc_type is not None:
-                    pageserver.assert_no_metric_errors()
-
-                pageserver.stop(immediate=True)
-
-            self.env.attachment_service.stop(immediate=True)
-
+                ps_assert_metric_no_errors=(exc_type is None),
+            )
             cleanup_error = None
 
             if self.scrub_on_exit:
@@ -935,7 +928,7 @@ class NeonEnv:
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
-        self.neon_cli.init(cfg)
+        self.neon_cli.init(cfg, force=config.config_init_force)
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
@@ -948,6 +941,20 @@ class NeonEnv:
 
         for safekeeper in self.safekeepers:
             safekeeper.start()
+
+    def stop(self, immediate=False, ps_assert_metric_no_errors=False):
+        """
+        After this method returns, there should be no child processes running.
+        """
+        self.endpoints.stop_all()
+        for sk in self.safekeepers:
+            sk.stop(immediate=immediate)
+        for pageserver in self.pageservers:
+            if ps_assert_metric_no_errors:
+                pageserver.assert_no_metric_errors()
+            pageserver.stop(immediate=immediate)
+        self.attachment_service.stop(immediate=immediate)
+        self.broker.stop(immediate=immediate)
 
     @property
     def pageserver(self) -> NeonPageserver:
@@ -1423,12 +1430,16 @@ class NeonCli(AbstractNeonCli):
     def init(
         self,
         config: Dict[str, Any],
+        force: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
             tmp.write(toml.dumps(config))
             tmp.flush()
 
             cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
+
+            if force is not None:
+                cmd.extend(["--force", force])
 
             storage = self.env.pageserver_remote_storage
 

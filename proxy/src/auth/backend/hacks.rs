@@ -36,7 +36,7 @@ pub async fn authenticate_cleartext(
         sasl::Outcome::Success(key) => key,
         sasl::Outcome::Failure(reason) => {
             info!("auth backend failed with an error: {reason}");
-            return Err(auth::AuthError::auth_failed(&*info.inner.user));
+            return Err(auth::AuthError::auth_failed(&*info.user));
         }
     };
 
@@ -67,7 +67,8 @@ pub async fn password_hack_no_authentication(
     // Report tentative success; compute node will check the password anyway.
     Ok(ComputeCredentials {
         info: ComputeUserInfo {
-            inner: info,
+            user: info.user,
+            options: info.options,
             endpoint: payload.endpoint,
         },
         keys: payload.password,

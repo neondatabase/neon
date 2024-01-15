@@ -190,18 +190,20 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Print a list of existing Postgres roles (only in debug mode)
     if span_enabled!(Level::INFO) {
-        info!("postgres roles:");
+        let mut vec = Vec::new();
         for r in &existing_roles {
-            info!(
-                "    - {}:{}",
+            vec.push(format!(
+                "{}:{}",
                 r.name,
                 if r.encrypted_password.is_some() {
                     "[FILTERED]"
                 } else {
                     "(null)"
                 }
-            );
+            ));
         }
+
+        info!("postgres roles (total {}): {:?}", vec.len(), vec);
     }
 
     // Process delta operations first
@@ -239,7 +241,10 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     // Refresh Postgres roles info to handle possible roles renaming
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
-    info!("cluster spec roles:");
+    info!(
+        "handling cluster spec roles (total {})",
+        spec.cluster.roles.len()
+    );
     for role in &spec.cluster.roles {
         let name = &role.name;
         // XXX: with a limited number of roles it is fine, but consider making it a HashMap
@@ -302,7 +307,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
-                info!("role create query: '{}'", &query);
+                info!("running role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
             }
@@ -319,7 +324,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 RoleAction::Create => " -> create",
                 RoleAction::Update => " -> update",
             };
-            info!("   - {}:{}{}", name, pwd, action_str);
+            info!(" - {}:{}{}", name, pwd, action_str);
         }
     }
 
@@ -428,10 +433,11 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
     // Print a list of existing Postgres databases (only in debug mode)
     if span_enabled!(Level::INFO) {
-        info!("postgres databases:");
+        let mut vec = Vec::new();
         for (dbname, db) in &existing_dbs {
-            info!("    {}:{}", dbname, db.owner);
+            vec.push(format!("{}:{}", dbname, db.owner));
         }
+        info!("postgres databases (total {}): {:?}", vec.len(), vec);
     }
 
     // Process delta operations first
@@ -503,7 +509,10 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     // Refresh Postgres databases info to handle possible renames
     let existing_dbs = get_existing_dbs(client)?;
 
-    info!("cluster spec databases:");
+    info!(
+        "handling cluster spec databases (total {})",
+        spec.cluster.databases.len()
+    );
     for db in &spec.cluster.databases {
         let name = &db.name;
         let pg_db = existing_dbs.get(name);
@@ -562,7 +571,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 DatabaseAction::Create => " -> create",
                 DatabaseAction::Update => " -> update",
             };
-            info!("   - {}:{}{}", db.name, db.owner, action_str);
+            info!(" - {}:{}{}", db.name, db.owner, action_str);
         }
     }
 

@@ -2,7 +2,7 @@
 
 use crate::{
     auth::password_hack::parse_endpoint_param, context::RequestMonitoring, error::UserFacingError,
-    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::neon_options_str,
+    metrics::NUM_CONNECTION_ACCEPTED_BY_SNI, proxy::NeonOptions,
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -12,7 +12,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
-pub enum ClientCredsParseError {
+pub enum ComputeUserInfoParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
@@ -33,34 +33,49 @@ pub enum ClientCredsParseError {
     MalformedProjectName(SmolStr),
 }
 
-impl UserFacingError for ClientCredsParseError {}
+impl UserFacingError for ComputeUserInfoParseError {}
 
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientCredentials {
+pub struct ComputeUserInfoMaybeEndpoint {
     pub user: SmolStr,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<SmolStr>,
 
-    pub cache_key: SmolStr,
+    pub options: NeonOptions,
 }
 
-impl ClientCredentials {
+impl ComputeUserInfoMaybeEndpoint {
     #[inline]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
     }
 }
 
-impl ClientCredentials {
+pub fn endpoint_sni<'a>(
+    sni: &'a str,
+    common_names: &HashSet<String>,
+) -> Result<&'a str, ComputeUserInfoParseError> {
+    let Some((subdomain, common_name)) = sni.split_once('.') else {
+        return Err(ComputeUserInfoParseError::UnknownCommonName { cn: sni.into() });
+    };
+    if !common_names.contains(common_name) {
+        return Err(ComputeUserInfoParseError::UnknownCommonName {
+            cn: common_name.into(),
+        });
+    }
+    Ok(subdomain)
+}
+
+impl ComputeUserInfoMaybeEndpoint {
     pub fn parse(
         ctx: &mut RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
-        common_names: Option<HashSet<String>>,
-    ) -> Result<Self, ClientCredsParseError> {
-        use ClientCredsParseError::*;
+        common_names: Option<&HashSet<String>>,
+    ) -> Result<Self, ComputeUserInfoParseError> {
+        use ComputeUserInfoParseError::*;
 
         // Some parameters are stored in the startup message.
         let get_param = |key| params.get(key).ok_or(MissingKey(key));
@@ -87,21 +102,7 @@ impl ClientCredentials {
 
         let project_from_domain = if let Some(sni_str) = sni {
             if let Some(cn) = common_names {
-                let common_name_from_sni = sni_str.split_once('.').map(|(_, domain)| domain);
-
-                let project = common_name_from_sni
-                    .and_then(|domain| {
-                        if cn.contains(domain) {
-                            subdomain_from_sni(sni_str, domain)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| UnknownCommonName {
-                        cn: common_name_from_sni.unwrap_or("").into(),
-                    })?;
-
-                Some(project)
+                Some(SmolStr::from(endpoint_sni(sni_str, cn)?))
             } else {
                 None
             }
@@ -140,17 +141,12 @@ impl ClientCredentials {
             info!("Connection with password hack");
         }
 
-        let cache_key = format!(
-            "{}{}",
-            project.as_deref().unwrap_or(""),
-            neon_options_str(params)
-        )
-        .into();
+        let options = NeonOptions::parse_params(params);
 
         Ok(Self {
             user,
             project,
-            cache_key,
+            options,
         })
     }
 }
@@ -207,25 +203,19 @@ fn project_name_valid(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '-')
 }
 
-fn subdomain_from_sni(sni: &str, common_name: &str) -> Option<SmolStr> {
-    sni.strip_suffix(common_name)?
-        .strip_suffix('.')
-        .map(SmolStr::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ClientCredsParseError::*;
+    use ComputeUserInfoParseError::*;
 
     #[test]
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
-        assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.project, None);
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        assert_eq!(user_info.user, "john_doe");
+        assert_eq!(user_info.project, None);
 
         Ok(())
     }
@@ -238,9 +228,9 @@ mod tests {
             ("foo", "bar"),        // should be ignored
         ]);
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
-        assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.project, None);
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        assert_eq!(user_info.user, "john_doe");
+        assert_eq!(user_info.project, None);
 
         Ok(())
     }
@@ -253,10 +243,11 @@ mod tests {
         let common_names = Some(["localhost".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
-        assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.project.as_deref(), Some("foo"));
-        assert_eq!(creds.cache_key, "foo");
+        let user_info =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+        assert_eq!(user_info.user, "john_doe");
+        assert_eq!(user_info.project.as_deref(), Some("foo"));
+        assert_eq!(user_info.options.get_cache_key("foo"), "foo");
 
         Ok(())
     }
@@ -269,9 +260,9 @@ mod tests {
         ]);
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
-        assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.project.as_deref(), Some("bar"));
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        assert_eq!(user_info.user, "john_doe");
+        assert_eq!(user_info.project.as_deref(), Some("bar"));
 
         Ok(())
     }
@@ -284,9 +275,9 @@ mod tests {
         ]);
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
-        assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.project.as_deref(), Some("bar"));
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        assert_eq!(user_info.user, "john_doe");
+        assert_eq!(user_info.project.as_deref(), Some("bar"));
 
         Ok(())
     }
@@ -302,9 +293,9 @@ mod tests {
         ]);
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
-        assert_eq!(creds.user, "john_doe");
-        assert!(creds.project.is_none());
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        assert_eq!(user_info.user, "john_doe");
+        assert!(user_info.project.is_none());
 
         Ok(())
     }
@@ -317,9 +308,9 @@ mod tests {
         ]);
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, None, None)?;
-        assert_eq!(creds.user, "john_doe");
-        assert!(creds.project.is_none());
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        assert_eq!(user_info.user, "john_doe");
+        assert!(user_info.project.is_none());
 
         Ok(())
     }
@@ -332,9 +323,10 @@ mod tests {
         let common_names = Some(["localhost".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
-        assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.project.as_deref(), Some("baz"));
+        let user_info =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+        assert_eq!(user_info.user, "john_doe");
+        assert_eq!(user_info.project.as_deref(), Some("baz"));
 
         Ok(())
     }
@@ -346,14 +338,16 @@ mod tests {
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
-        assert_eq!(creds.project.as_deref(), Some("p1"));
+        let user_info =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+        assert_eq!(user_info.project.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
-        assert_eq!(creds.project.as_deref(), Some("p1"));
+        let user_info =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+        assert_eq!(user_info.project.as_deref(), Some("p1"));
 
         Ok(())
     }
@@ -367,8 +361,9 @@ mod tests {
         let common_names = Some(["localhost".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names)
-            .expect_err("should fail");
+        let err =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())
+                .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -386,8 +381,9 @@ mod tests {
         let common_names = Some(["example.com".into()].into());
 
         let mut ctx = RequestMonitoring::test();
-        let err = ClientCredentials::parse(&mut ctx, &options, sni, common_names)
-            .expect_err("should fail");
+        let err =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())
+                .expect_err("should fail");
         match err {
             UnknownCommonName { cn } => {
                 assert_eq!(cn, "localhost");
@@ -406,9 +402,13 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
         let mut ctx = RequestMonitoring::test();
-        let creds = ClientCredentials::parse(&mut ctx, &options, sni, common_names)?;
-        assert_eq!(creds.project.as_deref(), Some("project"));
-        assert_eq!(creds.cache_key, "projectendpoint_type:read_write lsn:0/2");
+        let user_info =
+            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+        assert_eq!(user_info.project.as_deref(), Some("project"));
+        assert_eq!(
+            user_info.options.get_cache_key("project"),
+            "project endpoint_type:read_write lsn:0/2"
+        );
 
         Ok(())
     }

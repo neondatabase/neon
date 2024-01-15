@@ -20,7 +20,7 @@ use futures::StreamExt;
 use postgres::{Client, NoTls};
 use tokio;
 use tokio_postgres;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -280,7 +280,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             $$;"#,
         roles_decl, database_decl,
     );
-    info!("Neon superuser created:\n{}", inlinify(&query));
+    info!("Neon superuser created: {}", inlinify(&query));
     client
         .simple_query(&query)
         .map_err(|e| anyhow::anyhow!(e).context(query))?;
@@ -962,6 +962,16 @@ impl ComputeNode {
         info!(?metrics, "compute start finished");
 
         Ok(pg_process)
+    }
+
+    /// Update the `last_active` in the shared state, but ensure that it's a more recent one.
+    pub fn update_last_active(&self, last_active: Option<DateTime<Utc>>) {
+        let mut state = self.state.lock().unwrap();
+        // NB: `Some(<DateTime>)` is always greater than `None`.
+        if last_active > state.last_active {
+            state.last_active = last_active;
+            debug!("set the last compute activity time to: {:?}", last_active);
+        }
     }
 
     // Look for core dumps and collect backtraces.

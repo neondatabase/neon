@@ -945,8 +945,18 @@ impl LayerInner {
             Ok((Err(e), _permit)) => {
                 // sleep already happened in the spawned task, if it was not cancelled
                 let consecutive_failures = self.consecutive_failures.load(Ordering::Relaxed);
-                tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
-                Err(DownloadError::DownloadFailed)
+
+                match e.downcast_ref::<remote_storage::DownloadError>() {
+                    // If the download failed due to its cancellation token,
+                    // propagate the cancellation error upstream.
+                    Some(remote_storage::DownloadError::Cancelled) => {
+                        Err(DownloadError::DownloadCancelled)
+                    }
+                    _ => {
+                        tracing::error!(consecutive_failures, "layer file download failed: {e:#}");
+                        Err(DownloadError::DownloadFailed)
+                    }
+                }
             }
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }

@@ -65,11 +65,10 @@ use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
-use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
-use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
+use crate::pgdatadir_mapping::{CalculateLogicalSizeError, LsnForTimestamp};
 use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
-use pageserver_api::reltag::RelTag;
+use pageserver_api::reltag::{BlockNumber, RelTag};
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
