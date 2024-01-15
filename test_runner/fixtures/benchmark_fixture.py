@@ -411,6 +411,10 @@ class NeonBenchmarker:
         )
 
     def record_pagebench_results(self, name: str, results: Dict[str, Any], duration: str):
+        """
+        NB: We expect that we use pagebench with a fixed `--runtime`. Hence, duration is the
+        same and what matters for throughput is `request_count`.
+        """
         total = results["total"]
 
         metric = "request_count"
@@ -443,7 +447,7 @@ class NeonBenchmarker:
             metric_name=f"{name}.{metric}",
             metric_value=humantime_to_ms(duration) / 1000,
             unit="s",
-            report=MetricReport.LOWER_IS_BETTER,
+            report=MetricReport.TEST_PARAM,
         )
 
 
