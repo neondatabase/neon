@@ -702,29 +702,40 @@ impl RemoteStorage for S3Bucket {
                 tracing::info!("Key {key} has no changes since timestamp, skipping");
                 continue;
             }
-            match &versions[version_to_restore_to - 1] {
-                (VerOrDelete::Version(_), _last_modified, version_id) => {
-                    // Restore the state to the last version by copying
-                    let source_id = format!("{key}?versionId={version_id}");
+            let mut do_delete = false;
+            if version_to_restore_to == 0 {
+                // All versions more recent, so the key didn't exist at the specified time point.
+                tracing::info!("All versions more recent for {key}, deleting");
+                do_delete = true;
+            } else {
+                match &versions[version_to_restore_to - 1] {
+                    (VerOrDelete::Version(_), _last_modified, version_id) => {
+                        tracing::info!("Copying old version {version_id} for {key}...");
+                        // Restore the state to the last version by copying
+                        let source_id = format!("{key}?versionId={version_id}");
 
-                    self.client
-                        .copy_object()
-                        .bucket(self.bucket_name.clone())
-                        .key(key)
-                        .copy_source(source_id)
-                        .send()
-                        .await?;
-                }
-                (VerOrDelete::DeleteMarker(_), _last_modified, version_id) => {
-                    if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
-                        // Key has since been deleted (but there was some history), no need to do anything
-                    } else {
-                        let oid = ObjectIdentifier::builder()
-                            .key(key.to_owned())
-                            .version_id(version_id.to_owned())
-                            .build()?;
-                        self.delete_oids(kind, &[oid]).await?;
+                        self.client
+                            .copy_object()
+                            .bucket(self.bucket_name.clone())
+                            .key(key)
+                            .copy_source(source_id)
+                            .send()
+                            .await?;
                     }
+                    (VerOrDelete::DeleteMarker(_), _last_modified, _version_id) => {
+                        do_delete = true;
+                    }
+                }
+            };
+            if do_delete {
+                if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
+                    // Key has since been deleted (but there was some history), no need to do anything
+                    tracing::info!("Key {key} already deleted, skipping.");
+                } else {
+                    tracing::info!("Deleting {key}...");
+
+                    let oid = ObjectIdentifier::builder().key(key.to_owned()).build()?;
+                    self.delete_oids(kind, &[oid]).await?;
                 }
             }
         }
