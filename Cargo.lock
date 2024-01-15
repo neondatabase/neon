@@ -5484,7 +5484,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#bae58b63b8360c1fc623160eff453a35eea43a26"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#d605aa7b912247ce443234ad322277e758f886c5"
 dependencies = [
  "futures",
  "once_cell",
@@ -6050,7 +6050,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#bae58b63b8360c1fc623160eff453a35eea43a26"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=problame/macos-usage#d605aa7b912247ce443234ad322277e758f886c5"
 dependencies = [
  "io-uring",
  "libc",
