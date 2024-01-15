@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import queue
 import shutil
@@ -5,7 +6,6 @@ import threading
 from pathlib import Path
 from typing import Any, List, Tuple
 
-from fixtures import work_queue
 from fixtures.neon_fixtures import NeonEnv, Pagectl
 from fixtures.pageserver.types import (
     InvalidFileName,
@@ -57,8 +57,8 @@ def duplicate_tenant(env: NeonEnv, template_tenant: TenantId, ncopies: int) -> L
         duplicate_one_tenant(env, template_tenant, tenant_id)
 
     new_tenants: List[TenantId] = [TenantId.generate() for _ in range(0, ncopies)]
-    work_queue.do(8, new_tenants, work)
-    return new_tenants
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        return list(executor.map(work, new_tenants))
 
 
 def local_layer_name_from_remote_name(remote_name: str) -> str:

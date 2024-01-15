@@ -1,8 +1,8 @@
+import concurrent.futures
 import time
 from typing import Any, Callable, Dict, Tuple
 
 import fixtures.pageserver.remote_storage
-from fixtures import work_queue
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -65,7 +65,8 @@ def single_timeline(
         time.sleep(0.1)
         wait_until_tenant_state(ps_http, tenant, "Broken", 10)
 
-    work_queue.do(22, tenants, attach_broken)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=22) as executor:
+        executor.map(attach_broken, tenants)
 
     env.pageserver.stop(
         immediate=True
