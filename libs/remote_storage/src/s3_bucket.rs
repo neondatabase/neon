@@ -687,7 +687,8 @@ impl RemoteStorage for S3Bucket {
                 anyhow::bail!("Received ListVersions response for key={key} with version_id='null', \
                     indicating either disabled versioning, or legacy objects with null version id values");
             }
-            tracing::info!("Parsing version key={key} version_id={version_id} is_delete={}",
+            tracing::info!(
+                "Parsing version key={key} version_id={version_id} is_delete={}",
                 matches!(vd, VerOrDelete::DeleteMarker(_))
             );
 
@@ -702,7 +703,13 @@ impl RemoteStorage for S3Bucket {
                 tracing::info!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
-            tracing::info!("Key {key} has version list: {}", versions.iter().map(|v| format!("{:?} ", v.1)).collect::<String>());
+            tracing::info!(
+                "Key {key} has version list: {}",
+                versions
+                    .iter()
+                    .map(|v| format!("{:?} ", v.1))
+                    .collect::<String>()
+            );
             // the version we want to restore to.
             let version_to_restore_to =
                 match versions.binary_search_by_key(&timestamp, |tpl| *tpl.1) {
@@ -716,14 +723,18 @@ impl RemoteStorage for S3Bucket {
             let mut do_delete = false;
             if version_to_restore_to == 0 {
                 // All versions more recent, so the key didn't exist at the specified time point.
-                tracing::info!("All {} versions more recent for {key}, deleting", versions.len());
+                tracing::info!(
+                    "All {} versions more recent for {key}, deleting",
+                    versions.len()
+                );
                 do_delete = true;
             } else {
                 match &versions[version_to_restore_to - 1] {
                     (VerOrDelete::Version(_), _last_modified, version_id) => {
                         tracing::info!("Copying old version {version_id} for {key}...");
                         // Restore the state to the last version by copying
-                        let source_id = format!("{}/{key}?versionId={version_id}", self.bucket_name);
+                        let source_id =
+                            format!("{}/{key}?versionId={version_id}", self.bucket_name);
 
                         self.client
                             .copy_object()

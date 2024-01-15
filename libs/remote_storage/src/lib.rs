@@ -402,10 +402,22 @@ impl GenericRemoteStorage {
         done_if_after: SystemTime,
     ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
-            Self::AwsS3(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
-            Self::AzureBlob(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
-            Self::Unreliable(s) => s.time_travel_recover(prefix, timestamp, done_if_after).await,
+            Self::LocalFs(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after)
+                    .await
+            }
+            Self::AzureBlob(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after)
+                    .await
+            }
         }
     }
 }

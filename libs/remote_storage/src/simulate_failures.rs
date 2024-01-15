@@ -178,6 +178,8 @@ impl RemoteStorage for UnreliableWrapper {
         done_if_after: SystemTime,
     ) -> anyhow::Result<()> {
         self.attempt(RemoteOp::TimeTravelRecover(prefix.map(|p| p.to_owned())))?;
-        self.inner.time_travel_recover(prefix, timestamp, done_if_after).await
+        self.inner
+            .time_travel_recover(prefix, timestamp, done_if_after)
+            .await
     }
 }
