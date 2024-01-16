@@ -259,6 +259,44 @@ async fn s3_upload_download_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()
     Ok(())
 }
 
+#[test_context(MaybeEnabledS3)]
+#[tokio::test]
+async fn s3_copy_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
+    let MaybeEnabledS3::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/file_to_copy", ctx.base_prefix).as_str(),
+    ))
+    .with_context(|| "RemotePath conversion")?;
+    let path_dest = RemotePath::new(Utf8Path::new(
+        format!("{}/file_dest", ctx.base_prefix).as_str(),
+    ))
+    .with_context(|| "RemotePath conversion")?;
+
+    let orig = bytes::Bytes::from_static("remote blob data content".as_bytes());
+
+    let (data, len) = wrap_stream(orig.clone());
+
+    ctx.client.upload(data, len, &path, None).await?;
+
+    // Normal download request
+    ctx.client.copy_object(&path, &path_dest).await?;
+
+    let dl = ctx.client.download(&path_dest).await?;
+    let buf = download_to_vec(dl).await?;
+    assert_eq!(&buf, &orig);
+
+    debug!("Cleanup: deleting file at path {path:?}");
+    ctx.client
+        .delete_objects(&[path.clone(), path_dest.clone()])
+        .await
+        .with_context(|| format!("{path:?} removal"))?;
+
+    Ok(())
+}
+
 struct EnabledS3 {
     client: Arc<GenericRemoteStorage>,
     base_prefix: &'static str,

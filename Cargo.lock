@@ -3217,7 +3217,6 @@ dependencies = [
  "hdrhistogram",
  "humantime",
  "humantime-serde",
- "pageserver",
  "pageserver_api",
  "pageserver_client",
  "rand 0.8.5",

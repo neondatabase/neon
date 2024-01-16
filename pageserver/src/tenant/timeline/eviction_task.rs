@@ -213,13 +213,10 @@ impl Timeline {
 
         // So, we just need to deal with this.
 
-        let remote_client = match self.remote_client.as_ref() {
-            Some(c) => c,
-            None => {
-                error!("no remote storage configured, cannot evict layers");
-                return ControlFlow::Continue(());
-            }
-        };
+        if self.remote_client.is_none() {
+            error!("no remote storage configured, cannot evict layers");
+            return ControlFlow::Continue(());
+        }
 
         let mut js = tokio::task::JoinSet::new();
         {
@@ -272,9 +269,8 @@ impl Timeline {
                 };
                 let layer = guard.drop_eviction_guard();
                 if no_activity_for > p.threshold {
-                    let remote_client = remote_client.clone();
                     // this could cause a lot of allocations in some cases
-                    js.spawn(async move { layer.evict_and_wait(&remote_client).await });
+                    js.spawn(async move { layer.evict_and_wait().await });
                     stats.candidates += 1;
                 }
             }

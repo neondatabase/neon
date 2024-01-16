@@ -3,7 +3,8 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use pageserver_api::key::Key;
-use pageserver_api::shard::{ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -763,6 +764,8 @@ pub(crate) enum SetNewTenantConfigError {
     GetTenant(#[from] GetTenantError),
     #[error(transparent)]
     Persist(anyhow::Error),
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 pub(crate) async fn set_new_tenant_config(
@@ -776,10 +779,21 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
+    if tenant.tenant_shard_id().shard_count > ShardCount(0) {
+        // Note that we use ShardParameters::default below.
+        return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
+            "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
+        )));
+    }
+
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
-    let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
+    let location_conf = LocationConf::attached_single(
+        new_tenant_conf,
+        tenant.generation,
+        &ShardParameters::default(),
+    );
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
         .await
@@ -1650,8 +1664,8 @@ pub(crate) enum TenantMapListError {
 ///
 /// Get list of tenants, for the mgmt API
 ///
-pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, TenantMapListError>
-{
+pub(crate) async fn list_tenants(
+) -> Result<Vec<(TenantShardId, TenantState, Generation)>, TenantMapListError> {
     let tenants = TENANTS.read().unwrap();
     let m = match &*tenants {
         TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -1659,7 +1673,9 @@ pub(crate) async fn list_tenants() -> Result<Vec<(TenantShardId, TenantState)>, 
     };
     Ok(m.iter()
         .filter_map(|(id, tenant)| match tenant {
-            TenantSlot::Attached(tenant) => Some((*id, tenant.current_state())),
+            TenantSlot::Attached(tenant) => {
+                Some((*id, tenant.current_state(), tenant.generation()))
+            }
             TenantSlot::Secondary(_) => None,
             TenantSlot::InProgress(_) => None,
         })

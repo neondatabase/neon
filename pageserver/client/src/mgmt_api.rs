@@ -1,5 +1,5 @@
 use pageserver_api::{models::*, shard::TenantShardId};
-use reqwest::{IntoUrl, Method};
+use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
@@ -22,8 +22,8 @@ pub enum Error {
     #[error("receive error body: {0}")]
     ReceiveErrorBody(String),
 
-    #[error("pageserver API: {0}")]
-    ApiError(String),
+    #[error("pageserver API: {1}")]
+    ApiError(StatusCode, String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -41,7 +41,7 @@ impl ResponseErrorMessageExt for reqwest::Response {
 
         let url = self.url().to_owned();
         Err(match self.json::<HttpErrorBody>().await {
-            Ok(HttpErrorBody { msg }) => Error::ApiError(msg),
+            Ok(HttpErrorBody { msg }) => Error::ApiError(status, msg),
             Err(_) => {
                 Error::ReceiveErrorBody(format!("Http error ({}) at {}.", status.as_u16(), url))
             }
@@ -71,9 +71,9 @@ impl Client {
 
     pub async fn tenant_details(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<pageserver_api::models::TenantDetails> {
-        let uri = format!("{}/v1/tenant/{tenant_id}", self.mgmt_api_endpoint);
+        let uri = format!("{}/v1/tenant/{tenant_shard_id}", self.mgmt_api_endpoint);
         self.get(uri)
             .await?
             .json()
@@ -83,9 +83,12 @@ impl Client {
 
     pub async fn list_timelines(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
     ) -> Result<Vec<pageserver_api::models::TimelineInfo>> {
-        let uri = format!("{}/v1/tenant/{tenant_id}/timeline", self.mgmt_api_endpoint);
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline",
+            self.mgmt_api_endpoint
+        );
         self.get(&uri)
             .await?
             .json()
@@ -179,23 +182,23 @@ impl Client {
             "{}/v1/tenant/{}/secondary/download",
             self.mgmt_api_endpoint, tenant_id
         );
-        self.request(Method::POST, &uri, ())
-            .await?
-            .error_for_status()
-            .map(|_| ())
-            .map_err(|e| Error::ApiError(format!("{}", e)))
+        self.request(Method::POST, &uri, ()).await?;
+        Ok(())
     }
 
     pub async fn location_config(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         config: LocationConfig,
         flush_ms: Option<std::time::Duration>,
     ) -> Result<()> {
-        let req_body = TenantLocationConfigRequest { tenant_id, config };
+        let req_body = TenantLocationConfigRequest {
+            tenant_id: tenant_shard_id,
+            config,
+        };
         let path = format!(
             "{}/v1/tenant/{}/location_config",
-            self.mgmt_api_endpoint, tenant_id
+            self.mgmt_api_endpoint, tenant_shard_id
         );
         let path = if let Some(flush_ms) = flush_ms {
             format!("{}?flush_ms={}", path, flush_ms.as_millis())
@@ -237,6 +240,21 @@ impl Client {
             self.mgmt_api_endpoint, tenant_shard_id
         );
         self.request(Method::POST, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn tenant_synthetic_size(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<TenantHistorySize> {
+        let uri = format!(
+            "{}/v1/tenant/{}/synthetic_size",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.get(&uri)
             .await?
             .json()
             .await

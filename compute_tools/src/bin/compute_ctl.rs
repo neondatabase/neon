@@ -231,9 +231,9 @@ fn main() -> Result<()> {
     let compute = Arc::new(compute_node);
 
     // If this is a pooled VM, prewarm before starting HTTP server and becoming
-    // available for binding. Prewarming helps postgres start quicker later,
+    // available for binding. Prewarming helps Postgres start quicker later,
     // because QEMU will already have it's memory allocated from the host, and
-    // the necessary binaries will alreaady be cached.
+    // the necessary binaries will already be cached.
     if !spec_set {
         compute.prewarm_postgres()?;
     }
@@ -276,6 +276,11 @@ fn main() -> Result<()> {
 
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
+
+    info!(
+        "running compute with features: {:?}",
+        state.pspec.as_ref().unwrap().spec.features
+    );
     drop(state);
 
     // Launch remaining service threads
@@ -288,7 +293,7 @@ fn main() -> Result<()> {
     let pg = match compute.start_compute(extension_server_port) {
         Ok(pg) => Some(pg),
         Err(err) => {
-            error!("could not start the compute node: {:?}", err);
+            error!("could not start the compute node: {:#}", err);
             let mut state = compute.state.lock().unwrap();
             state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;

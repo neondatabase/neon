@@ -1,9 +1,7 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use futures::future::join_all;
-use pageserver::pgdatadir_mapping::key_to_rel_block;
-use pageserver::repository;
-use pageserver_api::key::is_rel_block_key;
+use pageserver_api::key::{is_rel_block_key, key_to_rel_block, Key};
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::PagestreamGetPageRequest;
 
@@ -269,7 +267,7 @@ async fn main_impl(
                         let mut rng = rand::thread_rng();
                         let r = &all_ranges[weights.sample(&mut rng)];
                         let key: i128 = rng.gen_range(r.start..r.end);
-                        let key = repository::Key::from_i128(key);
+                        let key = Key::from_i128(key);
                         let (rel_tag, block_no) =
                             key_to_rel_block(key).expect("we filter non-rel-block keys out above");
                         (
@@ -319,7 +317,7 @@ async fn main_impl(
                                 let mut rng = rand::thread_rng();
                                 let r = &ranges[weights.sample(&mut rng)];
                                 let key: i128 = rng.gen_range(r.start..r.end);
-                                let key = repository::Key::from_i128(key);
+                                let key = Key::from_i128(key);
                                 assert!(is_rel_block_key(&key));
                                 let (rel_tag, block_no) = key_to_rel_block(key)
                                     .expect("we filter non-rel-block keys out above");
@@ -351,10 +349,10 @@ async fn main_impl(
 
     let work_sender_task = tokio::spawn(work_sender);
 
+    info!("waiting for everything to become ready");
+    start_work_barrier.wait().await;
+    info!("work started");
     if let Some(runtime) = args.runtime {
-        info!("waiting for everything to become ready");
-        start_work_barrier.wait().await;
-        info!("work started");
         tokio::time::sleep(runtime.into()).await;
         info!("runtime over, signalling cancellation");
         cancel.cancel();

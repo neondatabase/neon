@@ -21,7 +21,6 @@ tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
-pageserver = { path = ".." }
 pageserver_client.workspace = true
 pageserver_api.workspace = true
 utils = { path = "../../libs/utils/" }

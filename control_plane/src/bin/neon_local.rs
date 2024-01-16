@@ -16,6 +16,7 @@ use control_plane::safekeeper::SafekeeperNode;
 use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
+use pageserver_api::shard::TenantShardId;
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -279,7 +280,7 @@ async fn get_timeline_infos(
     tenant_id: &TenantId,
 ) -> Result<HashMap<TimelineId, TimelineInfo>> {
     Ok(get_default_pageserver(env)
-        .timeline_list(tenant_id)
+        .timeline_list(&TenantShardId::unsharded(*tenant_id))
         .await?
         .into_iter()
         .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
@@ -490,7 +491,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
     match timeline_match.subcommand() {
         Some(("list", list_match)) => {
             let tenant_id = get_tenant_id(list_match, env)?;
-            let timelines = pageserver.timeline_list(&tenant_id).await?;
+            let timelines = pageserver
+                .timeline_list(&TenantShardId::unsharded(tenant_id))
+                .await?;
             print_timelines_tree(timelines, env.timeline_name_mappings())?;
         }
         Some(("create", create_match)) => {

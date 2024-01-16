@@ -13,6 +13,7 @@
 
 use anyhow::{bail, Context};
 use camino::Utf8Path;
+use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
@@ -1931,6 +1932,10 @@ impl Tenant {
         self.current_state() == TenantState::Active
     }
 
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
     /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
@@ -2696,10 +2701,11 @@ impl Tenant {
                 }
             }
 
-            // Legacy configs are implicitly in attached state
+            // Legacy configs are implicitly in attached state, and do not support sharding
             Ok(LocationConf::attached_single(
                 tenant_conf,
                 Generation::none(),
+                &models::ShardParameters::default(),
             ))
         } else {
             // FIXME If the config file is not found, assume that we're attaching
@@ -3204,6 +3210,55 @@ impl Tenant {
         .await
     }
 
+    async fn upload_initdb(
+        &self,
+        timelines_path: &Utf8PathBuf,
+        pgdata_path: &Utf8PathBuf,
+        timeline_id: &TimelineId,
+    ) -> anyhow::Result<()> {
+        let Some(storage) = &self.remote_storage else {
+            // No remote storage?  No upload.
+            return Ok(());
+        };
+
+        let temp_path = timelines_path.join(format!(
+            "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
+        ));
+
+        scopeguard::defer! {
+            if let Err(e) = fs::remove_file(&temp_path) {
+                error!("Failed to remove temporary initdb archive '{temp_path}': {e}");
+            }
+        }
+
+        let (pgdata_zstd, tar_zst_size) =
+            import_datadir::create_tar_zst(pgdata_path, &temp_path).await?;
+
+        pausable_failpoint!("before-initdb-upload");
+
+        backoff::retry(
+            || async {
+                self::remote_timeline_client::upload_initdb_dir(
+                    storage,
+                    &self.tenant_shard_id.tenant_id,
+                    timeline_id,
+                    pgdata_zstd.try_clone().await?,
+                    tar_zst_size,
+                    &self.cancel,
+                )
+                .await
+            },
+            |_| false,
+            3,
+            u32::MAX,
+            "persist_initdb_tar_zst",
+            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization completes, tar up the temp dir and upload it to S3.
     ///
@@ -3253,66 +3308,26 @@ impl Tenant {
                 )
                 .await
                 .context("download initdb tar")?;
+
+            scopeguard::defer! {
+                if let Err(e) = fs::remove_file(&initdb_tar_zst_path) {
+                    error!("Failed to remove temporary initdb archive '{initdb_tar_zst_path}': {e}");
+                }
+            }
+
             let buf_read =
                 BufReader::with_capacity(remote_timeline_client::BUFFER_SIZE, initdb_tar_zst);
             import_datadir::extract_tar_zst(&pgdata_path, buf_read)
                 .await
                 .context("extract initdb tar")?;
-
-            tokio::fs::remove_file(&initdb_tar_zst_path)
-                .await
-                .or_else(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        // If something else already removed the file, ignore the error
-                        Ok(())
-                    } else {
-                        Err(e)
-                    }
-                })
-                .with_context(|| format!("tempfile removal {initdb_tar_zst_path}"))?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
-            if let Some(storage) = &self.remote_storage {
-                let temp_path = timelines_path.join(format!(
-                    "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
-                ));
-
-                let (pgdata_zstd, tar_zst_size) =
-                    import_datadir::create_tar_zst(&pgdata_path, &temp_path).await?;
-                backoff::retry(
-                    || async {
-                        self::remote_timeline_client::upload_initdb_dir(
-                            storage,
-                            &self.tenant_shard_id.tenant_id,
-                            &timeline_id,
-                            pgdata_zstd.try_clone().await?,
-                            tar_zst_size,
-                            &self.cancel,
-                        )
-                        .await
-                    },
-                    |_| false,
-                    3,
-                    u32::MAX,
-                    "persist_initdb_tar_zst",
-                    backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Cancelled")),
-                )
-                .await?;
-
-                tokio::fs::remove_file(&temp_path)
-                    .await
-                    .or_else(|e| {
-                        if e.kind() == std::io::ErrorKind::NotFound {
-                            // If something else already removed the file, ignore the error
-                            Ok(())
-                        } else {
-                            Err(e)
-                        }
-                    })
-                    .with_context(|| format!("tempfile removal {temp_path}"))?;
+            if self.tenant_shard_id().is_zero() {
+                self.upload_initdb(&timelines_path, &pgdata_path, &timeline_id)
+                    .await?;
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
@@ -3975,6 +3990,7 @@ pub(crate) mod harness {
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     TenantConfOpt::from(self.tenant_conf),
                     self.generation,
+                    &ShardParameters::default(),
                 ))
                 .unwrap(),
                 // This is a legacy/test code path: sharding isn't supported here.
