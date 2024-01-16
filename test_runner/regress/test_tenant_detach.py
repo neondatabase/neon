@@ -34,6 +34,7 @@ PERMIT_PAGE_SERVICE_ERRORS = [
     ".*page_service.*Tenant .* is not active",
     ".*page_service.*cancelled",
     ".*page_service.*will not become active.*",
+    ".*Dropped remote consistent LSN updates for tenant.*"
 ]
 
 
