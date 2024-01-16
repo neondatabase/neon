@@ -22,6 +22,7 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use http_types::{StatusCode, Url};
+use tokio::time::Instant;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
@@ -340,13 +341,15 @@ impl RemoteStorage for AzureBlobStorage {
         let result = builder.into_future().await?;
 
         let mut copy_status = result.copy_status;
+        let start_time = Instant::now();
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(60);
         loop {
             match copy_status {
                 CopyStatus::Aborted => {
-                    anyhow::bail!("copy from {from} to {to} aborted!");
+                    anyhow::bail!("Received abort for copy from {from} to {to}.");
                 }
                 CopyStatus::Failed => {
-                    anyhow::bail!("copy from {from} to {to} failed!");
+                    anyhow::bail!("Received failure response for copy from {from} to {to}.");
                 }
                 CopyStatus::Success => return Ok(()),
                 CopyStatus::Pending => (),
@@ -359,6 +362,12 @@ impl RemoteStorage for AzureBlobStorage {
                 tracing::warn!("copy_status for copy is None!, from={from}, to={to}");
                 return Ok(());
             };
+            if start_time.elapsed() > MAX_WAIT_TIME {
+                anyhow::bail!("Copy from from {from} to {to} took longer than limit MAX_WAIT_TIME={}s. copy_pogress={:?}.",
+                    MAX_WAIT_TIME.as_secs_f32(),
+                    properties.blob.properties.copy_progress,
+                );
+            }
             copy_status = status;
         }
     }
