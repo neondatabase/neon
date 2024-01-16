@@ -477,6 +477,8 @@ pub async fn init_tenant_mgr(
                             tenant_shard_id,
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
+                                location_conf.shard,
+                                location_conf.tenant_conf,
                                 secondary_config,
                             )),
                         );
@@ -908,6 +910,7 @@ impl TenantManager {
                     Some(TenantSlot::Secondary(secondary_tenant)),
                 ) => {
                     secondary_tenant.set_config(secondary_conf);
+                    secondary_tenant.set_tenant_conf(&new_location_config.tenant_conf);
                     Some(FastPathModified::Secondary(secondary_tenant.clone()))
                 }
                 _ => {
@@ -1040,7 +1043,13 @@ impl TenantManager {
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
-                TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id, secondary_config))
+                let shard_identity = new_location_config.shard;
+                TenantSlot::Secondary(SecondaryTenant::new(
+                    tenant_shard_id,
+                    shard_identity,
+                    new_location_config.tenant_conf,
+                    secondary_config,
+                ))
             }
             LocationMode::Attached(_attach_config) => {
                 let shard_identity = new_location_config.shard;

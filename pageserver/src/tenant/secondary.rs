@@ -12,9 +12,15 @@ use self::{
     heatmap_uploader::heatmap_uploader_task,
 };
 
-use super::{config::SecondaryLocationConfig, mgr::TenantManager};
+use super::{
+    config::{SecondaryLocationConfig, TenantConfOpt},
+    mgr::TenantManager,
+};
 
-use pageserver_api::{models, shard::TenantShardId};
+use pageserver_api::{
+    models,
+    shard::{ShardIdentity, TenantShardId},
+};
 use remote_storage::GenericRemoteStorage;
 
 use tokio_util::sync::CancellationToken;
@@ -75,12 +81,20 @@ pub(crate) struct SecondaryTenant {
 
     pub(crate) gate: Gate,
 
+    // Secondary mode does not need the full shard identity or the TenantConfOpt.  However,
+    // storing these enables us to report our full LocationConf, enabling convenient reconciliation
+    // by the control plane (see [`Self::get_location_conf`])
+    shard_identity: ShardIdentity,
+    tenant_conf: std::sync::Mutex<TenantConfOpt>,
+
     detail: std::sync::Mutex<SecondaryDetail>,
 }
 
 impl SecondaryTenant {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
+        shard_identity: ShardIdentity,
+        tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -91,6 +105,9 @@ impl SecondaryTenant {
             // individual cancellations?
             cancel: CancellationToken::new(),
             gate: Gate::new(format!("SecondaryTenant {tenant_shard_id}")),
+
+            shard_identity,
+            tenant_conf: std::sync::Mutex::new(tenant_conf),
 
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
         })
@@ -107,6 +124,10 @@ impl SecondaryTenant {
         self.detail.lock().unwrap().config = config.clone();
     }
 
+    pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
+        *(self.tenant_conf.lock().unwrap()) = *config;
+    }
+
     fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
@@ -119,16 +140,15 @@ impl SecondaryTenant {
 
         let conf = models::LocationConfigSecondary { warm: conf.warm };
 
+        let tenant_conf = *self.tenant_conf.lock().unwrap();
         models::LocationConfig {
             mode: models::LocationConfigMode::Secondary,
             generation: None,
             secondary_conf: Some(conf),
             shard_number: self.tenant_shard_id.shard_number.0,
             shard_count: self.tenant_shard_id.shard_count.0,
-            // Shard stripe size is not set in secondary mode
-            shard_stripe_size: u32::default(),
-            // TenantConfig is for attached tenants, not set in secondary mode
-            tenant_conf: models::TenantConfig::default(),
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_conf.into(),
         }
     }
 }
