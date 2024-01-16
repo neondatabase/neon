@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
 use utils::id::TenantTimelineId;
-use utils::lsn::AtomicLsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
 use std::cmp::{max, min};
@@ -90,16 +89,12 @@ pub struct StandbyFeedback {
 
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
 pub struct WalSenders {
-    /// Lsn maximized over all walsenders *and* peer data, so might be higher
-    /// than what we receive from replicas.
-    remote_consistent_lsn: AtomicLsn,
     mutex: Mutex<WalSendersShared>,
 }
 
 impl WalSenders {
-    pub fn new(remote_consistent_lsn: Lsn) -> Arc<WalSenders> {
+    pub fn new() -> Arc<WalSenders> {
         Arc::new(WalSenders {
-            remote_consistent_lsn: AtomicLsn::from(remote_consistent_lsn),
             mutex: Mutex::new(WalSendersShared::new()),
         })
     }
@@ -157,7 +152,6 @@ impl WalSenders {
         let mut shared = self.mutex.lock();
         shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
         shared.update_ps_feedback();
-        self.update_remote_consistent_lsn(shared.agg_ps_feedback.remote_consistent_lsn);
     }
 
     /// Record standby reply.
@@ -200,18 +194,6 @@ impl WalSenders {
             ReplicationFeedback::Pageserver(feedback) => Some(feedback.remote_consistent_lsn),
             _ => None,
         }
-    }
-
-    /// Get remote_consistent_lsn maximized across all walsenders and peers.
-    pub fn get_remote_consistent_lsn(self: &Arc<WalSenders>) -> Lsn {
-        self.remote_consistent_lsn.load()
-    }
-
-    /// Update maximized remote_consistent_lsn, return new (potentially) value.
-    pub fn update_remote_consistent_lsn(self: &Arc<WalSenders>, candidate: Lsn) -> Lsn {
-        self.remote_consistent_lsn
-            .fetch_max(candidate)
-            .max(candidate)
     }
 
     /// Unregister walsender.
@@ -444,7 +426,11 @@ impl SafekeeperPostgresHandler {
             wal_reader,
             send_buf: [0; MAX_SEND_SIZE],
         };
-        let mut reply_reader = ReplyReader { reader, ws_guard };
+        let mut reply_reader = ReplyReader {
+            reader,
+            ws_guard,
+            tli,
+        };
 
         let res = tokio::select! {
             // todo: add read|write .context to these errors
@@ -638,17 +624,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
     ws_guard: Arc<WalSenderGuard>,
+    tli: Arc<Timeline>,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
     async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             let msg = self.reader.read_copy_message().await?;
-            self.handle_feedback(&msg)?
+            self.handle_feedback(&msg).await?
         }
     }
 
-    fn handle_feedback(&mut self, msg: &Bytes) -> anyhow::Result<()> {
+    async fn handle_feedback(&mut self, msg: &Bytes) -> anyhow::Result<()> {
         match msg.first().cloned() {
             Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                 // Note: deserializing is on m[1..] because we skip the tag byte.
@@ -675,6 +662,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                 self.ws_guard
                     .walsenders
                     .record_ps_feedback(self.ws_guard.id, &ps_feedback);
+                self.tli
+                    .update_remote_consistent_lsn(ps_feedback.remote_consistent_lsn)
+                    .await;
                 // in principle new remote_consistent_lsn could allow to
                 // deactivate the timeline, but we check that regularly through
                 // broker updated, not need to do it here

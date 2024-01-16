@@ -542,6 +542,7 @@ impl DeleteTenantFlow {
         )
         .await?;
 
+        pausable_failpoint!("tenant-delete-before-cleanup-remaining-fs-traces-pausable");
         fail::fail_point!("tenant-delete-before-cleanup-remaining-fs-traces", |_| {
             Err(anyhow::anyhow!(
                 "failpoint: tenant-delete-before-cleanup-remaining-fs-traces"

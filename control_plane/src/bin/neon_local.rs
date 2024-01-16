@@ -6,16 +6,17 @@
 //! rely on `neon_local` to set up the environment for each test.
 //!
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
+use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::attachment_service::AttachmentService;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::local_env::LocalEnv;
+use control_plane::local_env::{InitForceMode, LocalEnv};
 use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::tenant_migration::migrate_tenant;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
+use pageserver_api::shard::TenantShardId;
 use pageserver_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
@@ -279,7 +280,7 @@ async fn get_timeline_infos(
     tenant_id: &TenantId,
 ) -> Result<HashMap<TimelineId, TimelineInfo>> {
     Ok(get_default_pageserver(env)
-        .timeline_list(tenant_id)
+        .timeline_list(&TenantShardId::unsharded(*tenant_id))
         .await?
         .into_iter()
         .map(|timeline_info| (timeline_info.timeline_id, timeline_info))
@@ -338,7 +339,7 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
 
     let mut env =
         LocalEnv::parse_config(&toml_file).context("Failed to create neon configuration")?;
-    let force = init_match.get_flag("force");
+    let force = init_match.get_one("force").expect("we set a default value");
     env.init(pg_version, force)
         .context("Failed to initialize neon repository")?;
 
@@ -490,7 +491,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
     match timeline_match.subcommand() {
         Some(("list", list_match)) => {
             let tenant_id = get_tenant_id(list_match, env)?;
-            let timelines = pageserver.timeline_list(&tenant_id).await?;
+            let timelines = pageserver
+                .timeline_list(&TenantShardId::unsharded(tenant_id))
+                .await?;
             print_timelines_tree(timelines, env.timeline_name_mappings())?;
         }
         Some(("create", create_match)) => {
@@ -1266,9 +1269,15 @@ fn cli() -> Command {
         .required(false);
 
     let force_arg = Arg::new("force")
-        .value_parser(value_parser!(bool))
+        .value_parser(value_parser!(InitForceMode))
         .long("force")
-        .action(ArgAction::SetTrue)
+        .default_value(
+            InitForceMode::MustNotExist
+                .to_possible_value()
+                .unwrap()
+                .get_name()
+                .to_owned(),
+        )
         .help("Force initialization even if the repository is not empty")
         .required(false);
 

@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -14,7 +13,9 @@ use hyper::{Body, HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
+use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -28,8 +29,13 @@ use url::Url;
 use utils::http::error::ApiError;
 use utils::http::json::json_response;
 
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::endpoint_sni;
 use crate::config::HttpConfig;
+use crate::config::TlsConfig;
+use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CONNECTION_REQUESTS_GAUGE;
+use crate::proxy::NeonOptions;
 
 use super::conn_pool::ConnInfo;
 use super::conn_pool::GlobalConnPool;
@@ -54,6 +60,7 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART: &str = "api";
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -121,8 +128,10 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 }
 
 fn get_conn_info(
+    ctx: &mut RequestMonitoring,
     headers: &HeaderMap,
     sni_hostname: Option<String>,
+    tls: &TlsConfig,
 ) -> Result<ConnInfo, anyhow::Error> {
     let connection_string = headers
         .get("Neon-Connection-String")
@@ -146,10 +155,11 @@ fn get_conn_info(
         .next()
         .ok_or(anyhow::anyhow!("invalid database name"))?;
 
-    let username = connection_url.username();
+    let username = SmolStr::from(connection_url.username());
     if username.is_empty() {
         return Err(anyhow::anyhow!("missing username"));
     }
+    ctx.set_user(username.clone());
 
     let password = connection_url
         .password()
@@ -168,13 +178,19 @@ fn get_conn_info(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.split(':').next());
 
-    if hostname != sni_hostname {
+    // sni_hostname has to be either the same as hostname or the one used in serverless driver.
+    if !check_matches(&sni_hostname, hostname)? {
         return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
     } else if let Some(h) = host_header {
-        if h != hostname {
+        if h != sni_hostname {
             return Err(anyhow::anyhow!("mismatched host header and hostname"));
         }
     }
+
+    let endpoint = endpoint_sni(hostname, &tls.common_names)?;
+
+    let endpoint: SmolStr = endpoint.into();
+    ctx.set_endpoint_id(Some(endpoint.clone()));
 
     let pairs = connection_url.query_pairs();
 
@@ -182,46 +198,57 @@ fn get_conn_info(
 
     for (key, value) in pairs {
         if key == "options" {
-            options = Some(value.into());
+            options = Some(NeonOptions::parse_options_raw(&value));
             break;
         }
     }
 
+    let user_info = ComputeUserInfo {
+        endpoint,
+        user: username,
+        options: options.unwrap_or_default(),
+    };
+
     Ok(ConnInfo {
-        username: username.into(),
+        user_info,
         dbname: dbname.into(),
-        hostname: hostname.into(),
         password: password.into(),
-        options,
     })
+}
+
+fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Error> {
+    if sni_hostname == hostname {
+        return Ok(true);
+    }
+    let (sni_hostname_first, sni_hostname_rest) = sni_hostname
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected sni format."))?;
+    let (_, hostname_rest) = hostname
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
+    Ok(sni_hostname_rest == hostname_rest
+        && sni_hostname_first == SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART)
 }
 
 // TODO: return different http error codes
 pub async fn handle(
+    tls: &'static TlsConfig,
+    config: &'static HttpConfig,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
-    config: &'static HttpConfig,
 ) -> Result<Response<Body>, ApiError> {
     let result = tokio::time::timeout(
         config.request_timeout,
-        handle_inner(
-            config,
-            request,
-            sni_hostname,
-            conn_pool,
-            session_id,
-            peer_addr,
-        ),
+        handle_inner(tls, config, ctx, request, sni_hostname, conn_pool),
     )
     .await;
     let mut response = match result {
         Ok(r) => match r {
             Ok(r) => r,
             Err(e) => {
-                let message = format!("{:?}", e);
+                let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
                     .and_then(|e| e.as_db_error());
@@ -234,7 +261,25 @@ pub async fn handle(
                         .unwrap_or_default()
                 }
 
-                // TODO(conrad): db_error.position()
+                if let Some(db_error) = db_error {
+                    db_error.message().clone_into(&mut message);
+                }
+
+                let position = db_error.and_then(|db| db.position());
+                let (position, internal_position, internal_query) = match position {
+                    Some(ErrorPosition::Original(position)) => (
+                        Value::String(position.to_string()),
+                        Value::Null,
+                        Value::Null,
+                    ),
+                    Some(ErrorPosition::Internal { position, query }) => (
+                        Value::Null,
+                        Value::String(position.to_string()),
+                        Value::String(query.clone()),
+                    ),
+                    None => (Value::Null, Value::Null, Value::Null),
+                };
+
                 let code = get(db_error, |db| db.code().code());
                 let severity = get(db_error, |db| db.severity());
                 let detail = get(db_error, |db| db.detail());
@@ -246,7 +291,7 @@ pub async fn handle(
                 let datatype = get(db_error, |db| db.datatype());
                 let constraint = get(db_error, |db| db.constraint());
                 let file = get(db_error, |db| db.file());
-                let line = get(db_error, |db| db.line());
+                let line = get(db_error, |db| db.line().map(|l| l.to_string()));
                 let routine = get(db_error, |db| db.routine());
 
                 error!(
@@ -261,12 +306,15 @@ pub async fn handle(
                         "code": code,
                         "detail": detail,
                         "hint": hint,
+                        "position": position,
+                        "internalPosition": internal_position,
+                        "internalQuery": internal_query,
                         "severity": severity,
                         "where": where_,
                         "table": table,
                         "column": column,
                         "schema": schema,
-                        "datatype": datatype,
+                        "dataType": datatype,
                         "constraint": constraint,
                         "file": file,
                         "line": line,
@@ -296,12 +344,12 @@ pub async fn handle(
 
 #[instrument(name = "sql-over-http", fields(pid = tracing::field::Empty), skip_all)]
 async fn handle_inner(
+    tls: &'static TlsConfig,
     config: &'static HttpConfig,
+    ctx: &mut RequestMonitoring,
     request: Request<Body>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-    session_id: uuid::Uuid,
-    peer_addr: IpAddr,
 ) -> anyhow::Result<Response<Body>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
@@ -311,7 +359,7 @@ async fn handle_inner(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let conn_info = get_conn_info(headers, sni_hostname)?;
+    let conn_info = get_conn_info(ctx, headers, sni_hostname, tls)?;
 
     // Determine the output options. Default behaviour is 'false'. Anything that is not
     // strictly 'true' assumed to be false.
@@ -340,10 +388,12 @@ async fn handle_inner(
     let txn_read_only = headers.get(&TXN_READ_ONLY) == Some(&HEADER_VALUE_TRUE);
     let txn_deferrable = headers.get(&TXN_DEFERRABLE) == Some(&HEADER_VALUE_TRUE);
 
+    let paused = ctx.latency_timer.pause();
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
         None => MAX_REQUEST_SIZE + 1,
     };
+    drop(paused);
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
@@ -359,9 +409,7 @@ async fn handle_inner(
     let body = hyper::body::to_bytes(request.into_body()).await?;
     let payload: Payload = serde_json::from_slice(&body)?;
 
-    let mut client = conn_pool
-        .get(conn_info, !allow_pool, session_id, peer_addr)
-        .await?;
+    let mut client = conn_pool.get(ctx, conn_info, !allow_pool).await?;
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -449,6 +497,7 @@ async fn handle_inner(
             }
         };
 
+    ctx.log();
     let metrics = client.metrics();
 
     // how could this possibly fail

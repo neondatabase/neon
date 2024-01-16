@@ -1903,7 +1903,7 @@ mod tests {
         fn span(&self) -> tracing::Span {
             tracing::info_span!(
                 "test",
-                tenant_id = %self.harness.tenant_id,
+                tenant_id = %self.harness.tenant_shard_id.tenant_id,
                 timeline_id = %TIMELINE_ID
             )
         }

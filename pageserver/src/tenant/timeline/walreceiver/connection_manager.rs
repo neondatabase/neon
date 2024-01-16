@@ -1337,7 +1337,7 @@ mod tests {
 
         ConnectionManagerState {
             id: TenantTimelineId {
-                tenant_id: harness.tenant_id,
+                tenant_id: harness.tenant_shard_id.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
             timeline,

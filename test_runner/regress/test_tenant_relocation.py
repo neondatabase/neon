@@ -161,12 +161,10 @@ def switch_pg_to_new_pageserver(
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
         "metadata" in files_before_detach
-    ), f"Regular timeline {timeline_to_detach_local_path} should have the metadata file,\
-            but got: {files_before_detach}"
+    ), f"Regular timeline {timeline_to_detach_local_path} should have the metadata file, but got: {files_before_detach}"
     assert (
         len(files_before_detach) >= 2
-    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file,\
-            but got {files_before_detach}"
+    ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
 
     return timeline_to_detach_local_path
 

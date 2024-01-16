@@ -3,6 +3,8 @@ use byteorder::{ByteOrder, BE};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::reltag::{BlockNumber, RelTag};
+
 /// Key used in the Repository kv-store.
 ///
 /// The Repository treats this as an opaque struct, but see the code in pgdatadir_mapping.rs
@@ -141,8 +143,25 @@ impl Key {
     }
 }
 
+#[inline(always)]
 pub fn is_rel_block_key(key: &Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
+}
+
+/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
+pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
+    Ok(match key.field1 {
+        0x00 => (
+            RelTag {
+                spcnode: key.field2,
+                dbnode: key.field3,
+                relnode: key.field4,
+                forknum: key.field5,
+            },
+            key.field6,
+        ),
+        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
+    })
 }
 
 impl std::str::FromStr for Key {

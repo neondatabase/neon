@@ -743,7 +743,7 @@ async fn collect_eviction_candidates(
     // (https://github.com/neondatabase/neon/issues/6224)
     let mut candidates = Vec::new();
 
-    for (tenant_id, _state) in tenants {
+    for (tenant_id, _state, _gen) in tenants {
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
