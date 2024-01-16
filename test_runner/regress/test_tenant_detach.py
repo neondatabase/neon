@@ -749,11 +749,9 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
 
     client = env.pageserver.http_client()
     env.pageserver.allowed_errors.append(
-        [
-            r".* Changing Active tenant to Broken state, reason: broken from test",
-            r".*Dropped remote consistent LSN updates for tenant *.",
-        ]
+        r".* Changing Active tenant to Broken state, reason: broken from test"
     )
+    env.pageserver.allowed_errors.append(r".*Dropped remote consistent LSN updates for tenant *.")
 
     def only_int(samples: List[Sample]) -> Optional[int]:
         if len(samples) == 1:
