@@ -34,7 +34,7 @@ PERMIT_PAGE_SERVICE_ERRORS = [
     ".*page_service.*Tenant .* is not active",
     ".*page_service.*cancelled",
     ".*page_service.*will not become active.*",
-    ".*Dropped remote consistent LSN updates for tenant.*"
+    ".*Dropped remote consistent LSN updates for tenant.*",
 ]
 
 
@@ -748,10 +748,12 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
     env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
-    env.pageserver.allowed_errors.append([
-        r".* Changing Active tenant to Broken state, reason: broken from test",
-        ".*Dropped remote consistent LSN updates for tenant *."
-    ])
+    env.pageserver.allowed_errors.append(
+        [
+            r".* Changing Active tenant to Broken state, reason: broken from test",
+            r".*Dropped remote consistent LSN updates for tenant *.",
+        ]
+    )
 
     def only_int(samples: List[Sample]) -> Optional[int]:
         if len(samples) == 1:
