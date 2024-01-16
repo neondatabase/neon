@@ -3806,6 +3806,7 @@ pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
+    use pageserver_api::models::ShardParameters;
     use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;
