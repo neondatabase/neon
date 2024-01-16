@@ -302,7 +302,9 @@ pub struct LocationConfig {
     #[serde(default)]
     pub shard_stripe_size: u32,
 
-    // If requesting an Attached mode, supply configuration here
+    // This configuration only affects attached mode, but should be provided irrespective
+    // of the mode, as a secondary location might transition on startup if the response
+    // to the `/re-attach` control plane API requests it.
     pub tenant_conf: TenantConfig,
 }
 
