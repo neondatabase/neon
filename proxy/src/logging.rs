@@ -28,7 +28,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
 
     let reg = tracing_subscriber::registry();
 
-    #[cfg(feature = "tokio-console")]
+    #[cfg(all(tokio_unstable, feature = "tokio-console"))]
     let reg = reg.with(console_subscriber::spawn());
 
     reg.with(env_filter)
