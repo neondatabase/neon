@@ -330,8 +330,12 @@ impl RemoteStorage for AzureBlobStorage {
         let _permit = self.permit(RequestKind::Copy).await;
         let blob_client = self.client.blob_client(self.relative_path_to_name(to));
 
-        let source_name = self.relative_path_to_name(from);
-        let builder = blob_client.copy(Url::from_str(&source_name)?);
+        let source_url = format!(
+            "{}/{}",
+            self.client.url()?,
+            self.relative_path_to_name(from)
+        );
+        let builder = blob_client.copy(Url::from_str(&source_url)?);
 
         let result = builder.into_future().await?;
 
