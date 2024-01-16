@@ -644,7 +644,7 @@ impl RemoteStorage for S3Bucket {
         let timestamp = DateTime::from(timestamp);
         let done_if_after = DateTime::from(done_if_after);
 
-        tracing::info!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
+        tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let prefix = prefix
@@ -658,6 +658,10 @@ impl RemoteStorage for S3Bucket {
             .set_prefix(prefix.clone())
             .send()
             .await?;
+
+        if list.is_truncated().unwrap_or_default() {
+            anyhow::bail!("Received truncated ListObjectVersions response for prefix={prefix:?}");
+        }
 
         let mut versions_deletes = list
             .versions()
@@ -687,7 +691,7 @@ impl RemoteStorage for S3Bucket {
                 anyhow::bail!("Received ListVersions response for key={key} with version_id='null', \
                     indicating either disabled versioning, or legacy objects with null version id values");
             }
-            tracing::info!(
+            tracing::trace!(
                 "Parsing version key={key} version_id={version_id} is_delete={}",
                 matches!(vd, VerOrDelete::DeleteMarker(_))
             );
@@ -700,7 +704,7 @@ impl RemoteStorage for S3Bucket {
         for (key, versions) in hm_vd {
             let (last_vd, last_last_modified, _version_id) = versions.last().unwrap();
             if last_last_modified > &&done_if_after {
-                tracing::info!("Key {key} has version later than done_if_after, skipping");
+                tracing::trace!("Key {key} has version later than done_if_after, skipping");
                 continue;
             }
             // the version we want to restore to.
@@ -710,13 +714,13 @@ impl RemoteStorage for S3Bucket {
                     Err(e) => e,
                 };
             if version_to_restore_to == versions.len() {
-                tracing::info!("Key {key} has no changes since timestamp, skipping");
+                tracing::trace!("Key {key} has no changes since timestamp, skipping");
                 continue;
             }
             let mut do_delete = false;
             if version_to_restore_to == 0 {
                 // All versions more recent, so the key didn't exist at the specified time point.
-                tracing::info!(
+                tracing::trace!(
                     "All {} versions more recent for {key}, deleting",
                     versions.len()
                 );
@@ -724,7 +728,7 @@ impl RemoteStorage for S3Bucket {
             } else {
                 match &versions[version_to_restore_to - 1] {
                     (VerOrDelete::Version(_), _last_modified, version_id) => {
-                        tracing::info!("Copying old version {version_id} for {key}...");
+                        tracing::trace!("Copying old version {version_id} for {key}...");
                         // Restore the state to the last version by copying
                         let source_id =
                             format!("{}/{key}?versionId={version_id}", self.bucket_name);
@@ -745,9 +749,9 @@ impl RemoteStorage for S3Bucket {
             if do_delete {
                 if matches!(last_vd, VerOrDelete::DeleteMarker(_)) {
                     // Key has since been deleted (but there was some history), no need to do anything
-                    tracing::info!("Key {key} already deleted, skipping.");
+                    tracing::trace!("Key {key} already deleted, skipping.");
                 } else {
-                    tracing::info!("Deleting {key}...");
+                    tracing::trace!("Deleting {key}...");
 
                     let oid = ObjectIdentifier::builder().key(key.to_owned()).build()?;
                     self.delete_oids(kind, &[oid]).await?;
