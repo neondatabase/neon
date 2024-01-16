@@ -14,6 +14,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -265,7 +266,7 @@ impl From<SetNewTenantConfigError> for ApiError {
             SetNewTenantConfigError::GetTenant(tid) => {
                 ApiError::NotFound(anyhow!("tenant {}", tid).into())
             }
-            e @ SetNewTenantConfigError::Persist(_) => {
+            e @ (SetNewTenantConfigError::Persist(_) | SetNewTenantConfigError::Other(_)) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
             }
         }
@@ -704,7 +705,9 @@ async fn tenant_attach_handler(
     }
 
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let shard_params = ShardParameters::default();
+    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
+
     let tenant = state
         .tenant_manager
         .upsert_location(
@@ -1194,7 +1197,8 @@ async fn tenant_create_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let location_conf =
+        LocationConf::attached_single(tenant_conf, generation, &request_data.shard_parameters);
 
     let new_tenant = state
         .tenant_manager
@@ -1213,7 +1217,6 @@ async fn tenant_create_handler(
             "Upsert succeeded but didn't return tenant!"
         )));
     };
-
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
     if let res @ Err(_) = new_tenant
@@ -1652,12 +1655,13 @@ async fn disk_usage_eviction_run(
         )));
     };
 
-    let state = state.disk_usage_eviction_state.clone();
+    let eviction_state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state,
+        &eviction_state,
         storage,
         usage,
+        &state.tenant_manager,
         config.eviction_order,
         &cancel,
     )

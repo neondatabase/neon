@@ -9,7 +9,7 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
-use pageserver_api::models;
+use pageserver_api::models::{self, ShardParameters};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
@@ -167,14 +167,17 @@ impl LocationConf {
     /// For use when loading from a legacy configuration: presence of a tenant
     /// implies it is in AttachmentMode::Single, which used to be the only
     /// possible state.  This function should eventually be removed.
-    pub(crate) fn attached_single(tenant_conf: TenantConfOpt, generation: Generation) -> Self {
+    pub(crate) fn attached_single(
+        tenant_conf: TenantConfOpt,
+        generation: Generation,
+        shard_params: &ShardParameters,
+    ) -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
                 generation,
                 attach_mode: AttachmentMode::Single,
             }),
-            // Legacy configuration loads are always from tenants created before sharding existed.
-            shard: ShardIdentity::unsharded(),
+            shard: ShardIdentity::from_params(ShardNumber(0), shard_params),
             tenant_conf,
         }
     }

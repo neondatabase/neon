@@ -18,7 +18,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use crate::{reltag::RelTag, shard::TenantShardId};
+use crate::{
+    reltag::RelTag,
+    shard::{ShardCount, ShardStripeSize, TenantShardId},
+};
 use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -188,6 +191,31 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+/// Parameters that apply to all shards in a tenant.  Used during tenant creation.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ShardParameters {
+    pub count: ShardCount,
+    pub stripe_size: ShardStripeSize,
+}
+
+impl ShardParameters {
+    pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
+
+    pub fn is_unsharded(&self) -> bool {
+        self.count == ShardCount(0)
+    }
+}
+
+impl Default for ShardParameters {
+    fn default() -> Self {
+        Self {
+            count: ShardCount(0),
+            stripe_size: Self::DEFAULT_STRIPE_SIZE,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
@@ -195,6 +223,12 @@ pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<u32>,
+
+    // If omitted, create a single shard with TenantShardId::unsharded()
+    #[serde(default)]
+    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
+    pub shard_parameters: ShardParameters,
+
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -297,7 +331,7 @@ pub struct StatusResponse {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantLocationConfigRequest {
-    pub tenant_id: TenantId,
+    pub tenant_id: TenantShardId,
     #[serde(flatten)]
     pub config: LocationConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -658,6 +692,17 @@ pub struct PagestreamErrorResponse {
 #[derive(Debug)]
 pub struct PagestreamDbSizeResponse {
     pub db_size: i64,
+}
+
+// This is a cut-down version of TenantHistorySize from the pageserver crate, omitting fields
+// that require pageserver-internal types.  It is sufficient to get the total size.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantHistorySize {
+    pub id: TenantId,
+    /// Size is a mixture of WAL and logical size, so the unit is bytes.
+    ///
+    /// Will be none if `?inputs_only=true` was given.
+    pub size: Option<u64>,
 }
 
 impl PagestreamFeMessage {

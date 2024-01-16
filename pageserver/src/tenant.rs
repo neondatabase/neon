@@ -18,6 +18,7 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
@@ -2674,10 +2675,11 @@ impl Tenant {
                 }
             }
 
-            // Legacy configs are implicitly in attached state
+            // Legacy configs are implicitly in attached state, and do not support sharding
             Ok(LocationConf::attached_single(
                 tenant_conf,
                 Generation::none(),
+                &ShardParameters::default(),
             ))
         } else {
             // FIXME If the config file is not found, assume that we're attaching
@@ -3962,6 +3964,7 @@ pub(crate) mod harness {
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     TenantConfOpt::from(self.tenant_conf),
                     self.generation,
+                    &ShardParameters::default(),
                 ))
                 .unwrap(),
                 // This is a legacy/test code path: sharding isn't supported here.

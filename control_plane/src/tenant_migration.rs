@@ -24,7 +24,9 @@ async fn get_lsns(
     tenant_id: TenantId,
     pageserver: &PageServerNode,
 ) -> anyhow::Result<HashMap<TimelineId, Lsn>> {
-    let timelines = pageserver.timeline_list(&tenant_id).await?;
+    let timelines = pageserver
+        .timeline_list(&TenantShardId::unsharded(tenant_id))
+        .await?;
     Ok(timelines
         .into_iter()
         .map(|t| (t.timeline_id, t.last_record_lsn))
@@ -120,7 +122,9 @@ pub async fn migrate_tenant(
                 .attach_hook(tenant_id, dest_ps.conf.id)
                 .await?;
             let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-            dest_ps.location_config(tenant_id, dest_conf, None).await?;
+            dest_ps
+                .location_config(TenantShardId::unsharded(tenant_id), dest_conf, None)
+                .await?;
             println!("✅ Migration complete");
             return Ok(());
         }
@@ -130,7 +134,11 @@ pub async fn migrate_tenant(
         let stale_conf =
             build_location_config(LocationConfigMode::AttachedStale, Some(*generation), None);
         origin_ps
-            .location_config(tenant_id, stale_conf, Some(Duration::from_secs(10)))
+            .location_config(
+                TenantShardId::unsharded(tenant_id),
+                stale_conf,
+                Some(Duration::from_secs(10)),
+            )
             .await?;
 
         baseline_lsns = Some(get_lsns(tenant_id, &origin_ps).await?);
@@ -156,7 +164,9 @@ pub async fn migrate_tenant(
     let dest_conf = build_location_config(LocationConfigMode::AttachedMulti, gen, None);
 
     println!("🔁 Attaching to pageserver {}", dest_ps.conf.id);
-    dest_ps.location_config(tenant_id, dest_conf, None).await?;
+    dest_ps
+        .location_config(TenantShardId::unsharded(tenant_id), dest_conf, None)
+        .await?;
 
     if let Some(baseline) = baseline_lsns {
         println!("🕑 Waiting for LSN to catch up...");
@@ -203,7 +213,7 @@ pub async fn migrate_tenant(
             other_ps.conf.id
         );
         other_ps
-            .location_config(tenant_id, secondary_conf, None)
+            .location_config(TenantShardId::unsharded(tenant_id), secondary_conf, None)
             .await?;
     }
 
@@ -212,7 +222,9 @@ pub async fn migrate_tenant(
         dest_ps.conf.id
     );
     let dest_conf = build_location_config(LocationConfigMode::AttachedSingle, gen, None);
-    dest_ps.location_config(tenant_id, dest_conf, None).await?;
+    dest_ps
+        .location_config(TenantShardId::unsharded(tenant_id), dest_conf, None)
+        .await?;
 
     println!("✅ Migration complete");
 
