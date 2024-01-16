@@ -759,15 +759,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
     tenant_ids = {env.initial_tenant}
     for _i in range(0, n_tenants - 1):
         tenant_id = TenantId.generate()
-        env.pageserver.tenant_create(tenant_id)
-
-        # Empty tenants are not subject to waiting for logical size calculations, because
-        # those hapen on timeline level
-        timeline_id = TimelineId.generate()
-        env.neon_cli.create_timeline(
-            new_branch_name="main", tenant_id=tenant_id, timeline_id=timeline_id
-        )
-
+        env.neon_cli.create_tenant(tenant_id)
         tenant_ids.add(tenant_id)
 
     # Restart pageserver with logical size calculations paused
