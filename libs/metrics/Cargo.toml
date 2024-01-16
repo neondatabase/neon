@@ -9,7 +9,7 @@ prometheus.workspace = true
 libc.workspace = true
 once_cell.workspace = true
 chrono.workspace = true
-twox-hash = "1.6.3"
+twox-hash.workspace = true
 
 workspace_hack.workspace = true
 
