@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["testing"]
+default = ["tokio-console"]
 testing = []
+tokio-console = ["tokio/tracing", "dep:console-subscriber"]
 
 [dependencies]
 anyhow.workspace = true
@@ -17,6 +18,7 @@ bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
+console-subscriber = { workspace = true, optional = true }
 consumption_metrics.workspace = true
 dashmap.workspace = true
 futures.workspace = true

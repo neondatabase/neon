@@ -26,8 +26,12 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         .await
         .map(OpenTelemetryLayer::new);
 
-    tracing_subscriber::registry()
-        .with(env_filter)
+    let reg = tracing_subscriber::registry();
+
+    #[cfg(feature = "tokio-console")]
+    let reg = reg.with(console_subscriber::spawn());
+
+    reg.with(env_filter)
         .with(otlp_layer)
         .with(fmt_layer)
         .try_init()?;

@@ -64,6 +64,7 @@ cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
 close_fds = "0.3.2"
+console-subscriber = "0.2.0"
 comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
