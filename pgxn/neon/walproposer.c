@@ -980,7 +980,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 		 * the first record location, so we can bump truncateLsn to it.
 		 */
 		wp->truncateLsn = wp->timelineStartLsn;
-		walprop_log(LOG, "bumped truncateLsn to timelineStartLsn %X/%X", LSN_FORMAT_ARGS(wp->truncateLsn));
+		wp_log(LOG, "bumped truncateLsn to timelineStartLsn %X/%X", LSN_FORMAT_ARGS(wp->truncateLsn));
 	}
 
 	/*

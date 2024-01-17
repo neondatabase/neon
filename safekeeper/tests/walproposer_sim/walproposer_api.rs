@@ -513,7 +513,7 @@ impl ApiImpl for SimulationApi {
     }
 
     fn log_internal(&self, _wp: &mut walproposer::bindings::WalProposer, level: Level, msg: &str) {
-        debug!("walprop_log[{}] {}", level, msg);
+        debug!("wp_log[{}] {}", level, msg);
         if level == Level::Fatal || level == Level::Panic {
             if msg.contains("rejects our connection request with term") {
                 // collected quorum with lower term, then got rejected by next connected safekeeper
