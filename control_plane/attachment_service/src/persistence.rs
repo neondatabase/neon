@@ -1,9 +1,6 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{collections::HashMap, str::FromStr};
 
+use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{
     models::TenantConfig,
     shard::{ShardCount, ShardNumber, TenantShardId},
@@ -27,7 +24,7 @@ struct PersistentState {
     tenants: HashMap<TenantShardId, TenantShardPersistence>,
 
     #[serde(skip)]
-    path: PathBuf,
+    path: Utf8PathBuf,
 }
 
 /// A convenience for serializing the state inside a sync lock, and then
@@ -35,7 +32,7 @@ struct PersistentState {
 /// to a database backend.
 struct PendingWrite {
     bytes: Vec<u8>,
-    path: PathBuf,
+    path: Utf8PathBuf,
 }
 
 impl PendingWrite {
@@ -54,7 +51,7 @@ impl PersistentState {
         }
     }
 
-    async fn load(path: &Path) -> anyhow::Result<Self> {
+    async fn load(path: &Utf8Path) -> anyhow::Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         let mut decoded = serde_json::from_slice::<Self>(&bytes)?;
         decoded.path = path.to_owned();
@@ -72,10 +69,10 @@ impl PersistentState {
         Ok(decoded)
     }
 
-    async fn load_or_new(path: &Path) -> Self {
+    async fn load_or_new(path: &Utf8Path) -> Self {
         match Self::load(path).await {
             Ok(s) => {
-                tracing::info!("Loaded state file at {}", path.display());
+                tracing::info!("Loaded state file at {}", path);
                 s
             }
             Err(e)
@@ -83,21 +80,21 @@ impl PersistentState {
                     .map(|e| e.kind() == std::io::ErrorKind::NotFound)
                     .unwrap_or(false) =>
             {
-                tracing::info!("Will create state file at {}", path.display());
+                tracing::info!("Will create state file at {}", path);
                 Self {
                     tenants: HashMap::new(),
                     path: path.to_owned(),
                 }
             }
             Err(e) => {
-                panic!("Failed to load state from '{}': {e:#} (maybe your .neon/ dir was written by an older version?)", path.display())
+                panic!("Failed to load state from '{}': {e:#} (maybe your .neon/ dir was written by an older version?)", path)
             }
         }
     }
 }
 
 impl Persistence {
-    pub async fn new(path: &Path) -> Self {
+    pub async fn new(path: &Utf8Path) -> Self {
         let state = PersistentState::load_or_new(path).await;
         Self {
             state: std::sync::Mutex::new(state),

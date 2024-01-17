@@ -8,8 +8,8 @@ use anyhow::anyhow;
 use attachment_service::http::make_router;
 use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
+use camino::Utf8PathBuf;
 use clap::Parser;
-use std::path::PathBuf;
 use std::sync::Arc;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
@@ -35,7 +35,7 @@ struct Cli {
 
     /// Path to the .json file to store state (will be created if it doesn't exist)
     #[arg(short, long)]
-    path: PathBuf,
+    path: Utf8PathBuf,
 }
 
 #[tokio::main]
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     tracing::info!(
         "Starting, state at {}, listening on {}",
-        args.path.to_string_lossy(),
+        args.path,
         args.listen
     );
 
