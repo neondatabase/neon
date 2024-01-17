@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
 )
 
-from performance.pageserver import ensure_pageserver_ready_for_benchmarking
+from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 """
 Usage:

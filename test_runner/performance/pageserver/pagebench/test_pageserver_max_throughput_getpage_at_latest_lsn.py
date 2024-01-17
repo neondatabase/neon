@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.utils import get_scale_for_db, humantime_to_ms
 
-from performance.pageserver import ensure_pageserver_ready_for_benchmarking
+from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 
 @pytest.mark.parametrize("duration", [30])
