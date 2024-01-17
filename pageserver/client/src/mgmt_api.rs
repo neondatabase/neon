@@ -209,6 +209,15 @@ impl Client {
         Ok(())
     }
 
+    pub async fn list_location_config(&self) -> Result<LocationConfigListResponse> {
+        let path = format!("{}/v1/location_config", self.mgmt_api_endpoint);
+        self.request(Method::GET, &path, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_create(
         &self,
         tenant_id: TenantId,

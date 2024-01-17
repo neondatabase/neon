@@ -18,7 +18,7 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
-use pageserver_api::models::ShardParameters;
+use pageserver_api::models;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
@@ -2326,6 +2326,32 @@ impl Tenant {
             .clone()
     }
 
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
+        let conf = self.tenant_conf.read().unwrap();
+
+        let location_config_mode = match conf.location.attach_mode {
+            AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
+            AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
+            AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
+        };
+
+        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
+        let tenant_config: models::TenantConfig = conf.tenant_conf.into();
+
+        models::LocationConfig {
+            mode: location_config_mode,
+            generation: self.generation.into(),
+            secondary_conf: None,
+            shard_number: self.shard_identity.number.0,
+            shard_count: self.shard_identity.count.0,
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_config,
+        }
+    }
+
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
@@ -2680,7 +2706,7 @@ impl Tenant {
             Ok(LocationConf::attached_single(
                 tenant_conf,
                 Generation::none(),
-                &ShardParameters::default(),
+                &models::ShardParameters::default(),
             ))
         } else {
             // FIXME If the config file is not found, assume that we're attaching
@@ -3793,6 +3819,7 @@ pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
+    use pageserver_api::models::ShardParameters;
     use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;

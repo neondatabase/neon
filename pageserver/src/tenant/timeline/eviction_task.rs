@@ -20,6 +20,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use pageserver_api::models::{EvictionPolicy, EvictionPolicyLayerAccessThreshold};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
@@ -29,10 +30,7 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        tasks::BackgroundLoopKind,
-        timeline::EvictionError,
-        LogicalSizeCalculationCause, Tenant,
+        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
     },
 };
 

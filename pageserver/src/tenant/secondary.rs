@@ -18,11 +18,16 @@ use self::{
 };
 
 use super::{
-    config::SecondaryLocationConfig, mgr::TenantManager,
-    span::debug_assert_current_span_has_tenant_id, storage_layer::LayerFileName,
+    config::{SecondaryLocationConfig, TenantConfOpt},
+    mgr::TenantManager,
+    span::debug_assert_current_span_has_tenant_id,
+    storage_layer::LayerFileName,
 };
 
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{
+    models,
+    shard::{ShardIdentity, TenantShardId},
+};
 use remote_storage::GenericRemoteStorage;
 
 use tokio_util::sync::CancellationToken;
@@ -84,12 +89,20 @@ pub(crate) struct SecondaryTenant {
 
     pub(crate) gate: Gate,
 
+    // Secondary mode does not need the full shard identity or the TenantConfOpt.  However,
+    // storing these enables us to report our full LocationConf, enabling convenient reconciliation
+    // by the control plane (see [`Self::get_location_conf`])
+    shard_identity: ShardIdentity,
+    tenant_conf: std::sync::Mutex<TenantConfOpt>,
+
     detail: std::sync::Mutex<SecondaryDetail>,
 }
 
 impl SecondaryTenant {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
+        shard_identity: ShardIdentity,
+        tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -100,6 +113,9 @@ impl SecondaryTenant {
             // individual cancellations?
             cancel: CancellationToken::new(),
             gate: Gate::new(format!("SecondaryTenant {tenant_shard_id}")),
+
+            shard_identity,
+            tenant_conf: std::sync::Mutex::new(tenant_conf),
 
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
         })
@@ -114,6 +130,30 @@ impl SecondaryTenant {
 
     pub(crate) fn set_config(&self, config: &SecondaryLocationConfig) {
         self.detail.lock().unwrap().config = config.clone();
+    }
+
+    pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
+        *(self.tenant_conf.lock().unwrap()) = *config;
+    }
+
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
+        let conf = self.detail.lock().unwrap().config.clone();
+
+        let conf = models::LocationConfigSecondary { warm: conf.warm };
+
+        let tenant_conf = *self.tenant_conf.lock().unwrap();
+        models::LocationConfig {
+            mode: models::LocationConfigMode::Secondary,
+            generation: None,
+            secondary_conf: Some(conf),
+            shard_number: self.tenant_shard_id.shard_number.0,
+            shard_count: self.tenant_shard_id.shard_count.0,
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_conf.into(),
+        }
     }
 
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {

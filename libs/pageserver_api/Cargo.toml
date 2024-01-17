@@ -19,6 +19,7 @@ strum.workspace = true
 strum_macros.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+humantime-serde.workspace = true
 
 workspace_hack.workspace = true
 

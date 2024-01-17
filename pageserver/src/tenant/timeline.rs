@@ -15,9 +15,10 @@ use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
     models::{
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, LayerMapInfo,
-        TimelineState,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        LayerMapInfo, TimelineState,
     },
+    reltag::BlockNumber,
     shard::{ShardIdentity, TenantShardId},
 };
 use rand::Rng;
@@ -42,7 +43,6 @@ use std::{
     ops::ControlFlow,
 };
 
-use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
 use crate::tenant::{
     layer_map::{LayerMap, SearchResult},
@@ -65,16 +65,17 @@ use crate::{
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
 };
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
+use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
-use crate::pgdatadir_mapping::{CalculateLogicalSizeError, LsnForTimestamp};
-use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
-use pageserver_api::reltag::{BlockNumber, RelTag};
+use crate::tenant::config::TenantConfOpt;
+use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
