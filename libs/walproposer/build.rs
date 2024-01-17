@@ -6,13 +6,6 @@ use std::{env, path::PathBuf, process::Command};
 use anyhow::{anyhow, Context};
 use bindgen::CargoCallbacks;
 
-#[cfg(debug_assertions)]
-pub(crate) fn enable_build_sanitizers_in_debug() {
-    println!("cargo:rustc-link-arg=-fsanitize=address");
-    println!("cargo:rustc-link-arg=-fsanitize=undefined");
-    println!("cargo:rustc-link-arg=-static-libsan");
-}
-
 fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=bindgen_deps.h");
@@ -36,7 +29,12 @@ fn main() -> anyhow::Result<()> {
     let pgxn_neon = std::fs::canonicalize(pgxn_neon)?;
     let pgxn_neon = pgxn_neon.to_str().ok_or(anyhow!("Bad non-UTF path"))?;
 
-    enable_build_sanitizers_in_debug();
+    #[cfg(debug_assertions)]
+    {
+        println!("cargo:rustc-link-arg=-fsanitize=address");
+        println!("cargo:rustc-link-arg=-fsanitize=undefined");
+        println!("cargo:rustc-link-arg=-static-libsan");
+    }
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
     println!("cargo:rustc-link-lib=static=walproposer");
