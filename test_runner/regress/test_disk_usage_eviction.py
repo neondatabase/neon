@@ -709,7 +709,7 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
 
     tenant_ids = [t[0] for t in env.timelines]
 
-    # Set up a situation where on pageserver _only_ has secondary locations on it,
+    # Set up a situation where one pageserver _only_ has secondary locations on it,
     # so that when we release space we are sure it is via secondary locations.
 
     log.info("Setting up secondary location...")
