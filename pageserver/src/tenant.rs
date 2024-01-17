@@ -74,6 +74,7 @@ use crate::tenant::config::LocationMode;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
+use crate::tenant::remote_timeline_client::remote_initdb_archive_path;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
@@ -3272,6 +3273,18 @@ impl Tenant {
             let Some(storage) = &self.remote_storage else {
                 bail!("no storage configured but load_existing_initdb set to {existing_initdb_timeline_id}");
             };
+            if existing_initdb_timeline_id != timeline_id {
+                let source_path = &remote_initdb_archive_path(
+                    &self.tenant_shard_id.tenant_id,
+                    &existing_initdb_timeline_id,
+                );
+                let dest_path =
+                    &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
+                storage
+                    .copy_object(source_path, dest_path)
+                    .await
+                    .context("copy initdb tar")?;
+            }
             let (initdb_tar_zst_path, initdb_tar_zst) =
                 self::remote_timeline_client::download_initdb_tar_zst(
                     self.conf,
@@ -3295,7 +3308,7 @@ impl Tenant {
                 .await
                 .context("extract initdb tar")?;
         } else {
-            // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
+            // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
