@@ -389,8 +389,10 @@ impl Reconciler {
                     // Nothing to do
                     tracing::info!("Observed configuration already correct.")
                 }
-                Some(_) | None => {
-                    // If there is no observed configuration, or if its value does not equal our intent, then we must call out to the pageserver.
+                _ => {
+                    // In all cases other than a matching observed configuration, we will
+                    // reconcile this location.  This includes locations with different configurations, as well
+                    // as locations with unknown (None) observed state.
                     self.generation = self
                         .persistence
                         .increment_generation(self.tenant_shard_id, Some(node_id))
@@ -421,8 +423,9 @@ impl Reconciler {
                     // Nothing to do
                     tracing::info!(%node_id, "Observed configuration already correct.")
                 }
-                Some(_) | None => {
-                    // If there is no observed configuration, or if its value does not equal our intent, then we must call out to the pageserver.
+                _ => {
+                    // In all cases other than a matching observed configuration, we will
+                    // reconcile this location.
                     tracing::info!(%node_id, "Observed configuration requires update.");
                     changes.push((*node_id, wanted_conf))
                 }
