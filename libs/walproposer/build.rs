@@ -6,6 +6,13 @@ use std::{env, path::PathBuf, process::Command};
 use anyhow::{anyhow, Context};
 use bindgen::CargoCallbacks;
 
+#[cfg(debug_assertions)]
+pub(crate) fn enable_build_sanitizers_in_debug() {
+    println!("cargo:rustc-link-arg=-fsanitize=address");
+    println!("cargo:rustc-link-arg=-fsanitize=undefined");
+    println!("cargo:rustc-link-arg=-static-libsan");
+}
+
 fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=bindgen_deps.h");
@@ -114,11 +121,4 @@ fn main() -> anyhow::Result<()> {
         .expect("Couldn't write bindings!");
 
     Ok(())
-}
-
-#[cfg(debug_assertions)]
-pub(crate) fn enable_build_sanitizers_in_debug() {
-    println!("cargo:rustc-link-arg=-fsanitize=address");
-    println!("cargo:rustc-link-arg=-fsanitize=undefined");
-    println!("cargo:rustc-link-arg=-static-libsan");
 }
