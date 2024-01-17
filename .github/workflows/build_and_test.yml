@@ -158,7 +158,7 @@ jobs:
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
-        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" make postgres-headers -j$(nproc)
+        run: make postgres-headers -j$(nproc)
 
       # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
       # This will catch compiler & clippy warnings in all feature combinations.
@@ -297,7 +297,7 @@ jobs:
             cov_prefix=""
             ASAN_OPTIONS=""
             UBSAN_OPTIONS=""
-            RUSTFLAGS=""
+            RUSTFLAGS="-C linker=gcc"
             CARGO_FLAGS="--locked --release"
             CC=gcc
           fi
