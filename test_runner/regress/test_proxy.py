@@ -203,6 +203,21 @@ def test_close_on_connections_exit(static_proxy: NeonProxy):
     static_proxy.wait_for_exit()
 
 
+def test_sql_over_http_serverless_driver(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+    response = requests.post(
+        f"https://api.localtest.me:{static_proxy.external_http_port}/sql",
+        data=json.dumps({"query": "select 42 as answer", "params": []}),
+        headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+        verify=str(static_proxy.test_output_dir / "proxy.crt"),
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()["rows"]
+    assert rows == [{"answer": 42}]
+
+
 def test_sql_over_http(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http with login password 'http' superuser")
 

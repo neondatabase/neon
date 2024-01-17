@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::env;
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
@@ -14,12 +16,14 @@ use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::RetryOptions;
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
+use azure_storage_blobs::blob::CopyStatus;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures_util::StreamExt;
-use http_types::StatusCode;
+use http_types::{StatusCode, Url};
+use tokio::time::Instant;
 use tracing::debug;
 
 use crate::s3_bucket::RequestKind;
@@ -324,10 +328,49 @@ impl RemoteStorage for AzureBlobStorage {
         Ok(())
     }
 
-    async fn copy(&self, _from: &RemotePath, _to: &RemotePath) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!(
-            "copy for azure blob storage is not implemented"
-        ))
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+        let _permit = self.permit(RequestKind::Copy).await;
+        let blob_client = self.client.blob_client(self.relative_path_to_name(to));
+
+        let source_url = format!(
+            "{}/{}",
+            self.client.url()?,
+            self.relative_path_to_name(from)
+        );
+        let builder = blob_client.copy(Url::from_str(&source_url)?);
+
+        let result = builder.into_future().await?;
+
+        let mut copy_status = result.copy_status;
+        let start_time = Instant::now();
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(60);
+        loop {
+            match copy_status {
+                CopyStatus::Aborted => {
+                    anyhow::bail!("Received abort for copy from {from} to {to}.");
+                }
+                CopyStatus::Failed => {
+                    anyhow::bail!("Received failure response for copy from {from} to {to}.");
+                }
+                CopyStatus::Success => return Ok(()),
+                CopyStatus::Pending => (),
+            }
+            // The copy is taking longer. Waiting a second and then re-trying.
+            // TODO estimate time based on copy_progress and adjust time based on that
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let properties = blob_client.get_properties().into_future().await?;
+            let Some(status) = properties.blob.properties.copy_status else {
+                tracing::warn!("copy_status for copy is None!, from={from}, to={to}");
+                return Ok(());
+            };
+            if start_time.elapsed() > MAX_WAIT_TIME {
+                anyhow::bail!("Copy from from {from} to {to} took longer than limit MAX_WAIT_TIME={}s. copy_pogress={:?}.",
+                    MAX_WAIT_TIME.as_secs_f32(),
+                    properties.blob.properties.copy_progress,
+                );
+            }
+            copy_status = status;
+        }
     }
 
     async fn time_travel_recover(
