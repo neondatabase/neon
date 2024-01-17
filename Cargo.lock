@@ -284,6 +284,7 @@ dependencies = [
  "metrics",
  "pageserver_api",
  "pageserver_client",
+ "postgres_backend",
  "postgres_connection",
  "serde",
  "serde_json",

@@ -156,26 +156,17 @@ impl Service {
         for node in &mut nodes {
             let client = mgmt_api::Client::new(node.base_url(), config.jwt_token.as_deref());
 
-            // TODO: be more tolerant, apply a generous 5-10 second timeout, in case all services are restarting
-            // at the same time and we need to wait for this pageserver.  If more than one pageserver is unresponsive,
-            // wait longer: there's no point continuing to start up if most/all pageserers are not responsive.
-            // ... and/or give nodes a Pending state where we will avoid making scheduling decisions based
-            //     on their Offline/Active-ness, since we don't have good knowledge of it.
-
-            // TODO: for neon_local, we do not start up pageserver in parallel with this service: if we
-            // wait for pageservers during "cargo neon start" we'll never succeed.  Maybe in local dev
-            // env we should skip reconciliation on startup.  This doesn't affect tests which restart
-            // services individually, only the total "cargo neon start" command as a developer might
-            // use by hand.
-
             tracing::info!("Scanning shards on node {}...", node.id);
             match client.list_location_config().await {
                 Err(e) => {
-                    tracing::warn!(
-                        "Could not contact pageserver {}, setting it to Offline ({e})",
-                        node.id
-                    );
-                    node.availability = NodeAvailability::Offline;
+                    tracing::warn!("Could not contact pageserver {} ({e})", node.id);
+                    // TODO: be more tolerant, apply a generous 5-10 second timeout
+                    // TODO: setting a node to Offline is a dramatic thing to do, and can
+                    // prevent neon_local from starting up (it starts this service before
+                    // any pageservers are  running).  It may make sense to give nodes
+                    // a Pending state to accomodate this situation, and allow (but deprioritize)
+                    // scheduling on Pending nodes.
+                    //node.availability = NodeAvailability::Offline;
                 }
                 Ok(listing) => {
                     tracing::info!(

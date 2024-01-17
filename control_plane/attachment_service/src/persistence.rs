@@ -1,10 +1,15 @@
 use std::{collections::HashMap, str::FromStr};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use control_plane::{
+    attachment_service::{NodeAvailability, NodeSchedulingPolicy},
+    local_env::LocalEnv,
+};
 use pageserver_api::{
     models::TenantConfig,
     shard::{ShardCount, ShardNumber, TenantShardId},
 };
+use postgres_connection::parse_host_port;
 use serde::{Deserialize, Serialize};
 use utils::{
     generation::Generation,
@@ -112,8 +117,34 @@ impl Persistence {
     /// each node to do an initial reconciliation of the state of the world with our in-memory
     /// observed state.
     pub(crate) async fn list_nodes(&self) -> anyhow::Result<Vec<Node>> {
+        let env = LocalEnv::load_config()?;
         // TODO: node persitence will come with database backend
-        Ok(vec![])
+
+        // XXX hack: enable test_backward_compatibility to work by populating our list of
+        // nodes from LocalEnv when it is not present in persistent storage.  Otherwise at
+        // first startup in the compat test, we may have shards but no nodes.
+        let mut result = Vec::new();
+        tracing::info!(
+            "Loaded {} pageserver nodes from LocalEnv",
+            env.pageservers.len()
+        );
+        for ps_conf in env.pageservers {
+            let (pg_host, pg_port) =
+                parse_host_port(&ps_conf.listen_pg_addr).expect("Unable to parse listen_pg_addr");
+            let (http_host, http_port) = parse_host_port(&ps_conf.listen_http_addr)
+                .expect("Unable to parse listen_http_addr");
+            result.push(Node {
+                id: ps_conf.id,
+                listen_pg_addr: pg_host.to_string(),
+                listen_pg_port: pg_port.unwrap_or(5432),
+                listen_http_addr: http_host.to_string(),
+                listen_http_port: http_port.unwrap_or(80),
+                availability: NodeAvailability::Active,
+                scheduling: NodeSchedulingPolicy::Active,
+            });
+        }
+
+        Ok(result)
     }
 
     /// At startup, we populate our map of tenant shards from persistent storage.
