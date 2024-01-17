@@ -394,11 +394,41 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let selection = if matches!(eviction_order, EvictionOrder::RelativeAccessed { .. }) {
         // we currently have the layers ordered by AbsoluteAccessed so that we can get the summary
         // for comparison here. this is a temporary measure to develop alternatives.
+        use std::fmt::Write;
+
+        let mut summary_buf = String::with_capacity(256);
+
+        {
+            let absolute_summary = candidates
+                .iter()
+                .take(selection.amount)
+                .map(|(_, candidate)| candidate)
+                .collect::<summary::EvictionSummary>();
+
+            write!(summary_buf, "{absolute_summary}").expect("string grows");
+
+            info!("absolute accessed selection summary: {summary_buf}");
+        }
+
         candidates.sort_unstable_by_key(|(partition, candidate)| {
             (*partition, candidate.relative_last_activity)
         });
 
         let selection = select_victims(&candidates, usage_pre);
+
+        {
+            summary_buf.clear();
+
+            let relative_summary = candidates
+                .iter()
+                .take(selection.amount)
+                .map(|(_, candidate)| candidate)
+                .collect::<summary::EvictionSummary>();
+
+            write!(summary_buf, "{relative_summary}").expect("string grows");
+
+            info!("relative accessed selection summary: {summary_buf}");
+        }
 
         selection
     } else {
@@ -1049,6 +1079,137 @@ pub(crate) mod finite_f32 {
             } else {
                 Err(value)
             }
+        }
+    }
+}
+
+mod summary {
+    use super::finite_f32::FiniteF32;
+    use super::{EvictionCandidate, LayerCount};
+    use pageserver_api::shard::TenantShardId;
+    use std::collections::{BTreeMap, HashMap};
+    use std::time::SystemTime;
+
+    #[derive(Debug, Default)]
+    pub(super) struct EvictionSummary {
+        evicted_per_tenant: HashMap<TenantShardId, LayerCount>,
+        total: LayerCount,
+
+        last_absolute: Option<SystemTime>,
+        last_relative: Option<FiniteF32>,
+    }
+
+    impl<'a> FromIterator<&'a EvictionCandidate> for EvictionSummary {
+        fn from_iter<T: IntoIterator<Item = &'a EvictionCandidate>>(iter: T) -> Self {
+            let mut summary = EvictionSummary::default();
+            for item in iter {
+                let counts = summary
+                    .evicted_per_tenant
+                    .entry(*item.layer.get_tenant_shard_id())
+                    .or_default();
+
+                let sz = item.layer.get_file_size();
+
+                counts.file_sizes += sz;
+                counts.count += 1;
+
+                summary.total.file_sizes += sz;
+                summary.total.count += 1;
+
+                summary.last_absolute = Some(item.last_activity_ts);
+                summary.last_relative = Some(item.relative_last_activity);
+            }
+
+            summary
+        }
+    }
+
+    struct SiBytesAmount(u64);
+
+    impl std::fmt::Display for SiBytesAmount {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.0 < 1024 {
+                return write!(f, "{}B", self.0);
+            }
+
+            let mut tmp = self.0;
+            let mut ch = 0;
+            let suffixes = b"KMGTPE";
+
+            while tmp > 1024 * 1024 && ch < suffixes.len() - 1 {
+                tmp /= 1024;
+                ch += 1;
+            }
+
+            let ch = suffixes[ch] as char;
+
+            write!(f, "{:.1}{ch}iB", tmp as f64 / 1024.0)
+        }
+    }
+
+    impl std::fmt::Display for EvictionSummary {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // wasteful, but it's for testing
+
+            let mut sorted: BTreeMap<usize, Vec<(TenantShardId, u64)>> = BTreeMap::new();
+
+            for (tenant_shard_id, count) in &self.evicted_per_tenant {
+                sorted
+                    .entry(count.count)
+                    .or_default()
+                    .push((*tenant_shard_id, count.file_sizes));
+            }
+
+            let total_file_sizes = SiBytesAmount(self.total.file_sizes);
+
+            writeln!(
+                f,
+                "selected {} layers of {total_file_sizes} up to ({:?}, {:.2?}):",
+                self.total.count, self.last_absolute, self.last_relative,
+            )?;
+
+            for (count, per_tenant) in sorted.iter().rev().take(10) {
+                write!(f, "- {count} layers: ")?;
+
+                if per_tenant.len() < 3 {
+                    for (i, (tenant_shard_id, bytes)) in per_tenant.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        let bytes = SiBytesAmount(*bytes);
+                        write!(f, "{tenant_shard_id} ({bytes})")?;
+                    }
+                } else {
+                    let num_tenants = per_tenant.len();
+                    let total_bytes = per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>();
+                    let total_bytes = SiBytesAmount(total_bytes);
+                    let layers = num_tenants * count;
+
+                    write!(
+                        f,
+                        "{num_tenants} tenants {total_bytes} in total {layers} layers",
+                    )?;
+                }
+
+                writeln!(f)?;
+            }
+
+            if sorted.len() > 10 {
+                let (rem_count, rem_bytes) = sorted
+                    .iter()
+                    .rev()
+                    .map(|(count, per_tenant)| {
+                        (
+                            count,
+                            per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>(),
+                        )
+                    })
+                    .fold((0, 0), |acc, next| (acc.0 + next.0, acc.1 + next.1));
+                let rem_bytes = SiBytesAmount(rem_bytes);
+                writeln!(f, "- rest of tenants ({}) not shown ({rem_count} layers or {:.1}%, {rem_bytes} or {:.1}% bytes)", sorted.len() - 10, 100.0 * rem_count as f64 / self.total.count as f64, 100.0 * rem_bytes.0 as f64 / self.total.file_sizes as f64)?;
+            }
+
+            Ok(())
         }
     }
 }
