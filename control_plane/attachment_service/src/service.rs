@@ -371,17 +371,25 @@ impl Service {
             );
         }
 
-        let new_generation = self
-            .persistence
-            .increment_generation(attach_req.tenant_shard_id, attach_req.node_id)
-            .await?;
+        let new_generation = if attach_req.node_id.is_some() {
+            Some(
+                self.persistence
+                    .increment_generation(attach_req.tenant_shard_id, attach_req.node_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         let mut locked = self.inner.write().unwrap();
         let tenant_state = locked
             .tenants
             .get_mut(&attach_req.tenant_shard_id)
             .expect("Checked for existence above");
-        tenant_state.generation = new_generation;
+
+        if let Some(new_generation) = new_generation {
+            tenant_state.generation = new_generation;
+        }
 
         if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
             tracing::info!(
@@ -403,7 +411,6 @@ impl Service {
             "no-op: tenant already has no pageserver");
         }
         tenant_state.intent.attached = attach_req.node_id;
-        let generation = tenant_state.generation;
 
         tracing::info!(
             "attach_hook: tenant {} set generation {:?}, pageserver {}",
@@ -413,7 +420,9 @@ impl Service {
         );
 
         Ok(AttachHookResponse {
-            gen: attach_req.node_id.map(|_| generation.into().unwrap()),
+            gen: attach_req
+                .node_id
+                .map(|_| tenant_state.generation.into().unwrap()),
         })
     }
 
