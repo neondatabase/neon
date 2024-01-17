@@ -672,7 +672,7 @@ impl RemoteStorage for S3Bucket {
 
         versions_deletes.sort_by_key(|vd| (vd.key(), vd.last_modified()));
 
-        let mut hm_vd = HashMap::<_, Vec<_>>::new();
+        let mut vds_for_key = HashMap::<_, Vec<_>>::new();
 
         for vd in versions_deletes {
             let last_modified = vd.last_modified();
@@ -696,12 +696,12 @@ impl RemoteStorage for S3Bucket {
                 matches!(vd, VerOrDelete::DeleteMarker(_))
             );
 
-            hm_vd
+            vds_for_key
                 .entry(key)
                 .or_default()
                 .push((vd, last_modified, version_id));
         }
-        for (key, versions) in hm_vd {
+        for (key, versions) in vds_for_key {
             let (last_vd, last_last_modified, _version_id) = versions.last().unwrap();
             if last_last_modified > &&done_if_after {
                 tracing::trace!("Key {key} has version later than done_if_after, skipping");
