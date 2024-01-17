@@ -1105,6 +1105,14 @@ impl RemoteTimelineClient {
         let layer_deletion_count = layers.len();
         self.deletion_queue_client.push_immediate(layers).await?;
 
+        // Delete the initdb.tar.zst, which is not always present, but deletion attempts of
+        // inexistant objects are not considered errors.
+        let initdb_path =
+            remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &self.timeline_id);
+        self.deletion_queue_client
+            .push_immediate(vec![initdb_path])
+            .await?;
+
         // Do not delete index part yet, it is needed for possible retry. If we remove it first
         // and retry will arrive to different pageserver there wont be any traces of it on remote storage
         let timeline_storage_path = remote_timeline_path(&self.tenant_shard_id, &self.timeline_id);
@@ -1151,11 +1159,6 @@ impl RemoteTimelineClient {
             .filter(|p| {
                 if p == &latest_index {
                     return false;
-                }
-                if let Some(name) = p.object_name() {
-                    if name == INITDB_PATH {
-                        return false;
-                    }
                 }
                 true
             })
