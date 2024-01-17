@@ -504,7 +504,6 @@ jobs:
         with:
           store-test-results-into-db: true
         env:
-          REGRESS_TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
           REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
       - uses: actions/github-script@v6
