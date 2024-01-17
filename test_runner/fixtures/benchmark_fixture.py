@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Type-related stuff
-from typing import Any, Callable, ClassVar, Dict, Iterator, Optional
+from typing import Callable, ClassVar, Dict, Iterator, Optional
 
 import pytest
 from _pytest.config import Config
@@ -20,7 +20,6 @@ from _pytest.terminal import TerminalReporter
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
-from fixtures.utils import humantime_to_ms
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -408,46 +407,6 @@ class NeonBenchmarker:
             round((after - before) / (1024 * 1024)),
             "MB",
             report=MetricReport.LOWER_IS_BETTER,
-        )
-
-    def record_pagebench_results(self, name: str, results: Dict[str, Any], duration: str):
-        """
-        NB: We expect that we use pagebench with a fixed `--runtime`. Hence, duration is the
-        same and what matters for throughput is `request_count`.
-        """
-        total = results["total"]
-
-        metric = "request_count"
-        self.record(
-            metric_name=f"{name}.{metric}",
-            metric_value=total[metric],
-            unit="",
-            report=MetricReport.HIGHER_IS_BETTER,
-        )
-
-        metric = "latency_mean"
-        self.record(
-            metric_name=f"{name}.{metric}",
-            metric_value=humantime_to_ms(total[metric]),
-            unit="ms",
-            report=MetricReport.LOWER_IS_BETTER,
-        )
-
-        metric = "latency_percentiles"
-        for k, v in total[metric].items():
-            self.record(
-                metric_name=f"{name}.{metric}.{k}",
-                metric_value=humantime_to_ms(v),
-                unit="ms",
-                report=MetricReport.LOWER_IS_BETTER,
-            )
-
-        metric = "duration"
-        self.record(
-            metric_name=f"{name}.{metric}",
-            metric_value=humantime_to_ms(duration) / 1000,
-            unit="s",
-            report=MetricReport.TEST_PARAM,
         )
 
 
