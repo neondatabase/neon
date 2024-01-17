@@ -37,6 +37,8 @@ const STANDBY_STATUS_UPDATE_TAG_BYTE: u8 = b'r';
 // neon extension of replication protocol
 const NEON_STATUS_UPDATE_TAG_BYTE: u8 = b'z';
 
+const MAX_STANDBY_LAG: u64 = 1024 * 1024 * 1024; // 1Gb
+
 type FullTransactionId = u64;
 
 /// Hot standby feedback received from replica
@@ -268,21 +270,27 @@ impl WalSendersShared {
                     agg.ts = min(agg.ts, hs_feedback.ts);
                 }
                 let reply = standby_feedback.reply;
-                if reply.write_lsn != Lsn::INVALID {
+                if reply.write_lsn != Lsn::INVALID
+                    && self.agg_ps_feedback.last_received_lsn < reply.write_lsn + MAX_STANDBY_LAG
+                {
                     if reply_agg.write_lsn != Lsn::INVALID {
                         reply_agg.write_lsn = Lsn::min(reply_agg.write_lsn, reply.write_lsn);
                     } else {
                         reply_agg.write_lsn = reply.write_lsn;
                     }
                 }
-                if reply.flush_lsn != Lsn::INVALID {
+                if reply.flush_lsn != Lsn::INVALID
+                    && self.agg_ps_feedback.last_received_lsn < reply.flush_lsn + MAX_STANDBY_LAG
+                {
                     if reply_agg.flush_lsn != Lsn::INVALID {
                         reply_agg.flush_lsn = Lsn::min(reply_agg.flush_lsn, reply.flush_lsn);
                     } else {
                         reply_agg.flush_lsn = reply.flush_lsn;
                     }
                 }
-                if reply.apply_lsn != Lsn::INVALID {
+                if reply.apply_lsn != Lsn::INVALID
+                    && self.agg_ps_feedback.last_received_lsn < reply.apply_lsn + MAX_STANDBY_LAG
+                {
                     if reply_agg.apply_lsn != Lsn::INVALID {
                         reply_agg.apply_lsn = Lsn::min(reply_agg.apply_lsn, reply.apply_lsn);
                     } else {

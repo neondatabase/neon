@@ -4201,11 +4201,13 @@ impl Timeline {
             (horizon_cutoff, pitr_cutoff, retain_lsns)
         };
 
-        let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
+        let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
         let standby_flush_lsn = self.standby_flush_lsn.load();
-        if standby_flush_lsn != Lsn::INVALID && standby_flush_lsn < new_gc_cutoff {
-            new_gc_cutoff = standby_flush_lsn;
-        }
+        let new_gc_cutoff = if standby_flush_lsn != Lsn::INVALID {
+            Lsn::min(standby_flush_lsn, new_gc_cutoff)
+        } else {
+            new_gc_cutoff
+        };
 
         let res = self
             .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
