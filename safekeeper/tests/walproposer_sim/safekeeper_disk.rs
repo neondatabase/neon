@@ -94,6 +94,7 @@ impl control_file::Storage for DiskStateStorage {
 
     /// Timestamp of last persist.
     fn last_persist_at(&self) -> Instant {
+        // TODO: don't rely on it in tests
         self.last_persist_at
     }
 }
