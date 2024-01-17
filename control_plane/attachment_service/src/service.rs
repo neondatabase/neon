@@ -614,24 +614,22 @@ impl Service {
             // Take a snapshot of pageservers
             let pageservers = locked.nodes.clone();
 
-            let mut waiters = Vec::new();
             let result_tx = locked.result_tx.clone();
             let compute_hook = locked.compute_hook.clone();
 
-            for (_tenant_shard_id, shard) in locked
+            let waiters = locked
                 .tenants
                 .range_mut(TenantShardId::tenant_range(tenant_id))
-            {
-                if let Some(waiter) = shard.maybe_reconcile(
-                    result_tx.clone(),
-                    &pageservers,
-                    &compute_hook,
-                    &self.config,
-                    &self.persistence,
-                ) {
-                    waiters.push(waiter);
-                }
-            }
+                .filter_map(|(_shard_id, shard)| {
+                    shard.maybe_reconcile(
+                        result_tx.clone(),
+                        &pageservers,
+                        &compute_hook,
+                        &self.config,
+                        &self.persistence,
+                    )
+                })
+                .collect::<Vec<_>>();
             (waiters, response_shards)
         };
 
