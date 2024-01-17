@@ -279,40 +279,46 @@ impl Service {
                     result.result.is_ok()
                 );
                 let mut locked = result_task_this.inner.write().unwrap();
-                if let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) {
-                    tenant.generation = result.generation;
-                    match result.result {
-                        Ok(()) => {
-                            for (node_id, loc) in &result.observed.locations {
-                                if let Some(conf) = &loc.conf {
-                                    tracing::info!(
-                                        "Updating observed location {}: {:?}",
-                                        node_id,
-                                        conf
-                                    );
-                                } else {
-                                    tracing::info!("Setting observed location {} to None", node_id,)
-                                }
+                let Some(tenant) = locked.tenants.get_mut(&result.tenant_shard_id) else {
+                    // A reconciliation result might race with removing a tenant: drop results for
+                    // tenants that aren't in our map.
+                    continue;
+                };
+
+                // Usually generation should only be updated via this path, so the max() isn't
+                // needed, but it is used to handle out-of-band updates via. e.g. test hook.
+                tenant.generation = std::cmp::max(tenant.generation, result.generation);
+
+                match result.result {
+                    Ok(()) => {
+                        for (node_id, loc) in &result.observed.locations {
+                            if let Some(conf) = &loc.conf {
+                                tracing::info!(
+                                    "Updating observed location {}: {:?}",
+                                    node_id,
+                                    conf
+                                );
+                            } else {
+                                tracing::info!("Setting observed location {} to None", node_id,)
                             }
-                            tenant.observed = result.observed;
-                            tenant.waiter.advance(result.sequence);
                         }
-                        Err(e) => {
-                            // TODO: some observability, record on teh tenant its last reconcile error
-                            tracing::warn!(
-                                "Reconcile error on tenant {}: {}",
-                                tenant.tenant_shard_id,
-                                e
-                            );
+                        tenant.observed = result.observed;
+                        tenant.waiter.advance(result.sequence);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Reconcile error on tenant {}: {}",
+                            tenant.tenant_shard_id,
+                            e
+                        );
 
-                            // Ordering: populate last_error before advancing error_seq,
-                            // so that waiters will see the correct error after waiting.
-                            *(tenant.last_error.lock().unwrap()) = format!("{e}");
-                            tenant.error_waiter.advance(result.sequence);
+                        // Ordering: populate last_error before advancing error_seq,
+                        // so that waiters will see the correct error after waiting.
+                        *(tenant.last_error.lock().unwrap()) = format!("{e}");
+                        tenant.error_waiter.advance(result.sequence);
 
-                            for (node_id, o) in result.observed.locations {
-                                tenant.observed.locations.insert(node_id, o);
-                            }
+                        for (node_id, o) in result.observed.locations {
+                            tenant.observed.locations.insert(node_id, o);
                         }
                     }
                 }
