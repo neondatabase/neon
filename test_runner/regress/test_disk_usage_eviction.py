@@ -2,7 +2,7 @@ import enum
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, Tuple
 
 import pytest
 import toml
@@ -121,17 +121,7 @@ class EvictionEnv:
         }
 
     def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
-        ret: Counter[TenantId] = Counter()
-
-        for tenant_id, timeline_id in self.timelines:
-            timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
-            assert timeline_dir.exists()
-            for file in timeline_dir.iterdir():
-                if "__" not in file.name:
-                    continue
-                ret[tenant_id] += 1
-
-        return dict(ret)
+        return count_layers_per_tenant(pageserver, self.timelines)
 
     def warm_up_tenant(self, tenant_id: TenantId):
         """
@@ -197,6 +187,22 @@ class EvictionEnv:
             assert pageserver.log_contains(".*running mocked statvfs.*")
 
         wait_until(10, 1, statvfs_called)
+
+
+def count_layers_per_tenant(
+    pageserver: NeonPageserver, timelines: Iterable[Tuple[TenantId, TimelineId]]
+) -> Dict[TenantId, int]:
+    ret: Counter[TenantId] = Counter()
+
+    for tenant_id, timeline_id in timelines:
+        timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
+        assert timeline_dir.exists()
+        for file in timeline_dir.iterdir():
+            if "__" not in file.name:
+                continue
+            ret[tenant_id] += 1
+
+    return dict(ret)
 
 
 def human_bytes(amt: float) -> str:
