@@ -61,3 +61,7 @@ tokio-stream.workspace = true
 utils.workspace = true
 
 workspace_hack.workspace = true
+
+[[bench]]
+name = "sk_capacity"
+harness = false
