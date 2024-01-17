@@ -1,5 +1,6 @@
 import enum
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
@@ -118,6 +119,19 @@ class EvictionEnv:
             (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)], pageserver, verbose=True)[0]
             for tid, tlid in self.timelines
         }
+
+    def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
+        ret = Counter()
+
+        for tenant_id, timeline_id in self.timelines:
+            timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
+            assert timeline_dir.exists()
+            for file in timeline_dir.iterdir():
+                if "__" not in file.name:
+                    continue
+                ret[tenant_id] += 1
+
+        return dict(ret)
 
     def warm_up_tenant(self, tenant_id: TenantId):
         """
@@ -504,6 +518,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
 
     (total_on_disk, _, _) = env.timelines_du(env.pageserver)
     du_by_timeline = env.du_by_timeline(env.pageserver)
+    tenant_layers = env.count_layers_per_tenant(env.pageserver)
 
     # pick smaller or greater (iteration order is insertion order of scale=4 and scale=6)
     [warm, cold] = list(du_by_timeline.keys())
@@ -557,8 +572,31 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             cold_size < cold_upper
         ), "the cold tenant should be evicted to its min_resident_size, i.e., max layer file size"
     else:
-        # just go with the space was freed, find proper limits later
-        pass
+        # with relative order what matters is the amount of layers, with a
+        # fudge factor of whether the eviction bothers tenants with highest
+        # layer count the most. last accessed times between tenants does not
+        # matter.
+        layers_now = env.count_layers_per_tenant(env.pageserver)
+
+        expected_ratio = later_total_on_disk / total_on_disk
+        log.info(
+            f"freed up {100 * expected_ratio}%, expecting the layer counts to decrease in similar ratio"
+        )
+
+        for tenant_id, original_count in tenant_layers.items():
+            count_now = layers_now[tenant_id]
+            ratio = count_now / original_count
+            abs_diff = abs(ratio - expected_ratio)
+            assert original_count > count_now
+            log.info(
+                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < 0.1"
+            )
+
+            # in this test case both relative_spare and relative_equal produce
+            # the same outcomes; this must be a quantization effect of similar
+            # sizes (-s4 and -s6) and small (5MB) layer size.
+            # for pg15 and pg16 the absdiff is < 0.01, for pg14 it is closer to 0.02
+            assert abs_diff < 0.05
 
 
 def poor_mans_du(
