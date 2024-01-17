@@ -1067,12 +1067,26 @@ impl TenantManager {
             }
             LocationMode::Attached(_attach_config) => {
                 let shard_identity = new_location_config.shard;
+
+                // Testing hack: if we are configured with no control plane, then drop the generation
+                // from upserts.  This enables creating generation-less tenants even though neon_local
+                // always uses generations when calling the location conf API.
+                let attached_conf = if cfg!(feature = "testing") {
+                    let mut conf = AttachedTenantConf::try_from(new_location_config)?;
+                    if self.conf.control_plane_api.is_none() {
+                        conf.location.generation = Generation::none();
+                    }
+                    conf
+                } else {
+                    AttachedTenantConf::try_from(new_location_config)?
+                };
+
                 let tenant = tenant_spawn(
                     self.conf,
                     tenant_shard_id,
                     &tenant_path,
                     self.resources.clone(),
-                    AttachedTenantConf::try_from(new_location_config)?,
+                    attached_conf,
                     shard_identity,
                     None,
                     self.tenants,

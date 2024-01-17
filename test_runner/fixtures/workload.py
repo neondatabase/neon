@@ -5,6 +5,7 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     last_flush_lsn_upload,
+    tenant_get_shards,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
@@ -31,7 +32,7 @@ class Workload:
 
         self._endpoint: Optional[Endpoint] = None
 
-    def endpoint(self, pageserver_id: int) -> Endpoint:
+    def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
         if self._endpoint is None:
             self._endpoint = self.env.endpoints.create(
                 "main",
@@ -54,7 +55,7 @@ class Workload:
         if self._endpoint is not None:
             self._endpoint.stop()
 
-    def init(self, pageserver_id: int):
+    def init(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
 
         endpoint.safe_psql(f"CREATE TABLE {self.table} (id INTEGER PRIMARY KEY, val text);")
@@ -63,7 +64,7 @@ class Workload:
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
 
-    def write_rows(self, n, pageserver_id):
+    def write_rows(self, n, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
         start = self.expect_rows
         end = start + n - 1
@@ -81,7 +82,7 @@ class Workload:
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
 
-    def churn_rows(self, n, pageserver_id, upload=True):
+    def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True):
         assert self.expect_rows >= n
 
         max_iters = 10
@@ -119,21 +120,24 @@ class Workload:
                 ]
             )
 
-        last_flush_lsn = wait_for_last_flush_lsn(
-            self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
-        )
-        ps_http = self.env.get_pageserver(pageserver_id).http_client()
-        wait_for_last_record_lsn(ps_http, self.tenant_id, self.timeline_id, last_flush_lsn)
+        for tenant_shard_id, pageserver in tenant_get_shards(
+            self.env, self.tenant_id, pageserver_id
+        ):
+            last_flush_lsn = wait_for_last_flush_lsn(
+                self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
+            )
+            ps_http = pageserver.http_client()
+            wait_for_last_record_lsn(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
 
-        if upload:
-            # force a checkpoint to trigger upload
-            ps_http.timeline_checkpoint(self.tenant_id, self.timeline_id)
-            wait_for_upload(ps_http, self.tenant_id, self.timeline_id, last_flush_lsn)
-            log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
-        else:
-            log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
+            if upload:
+                # force a checkpoint to trigger upload
+                ps_http.timeline_checkpoint(tenant_shard_id, self.timeline_id)
+                wait_for_upload(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
+                log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
+            else:
+                log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
 
-    def validate(self, pageserver_id):
+    def validate(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
         result = endpoint.safe_psql_many(
             [

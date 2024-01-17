@@ -28,8 +28,8 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub(crate) trait ResponseErrorMessageExt: Sized {
-    async fn error_from_body(self) -> Result<Self>;
+pub trait ResponseErrorMessageExt: Sized {
+    fn error_from_body(self) -> impl std::future::Future<Output = Result<Self>> + Send;
 }
 
 impl ResponseErrorMessageExt for reqwest::Response {
@@ -220,12 +220,12 @@ impl Client {
 
     pub async fn timeline_create(
         &self,
-        tenant_id: TenantId,
+        tenant_shard_id: TenantShardId,
         req: &TimelineCreateRequest,
     ) -> Result<TimelineInfo> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline",
-            self.mgmt_api_endpoint, tenant_id
+            self.mgmt_api_endpoint, tenant_shard_id
         );
         self.request(Method::POST, &uri, req)
             .await?
@@ -240,6 +240,21 @@ impl Client {
             self.mgmt_api_endpoint, tenant_shard_id
         );
         self.request(Method::POST, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn timeline_list(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> Result<Vec<TimelineInfo>> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline",
+            self.mgmt_api_endpoint, tenant_shard_id
+        );
+        self.get(&uri)
             .await?
             .json()
             .await

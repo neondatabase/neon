@@ -16,7 +16,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
@@ -214,9 +214,6 @@ def _eviction_env(
     env = neon_env_builder.init_configs()
     env.start()
 
-    # We will create all tenants on the 0th pageserver
-    pageserver_http = env.pageservers[0].http_client()
-
     # allow because we are invoking this manually; we always warn on executing disk based eviction
     for ps in env.pageservers:
         ps.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
@@ -244,7 +241,7 @@ def _eviction_env(
 
         with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
             pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id, pageserver_id=1)
+            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
         timelines.append((tenant_id, timeline_id))
 
@@ -255,6 +252,8 @@ def _eviction_env(
 
     # after stopping the safekeepers, we know that no new WAL will be coming in
     for tenant_id, timeline_id in timelines:
+        pageserver_http = env.get_tenant_pageserver(tenant_id).http_client()
+
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
         tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
@@ -710,10 +709,20 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
 
     tenant_ids = [t[0] for t in env.timelines]
 
+    # Set up a situation where one pageserver _only_ has secondary locations on it,
+    # so that when we release space we are sure it is via secondary locations.
+
     log.info("Setting up secondary location...")
     ps_attached = env.neon_env.pageservers[0]
     ps_secondary = env.neon_env.pageservers[1]
     for tenant_id in tenant_ids:
+        # Migrate all attached tenants to the same pageserver, so that all the secondaries
+        # will run on the other pageserver.  This is necessary because when we create tenants,
+        # they are spread over pageservers by default.
+        env.neon_env.attachment_service.tenant_shard_migrate(
+            TenantShardId(tenant_id, 0, 0), ps_attached.id
+        )
+
         ps_secondary.tenant_location_configure(
             tenant_id,
             {
