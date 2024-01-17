@@ -9,6 +9,7 @@ anyhow.workspace = true
 camino.workspace = true
 clap.workspace = true
 futures.workspace = true
+git-version.workspace = true
 hyper.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
@@ -21,6 +22,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 utils = { path = "../../libs/utils/" }
+metrics = { path = "../../libs/metrics/" }
 control_plane = { path = ".." }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 

@@ -10,12 +10,16 @@ use attachment_service::persistence::Persistence;
 use attachment_service::service::{Config, Service};
 use camino::Utf8PathBuf;
 use clap::Parser;
+use metrics::launch_timestamp::LaunchTimestamp;
 use std::sync::Arc;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 use utils::signals::{ShutdownSignals, Signal};
 
-use utils::tcp_listener;
+use utils::{project_build_tag, project_git_version, tcp_listener};
+
+project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -40,6 +44,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
+
     logging::init(
         LogFormat::Plain,
         logging::TracingErrorLayerEnablement::Disabled,
@@ -48,7 +54,10 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Cli::parse();
     tracing::info!(
-        "Starting, state at {}, listening on {}",
+        "version: {}, launch_timestamp: {}, build_tag {}, state at {}, listening on {}",
+        GIT_VERSION,
+        launch_ts.to_string(),
+        BUILD_TAG,
         args.path,
         args.listen
     );
