@@ -991,6 +991,16 @@ class NeonEnv:
 
         raise RuntimeError(f"Pageserver with ID {id} not found")
 
+    def get_tenant_pageserver(self, tenant_id: Union[TenantId, TenantShardId]):
+        """
+        Get the NeonPageserver where this tenant shard is currently attached, according
+        to the attachment service.
+        """
+        meta = self.attachment_service.inspect(tenant_id)
+        assert meta is not None, f"{tenant_id} attachment location not found"
+        pageserver_id = meta[1]
+        return self.get_pageserver(pageserver_id)
+
     def get_safekeeper_connstrs(self) -> str:
         """Get list of safekeeper endpoints suitable for safekeepers GUC"""
         return ",".join(f"localhost:{wa.port.pg}" for wa in self.safekeepers)
@@ -1780,6 +1790,9 @@ class NeonAttachmentService:
         response.raise_for_status()
 
     def inspect(self, tenant_shard_id: Union[TenantId, TenantShardId]) -> Optional[tuple[int, int]]:
+        """
+        :return: 2-tuple of (generation, pageserver id), or None if unknown
+        """
         response = self.request(
             "POST",
             f"{self.env.control_plane_api}/inspect",
@@ -1857,6 +1870,16 @@ class NeonAttachmentService:
         log.info(f"tenant_shard_split success: {body}")
         shards: list[TenantShardId] = body["new_shards"]
         return shards
+
+    def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
+        response = self.request(
+            "PUT",
+            f"{self.env.control_plane_api}/tenant/{tenant_shard_id}/migrate",
+            json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
+        )
+        response.raise_for_status()
+        log.info(f"Migrated tenant {tenant_shard_id} to pageserver {dest_ps_id}")
+        assert self.env.get_tenant_pageserver(tenant_shard_id).id == dest_ps_id
 
     def __enter__(self) -> "NeonAttachmentService":
         return self
