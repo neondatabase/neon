@@ -117,7 +117,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(debug_assertions)]
-fn enable_build_sanitizers_in_debug() {
+pub(crate) fn enable_build_sanitizers_in_debug() {
     println!("cargo:rustc-link-arg=-fsanitize=address");
     println!("cargo:rustc-link-arg=-fsanitize=undefined");
     println!("cargo:rustc-link-arg=-static-libsan");
