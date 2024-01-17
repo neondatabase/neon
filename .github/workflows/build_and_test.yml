@@ -190,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug ]
+        build_type: [ debug, release ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -436,7 +436,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug ]
+        build_type: [ debug, release ]
         pg_version: [ v14, v15, v16 ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
