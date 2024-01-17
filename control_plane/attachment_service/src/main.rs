@@ -33,7 +33,7 @@ struct Cli {
     #[arg(long)]
     public_key: Option<camino::Utf8PathBuf>,
 
-    /// Token for authentication this service with the pageservers it controls
+    /// Token for authenticating this service with the pageservers it controls
     #[arg(short, long)]
     jwt_token: Option<String>,
 
