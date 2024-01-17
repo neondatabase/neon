@@ -621,9 +621,99 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             assert abs_diff < 0.05
 
 
+@pytest.mark.parametrize(
+    "order",
+    [
+        EvictionOrder.ABSOLUTE_ORDER,
+        EvictionOrder.RELATIVE_ORDER_EQUAL,
+        EvictionOrder.RELATIVE_ORDER_SPARE,
+    ],
+)
+def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, order: EvictionOrder):
+    """
+    Create in order first smaller tenants and finally a single larger tenant.
+    Assert that with relative order modes, the disk usage based eviction is
+    more fair towards the smaller tenants.
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+    env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
+
+    # initial_tenant and initial_timeline do not exist
+
+    # create N tenants the same fashion as EvictionEnv
+    layer_size = 5 * 1024**2
+    timelines = []
+    for scale in [1, 1, 1, 4]:
+        timelines.append((pgbench_init_tenant(layer_size, scale, env, pg_bin), scale))
+
+    env.neon_cli.safekeeper_stop()
+
+    for (tenant_id, timeline_id), scale in timelines:
+        min_expected_layers = 4 if scale == 1 else 10
+        finish_tenant_creation(env, tenant_id, timeline_id, min_expected_layers)
+
+    tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
+    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
+
+    # cut 10 percent
+    response = env.pageserver.http_client().disk_usage_eviction_run(
+        {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
+    )
+    log.info(f"{response}")
+
+    after_tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
+
+    ratios = []
+    for i, ((tenant_id, _timeline_id), _scale) in enumerate(timelines):
+        # we expect the oldest to suffer most
+        originally, after = tenant_layers[tenant_id], after_tenant_layers[tenant_id]
+        log.info(f"{i + 1}th tenant went from {originally} -> {after}")
+        ratio = after / originally
+        ratios.append(ratio)
+
+    assert (
+        len(ratios) == 4
+    ), "rest of the assertions expect 3 + 1 timelines, ratios, scales, all in order"
+    log.info(f"{ratios}")
+
+    if order == EvictionOrder.ABSOLUTE_ORDER:
+        losers = 0
+        for i, ratio in enumerate(ratios):
+            if i > 0 and ratios[i - 1] == 1.0:
+                assert (
+                    ratio == 1.0
+                ), "following after first tenant which did not lose must have all of the layers"
+            elif ratio < 1.0:
+                losers += 1
+
+        assert losers > 0, "there must had been evictions"
+        assert losers < len(timelines), "not all tenants should had lost layers"
+    elif order == EvictionOrder.RELATIVE_ORDER_EQUAL:
+        assert all(
+            map(lambda x: x == ratios[0], ratios[:3])
+        ), "scale=1 tenants should lose layers equally"
+
+        # across pg versions we cannot really say how the rations compare, as the amount of layers generated is different.
+        assert ratios[3] < 1.0, "largest tenant should always lose layers"
+
+        # sadly scales=[1, ..., 8] is not enough to show difference with RELATIVE_ORDER_EQUAL and ..._SPARE.
+        # scales=[1, 1, 1, 16] is enough to show the difference with pg16, but will take prohibitevely long time, yielding ratios:
+        # ratios=[6/7, ..., 75/87] (RELATIVE_ORDER_EQUAL)
+        # ratios=[7/7, ..., 75/87] (RELATIVE_ORDER_SPARE)
+    elif order == EvictionOrder.RELATIVE_ORDER_SPARE:
+        # with pg14 and the smaller amount of layers, any one or two of scale=1 could lose layers
+        assert (
+            len([map(lambda x: x < 1.0, ratios[:3])]) < 3
+        ), "subset of scale=1 tenants can lose layers"
+        assert ratios[3] < 1.0, "largest tenant should always lose layers"
+    else:
+        raise RuntimeError(f"unimplemented {order}")
+
+
 def poor_mans_du(
     env: NeonEnv,
-    timelines: list[Tuple[TenantId, TimelineId]],
+    timelines: Iterable[Tuple[TenantId, TimelineId]],
     pageserver: NeonPageserver,
     verbose: bool = False,
 ) -> Tuple[int, int, int]:
