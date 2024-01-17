@@ -2,7 +2,6 @@
 use std::{fs, io, path::Path};
 
 use anyhow::Context;
-use camino::Utf8Path;
 
 pub trait PathExt {
     /// Returns an error if `self` is not a directory.
