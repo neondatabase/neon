@@ -15,9 +15,8 @@ use desim::{
 };
 use hyper::Uri;
 use safekeeper::{
-    safekeeper::{
-        ProposerAcceptorMessage, SafeKeeper, SafeKeeperState, ServerInfo, UNKNOWN_SERVER_VERSION,
-    },
+    safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
+    state::TimelinePersistentState,
     timeline::TimelineError,
     wal_storage::Storage,
     SafeKeeperConf,
@@ -96,7 +95,8 @@ impl GlobalMap {
         let commit_lsn = Lsn::INVALID;
         let local_start_lsn = Lsn::INVALID;
 
-        let state = SafeKeeperState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
+        let state =
+            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
         if state.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(ttid));

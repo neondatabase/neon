@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use safekeeper::safekeeper::SafeKeeperState;
+use safekeeper::state::TimelinePersistentState;
 use utils::id::TenantTimelineId;
 
 use super::block_storage::BlockStorage;
@@ -35,7 +35,11 @@ impl SafekeeperDisk {
         }
     }
 
-    pub fn put_state(&self, ttid: &TenantTimelineId, state: SafeKeeperState) -> Arc<TimelineDisk> {
+    pub fn put_state(
+        &self,
+        ttid: &TenantTimelineId,
+        state: TimelinePersistentState,
+    ) -> Arc<TimelineDisk> {
         self.timelines
             .lock()
             .entry(*ttid)
@@ -55,13 +59,13 @@ impl SafekeeperDisk {
 
 /// Control file state and WAL storage.
 pub struct TimelineDisk {
-    pub state: Mutex<SafeKeeperState>,
+    pub state: Mutex<TimelinePersistentState>,
     pub wal: Mutex<BlockStorage>,
 }
 
 /// Implementation of `control_file::Storage` trait.
 pub struct DiskStateStorage {
-    persisted_state: SafeKeeperState,
+    persisted_state: TimelinePersistentState,
     disk: Arc<TimelineDisk>,
     last_persist_at: Instant,
 }
@@ -82,7 +86,7 @@ impl DiskStateStorage {
 #[async_trait::async_trait]
 impl control_file::Storage for DiskStateStorage {
     /// Persist safekeeper state on disk and update internal state.
-    async fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+    async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
         self.persisted_state = s.clone();
         *self.disk.state.lock() = s.clone();
         Ok(())
@@ -95,7 +99,7 @@ impl control_file::Storage for DiskStateStorage {
 }
 
 impl Deref for DiskStateStorage {
-    type Target = SafeKeeperState;
+    type Target = TimelinePersistentState;
 
     fn deref(&self) -> &Self::Target {
         &self.persisted_state
@@ -125,7 +129,7 @@ pub struct DiskWALStorage {
 }
 
 impl DiskWALStorage {
-    pub fn new(disk: Arc<TimelineDisk>, state: &SafeKeeperState) -> Result<Self> {
+    pub fn new(disk: Arc<TimelineDisk>, state: &TimelinePersistentState) -> Result<Self> {
         let write_lsn = if state.commit_lsn == Lsn(0) {
             Lsn(0)
         } else {
