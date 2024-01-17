@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
+use crate::compute::{ComputeNode, ComputeState, ParsedSpec, RowLevelParams};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -198,6 +198,31 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     resp
                 }
             }
+        }
+        (&Method::POST, "/ensure_row_level_sec") => {
+            info!("serving /ensure_row_level_sec GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!("compute is not running, current status: {:?}", status);
+                error!(msg);
+                let mut err_resp = Response::new(Body::from(msg));
+                *err_resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return err_resp;
+            }
+            let body_bytes: Vec<u8> = hyper::body::to_bytes(req.into_body()).await.unwrap().into();
+            let params: RowLevelParams =
+                serde_json::from_str(&String::from_utf8(body_bytes).unwrap()).unwrap();
+
+            let res = compute.ensure_row_level_sec(params).await;
+            match res {
+                Ok(true) => (),
+                _ => {
+                    let mut err_resp = Response::new(Body::from("query failed"));
+                    *err_resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    return err_resp;
+                }
+            }
+            Response::new(Body::from(""))
         }
 
         // Return the `404 Not Found` for any other routes.

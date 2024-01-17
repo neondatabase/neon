@@ -126,6 +126,16 @@ pub struct ParsedSpec {
     pub storage_auth_token: Option<String>,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct RowLevelParams {
+    pub table_name: String,
+    pub role: String,
+    pub user_name: String,
+    pub password: String,
+    pub database_name: String,
+    pub column_name: String,
+}
+
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
@@ -1156,6 +1166,39 @@ LIMIT 100",
             .insert(ext_archive_name.to_string(), (download_start, true));
 
         download_size
+    }
+
+    pub async fn ensure_row_level_sec(&self, params: RowLevelParams) -> Result<bool> {
+        let conn_str = self
+            .connstr
+            .as_str()
+            .replace("/postgres", &format!("/{}", params.database_name));
+        let connect_result = tokio_postgres::connect(&conn_str, NoTls).await;
+        let (client, connection) = connect_result.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        let result = client
+            .batch_execute(&format!(
+                "BEGIN;
+        ALTER TABLE {0} ENABLE ROW LEVEL SECURITY;
+        DROP POLICY IF EXISTS neon_row_level ON {0};
+        DROP ROLE IF EXISTS {1};
+        CREATE USER {1} WITH PASSWORD '{2}' IN GROUP {3};
+        CREATE POLICY neon_row_level ON {0} TO {3}
+            USING ({4} = current_user)
+            WITH CHECK ({4} = current_user);
+        COMMIT;",
+                &params.table_name,
+                &params.user_name,
+                &params.password,
+                &params.role,
+                &params.column_name,
+            ))
+            .await;
+        Ok(result.is_ok())
     }
 
     #[tokio::main]
