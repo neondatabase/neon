@@ -617,10 +617,14 @@ class NeonEnvBuilder:
             tenants_to_dir = self.repo_dir / ps_dir.name / "tenants"
 
             if self.test_overlay_dir is None:
-                log.info(f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
+                log.info(
+                    f"Copying pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
+                )
                 shutil.copytree(tenants_from_dir, tenants_to_dir)
             else:
-                log.info(f"Creating overlayfs mount of pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}")
+                log.info(
+                    f"Creating overlayfs mount of pageserver tenants directory {tenants_from_dir} to {tenants_to_dir}"
+                )
                 self.overlay_mount(f"{ps_dir.name}:tenants", tenants_from_dir, tenants_to_dir)
 
         for sk_from_dir in (repo_dir / "safekeepers").glob("sk*"):
@@ -631,12 +635,12 @@ class NeonEnvBuilder:
 
         shutil.rmtree(self.repo_dir / "local_fs_remote_storage", ignore_errors=True)
         if self.test_overlay_dir is None:
-            log.info(f"Copying local_fs_remote_storage directory from snapshot")
+            log.info("Copying local_fs_remote_storage directory from snapshot")
             shutil.copytree(
                 repo_dir / "local_fs_remote_storage", self.repo_dir / "local_fs_remote_storage"
             )
         else:
-            log.info(f"Creating overlayfs mount of local_fs_remote_storage directory from snapshot")
+            log.info("Creating overlayfs mount of local_fs_remote_storage directory from snapshot")
             self.overlay_mount(
                 "local_fs_remote_storage",
                 repo_dir / "local_fs_remote_storage",
