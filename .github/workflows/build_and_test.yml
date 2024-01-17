@@ -299,6 +299,7 @@ jobs:
             UBSAN_OPTIONS=""
             RUSTFLAGS=""
             CARGO_FLAGS="--locked --release"
+            unset CC
           fi
           {
             echo "cov_prefix=${cov_prefix}"
