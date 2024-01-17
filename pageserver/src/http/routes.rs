@@ -561,6 +561,36 @@ async fn timeline_list_handler(
     json_response(StatusCode::OK, response_data)
 }
 
+async fn timeline_backup_initdb_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    async {
+        let tenant = mgr::get_tenant(tenant_shard_id, true)?;
+
+        let timeline = tenant
+            .get_timeline(timeline_id, false)
+            .map_err(|e| ApiError::NotFound(e.into()))?;
+
+        timeline.backup_initdb_archive().await
+            .context("backing up initdb archive")
+            .map_err(ApiError::InternalServerError)?;
+
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_backup_initdb_archive",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn timeline_detail_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1942,6 +1972,9 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_id/ignore", |r| {
             api_handler(r, tenant_ignore_handler)
+        })
+        .post("/v1/tenant/:tenant_shard_id/timeline/:timeline_id/backup_initdb_archive", |r| {
+            api_handler(r, timeline_backup_initdb_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)
