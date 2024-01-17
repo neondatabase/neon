@@ -13,9 +13,13 @@ ifeq ($(BUILD_TYPE),release)
 	PG_CFLAGS = -O2 -g3 $(CFLAGS)
 	# Unfortunately, `--profile=...` is a nightly feature
 	CARGO_BUILD_FLAGS += --release
+	CPPFLAGS =
+    LDFLAGS =
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
+	CPPFLAGS = -fsanitize=address -fsanitize=undefined -fno-sanitize-recover -fno-sanitize=function -Wno-cast-function-type-strict
+	LDFLAGS = -fsanitize=address -fsanitize=undefined -static-libsan
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -80,8 +84,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 	(cd $(POSTGRES_INSTALL_DIR)/build/$* && \
 	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure \
 		CFLAGS='$(PG_CFLAGS)' \
-		CPPFLAGS='-fsanitize=address -fsanitize=undefined -fno-sanitize-recover -fno-sanitize=function -Wno-cast-function-type-strict' \
-		LDFLAGS='-fsanitize=address -fsanitize=undefined -static-libsan' \
+		CPPFLAGS='$(CPPFLAGS)' \
+		LDFLAGS='$(LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$* > configure.log)
 
