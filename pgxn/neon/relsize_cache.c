@@ -142,12 +142,27 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 		tag.rinfo = rinfo;
 		tag.forknum = forknum;
 		LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
-		entry = hash_search(relsize_hash, &tag, HASH_ENTER, &found);
+		/*
+		 * This should actually never happen! Below we check if hash is full and delete least recently user item in this case.
+		 * But for further safety we also perform check here.
+		 */
+		while ((entry = hash_search(relsize_hash, &tag, HASH_ENTER_NULL, &found)) == NULL)
+		{
+			RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
+			hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
+			Assert(relsize_ctl->size > 0);
+			relsize_ctl->size -= 1;
+		}
 		entry->size = size;
 		if (!found)
 		{
 			if (++relsize_ctl->size == relsize_hash_size)
 			{
+				/*
+				 * Remove least recently used elment from the hash.
+				 * Hash size after is becomes `relsize_hash_size-1`.
+				 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
+				 */
 				RelSizeEntry *victim = dlist_container(RelSizeEntry, lru_node, dlist_pop_head_node(&relsize_ctl->lru));
 				hash_search(relsize_hash, &victim->tag, HASH_REMOVE, NULL);
 				relsize_ctl->size -= 1;
