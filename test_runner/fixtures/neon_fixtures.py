@@ -583,7 +583,7 @@ class NeonEnvBuilder:
         assert not env.repo_dir.exists(), "both branches above should remove it"
         snapshot_dir.set_initialized()
 
-        self.env = None  # so that from_repo_dir works again (TODO review: is this safe?)
+        self.env = None  # so that from_repo_dir works again
 
     def from_repo_dir(
         self,
