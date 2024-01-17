@@ -33,12 +33,13 @@ use crate::safekeeper::{
 };
 use crate::send_wal::WalSenders;
 use crate::state::{TimelineMemState, TimelinePersistentState};
+use crate::wal_backup::{self};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
 use crate::wal_storage::Storage as wal_storage_iface;
-use crate::SafeKeeperConf;
 use crate::{debug_dump, wal_storage};
+use crate::{GlobalTimelines, SafeKeeperConf};
 
 /// Things safekeeper should know about timeline state on peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,14 +472,29 @@ impl Timeline {
         }
     }
 
-    /// Delete timeline from disk completely, by removing timeline directory. Background
-    /// timeline activities will stop eventually.
-    pub async fn delete_from_disk(
+    /// Delete timeline from disk completely, by removing timeline directory.
+    /// Background timeline activities will stop eventually.
+    ///
+    /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
+    /// deletion API endpoint is retriable.
+    pub async fn delete(
         &self,
         shared_state: &mut MutexGuard<'_, SharedState>,
+        only_local: bool,
     ) -> Result<(bool, bool)> {
         let was_active = shared_state.active;
         self.cancel(shared_state);
+
+        // TODO: It's better to wait for s3 offloader termination before
+        // removing data from s3. Though since s3 doesn't have transactions it
+        // still wouldn't guarantee absense of data after removal.
+        let conf = GlobalTimelines::get_global_config();
+        if !only_local && conf.is_wal_backup_enabled() {
+            // Note: we concurrently delete remote storage data from multiple
+            // safekeepers. That's ok, s3 replies 200 if object doesn't exist and we
+            // do some retries anyway.
+            wal_backup::delete_timeline(&self.ttid).await?;
+        }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok((dir_existed, was_active))
     }
