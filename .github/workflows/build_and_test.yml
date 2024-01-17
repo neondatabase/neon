@@ -581,17 +581,6 @@ jobs:
             --input-objects=/tmp/coverage/binaries.list \
             --format=lcov
 
-      - name: Upload coverage report
-        id: upload-coverage-report
-        env:
-          BUCKET: neon-github-public-dev
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://${BUCKET}/code-coverage/${COMMIT_SHA}
-
-          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
-          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
-
       - name: Build coverage report NEW
         id: upload-coverage-report-new
         env:
@@ -628,21 +617,11 @@ jobs:
 
       - uses: actions/github-script@v6
         env:
-          REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
           script: |
-            const { REPORT_URL, REPORT_URL_NEW, COMMIT_SHA } = process.env
-
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: `${COMMIT_SHA}`,
-              state: 'success',
-              target_url: `${REPORT_URL}`,
-              context: 'Code coverage report',
-            })
+            const { REPORT_URL_NEW, COMMIT_SHA } = process.env
 
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
