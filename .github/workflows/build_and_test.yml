@@ -195,7 +195,6 @@ jobs:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
-      CC: clang
 
     steps:
       - name: Fix git ownership
@@ -272,19 +271,21 @@ jobs:
           strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
             UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
             RUSTFLAGS="-C linker=clang"
+            CC=clang
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             ASAN_OPTIONS=""
             UBSAN_OPTIONS=""
             RUSTFLAGS=""
             CARGO_FLAGS="--locked --release"
-            unset CC
+            CC=gcc
           fi
           {
             echo "cov_prefix=${cov_prefix}"
             echo "ASAN_OPTIONS=${ASAN_OPTIONS}"
             echo "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
             echo "RUSTFLAGS=${RUSTFLAGS}"
+            echo "CC=${CC}"
             echo "CARGO_FEATURES=${CARGO_FEATURES}"
             echo "CARGO_FLAGS=${CARGO_FLAGS}"
             echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
