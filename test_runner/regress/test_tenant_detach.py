@@ -748,10 +748,12 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
     env = neon_env_builder.init_start()
 
     client = env.pageserver.http_client()
-    env.pageserver.allowed_errors.append(
-        r".* Changing Active tenant to Broken state, reason: broken from test"
+    env.pageserver.allowed_errors.extend(
+        [
+            r".* Changing Active tenant to Broken state, reason: broken from test",
+            r".*Dropped remote consistent LSN updates for tenant *.",
+        ]
     )
-    env.pageserver.allowed_errors.append(r".*Dropped remote consistent LSN updates for tenant *.")
 
     def only_int(samples: List[Sample]) -> Optional[int]:
         if len(samples) == 1:
