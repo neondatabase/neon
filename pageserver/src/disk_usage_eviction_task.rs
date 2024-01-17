@@ -389,6 +389,22 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     let selection = select_victims(&candidates, usage_pre);
 
+    let mut candidates = candidates;
+
+    let selection = if matches!(eviction_order, EvictionOrder::RelativeAccessed { .. }) {
+        // we currently have the layers ordered by AbsoluteAccessed so that we can get the summary
+        // for comparison here. this is a temporary measure to develop alternatives.
+        candidates.sort_unstable_by_key(|(partition, candidate)| {
+            (*partition, candidate.relative_last_activity)
+        });
+
+        let selection = select_victims(&candidates, usage_pre);
+
+        selection
+    } else {
+        selection
+    };
+
     let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
 
     // phase2: evict layers
