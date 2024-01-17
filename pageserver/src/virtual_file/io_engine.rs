@@ -67,6 +67,15 @@ use std::os::unix::prelude::FileExt;
 
 use super::FileGuard;
 
+fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
+    match e {
+        tokio_epoll_uring::Error::Op(e) => e,
+        tokio_epoll_uring::Error::System(system) => {
+            std::io::Error::new(std::io::ErrorKind::Other, system)
+        }
+    }
+}
+
 impl IoEngineKind {
     pub(super) async fn read_at<B>(
         &self,
@@ -99,15 +108,36 @@ impl IoEngineKind {
             IoEngineKind::TokioEpollUring => {
                 let system = tokio_epoll_uring::thread_local_system().await;
                 let (resources, res) = system.read(file_guard, offset, buf).await;
-                (
-                    resources,
-                    res.map_err(|e| match e {
-                        tokio_epoll_uring::Error::Op(e) => e,
-                        tokio_epoll_uring::Error::System(system) => {
-                            std::io::Error::new(std::io::ErrorKind::Other, system)
-                        }
-                    }),
-                )
+                (resources, res.map_err(epoll_uring_error_to_std))
+            }
+        }
+    }
+    pub(super) async fn sync_all(&self, file_guard: FileGuard) -> (FileGuard, std::io::Result<()>) {
+        match self {
+            IoEngineKind::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.sync_all());
+                (file_guard, res)
+            }
+            IoEngineKind::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.fsync(file_guard).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
+            }
+        }
+    }
+    pub(super) async fn sync_data(
+        &self,
+        file_guard: FileGuard,
+    ) -> (FileGuard, std::io::Result<()>) {
+        match self {
+            IoEngineKind::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.sync_data());
+                (file_guard, res)
+            }
+            IoEngineKind::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.fdatasync(file_guard).await;
+                (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
     }

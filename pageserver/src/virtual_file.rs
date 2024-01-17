@@ -447,8 +447,18 @@ impl VirtualFile {
 
     /// Call File::sync_all() on the underlying File.
     pub async fn sync_all(&self) -> Result<(), Error> {
-        with_file!(self, StorageIoOperation::Fsync, |file_guard| file_guard
-            .with_std_file(|std_file| std_file.sync_all()))
+        with_file!(self, StorageIoOperation::Fsync, |file_guard| {
+            let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
+            res
+        })
+    }
+
+    /// Call File::sync_all() on the underlying File.
+    pub async fn sync_data(&self) -> Result<(), Error> {
+        with_file!(self, StorageIoOperation::Fsync, |file_guard| {
+            let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
+            res
+        })
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
