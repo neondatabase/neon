@@ -249,21 +249,7 @@ def _eviction_env(
 
     timelines = []
     for scale in pgbench_scales:
-        tenant_id, timeline_id = env.neon_cli.create_tenant(
-            conf={
-                "gc_period": "0s",
-                "compaction_period": "0s",
-                "checkpoint_distance": f"{layer_size}",
-                "image_creation_threshold": "100",
-                "compaction_target_size": f"{layer_size}",
-            }
-        )
-
-        with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-            pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
-            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-
-        timelines.append((tenant_id, timeline_id))
+        timelines.append(pgbench_init_tenant(layer_size, scale, env, pg_bin))
 
     # stop the safekeepers to avoid on-demand downloads caused by
     # initial logical size calculation triggered by walreceiver connection status
@@ -272,31 +258,62 @@ def _eviction_env(
 
     # after stopping the safekeepers, we know that no new WAL will be coming in
     for tenant_id, timeline_id in timelines:
-        pageserver_http = env.get_tenant_pageserver(tenant_id).http_client()
-
-        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-        wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
-        tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
-        assert tl_info["last_record_lsn"] == tl_info["disk_consistent_lsn"]
-        assert tl_info["disk_consistent_lsn"] == tl_info["remote_consistent_lsn"]
-        pgbench_init_lsns[tenant_id] = Lsn(tl_info["last_record_lsn"])
-
-        layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
-        log.info(f"{layers}")
-        assert (
-            len(layers.historic_layers) >= 10
-        ), "evictions happen at layer granularity, but we often assert at byte-granularity"
+        pgbench_init_lsns[tenant_id] = finish_tenant_creation(env, tenant_id, timeline_id, 10)
 
     eviction_env = EvictionEnv(
         timelines=timelines,
         neon_env=env,
-        pageserver_http=pageserver_http,
+        # this last tenant http client works for num_pageservers=1
+        pageserver_http=env.get_tenant_pageserver(timelines[-1][0]).http_client(),
         layer_size=layer_size,
         pg_bin=pg_bin,
         pgbench_init_lsns=pgbench_init_lsns,
     )
 
     return eviction_env
+
+
+def pgbench_init_tenant(
+    layer_size: int, scale: int, env: NeonEnv, pg_bin: PgBin
+) -> Tuple[TenantId, TimelineId]:
+    tenant_id, timeline_id = env.neon_cli.create_tenant(
+        conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{layer_size}",
+            "image_creation_threshold": "100",
+            "compaction_target_size": f"{layer_size}",
+        }
+    )
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+
+    return (tenant_id, timeline_id)
+
+
+def finish_tenant_creation(
+    env: NeonEnv,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    min_expected_layers: int,
+) -> Lsn:
+    pageserver_http = env.get_tenant_pageserver(tenant_id).http_client()
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
+    tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
+    assert tl_info["last_record_lsn"] == tl_info["disk_consistent_lsn"]
+    assert tl_info["disk_consistent_lsn"] == tl_info["remote_consistent_lsn"]
+    pgbench_init_lsn = Lsn(tl_info["last_record_lsn"])
+
+    layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+    # log.info(f"{layers}")
+    assert (
+        len(layers.historic_layers) >= min_expected_layers
+    ), "evictions happen at layer granularity, but we often assert at byte-granularity"
+
+    return pgbench_init_lsn
 
 
 @pytest.fixture
