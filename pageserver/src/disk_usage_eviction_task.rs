@@ -386,39 +386,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // If we get far enough in the list that we start to evict layers that are below
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
-    let mut warned = None;
-    let mut usage_planned = usage_pre;
-    let mut evicted_amount = 0;
 
-    for (i, (partition, candidate)) in candidates.iter().enumerate() {
-        if !usage_planned.has_pressure() {
-            debug!(
-                no_candidates_evicted = i,
-                "took enough candidates for pressure to be relieved"
-            );
-            break;
-        }
+    let selection = select_victims(&candidates, usage_pre);
 
-        if partition == &MinResidentSizePartition::Below && warned.is_none() {
-            warn!(?usage_pre, ?usage_planned, candidate_no=i, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
-            warned = Some(usage_planned);
-        }
-
-        usage_planned.add_available_bytes(candidate.layer.get_file_size());
-        evicted_amount += 1;
-    }
-
-    let usage_planned = match warned {
-        Some(respecting_tenant_min_resident_size) => PlannedUsage {
-            respecting_tenant_min_resident_size,
-            fallback_to_global_lru: Some(usage_planned),
-        },
-        None => PlannedUsage {
-            respecting_tenant_min_resident_size: usage_planned,
-            fallback_to_global_lru: None,
-        },
-    };
-    debug!(?usage_planned, "usage planned");
+    let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
 
     // phase2: evict layers
 
@@ -914,6 +885,72 @@ async fn collect_eviction_candidates(
         .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
 
     Ok(EvictionCandidates::Finished(candidates))
+}
+
+/// Given a pre-sorted vec of all layers in the system, select the first N which are enough to
+/// relieve pressure.
+///
+/// Returns the amount of candidates selected, with the planned usage.
+fn select_victims<U: Usage>(
+    candidates: &[(MinResidentSizePartition, EvictionCandidate)],
+    usage_pre: U,
+) -> VictimSelection<U> {
+    let mut usage_when_switched = None;
+    let mut usage_planned = usage_pre;
+    let mut evicted_amount = 0;
+
+    for (i, (partition, candidate)) in candidates.iter().enumerate() {
+        if !usage_planned.has_pressure() {
+            break;
+        }
+
+        if partition == &MinResidentSizePartition::Below && usage_when_switched.is_none() {
+            usage_when_switched = Some((usage_planned, i));
+        }
+
+        usage_planned.add_available_bytes(candidate.layer.get_file_size());
+        evicted_amount += 1;
+    }
+
+    VictimSelection {
+        amount: evicted_amount,
+        usage_pre,
+        usage_when_switched,
+        usage_planned,
+    }
+}
+
+struct VictimSelection<U> {
+    amount: usize,
+    usage_pre: U,
+    usage_when_switched: Option<(U, usize)>,
+    usage_planned: U,
+}
+
+impl<U: Usage> VictimSelection<U> {
+    fn into_amount_and_planned(self) -> (usize, PlannedUsage<U>) {
+        debug!(
+            evicted_amount=%self.amount,
+            "took enough candidates for pressure to be relieved"
+        );
+
+        if let Some((usage_planned, candidate_no)) = self.usage_when_switched.as_ref() {
+            warn!(usage_pre=?self.usage_pre, ?usage_planned, candidate_no, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
+        }
+
+        let planned = match self.usage_when_switched {
+            Some((respecting_tenant_min_resident_size, _)) => PlannedUsage {
+                respecting_tenant_min_resident_size,
+                fallback_to_global_lru: Some(self.usage_planned),
+            },
+            None => PlannedUsage {
+                respecting_tenant_min_resident_size: self.usage_planned,
+                fallback_to_global_lru: None,
+            },
+        };
+
+        (self.amount, planned)
+    }
 }
 
 struct TimelineKey(Arc<Timeline>);
