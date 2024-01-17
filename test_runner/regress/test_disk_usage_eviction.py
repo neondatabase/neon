@@ -121,7 +121,7 @@ class EvictionEnv:
         }
 
     def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
-        ret = Counter()
+        ret: Counter[TenantId] = Counter()
 
         for tenant_id, timeline_id in self.timelines:
             timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
