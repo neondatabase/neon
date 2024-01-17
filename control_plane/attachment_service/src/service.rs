@@ -19,7 +19,7 @@ use pageserver_api::{
     },
     models,
     models::{
-        LocationConfig, LocationConfigMode, ShardParameters, TenantCreateRequest,
+        LocationConfig, LocationConfigMode, ShardParameters, TenantConfig, TenantCreateRequest,
         TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
@@ -338,6 +338,39 @@ impl Service {
         &self,
         attach_req: AttachHookRequest,
     ) -> anyhow::Result<AttachHookResponse> {
+        // This is a test hook.  To enable using it on tenants that were created directly with
+        // the pageserver API (not via this service), we will auto-create any missing tenant
+        // shards with default state.
+        let insert = {
+            let locked = self.inner.write().unwrap();
+            !locked.tenants.contains_key(&attach_req.tenant_shard_id)
+        };
+
+        if insert {
+            let tsp = TenantShardPersistence {
+                tenant_id: attach_req.tenant_shard_id.tenant_id.to_string(),
+                shard_number: attach_req.tenant_shard_id.shard_number.0 as i32,
+                shard_count: attach_req.tenant_shard_id.shard_count.0 as i32,
+                shard_stripe_size: 0,
+                generation: 0,
+                generation_pageserver: None,
+                placement_policy: serde_json::to_string(&PlacementPolicy::default()).unwrap(),
+                config: serde_json::to_string(&TenantConfig::default()).unwrap(),
+            };
+
+            self.persistence.insert_tenant_shards(vec![tsp]).await?;
+
+            let mut locked = self.inner.write().unwrap();
+            locked.tenants.insert(
+                attach_req.tenant_shard_id,
+                TenantState::new(
+                    attach_req.tenant_shard_id,
+                    ShardIdentity::unsharded(),
+                    PlacementPolicy::Single,
+                ),
+            );
+        }
+
         let new_generation = self
             .persistence
             .increment_generation(attach_req.tenant_shard_id, attach_req.node_id)
@@ -346,14 +379,8 @@ impl Service {
         let mut locked = self.inner.write().unwrap();
         let tenant_state = locked
             .tenants
-            .entry(attach_req.tenant_shard_id)
-            .or_insert_with(|| {
-                TenantState::new(
-                    attach_req.tenant_shard_id,
-                    ShardIdentity::unsharded(),
-                    PlacementPolicy::Single,
-                )
-            });
+            .get_mut(&attach_req.tenant_shard_id)
+            .expect("Checked for existence above");
         tenant_state.generation = new_generation;
 
         if let Some(attaching_pageserver) = attach_req.node_id.as_ref() {
