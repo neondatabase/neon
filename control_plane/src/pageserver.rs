@@ -395,6 +395,11 @@ impl PageServerNode {
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
             heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+            lazy_slru_download: settings
+                .remove("lazy_slru_download")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'lazy_slru_download' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -495,6 +500,11 @@ impl PageServerNode {
                     .transpose()
                     .context("Failed to parse 'gc_feedback' as bool")?,
                 heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
+                lazy_slru_download: settings
+                    .remove("lazy_slru_download")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'lazy_slru_download' as bool")?,
             }
         };
 

@@ -272,6 +272,7 @@ pub struct TenantConfig {
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
     pub heatmap_period: Option<String>,
+    pub lazy_slru_download: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
