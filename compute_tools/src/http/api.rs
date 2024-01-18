@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use crate::http::body::Body;
+use bytes::Bytes;
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
 use http_body_util::BodyExt;
+use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -43,7 +44,7 @@ fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
 }
 
 // Service function to handle all available routes.
-async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<Body> {
+async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<Full<Bytes>> {
     //
     // NOTE: The URI path is currently included in traces. That's OK because
     // it doesn't contain any variable parts or sensitive information. But
@@ -55,7 +56,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
             info!("serving /status GET request");
             let state = compute.state.lock().unwrap();
             let status_response = status_response_from_state(&state);
-            Response::new(Body::from(serde_json::to_string(&status_response).unwrap()))
+            Response::new(Full::from(serde_json::to_string(&status_response).unwrap()))
         }
 
         // Startup metrics in JSON format. Keep /metrics reserved for a possible
@@ -63,7 +64,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
         (&Method::GET, "/metrics.json") => {
             info!("serving /metrics.json GET request");
             let metrics = compute.state.lock().unwrap().metrics.clone();
-            Response::new(Body::from(serde_json::to_string(&metrics).unwrap()))
+            Response::new(Full::from(serde_json::to_string(&metrics).unwrap()))
         }
 
         // Collect Postgres current usage insights
@@ -73,11 +74,11 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
             if status != ComputeStatus::Running {
                 let msg = format!("compute is not running, current status: {:?}", status);
                 error!(msg);
-                return Response::new(Body::from(msg));
+                return Response::new(Full::from(msg));
             }
 
             let insights = compute.collect_insights().await;
-            Response::new(Body::from(insights))
+            Response::new(Full::from(insights))
         }
 
         (&Method::POST, "/check_writability") => {
@@ -89,15 +90,15 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
                     status
                 );
                 error!(msg);
-                return Response::new(Body::from(msg));
+                return Response::new(Full::from(msg));
             }
 
             let res = crate::checker::check_writability(compute).await;
             match res {
-                Ok(_) => Response::new(Body::from("true")),
+                Ok(_) => Response::new(Full::from("true")),
                 Err(e) => {
                     error!("check_writability failed: {}", e);
-                    Response::new(Body::from(e.to_string()))
+                    Response::new(Full::from(e.to_string()))
                 }
             }
         }
@@ -105,7 +106,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
         (&Method::GET, "/info") => {
             let num_cpus = num_cpus::get_physical();
             info!("serving /info GET request. num_cpus: {}", num_cpus);
-            Response::new(Body::from(
+            Response::new(Full::from(
                 serde_json::json!({
                     "num_cpus": num_cpus,
                 })
@@ -122,7 +123,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
         (&Method::POST, "/configure") => {
             info!("serving /configure POST request");
             match handle_configure_request(req, compute).await {
-                Ok(msg) => Response::new(Body::from(msg)),
+                Ok(msg) => Response::new(Full::from(msg)),
                 Err((msg, code)) => {
                     error!("error handling /configure request: {msg}");
                     render_json_error(&msg, code)
@@ -139,7 +140,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
             // if no remote storage is configured
             if compute.ext_remote_storage.is_none() {
                 info!("no extensions remote storage configured");
-                let mut resp = Response::new(Body::from("no remote storage configured"));
+                let mut resp = Response::new(Full::from("no remote storage configured"));
                 *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                 return resp;
             }
@@ -150,7 +151,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
                 if params == "is_library=true" {
                     is_library = true;
                 } else {
-                    let mut resp = Response::new(Body::from("Wrong request parameters"));
+                    let mut resp = Response::new(Full::from("Wrong request parameters"));
                     *resp.status_mut() = StatusCode::BAD_REQUEST;
                     return resp;
                 }
@@ -172,7 +173,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
                     Some(r) => r,
                     None => {
                         info!("no remote extensions spec was provided");
-                        let mut resp = Response::new(Body::from("no remote storage configured"));
+                        let mut resp = Response::new(Full::from("no remote storage configured"));
                         *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                         return resp;
                     }
@@ -189,10 +190,10 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
             match ext {
                 Ok((ext_name, ext_path)) => {
                     match compute.download_extension(ext_name, ext_path).await {
-                        Ok(_) => Response::new(Body::from("OK")),
+                        Ok(_) => Response::new(Full::from("OK")),
                         Err(e) => {
                             error!("extension download failed: {}", e);
-                            let mut resp = Response::new(Body::from(e.to_string()));
+                            let mut resp = Response::new(Full::from(e.to_string()));
                             *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                             resp
                         }
@@ -200,7 +201,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
                 }
                 Err(e) => {
                     warn!("extension download failed to find extension: {}", e);
-                    let mut resp = Response::new(Body::from("failed to find file"));
+                    let mut resp = Response::new(Full::from("failed to find file"));
                     *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
                     resp
                 }
@@ -209,7 +210,7 @@ async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<
 
         // Return the `404 Not Found` for any other routes.
         _ => {
-            let mut not_found = Response::new(Body::from("404 Not Found"));
+            let mut not_found = Response::new(Full::from("404 Not Found"));
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
         }
@@ -294,13 +295,13 @@ async fn handle_configure_request(
     }
 }
 
-fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
+fn render_json_error(e: &str, status: StatusCode) -> Response<Full<Bytes>> {
     let error = GenericAPIError {
         error: e.to_string(),
     };
     Response::builder()
         .status(status)
-        .body(Body::from(serde_json::to_string(&error).unwrap()))
+        .body(Full::from(serde_json::to_string(&error).unwrap()))
         .unwrap()
 }
 

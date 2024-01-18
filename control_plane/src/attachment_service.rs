@@ -1,6 +1,5 @@
 use crate::{background_process, local_env::LocalEnv};
 use camino::Utf8PathBuf;
-use hyper::Method;
 use pageserver_api::{
     models::{ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo},
     shard::TenantShardId,
@@ -8,6 +7,7 @@ use pageserver_api::{
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
+use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{path::PathBuf, process::Child, str::FromStr};
 use tracing::instrument;
@@ -278,7 +278,7 @@ impl AttachmentService {
     /// Simple HTTP request wrapper for calling into attachment service
     async fn dispatch<RQ, RS>(
         &self,
-        method: hyper::Method,
+        method: reqwest::Method,
         path: String,
         body: Option<RQ>,
     ) -> anyhow::Result<RS>

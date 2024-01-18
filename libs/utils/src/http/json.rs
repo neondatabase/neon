@@ -41,6 +41,13 @@ pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
         .map_err(ApiError::BadRequest)
 }
 
+pub fn json_response_body<T: Serialize>(
+    status: StatusCode,
+    data: T,
+) -> Result<Response<Body>, ApiError> {
+    json_response(status, data).map(|r| r.map(Body::new))
+}
+
 pub fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,

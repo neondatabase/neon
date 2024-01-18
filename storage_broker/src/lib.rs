@@ -1,6 +1,7 @@
 use std::time::Duration;
 use tonic::codegen::StdError;
-use tonic::transport::{ClientTlsConfig, Endpoint, Uri};
+pub use tonic::transport::Uri;
+use tonic::transport::{ClientTlsConfig, Endpoint};
 use tonic::{transport::Channel, Status};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 

@@ -117,7 +117,7 @@ parquet_derive = "49.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
-prost = "0.11"
+prost = "0.12"
 rand = "0.8"
 redis = { version = "0.24.0", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
@@ -215,7 +215,7 @@ criterion = "0.5.1"
 rcgen = "0.11"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
-tonic-build = "0.9"
+tonic-build = "0.10.2"
 
 [patch.crates-io]
 
