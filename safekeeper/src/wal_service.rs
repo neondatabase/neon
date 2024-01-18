@@ -100,7 +100,11 @@ async fn handle_socket(
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
     pgbackend
-        .run(&mut conn_handler, future::pending::<()>)
+        .run(
+            &mut conn_handler,
+            future::pending::<()>,
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
 }
 

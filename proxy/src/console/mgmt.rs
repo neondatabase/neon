@@ -73,7 +73,13 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
 
 async fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None)?;
-    pgbackend.run(&mut MgmtHandler, future::pending::<()>).await
+    pgbackend
+        .run(
+            &mut MgmtHandler,
+            future::pending::<()>,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
 }
 
 /// A message received by `mgmt` when a compute node is ready.
@@ -87,6 +93,7 @@ impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
         &mut self,
         pgb: &mut PostgresBackendTCP,
         query: &str,
+        _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(), QueryError> {
         try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");
