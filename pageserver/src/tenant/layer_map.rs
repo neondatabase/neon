@@ -283,15 +283,15 @@ impl LayerMap {
     ///
     /// This is used for garbage collection, to determine if an old layer can
     /// be deleted.
-    pub fn image_layer_exists(&self, key: &Range<Key>, lsn: &Range<Lsn>) -> Result<bool> {
+    pub fn image_layer_exists(&self, key: &Range<Key>, lsn: &Range<Lsn>) -> bool {
         if key.is_empty() {
             // Vacuously true. There's a newer image for all 0 of the kerys in the range.
-            return Ok(true);
+            return true;
         }
 
         let version = match self.historic.get().unwrap().get_version(lsn.end.0 - 1) {
             Some(v) => v,
-            None => return Ok(false),
+            None => return false,
         };
 
         let start = key.start.to_i128();
@@ -304,17 +304,17 @@ impl LayerMap {
 
         // Check the start is covered
         if !layer_covers(version.image_coverage.query(start)) {
-            return Ok(false);
+            return false;
         }
 
         // Check after all changes of coverage
         for (_, change_val) in version.image_coverage.range(start..end) {
             if !layer_covers(change_val) {
-                return Ok(false);
+                return false;
             }
         }
 
-        Ok(true)
+        true
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerDesc>> {
@@ -325,18 +325,14 @@ impl LayerMap {
     /// Divide the whole given range of keys into sub-ranges based on the latest
     /// image layer that covers each range at the specified lsn (inclusive).
     /// This is used when creating  new image layers.
-    ///
-    // FIXME: clippy complains that the result type is very complex. She's probably
-    // right...
-    #[allow(clippy::type_complexity)]
     pub fn image_coverage(
         &self,
         key_range: &Range<Key>,
         lsn: Lsn,
-    ) -> Result<Vec<(Range<Key>, Option<Arc<PersistentLayerDesc>>)>> {
+    ) -> Vec<(Range<Key>, Option<Arc<PersistentLayerDesc>>)> {
         let version = match self.historic.get().unwrap().get_version(lsn.0) {
             Some(v) => v,
-            None => return Ok(vec![]),
+            None => return vec![],
         };
 
         let start = key_range.start.to_i128();
@@ -359,7 +355,7 @@ impl LayerMap {
         let kr = Key::from_i128(current_key)..Key::from_i128(end);
         coverage.push((kr, current_val.take()));
 
-        Ok(coverage)
+        coverage
     }
 
     pub fn is_l0(layer: &PersistentLayerDesc) -> bool {
@@ -410,24 +406,19 @@ impl LayerMap {
     /// This number is used to compute the largest number of deltas that
     /// we'll need to visit for any page reconstruction in this region.
     /// We use this heuristic to decide whether to create an image layer.
-    pub fn count_deltas(
-        &self,
-        key: &Range<Key>,
-        lsn: &Range<Lsn>,
-        limit: Option<usize>,
-    ) -> Result<usize> {
+    pub fn count_deltas(&self, key: &Range<Key>, lsn: &Range<Lsn>, limit: Option<usize>) -> usize {
         // We get the delta coverage of the region, and for each part of the coverage
         // we recurse right underneath the delta. The recursion depth is limited by
         // the largest result this function could return, which is in practice between
         // 3 and 10 (since we usually try to create an image when the number gets larger).
 
         if lsn.is_empty() || key.is_empty() || limit == Some(0) {
-            return Ok(0);
+            return 0;
         }
 
         let version = match self.historic.get().unwrap().get_version(lsn.end.0 - 1) {
             Some(v) => v,
-            None => return Ok(0),
+            None => return 0,
         };
 
         let start = key.start.to_i128();
@@ -448,8 +439,7 @@ impl LayerMap {
                     if !kr.is_empty() {
                         let base_count = Self::is_reimage_worthy(&val, key) as usize;
                         let new_limit = limit.map(|l| l - base_count);
-                        let max_stacked_deltas_underneath =
-                            self.count_deltas(&kr, &lr, new_limit)?;
+                        let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                         max_stacked_deltas = std::cmp::max(
                             max_stacked_deltas,
                             base_count + max_stacked_deltas_underneath,
@@ -471,7 +461,7 @@ impl LayerMap {
                 if !kr.is_empty() {
                     let base_count = Self::is_reimage_worthy(&val, key) as usize;
                     let new_limit = limit.map(|l| l - base_count);
-                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
+                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                     max_stacked_deltas = std::cmp::max(
                         max_stacked_deltas,
                         base_count + max_stacked_deltas_underneath,
@@ -480,7 +470,7 @@ impl LayerMap {
             }
         }
 
-        Ok(max_stacked_deltas)
+        max_stacked_deltas
     }
 
     /// Count how many reimage-worthy layers we need to visit for given key-lsn pair.
@@ -592,10 +582,7 @@ impl LayerMap {
                     if limit == Some(difficulty) {
                         break;
                     }
-                    for (img_range, last_img) in self
-                        .image_coverage(range, lsn)
-                        .expect("why would this err?")
-                    {
+                    for (img_range, last_img) in self.image_coverage(range, lsn) {
                         if limit == Some(difficulty) {
                             break;
                         }
@@ -606,9 +593,7 @@ impl LayerMap {
                         };
 
                         if img_lsn < lsn {
-                            let num_deltas = self
-                                .count_deltas(&img_range, &(img_lsn..lsn), limit)
-                                .expect("why would this err lol?");
+                            let num_deltas = self.count_deltas(&img_range, &(img_lsn..lsn), limit);
                             difficulty = std::cmp::max(difficulty, num_deltas);
                         }
                     }

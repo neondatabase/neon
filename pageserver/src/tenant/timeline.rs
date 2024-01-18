@@ -3011,11 +3011,7 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    async fn time_for_new_image_layer(
-        &self,
-        partition: &KeySpace,
-        lsn: Lsn,
-    ) -> anyhow::Result<bool> {
+    async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
@@ -3035,20 +3031,20 @@ impl Timeline {
                     // but the range is already covered by image layers at more recent LSNs. Before we
                     // create a new image layer, check if the range is already covered at more recent LSNs.
                     if !layers
-                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))?
+                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))
                     {
                         debug!(
                             "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
                             img_range.start, img_range.end, cutoff_lsn, lsn
                         );
-                        return Ok(true);
+                        return true;
                     }
                 }
             }
         }
 
         for part_range in &partition.ranges {
-            let image_coverage = layers.image_coverage(part_range, lsn)?;
+            let image_coverage = layers.image_coverage(part_range, lsn);
             for (img_range, last_img) in image_coverage {
                 let img_lsn = if let Some(last_img) = last_img {
                     last_img.get_lsn_range().end
@@ -3069,7 +3065,7 @@ impl Timeline {
                 // after we read last_record_lsn, which is passed here in the 'lsn' argument.
                 if img_lsn < lsn {
                     let num_deltas =
-                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
+                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold));
 
                     max_deltas = max_deltas.max(num_deltas);
                     if num_deltas >= threshold {
@@ -3077,7 +3073,7 @@ impl Timeline {
                             "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
                         );
-                        return Ok(true);
+                        return true;
                     }
                 }
             }
@@ -3087,7 +3083,7 @@ impl Timeline {
             max_deltas,
             "none of the partitioned ranges had >= {threshold} deltas"
         );
-        Ok(false)
+        false
     }
 
     #[tracing::instrument(skip_all, fields(%lsn, %force))]
@@ -3115,7 +3111,7 @@ impl Timeline {
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
             start = img_range.end;
-            if force || self.time_for_new_image_layer(partition, lsn).await? {
+            if force || self.time_for_new_image_layer(partition, lsn).await {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -3545,7 +3541,7 @@ impl Timeline {
                     // has not so much sense, because largest holes will corresponds field1/field2 changes.
                     // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
                     // That is why it is better to measure size of hole as number of covering image layers.
-                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn)?.len();
+                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn).len();
                     if coverage_size >= min_hole_coverage_size {
                         heap.push(Hole {
                             key_range,
@@ -4171,7 +4167,7 @@ impl Timeline {
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
             if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
                 debug!("keeping {} because it is the latest layer", l.filename());
                 // Collect delta key ranges that need image layers to allow garbage
