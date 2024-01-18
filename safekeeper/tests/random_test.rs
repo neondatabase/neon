@@ -2,13 +2,16 @@ use rand::Rng;
 use tracing::{info, warn};
 
 use crate::walproposer_sim::{
-    log::init_logger,
+    log::{init_logger, init_tracing_logger},
     simulation::{generate_network_opts, generate_schedule, TestConfig},
     simulation_logs::validate_events,
 };
 
 pub mod walproposer_sim;
 
+// Generates 2000 random seeds and runs a schedule for each of them.
+// If you seed this test fail, please report the last seed to the
+// @safekeeper team.
 #[test]
 fn test_random_schedules() -> anyhow::Result<()> {
     let clock = init_logger();
@@ -30,10 +33,11 @@ fn test_random_schedules() -> anyhow::Result<()> {
     Ok(())
 }
 
+// After you found a seed that fails, you can insert this seed here
+// and run the test to see the full debug output.
 #[test]
 fn test_one_schedule() -> anyhow::Result<()> {
-    // enable_debug();
-    let clock = init_logger();
+    let clock = init_tracing_logger(true);
     let mut config = TestConfig::new(Some(clock));
 
     let seed = 2717576027256331644;

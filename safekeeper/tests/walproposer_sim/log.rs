@@ -40,7 +40,7 @@ impl FormatTime for SimClock {
 
 static LOGGING_DONE: OnceCell<SimClock> = OnceCell::new();
 
-fn init_tracing_logger(debug_enabled: bool) -> SimClock {
+pub fn init_tracing_logger(debug_enabled: bool) -> SimClock {
     LOGGING_DONE
         .get_or_init(|| {
             let clock = SimClock::default();
