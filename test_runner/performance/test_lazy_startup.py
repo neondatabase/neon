@@ -46,7 +46,8 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
         endpoint.safe_psql("CREATE TABLE t (pk integer PRIMARY KEY, x integer)")
         endpoint.safe_psql("ALTER TABLE t SET (autovacuum_enabled = false)")
         endpoint.safe_psql("INSERT INTO t VALUES (1, 0)")
-        endpoint.safe_psql("""
+        endpoint.safe_psql(
+            """
           CREATE PROCEDURE updating() as
           $$
             DECLARE
@@ -58,7 +59,8 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
               END LOOP;
             END
           $$ LANGUAGE plpgsql
-        """)
+        """
+        )
         endpoint.safe_psql("SET statement_timeout=0")
         endpoint.safe_psql("call updating()")
 
@@ -91,7 +93,12 @@ def test_lazy_startup(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchm
                 zenbenchmark.record(name, value, "ms", report=MetricReport.LOWER_IS_BETTER)
 
             basebackup_bytes = metrics["basebackup_bytes"]
-            zenbenchmark.record(f"{slru}_{i}_basebackup_bytes", basebackup_bytes, "bytes", report=MetricReport.LOWER_IS_BETTER)
+            zenbenchmark.record(
+                f"{slru}_{i}_basebackup_bytes",
+                basebackup_bytes,
+                "bytes",
+                report=MetricReport.LOWER_IS_BETTER,
+            )
 
             # Stop so we can restart
             endpoint.stop()
