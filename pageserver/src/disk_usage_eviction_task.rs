@@ -386,39 +386,56 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // If we get far enough in the list that we start to evict layers that are below
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
-    let mut warned = None;
-    let mut usage_planned = usage_pre;
-    let mut evicted_amount = 0;
 
-    for (i, (partition, candidate)) in candidates.iter().enumerate() {
-        if !usage_planned.has_pressure() {
-            debug!(
-                no_candidates_evicted = i,
-                "took enough candidates for pressure to be relieved"
-            );
-            break;
+    let selection = select_victims(&candidates, usage_pre);
+
+    let mut candidates = candidates;
+
+    let selection = if matches!(eviction_order, EvictionOrder::RelativeAccessed { .. }) {
+        // we currently have the layers ordered by AbsoluteAccessed so that we can get the summary
+        // for comparison here. this is a temporary measure to develop alternatives.
+        use std::fmt::Write;
+
+        let mut summary_buf = String::with_capacity(256);
+
+        {
+            let absolute_summary = candidates
+                .iter()
+                .take(selection.amount)
+                .map(|(_, candidate)| candidate)
+                .collect::<summary::EvictionSummary>();
+
+            write!(summary_buf, "{absolute_summary}").expect("string grows");
+
+            info!("absolute accessed selection summary: {summary_buf}");
         }
 
-        if partition == &MinResidentSizePartition::Below && warned.is_none() {
-            warn!(?usage_pre, ?usage_planned, candidate_no=i, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
-            warned = Some(usage_planned);
+        candidates.sort_unstable_by_key(|(partition, candidate)| {
+            (*partition, candidate.relative_last_activity)
+        });
+
+        let selection = select_victims(&candidates, usage_pre);
+
+        {
+            summary_buf.clear();
+
+            let relative_summary = candidates
+                .iter()
+                .take(selection.amount)
+                .map(|(_, candidate)| candidate)
+                .collect::<summary::EvictionSummary>();
+
+            write!(summary_buf, "{relative_summary}").expect("string grows");
+
+            info!("relative accessed selection summary: {summary_buf}");
         }
 
-        usage_planned.add_available_bytes(candidate.layer.get_file_size());
-        evicted_amount += 1;
-    }
-
-    let usage_planned = match warned {
-        Some(respecting_tenant_min_resident_size) => PlannedUsage {
-            respecting_tenant_min_resident_size,
-            fallback_to_global_lru: Some(usage_planned),
-        },
-        None => PlannedUsage {
-            respecting_tenant_min_resident_size: usage_planned,
-            fallback_to_global_lru: None,
-        },
+        selection
+    } else {
+        selection
     };
-    debug!(?usage_planned, "usage planned");
+
+    let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
 
     // phase2: evict layers
 
@@ -910,20 +927,78 @@ async fn collect_eviction_candidates(
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
 
-    match eviction_order {
-        EvictionOrder::AbsoluteAccessed => {
-            candidates.sort_unstable_by_key(|(partition, candidate)| {
-                (*partition, candidate.last_activity_ts)
-            });
-        }
-        EvictionOrder::RelativeAccessed { .. } => {
-            candidates.sort_unstable_by_key(|(partition, candidate)| {
-                (*partition, candidate.relative_last_activity)
-            });
-        }
-    }
+    // always behave as if AbsoluteAccessed was selected. if RelativeAccessed is in use, we
+    // will sort later by candidate.relative_last_activity to get compare evictions.
+    candidates
+        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
 
     Ok(EvictionCandidates::Finished(candidates))
+}
+
+/// Given a pre-sorted vec of all layers in the system, select the first N which are enough to
+/// relieve pressure.
+///
+/// Returns the amount of candidates selected, with the planned usage.
+fn select_victims<U: Usage>(
+    candidates: &[(MinResidentSizePartition, EvictionCandidate)],
+    usage_pre: U,
+) -> VictimSelection<U> {
+    let mut usage_when_switched = None;
+    let mut usage_planned = usage_pre;
+    let mut evicted_amount = 0;
+
+    for (i, (partition, candidate)) in candidates.iter().enumerate() {
+        if !usage_planned.has_pressure() {
+            break;
+        }
+
+        if partition == &MinResidentSizePartition::Below && usage_when_switched.is_none() {
+            usage_when_switched = Some((usage_planned, i));
+        }
+
+        usage_planned.add_available_bytes(candidate.layer.get_file_size());
+        evicted_amount += 1;
+    }
+
+    VictimSelection {
+        amount: evicted_amount,
+        usage_pre,
+        usage_when_switched,
+        usage_planned,
+    }
+}
+
+struct VictimSelection<U> {
+    amount: usize,
+    usage_pre: U,
+    usage_when_switched: Option<(U, usize)>,
+    usage_planned: U,
+}
+
+impl<U: Usage> VictimSelection<U> {
+    fn into_amount_and_planned(self) -> (usize, PlannedUsage<U>) {
+        debug!(
+            evicted_amount=%self.amount,
+            "took enough candidates for pressure to be relieved"
+        );
+
+        if let Some((usage_planned, candidate_no)) = self.usage_when_switched.as_ref() {
+            warn!(usage_pre=?self.usage_pre, ?usage_planned, candidate_no, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
+        }
+
+        let planned = match self.usage_when_switched {
+            Some((respecting_tenant_min_resident_size, _)) => PlannedUsage {
+                respecting_tenant_min_resident_size,
+                fallback_to_global_lru: Some(self.usage_planned),
+            },
+            None => PlannedUsage {
+                respecting_tenant_min_resident_size: self.usage_planned,
+                fallback_to_global_lru: None,
+            },
+        };
+
+        (self.amount, planned)
+    }
 }
 
 struct TimelineKey(Arc<Timeline>);
@@ -1006,6 +1081,137 @@ pub(crate) mod finite_f32 {
             } else {
                 Err(value)
             }
+        }
+    }
+}
+
+mod summary {
+    use super::finite_f32::FiniteF32;
+    use super::{EvictionCandidate, LayerCount};
+    use pageserver_api::shard::TenantShardId;
+    use std::collections::{BTreeMap, HashMap};
+    use std::time::SystemTime;
+
+    #[derive(Debug, Default)]
+    pub(super) struct EvictionSummary {
+        evicted_per_tenant: HashMap<TenantShardId, LayerCount>,
+        total: LayerCount,
+
+        last_absolute: Option<SystemTime>,
+        last_relative: Option<FiniteF32>,
+    }
+
+    impl<'a> FromIterator<&'a EvictionCandidate> for EvictionSummary {
+        fn from_iter<T: IntoIterator<Item = &'a EvictionCandidate>>(iter: T) -> Self {
+            let mut summary = EvictionSummary::default();
+            for item in iter {
+                let counts = summary
+                    .evicted_per_tenant
+                    .entry(*item.layer.get_tenant_shard_id())
+                    .or_default();
+
+                let sz = item.layer.get_file_size();
+
+                counts.file_sizes += sz;
+                counts.count += 1;
+
+                summary.total.file_sizes += sz;
+                summary.total.count += 1;
+
+                summary.last_absolute = Some(item.last_activity_ts);
+                summary.last_relative = Some(item.relative_last_activity);
+            }
+
+            summary
+        }
+    }
+
+    struct SiBytesAmount(u64);
+
+    impl std::fmt::Display for SiBytesAmount {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.0 < 1024 {
+                return write!(f, "{}B", self.0);
+            }
+
+            let mut tmp = self.0;
+            let mut ch = 0;
+            let suffixes = b"KMGTPE";
+
+            while tmp > 1024 * 1024 && ch < suffixes.len() - 1 {
+                tmp /= 1024;
+                ch += 1;
+            }
+
+            let ch = suffixes[ch] as char;
+
+            write!(f, "{:.1}{ch}iB", tmp as f64 / 1024.0)
+        }
+    }
+
+    impl std::fmt::Display for EvictionSummary {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // wasteful, but it's for testing
+
+            let mut sorted: BTreeMap<usize, Vec<(TenantShardId, u64)>> = BTreeMap::new();
+
+            for (tenant_shard_id, count) in &self.evicted_per_tenant {
+                sorted
+                    .entry(count.count)
+                    .or_default()
+                    .push((*tenant_shard_id, count.file_sizes));
+            }
+
+            let total_file_sizes = SiBytesAmount(self.total.file_sizes);
+
+            writeln!(
+                f,
+                "selected {} layers of {total_file_sizes} up to ({:?}, {:.2?}):",
+                self.total.count, self.last_absolute, self.last_relative,
+            )?;
+
+            for (count, per_tenant) in sorted.iter().rev().take(10) {
+                write!(f, "- {count} layers: ")?;
+
+                if per_tenant.len() < 3 {
+                    for (i, (tenant_shard_id, bytes)) in per_tenant.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        let bytes = SiBytesAmount(*bytes);
+                        write!(f, "{tenant_shard_id} ({bytes})")?;
+                    }
+                } else {
+                    let num_tenants = per_tenant.len();
+                    let total_bytes = per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>();
+                    let total_bytes = SiBytesAmount(total_bytes);
+                    let layers = num_tenants * count;
+
+                    write!(
+                        f,
+                        "{num_tenants} tenants {total_bytes} in total {layers} layers",
+                    )?;
+                }
+
+                writeln!(f)?;
+            }
+
+            if sorted.len() > 10 {
+                let (rem_count, rem_bytes) = sorted
+                    .iter()
+                    .rev()
+                    .map(|(count, per_tenant)| {
+                        (
+                            count,
+                            per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>(),
+                        )
+                    })
+                    .fold((0, 0), |acc, next| (acc.0 + next.0, acc.1 + next.1));
+                let rem_bytes = SiBytesAmount(rem_bytes);
+                writeln!(f, "- rest of tenants ({}) not shown ({rem_count} layers or {:.1}%, {rem_bytes} or {:.1}% bytes)", sorted.len() - 10, 100.0 * rem_count as f64 / self.total.count as f64, 100.0 * rem_bytes.0 as f64 / self.total.file_sizes as f64)?;
+            }
+
+            Ok(())
         }
     }
 }
