@@ -143,6 +143,7 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
 #########################################################################################
 FROM build-deps AS plv8-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+ARG PG_VERSION
 RUN apt update && \
     apt install -y ninja-build python3-dev libncurses5 binutils clang
 
