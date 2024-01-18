@@ -522,8 +522,6 @@ impl RemoteTimelineClient {
             cancel,
         )
         .measure_remote_op(
-            self.tenant_shard_id.tenant_id,
-            self.timeline_id,
             RemoteOpFileKind::Index,
             RemoteOpKind::Download,
             Arc::clone(&self.metrics),
@@ -566,8 +564,6 @@ impl RemoteTimelineClient {
                 cancel,
             )
             .measure_remote_op(
-                self.tenant_shard_id.tenant_id,
-                self.timeline_id,
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Download,
                 Arc::clone(&self.metrics),
@@ -1351,8 +1347,6 @@ impl RemoteTimelineClient {
                         &self.cancel,
                     )
                     .measure_remote_op(
-                        self.tenant_shard_id.tenant_id,
-                        self.timeline_id,
                         RemoteOpFileKind::Layer,
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),
@@ -1378,8 +1372,6 @@ impl RemoteTimelineClient {
                         &self.cancel,
                     )
                     .measure_remote_op(
-                        self.tenant_shard_id.tenant_id,
-                        self.timeline_id,
                         RemoteOpFileKind::Index,
                         RemoteOpKind::Upload,
                         Arc::clone(&self.metrics),

@@ -847,15 +847,13 @@ impl TenantManager {
                 TenantState::Active => Ok(Arc::clone(tenant)),
                 _ => {
                     if active_only {
-                        Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+                        Err(GetTenantError::NotActive(tenant_shard_id))
                     } else {
                         Ok(Arc::clone(tenant))
                     }
                 }
             },
-            Some(TenantSlot::InProgress(_)) => {
-                Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
-            }
+            Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
             None | Some(TenantSlot::Secondary(_)) => {
                 Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
             }
@@ -1306,10 +1304,13 @@ impl TenantManager {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GetTenantError {
+    /// NotFound is a TenantId rather than TenantShardId, because this error type is used from
+    /// getters that use a TenantId and a ShardSelector, not just getters that target a specific shard.
     #[error("Tenant {0} not found")]
     NotFound(TenantId),
+
     #[error("Tenant {0} is not active")]
-    NotActive(TenantId),
+    NotActive(TenantShardId),
     /// Broken is logically a subset of NotActive, but a distinct error is useful as
     /// NotActive is usually a retryable state for API purposes, whereas Broken
     /// is a stuck error state
@@ -1342,15 +1343,13 @@ pub(crate) fn get_tenant(
             TenantState::Active => Ok(Arc::clone(tenant)),
             _ => {
                 if active_only {
-                    Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
+                    Err(GetTenantError::NotActive(tenant_shard_id))
                 } else {
                     Ok(Arc::clone(tenant))
                 }
             }
         },
-        Some(TenantSlot::InProgress(_)) => {
-            Err(GetTenantError::NotActive(tenant_shard_id.tenant_id))
-        }
+        Some(TenantSlot::InProgress(_)) => Err(GetTenantError::NotActive(tenant_shard_id)),
         None | Some(TenantSlot::Secondary(_)) => {
             Err(GetTenantError::NotFound(tenant_shard_id.tenant_id))
         }
@@ -1426,7 +1425,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
             }
             Some(TenantSlot::Secondary(_)) => {
                 return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                    tenant_id,
+                    tenant_shard_id,
                 )))
             }
             Some(TenantSlot::InProgress(barrier)) => {
@@ -1465,7 +1464,7 @@ pub(crate) async fn get_active_tenant_with_timeout(
                     Some(TenantSlot::Attached(tenant)) => tenant.clone(),
                     _ => {
                         return Err(GetActiveTenantError::NotFound(GetTenantError::NotActive(
-                            tenant_id,
+                            tenant_shard_id,
                         )))
                     }
                 }
@@ -1493,7 +1492,7 @@ pub(crate) enum DeleteTimelineError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TenantStateError {
     #[error("Tenant {0} is stopping")]
-    IsStopping(TenantId),
+    IsStopping(TenantShardId),
     #[error(transparent)]
     SlotError(#[from] TenantSlotError),
     #[error(transparent)]
@@ -2123,7 +2122,7 @@ where
                     // if pageserver shutdown or other detach/ignore is already ongoing, we don't want to
                     // wait for it but return an error right away because these are distinct requests.
                     slot_guard.revert();
-                    return Err(TenantStateError::IsStopping(tenant_shard_id.tenant_id));
+                    return Err(TenantStateError::IsStopping(tenant_shard_id));
                 }
             }
             Some(tenant)
@@ -2252,7 +2251,6 @@ pub(crate) async fn immediate_gc(
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::shard::TenantShardId;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use tracing::{info_span, Instrument};
@@ -2273,7 +2271,7 @@ mod tests {
 
         // harness loads it to active, which is forced and nothing is running on the tenant
 
-        let id = TenantShardId::unsharded(t.tenant_id());
+        let id = t.tenant_shard_id();
 
         // tenant harness configures the logging and we cannot escape it
         let _e = info_span!("testing", tenant_id = %id).entered();

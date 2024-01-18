@@ -252,6 +252,10 @@ pub struct Timeline {
 
     pub(super) metrics: TimelineMetrics,
 
+    // `Timeline` doesn't write these metrics itself, but it manages the lifetime.  Code
+    // in `crate::page_service` writes these metrics.
+    pub(crate) query_metrics: crate::metrics::SmgrQueryTimePerTimeline,
+
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
@@ -1313,6 +1317,11 @@ impl Timeline {
                         "mtime",
                         evictions_low_residence_duration_metric_threshold,
                     ),
+                ),
+
+                query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
+                    &tenant_shard_id,
+                    &timeline_id,
                 ),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
