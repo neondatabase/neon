@@ -253,6 +253,32 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    /// The timeline deletion API can return 201 if deletion is incomplete, or
+    /// 403 if it is complete.  Callers are responsible for checking the status
+    /// code and retrying.  Error codes other than 403 will return Err().
+    pub async fn timeline_delete(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        );
+
+        match self.request(Method::DELETE, &uri, ()).await {
+            Err(Error::ApiError(status_code, msg)) => {
+                if status_code == StatusCode::NOT_FOUND {
+                    Ok(StatusCode::NOT_FOUND)
+                } else {
+                    Err(Error::ApiError(status_code, msg))
+                }
+            }
+            Err(e) => Err(e),
+            Ok(response) => Ok(response.status()),
+        }
+    }
+
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {
         let uri = format!(
             "{}/v1/tenant/{}/reset",

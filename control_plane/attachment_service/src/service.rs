@@ -30,7 +30,7 @@ use utils::{
     completion::Barrier,
     generation::Generation,
     http::error::ApiError,
-    id::{NodeId, TenantId},
+    id::{NodeId, TenantId, TimelineId},
     seqwait::SeqWait,
 };
 
@@ -752,6 +752,83 @@ impl Service {
         })
     }
 
+    pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
+        // TODO: refactor into helper
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                let node_id = shard.intent.attached.ok_or_else(|| {
+                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
+                })?;
+                let node = locked
+                    .nodes
+                    .get(&node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                targets.push((*tenant_shard_id, node.clone()));
+            }
+            targets
+        };
+
+        // TODO: error out if the tenant is not attached anywhere.
+
+        // Phase 1: delete on the pageservers
+        let mut any_pending = false;
+        for (tenant_shard_id, node) in targets {
+            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+            // TODO: this, like many other places, requires proper retry handling for 503, timeout: those should not
+            // surface immediately as an error to our caller.
+            let status = client.tenant_delete(tenant_shard_id).await.map_err(|e| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "Error deleting shard {tenant_shard_id} on node {}: {e}",
+                    node.id
+                ))
+            })?;
+            tracing::info!(
+                "Shard {tenant_shard_id} on node {}, delete returned {}",
+                node.id,
+                status
+            );
+            if status == StatusCode::ACCEPTED {
+                any_pending = true;
+            }
+        }
+
+        if any_pending {
+            // Caller should call us again later.  When we eventually see 404s from
+            // all the shards, we may proceed to delete our records of the tenant.
+            tracing::info!(
+                "Tenant {} has some shards pending deletion, returning 202",
+                tenant_id
+            );
+            return Ok(StatusCode::ACCEPTED);
+        }
+
+        // Fall through: deletion of the tenant on pageservers is complete, we may proceed to drop
+        // our in-memory state and database state.
+
+        // Ordering: we delete persistent state first: if we then
+        // crash, we will drop the in-memory state.
+
+        // Drop persistent state.
+        self.persistence.delete_tenant(tenant_id).await?;
+
+        // Drop in-memory state
+        {
+            let mut locked = self.inner.write().unwrap();
+            locked
+                .tenants
+                .retain(|tenant_shard_id, _shard| tenant_shard_id.tenant_id != tenant_id);
+        };
+
+        // Success is represented as 404, to imitate the existing pageserver deletion API
+        Ok(StatusCode::NOT_FOUND)
+    }
+
     pub(crate) async fn tenant_timeline_create(
         &self,
         tenant_id: TenantId,
@@ -759,25 +836,15 @@ impl Service {
     ) -> Result<TimelineInfo, ApiError> {
         let mut timeline_info = None;
 
-        let ensure_waiters = {
-            let locked = self.inner.write().unwrap();
-            tracing::info!(
-                "Creating timeline {}/{}, have {} pageservers",
-                tenant_id,
-                create_req.new_timeline_id,
-                locked.nodes.len()
-            );
+        tracing::info!(
+            "Creating timeline {}/{}",
+            tenant_id,
+            create_req.new_timeline_id,
+        );
 
-            self.ensure_attached(locked, tenant_id)
-                .map_err(ApiError::InternalServerError)?
-        };
+        self.ensure_attached_wait(tenant_id).await?;
 
-        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
-        for waiter in ensure_waiters {
-            let timeout = deadline.duration_since(Instant::now());
-            waiter.wait_timeout(timeout).await?;
-        }
-
+        // TODO: refuse to do this if shard splitting is in progress
         let targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
@@ -846,6 +913,76 @@ impl Service {
             }
         }
         Ok(timeline_info.expect("targets cannot be empty"))
+    }
+
+    pub(crate) async fn tenant_timeline_delete(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<StatusCode, ApiError> {
+        tracing::info!("Deleting timeline {}/{}", tenant_id, timeline_id,);
+
+        self.ensure_attached_wait(tenant_id).await?;
+
+        // TODO: refuse to do this if shard splitting is in progress
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                let node_id = shard.intent.attached.ok_or_else(|| {
+                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
+                })?;
+                let node = locked
+                    .nodes
+                    .get(&node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                targets.push((*tenant_shard_id, node.clone()));
+            }
+            targets
+        };
+
+        if targets.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant not found").into(),
+            ));
+        }
+
+        // TODO: call into shards concurrently
+        let mut any_pending = false;
+        for (tenant_shard_id, node) in targets {
+            let client = mgmt_api::Client::new(node.base_url(), self.config.jwt_token.as_deref());
+
+            tracing::info!(
+                "Deleting timeline on shard {}/{}, attached to node {}",
+                tenant_shard_id,
+                timeline_id,
+                node.id
+            );
+
+            let status = client
+                .timeline_delete(tenant_shard_id, timeline_id)
+                .await
+                .map_err(|e| {
+                    ApiError::InternalServerError(anyhow::anyhow!(
+                    "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {}: {e}",
+                    node.id
+                ))
+                })?;
+
+            if status == StatusCode::ACCEPTED {
+                any_pending = true;
+            }
+        }
+
+        if any_pending {
+            Ok(StatusCode::ACCEPTED)
+        } else {
+            Ok(StatusCode::NOT_FOUND)
+        }
     }
 
     pub(crate) fn tenant_locate(
@@ -1180,7 +1317,7 @@ impl Service {
     /// Helper for methods that will try and call pageserver APIs for
     /// a tenant, such as timeline CRUD: they cannot proceed unless the tenant
     /// is attached somewhere.
-    fn ensure_attached(
+    fn ensure_attached_schedule(
         &self,
         mut locked: std::sync::RwLockWriteGuard<'_, ServiceState>,
         tenant_id: TenantId,
@@ -1208,6 +1345,23 @@ impl Service {
             }
         }
         Ok(waiters)
+    }
+
+    async fn ensure_attached_wait(&self, tenant_id: TenantId) -> Result<(), ApiError> {
+        let ensure_waiters = {
+            let locked = self.inner.write().unwrap();
+
+            self.ensure_attached_schedule(locked, tenant_id)
+                .map_err(ApiError::InternalServerError)?
+        };
+
+        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        for waiter in ensure_waiters {
+            let timeout = deadline.duration_since(Instant::now());
+            waiter.wait_timeout(timeout).await?;
+        }
+
+        Ok(())
     }
 
     /// Check all tenants for pending reconciliation work, and reconcile those in need

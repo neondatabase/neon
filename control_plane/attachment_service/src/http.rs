@@ -5,10 +5,11 @@ use hyper::{StatusCode, Uri};
 use pageserver_api::models::{TenantCreateRequest, TimelineCreateRequest};
 use pageserver_api::shard::TenantShardId;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use utils::auth::SwappableJwtAuth;
 use utils::http::endpoint::{auth_middleware, request_span};
 use utils::http::request::parse_request_param;
-use utils::id::TenantId;
+use utils::id::{TenantId, TimelineId};
 
 use utils::{
     http::{
@@ -112,6 +113,64 @@ async fn handle_tenant_create(
     json_response(StatusCode::OK, service.tenant_create(create_req).await?)
 }
 
+// For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
+// we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.  This avoids
+// needing to track a "deleting" state for tenants.
+async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>
+where
+    R: std::future::Future<Output = Result<StatusCode, ApiError>> + Send + 'static,
+    F: Fn(Arc<Service>) -> R + Send + Sync + 'static,
+{
+    let started_at = Instant::now();
+    // To keep deletion reasonably snappy for small tenants, initially check after 1 second if deletion
+    // completed.
+    let mut retry_period = Duration::from_secs(1);
+    // On subsequent retries, wait longer.
+    let max_retry_period = Duration::from_secs(5);
+    // Enable callers with a 30 second request timeout to reliably get a response
+    let max_wait = Duration::from_secs(25);
+
+    loop {
+        let status = f(service.clone()).await?;
+        match status {
+            StatusCode::ACCEPTED => {
+                tracing::info!("Deletion accepted, waiting to try again...");
+                tokio::time::sleep(retry_period).await;
+                retry_period = max_retry_period;
+            }
+            StatusCode::NOT_FOUND => {
+                tracing::info!("Deletion complete");
+                return json_response(StatusCode::OK, ());
+            }
+            _ => {
+                tracing::warn!("Unexpected status {status}");
+                return json_response(status, ());
+            }
+        }
+
+        let now = Instant::now();
+        if now + retry_period > started_at + max_wait {
+            tracing::info!("Deletion timed out waiting for 404");
+            // REQUEST_TIMEOUT would be more appropriate, but CONFLICT is already part of
+            // the pageserver's swagger definition for this endpoint, and has the same desired
+            // effect of causing the control plane to retry later.
+            return json_response(StatusCode::CONFLICT, ());
+        }
+    }
+}
+
+async fn handle_tenant_delete(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
+    deletion_wrapper(service, move |service| async move {
+        service.tenant_delete(tenant_id).await
+    })
+    .await
+}
+
 async fn handle_tenant_timeline_create(
     service: Arc<Service>,
     mut req: Request<Body>,
@@ -124,6 +183,19 @@ async fn handle_tenant_timeline_create(
             .tenant_timeline_create(tenant_id, create_req)
             .await?,
     )
+}
+
+async fn handle_tenant_timeline_delete(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    deletion_wrapper(service, move |service| async move {
+        service.tenant_timeline_delete(tenant_id, timeline_id).await
+    })
+    .await
 }
 
 async fn handle_tenant_locate(
@@ -244,6 +316,9 @@ pub fn make_router(
         .post("/v1/tenant", |r| {
             tenant_service_handler(r, handle_tenant_create)
         })
+        .delete("/v1/tenant/:tenant_id", |r| {
+            tenant_service_handler(r, handle_tenant_delete)
+        })
         .post("/v1/tenant/:tenant_id/timeline", |r| {
             tenant_service_handler(r, handle_tenant_timeline_create)
         })
@@ -252,6 +327,9 @@ pub fn make_router(
         })
         .put("/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(r, handle_tenant_shard_migrate)
+        })
+        .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            tenant_service_handler(r, handle_tenant_timeline_delete)
         })
         // Path aliases for tests_forward_compatibility
         // TODO: remove these in future PR
