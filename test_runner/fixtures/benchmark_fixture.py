@@ -427,9 +427,10 @@ def zenbenchmark(
     results = {}
     for _, recorded_property in request.node.user_properties:
         name = recorded_property["name"]
-        value = recorded_property["value"]
-        unit = recorded_property["unit"]
-        results[name] = f"{value} {unit}"
+        value = str(recorded_property["value"])
+        if (unit := recorded_property["unit"].strip()) != "":
+            value += f" {unit}"
+        results[name] = value
 
     content = json.dumps(results, indent=2)
     allure.attach(
