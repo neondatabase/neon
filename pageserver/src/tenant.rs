@@ -112,7 +112,7 @@ use toml_edit;
 use utils::{
     crashsafe,
     generation::Generation,
-    id::{TenantId, TimelineId},
+    id::TimelineId,
     lsn::{Lsn, RecordLsn},
 };
 
@@ -371,13 +371,13 @@ impl WalRedoManager {
 pub enum GetTimelineError {
     #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
     NotActive {
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
         state: TimelineState,
     },
     #[error("Timeline {tenant_id}/{timeline_id} was not found")]
     NotFound {
-        tenant_id: TenantId,
+        tenant_id: TenantShardId,
         timeline_id: TimelineId,
     },
 }
@@ -1517,10 +1517,6 @@ impl Tenant {
             .map_err(LoadLocalTimelineError::Load)
     }
 
-    pub(crate) fn tenant_id(&self) -> TenantId {
-        self.tenant_shard_id.tenant_id
-    }
-
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
         self.tenant_shard_id
     }
@@ -1536,13 +1532,13 @@ impl Tenant {
         let timeline = timelines_accessor
             .get(&timeline_id)
             .ok_or(GetTimelineError::NotFound {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_id: self.tenant_shard_id,
                 timeline_id,
             })?;
 
         if active_only && !timeline.is_active() {
             Err(GetTimelineError::NotActive {
-                tenant_id: self.tenant_shard_id.tenant_id,
+                tenant_id: self.tenant_shard_id,
                 timeline_id,
                 state: timeline.current_state(),
             })
@@ -2597,7 +2593,9 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
+            // Strings for metric labels
             let tid = tenant_shard_id.to_string();
+            let shard_id_str = format!("{}", tenant_shard_id.shard_slug());
 
             fn inspect_state(state: &TenantState) -> ([&'static str; 1], bool) {
                 ([state.into()], matches!(state, TenantState::Broken { .. }))
@@ -2610,13 +2608,15 @@ impl Tenant {
                 // the tenant might be ignored and reloaded, so first remove any previous set
                 // element. it most likely has already been scraped, as these are manual operations
                 // right now. most likely we will add it back very soon.
-                drop(crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid]));
+                drop(
+                    crate::metrics::BROKEN_TENANTS_SET.remove_label_values(&[&tid, &shard_id_str]),
+                );
                 false
             } else {
                 // add the id to the set right away, there should not be any updates on the channel
                 // after
                 crate::metrics::BROKEN_TENANTS_SET
-                    .with_label_values(&[&tid])
+                    .with_label_values(&[&tid, &shard_id_str])
                     .set(1);
                 true
             };
@@ -2642,7 +2642,7 @@ impl Tenant {
                     counted_broken = true;
                     // insert the tenant_id (back) into the set
                     crate::metrics::BROKEN_TENANTS_SET
-                        .with_label_values(&[&tid])
+                        .with_label_values(&[&tid, &shard_id_str])
                         .inc();
                 }
             }
@@ -3629,6 +3629,9 @@ impl Tenant {
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
 
+        // Only shard zero should be calculating synthetic sizes
+        debug_assert!(self.shard_identity.is_zero());
+
         TENANT_SYNTHETIC_SIZE_METRIC
             .get_metric_with_label_values(&[&self.tenant_shard_id.tenant_id.to_string()])
             .unwrap()
@@ -3780,7 +3783,7 @@ async fn run_initdb(
 
 impl Drop for Tenant {
     fn drop(&mut self) {
-        remove_tenant_metrics(&self.tenant_shard_id.tenant_id);
+        remove_tenant_metrics(&self.tenant_shard_id);
     }
 }
 /// Dump contents of a layer file to stdout.
@@ -5208,7 +5211,7 @@ mod tests {
                 assert_eq!(
                     e,
                     GetTimelineError::NotFound {
-                        tenant_id: tenant.tenant_shard_id.tenant_id,
+                        tenant_id: tenant.tenant_shard_id,
                         timeline_id: TIMELINE_ID,
                     }
                 )

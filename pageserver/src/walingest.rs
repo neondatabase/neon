@@ -2201,7 +2201,8 @@ mod tests {
         let harness = TenantHarness::create("test_ingest_real_wal").unwrap();
         let (tenant, ctx) = harness.load().await;
 
-        let remote_initdb_path = remote_initdb_archive_path(&tenant.tenant_id(), &TIMELINE_ID);
+        let remote_initdb_path =
+            remote_initdb_archive_path(&tenant.tenant_shard_id().tenant_id, &TIMELINE_ID);
         let initdb_path = harness.remote_fs_dir.join(remote_initdb_path.get_path());
 
         std::fs::create_dir_all(initdb_path.parent().unwrap())

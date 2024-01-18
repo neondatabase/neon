@@ -796,14 +796,16 @@ async fn collect_eviction_candidates(
         // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             debug!(
-                tenant_id=%tenant.tenant_id(),
+                tenant_id=%tenant.tenant_shard_id().tenant_id,
+                shard_id=%tenant.tenant_shard_id().shard_slug(),
                 overridden_size=s,
                 "using overridden min resident size for tenant"
             );
             s
         } else {
             debug!(
-                tenant_id=%tenant.tenant_id(),
+                tenant_id=%tenant.tenant_shard_id().tenant_id,
+                shard_id=%tenant.tenant_shard_id().shard_slug(),
                 max_layer_size,
                 "using max layer size as min_resident_size for tenant",
             );
