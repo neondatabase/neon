@@ -883,8 +883,10 @@ FROM debian:bullseye-slim
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
     mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
+    mkdir /var/db/postgres/pgbouncer && \
     chown -R postgres:postgres /var/db/postgres && \
     chmod 0750 /var/db/postgres/compute && \
+    chmod 0750 /var/db/postgres/pgbouncer && \
     echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
     # create folder for file cache
     mkdir -p -m 777 /neon/cache
