@@ -526,6 +526,17 @@ class PageserverHttpClient(requests.Session):
         res_json = res.json()
         assert res_json is None
 
+    def timeline_preserve_initdb_archive(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ):
+        log.info(
+            f"Requesting initdb archive preservation for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive",
+        )
+        self.verbose_error(res)
+
     def timeline_get_lsn_by_timestamp(
         self,
         tenant_id: Union[TenantId, TenantShardId],
