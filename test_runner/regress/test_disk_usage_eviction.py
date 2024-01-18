@@ -696,11 +696,6 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
 
         # across pg versions we cannot really say how the rations compare, as the amount of layers generated is different.
         assert ratios[3] < 1.0, "largest tenant should always lose layers"
-
-        # sadly scales=[1, ..., 8] is not enough to show difference with RELATIVE_ORDER_EQUAL and ..._SPARE.
-        # scales=[1, 1, 1, 16] is enough to show the difference with pg16, but will take prohibitevely long time, yielding ratios:
-        # ratios=[6/7, ..., 75/87] (RELATIVE_ORDER_EQUAL)
-        # ratios=[7/7, ..., 75/87] (RELATIVE_ORDER_SPARE)
     elif order == EvictionOrder.RELATIVE_ORDER_SPARE:
         # with pg14 and the smaller amount of layers, any one or two of scale=1 could lose layers
         assert (
