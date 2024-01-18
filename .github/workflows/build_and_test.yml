@@ -141,7 +141,7 @@ jobs:
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
-        run: CC=clang CARGO_BUILD_FLAGS="--features=testing" make postgres-headers -j$(nproc)
+        run: CARGO_BUILD_FLAGS="--features=testing" make postgres-headers -j$(nproc)
 
       # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
       # This will catch compiler & clippy warnings in all feature combinations.
@@ -271,7 +271,7 @@ jobs:
           strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
             UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
             RUSTFLAGS="-C linker=clang"
-            CC=clang
+            CC=gcc
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
@@ -353,26 +353,26 @@ jobs:
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
-#      - name: Run rust tests
-#        run: |
-#          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
-#
-#          # Run separate tests for real S3
-#          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-#          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
-#          export REMOTE_STORAGE_S3_REGION=eu-central-1
-#          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-#          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
-#
-#          # Run separate tests for real Azure Blob Storage
-#          # XXX: replace region with `eu-central-1`-like region
-#          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-#          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-#          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-#          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
-#          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-#          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-#          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
+      - name: Run rust tests
+        run: |
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'not test()'
+
+          # Run separate tests for real S3
+          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
+          export REMOTE_STORAGE_S3_REGION=eu-central-1
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
+
+          # Run separate tests for real Azure Blob Storage
+          # XXX: replace region with `eu-central-1`-like region
+          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install rust binaries
         run: |
