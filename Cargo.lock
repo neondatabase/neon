@@ -1775,6 +1775,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "equivalent"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
+
+[[package]]
 name = "errno"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2132,9 +2138,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.3.19"
+version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d357c7ae988e7d2182f7d7871d0b963962420b0678b0997ce7de72001aeab782"
+checksum = "bb2c4422095b67ee78da96fbb51a4cc413b3b25883c7717ff7ca1ab31022c9c9"
 dependencies = [
  "bytes",
  "fnv",
@@ -2142,7 +2148,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http",
- "indexmap",
+ "indexmap 2.0.1",
  "slab",
  "tokio",
  "tokio-util",
@@ -2476,6 +2482,16 @@ dependencies = [
  "autocfg",
  "hashbrown 0.12.3",
  "serde",
+]
+
+[[package]]
+name = "indexmap"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad227c3af19d4914570ad36d30409928b75967c298feb9ea1969db3a610bb14e"
+dependencies = [
+ "equivalent",
+ "hashbrown 0.14.0",
 ]
 
 [[package]]
@@ -3156,7 +3172,7 @@ dependencies = [
  "fnv",
  "futures-channel",
  "futures-util",
- "indexmap",
+ "indexmap 1.9.3",
  "once_cell",
  "pin-project-lite",
  "thiserror",
@@ -3551,7 +3567,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4dd7d28ee937e54fe3080c91faa1c3a46c06de6252988a7f4592ba2310ef22a4"
 dependencies = [
  "fixedbitset",
- "indexmap",
+ "indexmap 1.9.3",
 ]
 
 [[package]]
@@ -4956,7 +4972,7 @@ dependencies = [
  "base64 0.13.1",
  "chrono",
  "hex",
- "indexmap",
+ "indexmap 1.9.3",
  "serde",
  "serde_json",
  "serde_with_macros",
@@ -5657,7 +5673,7 @@ version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2380d56e8670370eee6566b0bfd4265f65b3f432e8c6d85623f728d4fa31f739"
 dependencies = [
- "indexmap",
+ "indexmap 1.9.3",
  "serde",
  "serde_spanned",
  "toml_datetime",
@@ -5749,7 +5765,7 @@ checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap",
+ "indexmap 1.9.3",
  "pin-project",
  "pin-project-lite",
  "rand 0.8.5",
