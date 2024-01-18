@@ -17,6 +17,16 @@ from fixtures.utils import get_scale_for_db, humantime_to_ms
 from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 
+# For reference, space usage of the snapshots (runtime space usage will be ~2x this)
+# admin@ip-172-31-13-23:[~/neon-main]: du -hs /instance_store/test_output/shared-snapshots/*
+# 4.2G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1-26
+# 1.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1-6
+# 22G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-26
+# 5.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-6
+# 200G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-26
+# 46G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-6
+#
+# execution time for this file (all parametrization combinations) on an i3en.3xlarge: ~20min
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100, 400]])
 @pytest.mark.parametrize("n_tenants", [1, 10, 100])
