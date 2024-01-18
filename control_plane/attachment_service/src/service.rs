@@ -823,6 +823,10 @@ impl Service {
             locked
                 .tenants
                 .retain(|tenant_shard_id, _shard| tenant_shard_id.tenant_id != tenant_id);
+            tracing::info!(
+                "Deleted tenant {tenant_id}, now have {} tenants",
+                locked.tenants.len()
+            );
         };
 
         // Success is represented as 404, to imitate the existing pageserver deletion API
@@ -983,6 +987,41 @@ impl Service {
         } else {
             Ok(StatusCode::NOT_FOUND)
         }
+    }
+
+    /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
+    /// function looks it up and returns the url.  If the tenant isn't found, returns Err(ApiError::NotFound)
+    pub(crate) fn tenant_shard0_baseurl(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<(String, TenantShardId), ApiError> {
+        let locked = self.inner.read().unwrap();
+        let Some((tenant_shard_id, shard)) = locked
+            .tenants
+            .range(TenantShardId::tenant_range(tenant_id))
+            .next()
+        else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            ));
+        };
+
+        // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
+        // point to somewhere we haven't attached yet.
+        let Some(node_id) = shard.intent.attached else {
+            return Err(ApiError::Conflict(
+                "Cannot call timeline API on non-attached tenant".to_string(),
+            ));
+        };
+
+        let Some(node) = locked.nodes.get(&node_id) else {
+            // This should never happen
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Shard refers to nonexistent node"
+            )));
+        };
+
+        Ok((node.base_url(), *tenant_shard_id))
     }
 
     pub(crate) fn tenant_locate(

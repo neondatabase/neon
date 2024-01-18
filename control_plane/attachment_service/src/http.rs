@@ -4,6 +4,7 @@ use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use pageserver_api::models::{TenantCreateRequest, TimelineCreateRequest};
 use pageserver_api::shard::TenantShardId;
+use pageserver_client::mgmt_api;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use utils::auth::SwappableJwtAuth;
@@ -198,6 +199,50 @@ async fn handle_tenant_timeline_delete(
     .await
 }
 
+async fn handle_tenant_timeline_passthrough(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
+    let Some(path) = req.uri().path_and_query() else {
+        // This should never happen, our request router only calls us if there is a path
+        return Err(ApiError::BadRequest(anyhow::anyhow!("Missing path")));
+    };
+
+    tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
+
+    // Find the node that holds shard zero
+    let (base_url, tenant_shard_id) = service.tenant_shard0_baseurl(tenant_id)?;
+
+    // Callers will always pass an unsharded tenant ID.  Before proxying, we must
+    // rewrite this to a shard-aware shard zero ID.
+    let path = format!("{}", path);
+    let tenant_str = tenant_id.to_string();
+    let tenant_shard_str = format!("{}", tenant_shard_id);
+    let path = path.replace(&tenant_str, &tenant_shard_str);
+
+    let client = mgmt_api::Client::new(base_url, service.get_config().jwt_token.as_deref());
+    let resp = client.proxy_get(path).await.map_err(|_e|
+        // FIXME: give APiError a proper Unavailable variant.  We return 503 here because
+        // if we can't successfully send a request to the pageserver, we aren't available.
+        ApiError::ShuttingDown)?;
+
+    // We have a reqest::Response, would like a http::Response
+    let mut builder = hyper::Response::builder()
+        .status(resp.status())
+        .version(resp.version());
+    for (k, v) in resp.headers() {
+        builder = builder.header(k, v);
+    }
+
+    let response = builder
+        .body(Body::wrap_stream(resp.bytes_stream()))
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    Ok(response)
+}
+
 async fn handle_tenant_locate(
     service: Arc<Service>,
     req: Request<Body>,
@@ -304,32 +349,42 @@ pub fn make_router(
     router
         .data(Arc::new(HttpState::new(service, auth)))
         .get("/status", |r| request_span(r, handle_status))
-        .post("/re-attach", |r| request_span(r, handle_re_attach))
-        .post("/validate", |r| request_span(r, handle_validate))
+        // Testing endpoints
         .post("/attach-hook", |r| request_span(r, handle_attach_hook))
         .post("/inspect", |r| request_span(r, handle_inspect))
+        // Upcalls for the pageserver
+        .post("/re-attach", |r| request_span(r, handle_re_attach))
+        .post("/validate", |r| request_span(r, handle_validate))
+        // Node operations
         .post("/node", |r| request_span(r, handle_node_register))
         .get("/node", |r| request_span(r, handle_node_list))
         .put("/node/:node_id/config", |r| {
             request_span(r, handle_node_configure)
         })
+        // Tenant operations
         .post("/v1/tenant", |r| {
             tenant_service_handler(r, handle_tenant_create)
         })
         .delete("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(r, handle_tenant_delete)
         })
-        .post("/v1/tenant/:tenant_id/timeline", |r| {
-            tenant_service_handler(r, handle_tenant_timeline_create)
-        })
         .get("/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)
         })
+        // Tenant Shard operations (low level/maintenance)
         .put("/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(r, handle_tenant_shard_migrate)
         })
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             tenant_service_handler(r, handle_tenant_timeline_delete)
+        })
+        // Timeline operations
+        .post("/v1/tenant/:tenant_id/timeline", |r| {
+            tenant_service_handler(r, handle_tenant_timeline_create)
+        })
+        // Timeline GET passthrough to shard zero
+        .get("/v1/tenant/:tenant_id/timeline*", |r| {
+            tenant_service_handler(r, handle_tenant_timeline_passthrough)
         })
         // Path aliases for tests_forward_compatibility
         // TODO: remove these in future PR

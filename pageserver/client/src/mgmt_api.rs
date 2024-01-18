@@ -69,6 +69,19 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn proxy_get(&self, path: String) -> Result<reqwest::Response> {
+        debug_assert!(path.starts_with('/'));
+        let uri = format!("{}{}", self.mgmt_api_endpoint, path);
+
+        let req = self.client.request(Method::GET, uri);
+        let req = if let Some(value) = &self.authorization_header {
+            req.header(reqwest::header::AUTHORIZATION, value)
+        } else {
+            req
+        };
+        req.send().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn tenant_details(
         &self,
         tenant_shard_id: TenantShardId,
