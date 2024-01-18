@@ -18,6 +18,7 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use pageserver_api::models;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::shard::TenantShardId;
@@ -73,6 +74,7 @@ use crate::tenant::config::LocationMode;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
+use crate::tenant::remote_timeline_client::remote_initdb_archive_path;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
@@ -2327,6 +2329,32 @@ impl Tenant {
             .clone()
     }
 
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
+        let conf = self.tenant_conf.read().unwrap();
+
+        let location_config_mode = match conf.location.attach_mode {
+            AttachmentMode::Single => models::LocationConfigMode::AttachedSingle,
+            AttachmentMode::Multi => models::LocationConfigMode::AttachedMulti,
+            AttachmentMode::Stale => models::LocationConfigMode::AttachedStale,
+        };
+
+        // We have a pageserver TenantConf, we need the API-facing TenantConfig.
+        let tenant_config: models::TenantConfig = conf.tenant_conf.into();
+
+        models::LocationConfig {
+            mode: location_config_mode,
+            generation: self.generation.into(),
+            secondary_conf: None,
+            shard_number: self.shard_identity.number.0,
+            shard_count: self.shard_identity.count.0,
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_config,
+        }
+    }
+
     pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
     }
@@ -2677,10 +2705,11 @@ impl Tenant {
                 }
             }
 
-            // Legacy configs are implicitly in attached state
+            // Legacy configs are implicitly in attached state, and do not support sharding
             Ok(LocationConf::attached_single(
                 tenant_conf,
                 Generation::none(),
+                &models::ShardParameters::default(),
             ))
         } else {
             // FIXME If the config file is not found, assume that we're attaching
@@ -3273,6 +3302,18 @@ impl Tenant {
             let Some(storage) = &self.remote_storage else {
                 bail!("no storage configured but load_existing_initdb set to {existing_initdb_timeline_id}");
             };
+            if existing_initdb_timeline_id != timeline_id {
+                let source_path = &remote_initdb_archive_path(
+                    &self.tenant_shard_id.tenant_id,
+                    &existing_initdb_timeline_id,
+                );
+                let dest_path =
+                    &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
+                storage
+                    .copy_object(source_path, dest_path)
+                    .await
+                    .context("copy initdb tar")?;
+            }
             let (initdb_tar_zst_path, initdb_tar_zst) =
                 self::remote_timeline_client::download_initdb_tar_zst(
                     self.conf,
@@ -3296,7 +3337,7 @@ impl Tenant {
                 .await
                 .context("extract initdb tar")?;
         } else {
-            // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
+            // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
@@ -3781,6 +3822,7 @@ pub(crate) mod harness {
     use bytes::{Bytes, BytesMut};
     use camino::Utf8PathBuf;
     use once_cell::sync::OnceCell;
+    use pageserver_api::models::ShardParameters;
     use pageserver_api::shard::ShardIndex;
     use std::fs;
     use std::sync::Arc;
@@ -3965,6 +4007,7 @@ pub(crate) mod harness {
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     TenantConfOpt::from(self.tenant_conf),
                     self.generation,
+                    &ShardParameters::default(),
                 ))
                 .unwrap(),
                 // This is a legacy/test code path: sharding isn't supported here.

@@ -15,6 +15,7 @@ use serde_json::Map;
 use serde_json::Value;
 use smol_str::SmolStr;
 use tokio_postgres::error::DbError;
+use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
@@ -59,6 +60,7 @@ enum Payload {
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART: &str = "api";
 
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
@@ -176,10 +178,11 @@ fn get_conn_info(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.split(':').next());
 
-    if hostname != sni_hostname {
+    // sni_hostname has to be either the same as hostname or the one used in serverless driver.
+    if !check_matches(&sni_hostname, hostname)? {
         return Err(anyhow::anyhow!("mismatched SNI hostname and hostname"));
     } else if let Some(h) = host_header {
-        if h != hostname {
+        if h != sni_hostname {
             return Err(anyhow::anyhow!("mismatched host header and hostname"));
         }
     }
@@ -213,6 +216,20 @@ fn get_conn_info(
     })
 }
 
+fn check_matches(sni_hostname: &str, hostname: &str) -> Result<bool, anyhow::Error> {
+    if sni_hostname == hostname {
+        return Ok(true);
+    }
+    let (sni_hostname_first, sni_hostname_rest) = sni_hostname
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected sni format."))?;
+    let (_, hostname_rest) = hostname
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("Unexpected hostname format."))?;
+    Ok(sni_hostname_rest == hostname_rest
+        && sni_hostname_first == SERVERLESS_DRIVER_SNI_HOSTNAME_FIRST_PART)
+}
+
 // TODO: return different http error codes
 pub async fn handle(
     tls: &'static TlsConfig,
@@ -231,7 +248,7 @@ pub async fn handle(
         Ok(r) => match r {
             Ok(r) => r,
             Err(e) => {
-                let message = format!("{:?}", e);
+                let mut message = format!("{:?}", e);
                 let db_error = e
                     .downcast_ref::<tokio_postgres::Error>()
                     .and_then(|e| e.as_db_error());
@@ -244,7 +261,25 @@ pub async fn handle(
                         .unwrap_or_default()
                 }
 
-                // TODO(conrad): db_error.position()
+                if let Some(db_error) = db_error {
+                    db_error.message().clone_into(&mut message);
+                }
+
+                let position = db_error.and_then(|db| db.position());
+                let (position, internal_position, internal_query) = match position {
+                    Some(ErrorPosition::Original(position)) => (
+                        Value::String(position.to_string()),
+                        Value::Null,
+                        Value::Null,
+                    ),
+                    Some(ErrorPosition::Internal { position, query }) => (
+                        Value::Null,
+                        Value::String(position.to_string()),
+                        Value::String(query.clone()),
+                    ),
+                    None => (Value::Null, Value::Null, Value::Null),
+                };
+
                 let code = get(db_error, |db| db.code().code());
                 let severity = get(db_error, |db| db.severity());
                 let detail = get(db_error, |db| db.detail());
@@ -256,7 +291,7 @@ pub async fn handle(
                 let datatype = get(db_error, |db| db.datatype());
                 let constraint = get(db_error, |db| db.constraint());
                 let file = get(db_error, |db| db.file());
-                let line = get(db_error, |db| db.line());
+                let line = get(db_error, |db| db.line().map(|l| l.to_string()));
                 let routine = get(db_error, |db| db.routine());
 
                 error!(
@@ -271,12 +306,15 @@ pub async fn handle(
                         "code": code,
                         "detail": detail,
                         "hint": hint,
+                        "position": position,
+                        "internalPosition": internal_position,
+                        "internalQuery": internal_query,
                         "severity": severity,
                         "where": where_,
                         "table": table,
                         "column": column,
                         "schema": schema,
-                        "datatype": datatype,
+                        "dataType": datatype,
                         "constraint": constraint,
                         "file": file,
                         "line": line,

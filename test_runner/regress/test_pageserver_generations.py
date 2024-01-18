@@ -62,6 +62,7 @@ def generate_uploads_and_deletions(
     tenant_id: Optional[TenantId] = None,
     timeline_id: Optional[TimelineId] = None,
     data: Optional[str] = None,
+    pageserver_id: Optional[int] = None,
 ):
     """
     Using the environment's default tenant + timeline, generate a load pattern
@@ -78,7 +79,9 @@ def generate_uploads_and_deletions(
 
     ps_http = env.pageserver.http_client()
 
-    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+    with env.endpoints.create_start(
+        "main", tenant_id=tenant_id, pageserver_id=pageserver_id
+    ) as endpoint:
         if init:
             endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
             last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
@@ -202,7 +205,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, pageserver_id=env.pageserver.id)
 
     def parse_generation_suffix(key):
         m = re.match(".+-([0-9a-zA-Z]{8})$", key)
@@ -224,7 +227,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # Starting without the override that disabled control_plane_api
     env.pageserver.start()
 
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, pageserver_id=env.pageserver.id, init=False)
 
     legacy_objects: list[str] = []
     suffixed_objects = []
@@ -268,6 +271,7 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
     some_other_pageserver = 1234
+
     ps_http = env.pageserver.http_client()
 
     generate_uploads_and_deletions(env)
@@ -290,7 +294,7 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     # Now advance the generation in the control plane: subsequent validations
     # from the running pageserver will fail.  No more deletions should happen.
     env.attachment_service.attach_hook_issue(env.initial_tenant, some_other_pageserver)
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver_id=env.pageserver.id)
 
     assert_deletion_queue(ps_http, lambda n: n > 0)
     queue_depth_before = get_deletion_queue_depth(ps_http)
@@ -456,7 +460,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     ps_http = env.pageserver.http_client()
 
-    generate_uploads_and_deletions(env)
+    generate_uploads_and_deletions(env, pageserver_id=env.pageserver.id)
 
     env.pageserver.allowed_errors.extend(
         [
@@ -473,7 +477,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # Remember how many validations had happened before the control plane went offline
     validated = get_deletion_queue_validated(ps_http)
 
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver_id=env.pageserver.id)
 
     # The running pageserver should stop progressing deletions
     time.sleep(10)
@@ -488,7 +492,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     )
 
     # The pageserver should provide service to clients
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver_id=env.pageserver.id)
 
     # The pageserver should neither validate nor execute any deletions, it should have
     # loaded the DeletionLists from before though
@@ -509,7 +513,7 @@ def test_emergency_mode(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env.pageserver.stop()  # Non-immediate: implicitly checking that shutdown doesn't hang waiting for CP
     env.pageserver.start()
 
-    generate_uploads_and_deletions(env, init=False)
+    generate_uploads_and_deletions(env, init=False, pageserver_id=env.pageserver.id)
     ps_http.deletion_queue_flush(execute=True)
     assert get_deletion_queue_depth(ps_http) == 0
     assert get_deletion_queue_validated(ps_http) > 0

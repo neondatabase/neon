@@ -67,6 +67,7 @@ def load(endpoint: Endpoint, stop_event: threading.Event, load_ok_event: threadi
                     log.info("successfully recovered %s", inserted_ctr)
                     failed = False
                     load_ok_event.set()
+
     log.info("load thread stopped")
 
 
@@ -144,18 +145,14 @@ def check_timeline_attached(
 def switch_pg_to_new_pageserver(
     origin_ps: NeonPageserver,
     endpoint: Endpoint,
-    new_pageserver_port: int,
+    new_pageserver_id: int,
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ) -> Path:
+    # We could reconfigure online with endpoint.reconfigure(), but this stop/start
+    # is needed to trigger the logic in load() to set its ok event after restart.
     endpoint.stop()
-
-    pg_config_file_path = Path(endpoint.config_file_path())
-    pg_config_file_path.open("a").write(
-        f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'"
-    )
-
-    endpoint.start()
+    endpoint.start(pageserver_id=new_pageserver_id)
 
     timeline_to_detach_local_path = origin_ps.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
@@ -212,7 +209,7 @@ def test_tenant_relocation(
 
     env = neon_env_builder.init_start()
 
-    tenant_id = TenantId("74ee8b079a0e437eb0afea7d26a07209")
+    tenant_id = env.initial_tenant
 
     env.pageservers[0].allowed_errors.extend(
         [
@@ -236,8 +233,7 @@ def test_tenant_relocation(
     origin_http = origin_ps.http_client()
     destination_http = destination_ps.http_client()
 
-    _, initial_timeline_id = env.neon_cli.create_tenant(tenant_id)
-    log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
+    log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, env.initial_timeline)
 
     env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
     ep_main = env.endpoints.create_start(
@@ -380,7 +376,7 @@ def test_tenant_relocation(
     old_local_path_main = switch_pg_to_new_pageserver(
         origin_ps,
         ep_main,
-        destination_ps.service_port.pg,
+        destination_ps.id,
         tenant_id,
         timeline_id_main,
     )
@@ -388,7 +384,7 @@ def test_tenant_relocation(
     old_local_path_second = switch_pg_to_new_pageserver(
         origin_ps,
         ep_second,
-        destination_ps.service_port.pg,
+        destination_ps.id,
         tenant_id,
         timeline_id_second,
     )

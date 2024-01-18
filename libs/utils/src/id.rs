@@ -1,3 +1,4 @@
+use std::num::ParseIntError;
 use std::{fmt, str::FromStr};
 
 use anyhow::Context;
@@ -371,6 +372,13 @@ pub struct NodeId(pub u64);
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(NodeId(u64::from_str(s)?))
     }
 }
 

@@ -47,21 +47,24 @@ use std::{
 };
 
 use anyhow::Context;
-use camino::Utf8Path;
+use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::completion;
 use utils::serde_percent::Percent;
+use utils::{completion, id::TimelineId};
 
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         self,
-        storage_layer::{AsLayerDesc, EvictionError, Layer},
+        mgr::TenantManager,
+        remote_timeline_client::LayerFileMetadata,
+        secondary::SecondaryTenant,
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerFileName},
         Timeline,
     },
 };
@@ -125,6 +128,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
+    tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
@@ -150,8 +154,7 @@ pub fn launch_disk_usage_global_eviction_task(
                 _ = background_jobs_barrier.wait() => { }
             };
 
-            disk_usage_eviction_task(&state, task_config, &storage, &conf.tenants_path(), cancel)
-                .await;
+            disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel).await;
             Ok(())
         },
     );
@@ -164,7 +167,7 @@ async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir: &Utf8Path,
+    tenant_manager: Arc<TenantManager>,
     cancel: CancellationToken,
 ) {
     scopeguard::defer! {
@@ -191,7 +194,7 @@ async fn disk_usage_eviction_task(
                 state,
                 task_config,
                 storage,
-                tenants_dir,
+                &tenant_manager,
                 &cancel,
             )
             .await;
@@ -226,15 +229,17 @@ async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir: &Utf8Path,
+    tenant_manager: &Arc<TenantManager>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
+    let tenants_dir = tenant_manager.get_conf().tenants_path();
+    let usage_pre = filesystem_level_usage::get(&tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
     let res = disk_usage_eviction_task_iteration_impl(
         state,
         storage,
         usage_pre,
+        tenant_manager,
         task_config.eviction_order,
         cancel,
     )
@@ -248,7 +253,7 @@ async fn disk_usage_eviction_task_iteration(
                 }
                 IterationOutcome::Finished(outcome) => {
                     // Verify with statvfs whether we made any real progress
-                    let after = filesystem_level_usage::get(tenants_dir, task_config)
+                    let after = filesystem_level_usage::get(&tenants_dir, task_config)
                         // It's quite unlikely to hit the error here. Keep the code simple and bail out.
                         .context("get filesystem-level disk usage after evictions")?;
 
@@ -324,6 +329,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     state: &State,
     _storage: &GenericRemoteStorage,
     usage_pre: U,
+    tenant_manager: &Arc<TenantManager>,
     eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
@@ -344,29 +350,29 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let candidates = match collect_eviction_candidates(eviction_order, cancel).await? {
-        EvictionCandidates::Cancelled => {
-            return Ok(IterationOutcome::Cancelled);
-        }
-        EvictionCandidates::Finished(partitioned) => partitioned,
-    };
+    let candidates =
+        match collect_eviction_candidates(tenant_manager, eviction_order, cancel).await? {
+            EvictionCandidates::Cancelled => {
+                return Ok(IterationOutcome::Cancelled);
+            }
+            EvictionCandidates::Finished(partitioned) => partitioned,
+        };
 
     // Debug-log the list of candidates
     let now = SystemTime::now();
     for (i, (partition, candidate)) in candidates.iter().enumerate() {
         let nth = i + 1;
-        let desc = candidate.layer.layer_desc();
         let total_candidates = candidates.len();
-        let size = desc.file_size;
+        let size = candidate.layer.get_file_size();
         let rel = candidate.relative_last_activity;
         debug!(
             "cand {nth}/{total_candidates}: size={size}, rel_last_activity={rel}, no_access_for={}us, partition={partition:?}, {}/{}/{}",
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
-            desc.tenant_shard_id,
-            desc.timeline_id,
-            candidate.layer,
+            candidate.layer.get_tenant_shard_id(),
+            candidate.layer.get_timeline_id(),
+            candidate.layer.get_name(),
         );
     }
 
@@ -398,7 +404,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             warned = Some(usage_planned);
         }
 
-        usage_planned.add_available_bytes(candidate.layer.layer_desc().file_size);
+        usage_planned.add_available_bytes(candidate.layer.get_file_size());
         evicted_amount += 1;
     }
 
@@ -463,19 +469,30 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 continue;
             };
 
-            js.spawn(async move {
-                let rtc = candidate.timeline.remote_client.as_ref().expect(
-                    "holding the witness, all timelines must have a remote timeline client",
-                );
-                let file_size = candidate.layer.layer_desc().file_size;
-                candidate
-                    .layer
-                    .evict_and_wait(rtc)
-                    .await
-                    .map(|()| file_size)
-                    .map_err(|e| (file_size, e))
-            });
+            match candidate.layer {
+                EvictionLayer::Attached(layer) => {
+                    let file_size = layer.layer_desc().file_size;
+                    js.spawn(async move {
+                        layer
+                            .evict_and_wait()
+                            .await
+                            .map(|()| file_size)
+                            .map_err(|e| (file_size, e))
+                    });
+                }
+                EvictionLayer::Secondary(layer) => {
+                    let file_size = layer.metadata.file_size();
+                    let tenant_manager = tenant_manager.clone();
 
+                    js.spawn(async move {
+                        layer
+                            .secondary_tenant
+                            .evict_layer(tenant_manager.get_conf(), layer.timeline_id, layer.name)
+                            .await;
+                        Ok(file_size)
+                    });
+                }
+            }
             tokio::task::yield_now().await;
         }
 
@@ -502,11 +519,100 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 }
 
 #[derive(Clone)]
-struct EvictionCandidate {
-    timeline: Arc<Timeline>,
-    layer: Layer,
-    last_activity_ts: SystemTime,
-    relative_last_activity: finite_f32::FiniteF32,
+pub(crate) struct EvictionSecondaryLayer {
+    pub(crate) secondary_tenant: Arc<SecondaryTenant>,
+    pub(crate) timeline_id: TimelineId,
+    pub(crate) name: LayerFileName,
+    pub(crate) metadata: LayerFileMetadata,
+}
+
+/// Full [`Layer`] objects are specific to tenants in attached mode.  This type is a layer
+/// of indirection to store either a `Layer`, or a reference to a secondary tenant and a layer name.
+#[derive(Clone)]
+pub(crate) enum EvictionLayer {
+    Attached(Layer),
+    #[allow(dead_code)]
+    Secondary(EvictionSecondaryLayer),
+}
+
+impl From<Layer> for EvictionLayer {
+    fn from(value: Layer) -> Self {
+        Self::Attached(value)
+    }
+}
+
+impl EvictionLayer {
+    pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
+        match self {
+            Self::Attached(l) => &l.layer_desc().tenant_shard_id,
+            Self::Secondary(sl) => sl.secondary_tenant.get_tenant_shard_id(),
+        }
+    }
+
+    pub(crate) fn get_timeline_id(&self) -> &TimelineId {
+        match self {
+            Self::Attached(l) => &l.layer_desc().timeline_id,
+            Self::Secondary(sl) => &sl.timeline_id,
+        }
+    }
+
+    pub(crate) fn get_name(&self) -> LayerFileName {
+        match self {
+            Self::Attached(l) => l.layer_desc().filename(),
+            Self::Secondary(sl) => sl.name.clone(),
+        }
+    }
+
+    pub(crate) fn get_file_size(&self) -> u64 {
+        match self {
+            Self::Attached(l) => l.layer_desc().file_size,
+            Self::Secondary(sl) => sl.metadata.file_size(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct EvictionCandidate {
+    pub(crate) layer: EvictionLayer,
+    pub(crate) last_activity_ts: SystemTime,
+    pub(crate) relative_last_activity: finite_f32::FiniteF32,
+}
+
+impl std::fmt::Display for EvictionLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Attached(l) => l.fmt(f),
+            Self::Secondary(sl) => {
+                write!(f, "{}/{}", sl.timeline_id, sl.name)
+            }
+        }
+    }
+}
+
+pub(crate) struct DiskUsageEvictionInfo {
+    /// Timeline's largest layer (remote or resident)
+    pub max_layer_size: Option<u64>,
+    /// Timeline's resident layers
+    pub resident_layers: Vec<EvictionCandidate>,
+}
+
+impl std::fmt::Debug for EvictionCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // format the tv_sec, tv_nsec into rfc3339 in case someone is looking at it
+        // having to allocate a string to this is bad, but it will rarely be formatted
+        let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
+        let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        struct DisplayIsDebug<'a, T>(&'a T);
+        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        f.debug_struct("LocalLayerInfoForDiskUsageEviction")
+            .field("layer", &DisplayIsDebug(&self.layer))
+            .field("last_activity", &ts)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -623,6 +729,7 @@ enum EvictionCandidates {
 /// - tenant B 1 layer
 /// - tenant C 8 layers
 async fn collect_eviction_candidates(
+    tenant_manager: &Arc<TenantManager>,
     eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
@@ -631,13 +738,16 @@ async fn collect_eviction_candidates(
         .await
         .context("get list of tenants")?;
 
+    // TODO: avoid listing every layer in every tenant: this loop can block the executor,
+    // and the resulting data structure can be huge.
+    // (https://github.com/neondatabase/neon/issues/6224)
     let mut candidates = Vec::new();
 
-    for (tenant_id, _state, _gen) in &tenants {
+    for (tenant_id, _state, _gen) in tenants {
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
-        let tenant = match tenant::mgr::get_tenant(*tenant_id, true) {
+        let tenant = match tenant::mgr::get_tenant(tenant_id, true) {
             Ok(tenant) => tenant,
             Err(e) => {
                 // this can happen if tenant has lifecycle transition after we fetched it
@@ -665,11 +775,7 @@ async fn collect_eviction_candidates(
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
-            tenant_candidates.extend(
-                info.resident_layers
-                    .into_iter()
-                    .map(|layer_infos| (tl.clone(), layer_infos)),
-            );
+            tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
             if cancel.is_cancelled() {
@@ -707,7 +813,7 @@ async fn collect_eviction_candidates(
         // Sort layers most-recently-used first, then partition by
         // cumsum above/below min_resident_size.
         tenant_candidates
-            .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
+            .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
 
         // keeping the -1 or not decides if every tenant should lose their least recently accessed
@@ -741,12 +847,10 @@ async fn collect_eviction_candidates(
             .unwrap_or(1);
         let divider = total as f32;
 
-        for (i, (timeline, layer_info)) in tenant_candidates.into_iter().enumerate() {
-            let file_size = layer_info.file_size();
-
+        for (i, mut candidate) in tenant_candidates.into_iter().enumerate() {
             // as we iterate this reverse sorted list, the most recently accessed layer will always
             // be 1.0; this is for us to evict it last.
-            let relative_last_activity = if matches!(
+            candidate.relative_last_activity = if matches!(
                 eviction_order,
                 EvictionOrder::RelativeAccessed { .. }
             ) {
@@ -761,20 +865,44 @@ async fn collect_eviction_candidates(
                 finite_f32::FiniteF32::ZERO
             };
 
-            let candidate = EvictionCandidate {
-                timeline,
-                last_activity_ts: layer_info.last_activity_ts,
-                layer: layer_info.layer,
-                relative_last_activity,
-            };
             let partition = if cumsum > min_resident_size as i128 {
                 MinResidentSizePartition::Above
             } else {
                 MinResidentSizePartition::Below
             };
+            cumsum += i128::from(candidate.layer.get_file_size());
             candidates.push((partition, candidate));
-            cumsum += i128::from(file_size);
         }
+    }
+
+    // Note: the same tenant ID might be hit twice, if it transitions from attached to
+    // secondary while we run.  That is okay: when we eventually try and run the eviction,
+    // the `Gate` on the object will ensure that whichever one has already been shut down
+    // will not delete anything.
+
+    let mut secondary_tenants = Vec::new();
+    tenant_manager.foreach_secondary_tenants(
+        |_tenant_shard_id: &TenantShardId, state: &Arc<SecondaryTenant>| {
+            secondary_tenants.push(state.clone());
+        },
+    );
+
+    for secondary_tenant in secondary_tenants {
+        let mut layer_info = secondary_tenant.get_layers_for_eviction();
+
+        layer_info
+            .resident_layers
+            .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
+
+        candidates.extend(layer_info.resident_layers.into_iter().map(|candidate| {
+            (
+                // Secondary locations' layers are always considered above the min resident size,
+                // i.e. secondary locations are permitted to be trimmed to zero layers if all
+                // the layers have sufficiently old access times.
+                MinResidentSizePartition::Above,
+                candidate,
+            )
+        }));
     }
 
     debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
@@ -821,7 +949,7 @@ impl std::ops::Deref for TimelineKey {
 }
 
 /// A totally ordered f32 subset we can use with sorting functions.
-mod finite_f32 {
+pub(crate) mod finite_f32 {
 
     /// A totally ordered f32 subset we can use with sorting functions.
     #[derive(Clone, Copy, PartialEq)]

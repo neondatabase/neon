@@ -337,15 +337,6 @@ pub(crate) mod page_cache_eviction_metrics {
     }
 }
 
-pub(crate) static PAGE_CACHE_ACQUIRE_PINNED_SLOT_TIME: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "pageserver_page_cache_acquire_pinned_slot_seconds",
-        "Time spent acquiring a pinned slot in the page cache",
-        CRITICAL_OP_BUCKETS.into(),
-    )
-    .expect("failed to define a metric")
-});
-
 static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "page_cache_errors_total",

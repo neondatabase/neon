@@ -3,7 +3,8 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use pageserver_api::key::Key;
-use pageserver_api::shard::{ShardIdentity, ShardNumber, TenantShardId};
+use pageserver_api::models::ShardParameters;
+use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -56,6 +57,7 @@ use super::TenantSharedResources;
 /// that way we avoid having to carefully switch a tenant's ingestion etc on and off during
 /// its lifetime, and we can preserve some important safety invariants like `Tenant` always
 /// having a properly acquired generation (Secondary doesn't need a generation)
+#[derive(Clone)]
 pub(crate) enum TenantSlot {
     Attached(Arc<Tenant>),
     Secondary(Arc<SecondaryTenant>),
@@ -476,6 +478,8 @@ pub async fn init_tenant_mgr(
                             tenant_shard_id,
                             TenantSlot::Secondary(SecondaryTenant::new(
                                 tenant_shard_id,
+                                location_conf.shard,
+                                location_conf.tenant_conf,
                                 secondary_config,
                             )),
                         );
@@ -760,6 +764,8 @@ pub(crate) enum SetNewTenantConfigError {
     GetTenant(#[from] GetTenantError),
     #[error(transparent)]
     Persist(anyhow::Error),
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 pub(crate) async fn set_new_tenant_config(
@@ -773,10 +779,21 @@ pub(crate) async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_shard_id, true)?;
 
+    if tenant.tenant_shard_id().shard_count > ShardCount(0) {
+        // Note that we use ShardParameters::default below.
+        return Err(SetNewTenantConfigError::Other(anyhow::anyhow!(
+            "This API may only be used on single-sharded tenants, use the /location_config API for sharded tenants"
+        )));
+    }
+
     // This is a legacy API that only operates on attached tenants: the preferred
     // API to use is the location_config/ endpoint, which lets the caller provide
     // the full LocationConf.
-    let location_conf = LocationConf::attached_single(new_tenant_conf, tenant.generation);
+    let location_conf = LocationConf::attached_single(
+        new_tenant_conf,
+        tenant.generation,
+        &ShardParameters::default(),
+    );
 
     Tenant::persist_tenant_config(conf, &tenant_shard_id, &location_conf)
         .await
@@ -907,6 +924,7 @@ impl TenantManager {
                     Some(TenantSlot::Secondary(secondary_tenant)),
                 ) => {
                     secondary_tenant.set_config(secondary_conf);
+                    secondary_tenant.set_tenant_conf(&new_location_config.tenant_conf);
                     Some(FastPathModified::Secondary(secondary_tenant.clone()))
                 }
                 _ => {
@@ -1039,16 +1057,36 @@ impl TenantManager {
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
-                TenantSlot::Secondary(SecondaryTenant::new(tenant_shard_id, secondary_config))
+                let shard_identity = new_location_config.shard;
+                TenantSlot::Secondary(SecondaryTenant::new(
+                    tenant_shard_id,
+                    shard_identity,
+                    new_location_config.tenant_conf,
+                    secondary_config,
+                ))
             }
             LocationMode::Attached(_attach_config) => {
                 let shard_identity = new_location_config.shard;
+
+                // Testing hack: if we are configured with no control plane, then drop the generation
+                // from upserts.  This enables creating generation-less tenants even though neon_local
+                // always uses generations when calling the location conf API.
+                let attached_conf = if cfg!(feature = "testing") {
+                    let mut conf = AttachedTenantConf::try_from(new_location_config)?;
+                    if self.conf.control_plane_api.is_none() {
+                        conf.location.generation = Generation::none();
+                    }
+                    conf
+                } else {
+                    AttachedTenantConf::try_from(new_location_config)?
+                };
+
                 let tenant = tenant_spawn(
                     self.conf,
                     tenant_shard_id,
                     &tenant_path,
                     self.resources.clone(),
-                    AttachedTenantConf::try_from(new_location_config)?,
+                    attached_conf,
                     shard_identity,
                     None,
                     self.tenants,
@@ -1185,6 +1223,17 @@ impl TenantManager {
                 if !state.cancel.is_cancelled() {
                     func(tenant_id, state)
                 }
+            }
+        }
+    }
+
+    /// Total list of all tenant slots: this includes attached, secondary, and InProgress.
+    pub(crate) fn list(&self) -> Vec<(TenantShardId, TenantSlot)> {
+        let locked = self.tenants.read().unwrap();
+        match &*locked {
+            TenantsMap::Initializing => Vec::new(),
+            TenantsMap::Open(map) | TenantsMap::ShuttingDown(map) => {
+                map.iter().map(|(k, v)| (*k, v.clone())).collect()
             }
         }
     }

@@ -14,6 +14,8 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -38,11 +40,11 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
 use crate::tenant::mgr::GetActiveTenantError;
-use crate::tenant::mgr::UpsertLocationError;
 use crate::tenant::mgr::{
     GetTenantError, SetNewTenantConfigError, TenantManager, TenantMapError, TenantMapInsertError,
     TenantSlotError, TenantSlotUpsertError, TenantStateError,
 };
+use crate::tenant::mgr::{TenantSlot, UpsertLocationError};
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
@@ -265,7 +267,7 @@ impl From<SetNewTenantConfigError> for ApiError {
             SetNewTenantConfigError::GetTenant(tid) => {
                 ApiError::NotFound(anyhow!("tenant {}", tid).into())
             }
-            e @ SetNewTenantConfigError::Persist(_) => {
+            e @ (SetNewTenantConfigError::Persist(_) | SetNewTenantConfigError::Other(_)) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
             }
         }
@@ -704,7 +706,9 @@ async fn tenant_attach_handler(
     }
 
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let shard_params = ShardParameters::default();
+    let location_conf = LocationConf::attached_single(tenant_conf, generation, &shard_params);
+
     let tenant = state
         .tenant_manager
         .upsert_location(
@@ -1194,7 +1198,8 @@ async fn tenant_create_handler(
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let location_conf = LocationConf::attached_single(tenant_conf, generation);
+    let location_conf =
+        LocationConf::attached_single(tenant_conf, generation, &request_data.shard_parameters);
 
     let new_tenant = state
         .tenant_manager
@@ -1213,7 +1218,6 @@ async fn tenant_create_handler(
             "Upsert succeeded but didn't return tenant!"
         )));
     };
-
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
     if let res @ Err(_) = new_tenant
@@ -1349,6 +1353,28 @@ async fn put_tenant_location_config_handler(
     }
 
     json_response(StatusCode::OK, ())
+}
+
+async fn list_location_config_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+    let slots = state.tenant_manager.list();
+    let result = LocationConfigListResponse {
+        tenant_shards: slots
+            .into_iter()
+            .map(|(tenant_shard_id, slot)| {
+                let v = match slot {
+                    TenantSlot::Attached(t) => Some(t.get_location_conf()),
+                    TenantSlot::Secondary(s) => Some(s.get_location_conf()),
+                    TenantSlot::InProgress(_) => None,
+                };
+                (tenant_shard_id, v)
+            })
+            .collect(),
+    };
+    json_response(StatusCode::OK, result)
 }
 
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
@@ -1652,12 +1678,13 @@ async fn disk_usage_eviction_run(
         )));
     };
 
-    let state = state.disk_usage_eviction_state.clone();
+    let eviction_state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
-        &state,
+        &eviction_state,
         storage,
         usage,
+        &state.tenant_manager,
         config.eviction_order,
         &cancel,
     )
@@ -1891,6 +1918,9 @@ pub fn make_router(
         })
         .put("/v1/tenant/:tenant_shard_id/location_config", |r| {
             api_handler(r, put_tenant_location_config_handler)
+        })
+        .get("/v1/location_config", |r| {
+            api_handler(r, list_location_config_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
