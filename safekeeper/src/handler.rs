@@ -197,6 +197,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
+        _cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<(), QueryError> {
         if query_string
             .to_ascii_lowercase()

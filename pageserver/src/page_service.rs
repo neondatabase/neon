@@ -262,7 +262,11 @@ async fn page_service_conn_main(
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
-        .run(&mut conn_handler, task_mgr::shutdown_watcher)
+        .run(
+            &mut conn_handler,
+            task_mgr::shutdown_watcher,
+            task_mgr::shutdown_token(),
+        )
         .await
     {
         Ok(()) => {
@@ -515,6 +519,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         ctx: RequestContext,
+        cancel: &CancellationToken,
     ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -551,7 +556,8 @@ impl PageServerHandler {
             let msg = tokio::select! {
                 biased;
 
-                _ = self.timeline_cancelled() => {
+                // NB: self.timeline_cancelled() can't be used here
+                _ = cancel.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
                     return Err(QueryError::Shutdown)
@@ -1284,6 +1290,7 @@ where
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
+        cancel: &CancellationToken,
     ) -> Result<(), QueryError> {
         fail::fail_point!("simulated-bad-compute-connection", |_| {
             info!("Hit failpoint for bad connection");
@@ -1311,7 +1318,7 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, tenant_id, timeline_id, ctx)
+            self.handle_pagerequests(pgb, tenant_id, timeline_id, ctx, cancel)
                 .await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
