@@ -4,7 +4,6 @@ import enum
 import json
 import os
 import re
-import tempfile
 import timeit
 from contextlib import contextmanager
 from datetime import datetime
@@ -425,18 +424,19 @@ def zenbenchmark(
     benchmarker = NeonBenchmarker(record_property)
     yield benchmarker
 
-    with tempfile.NamedTemporaryFile(mode="w") as tmp:
-        results = {}
-        for _, recorded_property in request.node.user_properties:
-            name = recorded_property["name"]
-            value = recorded_property["value"]
-            unit = recorded_property["unit"]
-            results[name] = f"{value} {unit}"
+    results = {}
+    for _, recorded_property in request.node.user_properties:
+        name = recorded_property["name"]
+        value = recorded_property["value"]
+        unit = recorded_property["unit"]
+        results[name] = f"{value} {unit}"
 
-        json.dump(results, tmp, indent=2)
-        tmp.flush()
-
-        allure.attach.file(tmp.name, "benchmarks-results.json", allure.attachment_type.JSON)
+    content = json.dumps(results, indent=2)
+    allure.attach(
+        content,
+        "benchmarks.json",
+        allure.attachment_type.JSON,
+    )
 
 
 def pytest_addoption(parser: Parser):
