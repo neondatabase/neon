@@ -10,6 +10,7 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{Config, NoTls, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_util::sync::CancellationToken;
 
 // generate client, server test streams
 async fn make_tcp_pair() -> (TcpStream, TcpStream) {
@@ -29,6 +30,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> Handler<IO> for TestHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         _query_string: &str,
+        _cancel: &CancellationToken,
     ) -> Result<(), QueryError> {
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
             b"hey",
@@ -50,7 +52,13 @@ async fn simple_select() {
 
     tokio::spawn(async move {
         let mut handler = TestHandler {};
-        pgbackend.run(&mut handler, future::pending::<()>).await
+        pgbackend
+            .run(
+                &mut handler,
+                future::pending::<()>,
+                CancellationToken::new(),
+            )
+            .await
     });
 
     let conf = Config::new();
@@ -98,7 +106,13 @@ async fn simple_select_ssl() {
 
     tokio::spawn(async move {
         let mut handler = TestHandler {};
-        pgbackend.run(&mut handler, future::pending::<()>).await
+        pgbackend
+            .run(
+                &mut handler,
+                future::pending::<()>,
+                CancellationToken::new(),
+            )
+            .await
     });
 
     let client_cfg = rustls::ClientConfig::builder()
