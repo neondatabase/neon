@@ -292,12 +292,14 @@ jobs:
           strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
             UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
             CC=gcc
+            RUSTFLAGS="-C linker=gcc"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
             CARGO_FLAGS="--locked --release"
             ASAN_OPTIONS=""
             UBSAN_OPTIONS=""
             CC=gcc
+            RUSTFLAGS=""
           fi
           {
             echo "cov_prefix=${cov_prefix}"
@@ -307,6 +309,7 @@ jobs:
             echo "ASAN_OPTIONS=${ASAN_OPTIONS}"
             echo "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
             echo "CC=${CC}"
+            echo "RUSTFLAGS=${RUSTFLAGS}"
           } >> $GITHUB_ENV
 
       # Disabled for now
