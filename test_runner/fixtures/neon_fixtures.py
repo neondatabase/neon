@@ -993,6 +993,11 @@ class NeonEnv:
         self.initial_timeline = config.initial_timeline
 
         attachment_service_port = self.port_distributor.get_port()
+        # Reserve the next port after attachment service for use by its postgres: this
+        # will assert out if the next port wasn't free.
+        attachment_service_pg_port = self.port_distributor.get_port()
+        assert attachment_service_pg_port == attachment_service_port + 1
+
         self.control_plane_api: str = f"http://127.0.0.1:{attachment_service_port}"
         self.attachment_service: NeonAttachmentService = NeonAttachmentService(
             self, config.auth_enabled
@@ -1652,8 +1657,10 @@ class NeonCli(AbstractNeonCli):
         id: int,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "subprocess.CompletedProcess[str]":
-        start_args = ["pageserver", "start", f"--id={id}", *overrides]
+        register_str = "true" if register else "false"
+        start_args = ["pageserver", "start", f"--id={id}", *overrides, f"--register={register_str}"]
         storage = self.env.pageserver_remote_storage
         append_pageserver_param_overrides(
             params_to_update=start_args,
@@ -2080,6 +2087,7 @@ class NeonPageserver(PgProtocol):
         self,
         overrides: Tuple[str, ...] = (),
         extra_env_vars: Optional[Dict[str, str]] = None,
+        register: bool = True,
     ) -> "NeonPageserver":
         """
         Start the page server.
@@ -2089,7 +2097,7 @@ class NeonPageserver(PgProtocol):
         assert self.running is False
 
         self.env.neon_cli.pageserver_start(
-            self.id, overrides=overrides, extra_env_vars=extra_env_vars
+            self.id, overrides=overrides, extra_env_vars=extra_env_vars, register=register
         )
         self.running = True
         return self
