@@ -19,7 +19,7 @@ else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 	CPPFLAGS = -fsanitize=address -fsanitize=undefined -fno-sanitize-recover -Wno-cast-function-type-strict
-	LDFLAGS = -fsanitize=address -fsanitize=undefined -static-libubsan
+	LDFLAGS = -fsanitize=address -fsanitize=undefined
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif

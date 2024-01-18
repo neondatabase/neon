@@ -33,8 +33,8 @@ fn main() -> anyhow::Result<()> {
     {
         println!("cargo:rustc-link-arg=-fsanitize=address");
         println!("cargo:rustc-link-arg=-fsanitize=undefined");
-        println!("cargo:rustc-link-arg=-static-libasan");
-        println!("cargo:rustc-link-arg=-static-libubsan");
+        // println!("cargo:rustc-link-arg=-static-libasan");
+        //println!("cargo:rustc-link-arg=-static-libubsan");
     }
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
