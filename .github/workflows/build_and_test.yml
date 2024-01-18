@@ -276,7 +276,6 @@ jobs:
             CARGO_FLAGS="--locked --release"
             ASAN_OPTIONS=""
             UBSAN_OPTIONS=""
-            RUSTFLAGS="-C linker=gcc"
             CC=gcc
           fi
           {
@@ -286,7 +285,6 @@ jobs:
             echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
             echo "ASAN_OPTIONS=${ASAN_OPTIONS}"
             echo "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
-            echo "RUSTFLAGS=${RUSTFLAGS}"
             echo "CC=${CC}"
           } >> $GITHUB_ENV
 
