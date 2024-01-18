@@ -1,7 +1,8 @@
 //! Tracing wrapper for Hyper HTTP server
 
+use hyper::body::Body;
 use hyper::HeaderMap;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
 use std::future::Future;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -35,14 +36,14 @@ pub enum OtelName<'a> {
 /// instrumentation libraries at:
 /// <https://opentelemetry.io/registry/?language=rust&component=instrumentation>
 /// If a Hyper crate appears, consider switching to that.
-pub async fn tracing_handler<F, R>(
-    req: Request<Body>,
+pub async fn tracing_handler<B1: Body, B2: Body, F, R>(
+    req: Request<B1>,
     handler: F,
     otel_name: OtelName<'_>,
-) -> Response<Body>
+) -> Response<B2>
 where
-    F: Fn(Request<Body>) -> R,
-    R: Future<Output = Response<Body>>,
+    F: Fn(Request<B1>) -> R,
+    R: Future<Output = Response<B2>>,
 {
     // Create a tracing span, with context propagated from the incoming
     // request if any.

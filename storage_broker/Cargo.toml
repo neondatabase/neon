@@ -19,6 +19,7 @@ futures-util.workspace = true
 git-version.workspace = true
 humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }
+http-body-util = { workspace = true }
 once_cell.workspace = true
 parking_lot.workspace = true
 prost.workspace = true

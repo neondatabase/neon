@@ -15,7 +15,11 @@ aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 bytes.workspace = true
 camino.workspace = true
-hyper = { workspace = true, features = ["stream"] }
+hyper = { workspace = true, features = [] }
+hyper-util = { workspace = true, features = [] }
+http = { workspace = true, features = [] }
+http-body = { workspace = true, features = [] }
+http-body-util = { workspace = true, features = [] }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

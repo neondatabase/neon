@@ -6,14 +6,21 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
+use crate::http::body::Body;
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
+use hyper_util::server::conn;
 use num_cpus;
 use serde_json;
+use tokio::net::TcpListener;
 use tokio::task;
 use tracing::{error, info, warn};
 use tracing_utils::http::OtelName;
@@ -36,7 +43,7 @@ fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
 }
 
 // Service function to handle all available routes.
-async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+async fn routes(req: Request<Incoming>, compute: &Arc<ComputeNode>) -> Response<Body> {
     //
     // NOTE: The URI path is currently included in traces. That's OK because
     // it doesn't contain any variable parts or sensitive information. But
@@ -210,7 +217,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
 }
 
 async fn handle_configure_request(
-    req: Request<Body>,
+    req: Request<Incoming>,
     compute: &Arc<ComputeNode>,
 ) -> Result<String, (String, StatusCode)> {
     if !compute.live_config_allowed {
@@ -220,7 +227,7 @@ async fn handle_configure_request(
         ));
     }
 
-    let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
+    let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
     let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
     if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
         let spec = request.spec;
@@ -304,35 +311,43 @@ async fn serve(port: u16, state: Arc<ComputeNode>) {
     // see e.g. https://github.com/rust-lang/rust/pull/34440
     let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), port);
 
-    let make_service = make_service_fn(move |_conn| {
+    let service = service_fn(move |req: Request<Incoming>| {
         let state = state.clone();
         async move {
-            Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-                let state = state.clone();
-                async move {
-                    Ok::<_, Infallible>(
-                        // NOTE: We include the URI path in the string. It
-                        // doesn't contain any variable parts or sensitive
-                        // information in this API.
-                        tracing_utils::http::tracing_handler(
-                            req,
-                            |req| routes(req, &state),
-                            OtelName::UriPath,
-                        )
-                        .await,
-                    )
-                }
-            }))
+            Ok::<_, Infallible>(
+                // NOTE: We include the URI path in the string. It
+                // doesn't contain any variable parts or sensitive
+                // information in this API.
+                tracing_utils::http::tracing_handler(
+                    req,
+                    |req| routes(req, &state),
+                    OtelName::UriPath,
+                )
+                .await,
+            )
         }
     });
 
     info!("starting HTTP server on {}", addr);
 
-    let server = Server::bind(&addr).serve(make_service);
-
-    // Run this server forever
-    if let Err(e) = server.await {
-        error!("server error: {}", e);
+    let listener = TcpListener::bind(addr).await.unwrap();
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("server error: {}", e);
+                return;
+            }
+        };
+        let io = TokioIo::new(stream);
+        let service = service.clone();
+        tokio::task::spawn(async move {
+            let builder = conn::auto::Builder::new(TokioExecutor::new());
+            let res = builder.serve_connection(io, service).await;
+            if let Err(err) = res {
+                println!("Error serving connection: {:?}", err);
+            }
+        });
     }
 }
 

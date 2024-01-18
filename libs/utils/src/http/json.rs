@@ -1,6 +1,8 @@
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use bytes::Buf;
-use hyper::{header, Body, Request, Response, StatusCode};
+use http_body_util::BodyExt;
+use hyper::{header, Request, Response, StatusCode};
+use routerify::Body;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
@@ -18,10 +20,14 @@ pub async fn json_request<T: for<'de> Deserialize<'de>>(
 pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
     request: &mut Request<Body>,
 ) -> Result<Option<T>, ApiError> {
-    let body = hyper::body::aggregate(request.body_mut())
+    let body = request
+        .body_mut()
+        .collect()
         .await
+        .map_err(|e| anyhow!(e))
         .context("Failed to read request body")
-        .map_err(ApiError::BadRequest)?;
+        .map_err(ApiError::BadRequest)?
+        .aggregate();
     if body.remaining() == 0 {
         return Ok(None);
     }

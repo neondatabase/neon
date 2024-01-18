@@ -22,6 +22,7 @@ chrono.workspace = true
 heapless.workspace = true
 hex = { workspace = true, features = ["serde"] }
 hyper = { workspace = true, features = ["full"] }
+http-body-util = { workspace = true, features = [] }
 fail.workspace = true
 futures = { workspace = true}
 jsonwebtoken.workspace = true

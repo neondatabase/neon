@@ -1,4 +1,5 @@
-use hyper::{header, Body, Response, StatusCode};
+use hyper::{header, Response, StatusCode};
+use routerify::Body;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::error::Error as StdError;
