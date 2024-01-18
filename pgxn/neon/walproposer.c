@@ -959,8 +959,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 	}
 
 	/*
-	 * If propEpochStartLsn is 0 everywhere, we are bootstrapping -- nothing
-	 * was committed yet. Start streaming then from the basebackup LSN.
+	 * If propEpochStartLsn is 0, it means flushLsn is 0 everywhere, we are bootstrapping
+	 * and nothing was committed yet. Start streaming then from the basebackup LSN.
 	 */
 	if (wp->propEpochStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
 	{
@@ -973,12 +973,13 @@ DetermineEpochStartLsn(WalProposer *wp)
 	}
 
 	/*
-	 * If propEpochStartLsn is not 0, at least one msg with WAL was sent to
-	 * some connected safekeeper; it must have carried truncateLsn pointing to
-	 * the first record.
+	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so it
+	 * should never be zero at this point, if we know timelineStartLsn.
+	 * 
+	 * timelineStartLsn can be zero only on the first syncSafekeepers run.
 	 */
 	Assert((wp->truncateLsn != InvalidXLogRecPtr) ||
-		   (wp->config->syncSafekeepers && wp->truncateLsn == wp->propEpochStartLsn));
+		   (wp->config->syncSafekeepers && wp->truncateLsn == wp->timelineStartLsn));
 
 	/*
 	 * We will be generating WAL since propEpochStartLsn, so we should set
