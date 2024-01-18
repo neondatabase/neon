@@ -406,13 +406,28 @@ pub(crate) enum PageReconstructError {
 }
 
 #[derive(thiserror::Error, Debug)]
+enum CreateImageLayersError {
+    #[error("timeline shutting down")]
+    Cancelled,
+
+    #[error(transparent)]
+    GetVectoredError(GetVectoredError),
+
+    #[error(transparent)]
+    PageReconstructError(PageReconstructError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
 enum FlushLayerError {
     /// Timeline cancellation token was cancelled
     #[error("timeline shutting down")]
     Cancelled,
 
     #[error(transparent)]
-    PageReconstructError(#[from] PageReconstructError),
+    CreateImageLayersError(CreateImageLayersError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -467,6 +482,45 @@ pub(crate) enum WaitLsnError {
     // Timeout expired while waiting for LSN to catch up with goal.
     #[error("{0}")]
     Timeout(String),
+}
+
+// The impls below achieve cancellation mapping for errors.
+// Perhaps there's a way of achieving this with less cruft.
+
+impl From<CreateImageLayersError> for CompactionError {
+    fn from(e: CreateImageLayersError) -> Self {
+        match e {
+            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            _ => CompactionError::Other(e.into()),
+        }
+    }
+}
+
+impl From<CreateImageLayersError> for FlushLayerError {
+    fn from(e: CreateImageLayersError) -> Self {
+        match e {
+            CreateImageLayersError::Cancelled => FlushLayerError::Cancelled,
+            any => FlushLayerError::CreateImageLayersError(any),
+        }
+    }
+}
+
+impl From<PageReconstructError> for CreateImageLayersError {
+    fn from(e: PageReconstructError) -> Self {
+        match e {
+            PageReconstructError::Cancelled => CreateImageLayersError::Cancelled,
+            _ => CreateImageLayersError::PageReconstructError(e),
+        }
+    }
+}
+
+impl From<GetVectoredError> for CreateImageLayersError {
+    fn from(e: GetVectoredError) -> Self {
+        match e {
+            GetVectoredError::Cancelled => CreateImageLayersError::Cancelled,
+            _ => CreateImageLayersError::GetVectoredError(e),
+        }
+    }
 }
 
 /// Public interface functions
@@ -2643,7 +2697,7 @@ impl Timeline {
                         return;
                     }
                     err @ Err(
-                        FlushLayerError::Other(_) | FlushLayerError::PageReconstructError(_),
+                        FlushLayerError::Other(_) | FlushLayerError::CreateImageLayersError(_),
                     ) => {
                         error!("could not flush frozen layer: {err:?}");
                         break err;
@@ -3093,7 +3147,7 @@ impl Timeline {
         lsn: Lsn,
         force: bool,
         ctx: &RequestContext,
-    ) -> Result<Vec<ResidentLayer>, PageReconstructError> {
+    ) -> Result<Vec<ResidentLayer>, CreateImageLayersError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers = Vec::new();
 
@@ -3122,10 +3176,12 @@ impl Timeline {
                 .await?;
 
                 fail_point!("image-layer-writer-fail-before-finish", |_| {
-                    Err(PageReconstructError::Other(anyhow::anyhow!(
+                    Err(CreateImageLayersError::Other(anyhow::anyhow!(
                         "failpoint image-layer-writer-fail-before-finish"
                     )))
                 });
+
+                let mut key_request_accum = KeySpaceAccum::new();
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
@@ -3138,34 +3194,55 @@ impl Timeline {
                             key = key.next();
                             continue;
                         }
-                        let img = match self.get(key, lsn, ctx).await {
-                            Ok(img) => img,
-                            Err(err) => {
-                                // If we fail to reconstruct a VM or FSM page, we can zero the
-                                // page without losing any actual user data. That seems better
-                                // than failing repeatedly and getting stuck.
-                                //
-                                // We had a bug at one point, where we truncated the FSM and VM
-                                // in the pageserver, but the Postgres didn't know about that
-                                // and continued to generate incremental WAL records for pages
-                                // that didn't exist in the pageserver. Trying to replay those
-                                // WAL records failed to find the previous image of the page.
-                                // This special case allows us to recover from that situation.
-                                // See https://github.com/neondatabase/neon/issues/2601.
-                                //
-                                // Unfortunately we cannot do this for the main fork, or for
-                                // any metadata keys, keys, as that would lead to actual data
-                                // loss.
-                                if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
-                                    warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
-                                    ZERO_PAGE.clone()
-                                } else {
-                                    return Err(err);
-                                }
-                            }
-                        };
 
-                        image_layer_writer.put_image(key, &img).await?;
+                        key_request_accum.add_key(key);
+                        if key_request_accum.size() >= Timeline::MAX_GET_VECTORED_KEYS
+                            || key.next() == range.end
+                        {
+                            let results = self
+                                .get_vectored(
+                                    &key_request_accum.consume_keyspace().ranges,
+                                    lsn,
+                                    ctx,
+                                )
+                                .await?;
+
+                            for (img_key, img) in results {
+                                let img = match img {
+                                    Ok(img) => img,
+                                    Err(err) => {
+                                        // If we fail to reconstruct a VM or FSM page, we can zero the
+                                        // page without losing any actual user data. That seems better
+                                        // than failing repeatedly and getting stuck.
+                                        //
+                                        // We had a bug at one point, where we truncated the FSM and VM
+                                        // in the pageserver, but the Postgres didn't know about that
+                                        // and continued to generate incremental WAL records for pages
+                                        // that didn't exist in the pageserver. Trying to replay those
+                                        // WAL records failed to find the previous image of the page.
+                                        // This special case allows us to recover from that situation.
+                                        // See https://github.com/neondatabase/neon/issues/2601.
+                                        //
+                                        // Unfortunately we cannot do this for the main fork, or for
+                                        // any metadata keys, keys, as that would lead to actual data
+                                        // loss.
+                                        if is_rel_fsm_block_key(img_key)
+                                            || is_rel_vm_block_key(img_key)
+                                        {
+                                            warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
+                                            ZERO_PAGE.clone()
+                                        } else {
+                                            return Err(
+                                                CreateImageLayersError::PageReconstructError(err),
+                                            );
+                                        }
+                                    }
+                                };
+
+                                image_layer_writer.put_image(img_key, &img).await?;
+                            }
+                        }
+
                         key = key.next();
                     }
                 }
