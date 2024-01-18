@@ -14,6 +14,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
 use pageserver_api::{
+    keyspace::{key_range_size, KeySpaceAccum},
     models::{
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
         LayerMapInfo, TimelineState,
@@ -32,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::Gate;
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -417,6 +418,18 @@ enum FlushLayerError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum GetVectoredError {
+    #[error("timeline shutting down")]
+    Cancelled,
+
+    #[error("Requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
+    Oversized(u64),
+
+    #[error("Requested at invalid LSN: {0}")]
+    InvalidLsn(Lsn),
+}
+
 #[derive(Clone, Copy)]
 pub enum LogicalSizeCalculationCause {
     Initial,
@@ -573,6 +586,54 @@ impl Timeline {
         }
 
         res
+    }
+
+    pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
+
+    /// Look up multiple page versions at a given LSN
+    ///
+    /// This naive implementation will be replaced with a more efficient one
+    /// which actually vectorizes the read path.
+    pub(crate) async fn get_vectored(
+        &self,
+        key_ranges: &[Range<Key>],
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if !lsn.is_valid() {
+            return Err(GetVectoredError::InvalidLsn(lsn));
+        }
+
+        let key_count = key_ranges
+            .iter()
+            .map(|range| key_range_size(range) as u64)
+            .sum();
+        if key_count > Timeline::MAX_GET_VECTORED_KEYS {
+            return Err(GetVectoredError::Oversized(key_count));
+        }
+
+        let mut values = BTreeMap::new();
+        for range in key_ranges {
+            let mut key = range.start;
+            while key != range.end {
+                debug_assert!(!self.shard_identity.is_key_disposable(&key));
+
+                let block = self.get(key, lsn, ctx).await;
+
+                if matches!(
+                    block,
+                    Err(PageReconstructError::Cancelled)
+                        | Err(PageReconstructError::AncestorStopping(_))
+                ) {
+                    return Err(GetVectoredError::Cancelled);
+                }
+
+                values.insert(key, block);
+                key = key.next();
+            }
+        }
+
+        Ok(values)
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
