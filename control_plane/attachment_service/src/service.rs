@@ -519,6 +519,14 @@ impl Service {
                     id: req_tenant.id,
                     valid,
                 });
+            } else {
+                // After tenant deletion, we may approve any validation.  This avoids
+                // spurious warnings on the pageserver if it has pending LSN updates
+                // at the point a deletion happens.
+                response.tenants.push(ValidateResponseTenant {
+                    id: req_tenant.id,
+                    valid: true,
+                });
             }
         }
         response
