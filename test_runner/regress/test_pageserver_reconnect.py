@@ -3,8 +3,8 @@
 #
 import threading
 import time
-
 from contextlib import closing
+
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin
 
