@@ -57,7 +57,7 @@ use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
 
 use compute_api::responses::{ComputeState, ComputeStatus};
-use compute_api::spec::{Cluster, ComputeMode, ComputeSpec};
+use compute_api::spec::{Cluster, ComputeFeature, ComputeMode, ComputeSpec};
 
 // contents of a endpoint.json file
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -70,6 +70,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    features: Vec<ComputeFeature>,
 }
 
 //
@@ -140,6 +141,7 @@ impl ComputeControlPlane {
             // with this we basically test a case of waking up an idle compute, where
             // we also skip catalog updates in the cloud.
             skip_pg_catalog_updates: true,
+            features: vec![],
         });
 
         ep.create_endpoint_dir()?;
@@ -154,6 +156,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates: true,
+                features: vec![],
             })?,
         )?;
         std::fs::write(
@@ -215,6 +218,9 @@ pub struct Endpoint {
 
     // Optimizations
     skip_pg_catalog_updates: bool,
+
+    // Feature flags
+    features: Vec<ComputeFeature>,
 }
 
 impl Endpoint {
@@ -244,6 +250,7 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            features: conf.features,
         })
     }
 
@@ -519,7 +526,7 @@ impl Endpoint {
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
-            features: vec![],
+            features: self.features.clone(),
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
