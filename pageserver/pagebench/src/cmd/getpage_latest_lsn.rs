@@ -413,7 +413,10 @@ async fn client(
 
         let res = tokio::select! {
             res = client.getpage(req) => { res },
-            _ = cancel.cancelled() => { return; }
+            _ = cancel.cancelled() => {
+                client.shutdown().await;
+                return;
+            }
         };
         res.with_context(|| format!("getpage for {timeline}"))
             .unwrap();
