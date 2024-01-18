@@ -19,7 +19,8 @@ else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS = -O0 -g3 $(CFLAGS)
 	CPPFLAGS = -fsanitize=address -fsanitize=undefined -fno-sanitize-recover -Wno-cast-function-type-strict
-	LDFLAGS = -fsanitize=address -fsanitize=undefined
+	LDFLAGS = -fsanitize=address -fsanitize=undefined -export-dynamic
+	LD_PRELOAD=$(gcc -print-file-name=libasan.so)
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
