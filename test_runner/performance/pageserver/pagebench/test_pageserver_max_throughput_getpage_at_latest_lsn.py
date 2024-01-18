@@ -43,12 +43,24 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
         zenbenchmark.record(
             metric_name=f"pageserver_max_throughput_getpage_at_latest_lsn.{metric}", **kwargs
         )
+    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
 
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {
+    # params from fixtures
+    params.update({
         "n_tenants": (n_tenants, {"unit": ""}),
         "pgbench_scale": (pgbench_scale, {"unit": ""}),
         "duration": (duration, {"unit": "s"}),
-    }
+    })
+
+    # configure cache sizes like in prod
+    page_cache_size = 16384
+    max_file_descriptors = 500000
+    neon_env_builder.pageserver_config_override = f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
+    params.update({
+        "pageserver_config_override.page_cache_size": (page_cache_size * 8192, {"unit": "byte"}),
+        "pageserver_config_override.max_file_descriptors": (max_file_descriptors, {"unit": ""}),
+    })
+
     for param, (value, kwargs) in params.items():
         record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
     env = setup_pageserver_with_pgbench_tenants(neon_env_builder, pg_bin, n_tenants, pgbench_scale)
