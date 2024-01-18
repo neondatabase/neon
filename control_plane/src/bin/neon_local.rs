@@ -1094,23 +1094,6 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
         }
 
-        Some(("migrate", subcommand_args)) => {
-            let pageserver = get_pageserver(env, subcommand_args)?;
-            //TODO what shutdown strategy should we use here?
-            if let Err(e) = pageserver.stop(false) {
-                eprintln!("pageserver stop failed: {}", e);
-                exit(1);
-            }
-
-            if let Err(e) = pageserver
-                .start(&pageserver_config_overrides(subcommand_args))
-                .await
-            {
-                eprintln!("pageserver start failed: {e}");
-                exit(1);
-            }
-        }
-
         Some(("set-state", subcommand_args)) => {
             let pageserver = get_pageserver(env, subcommand_args)?;
             let scheduling = subcommand_args.get_one("scheduling");
