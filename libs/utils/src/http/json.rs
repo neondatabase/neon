@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
-use bytes::Buf;
-use http_body_util::BodyExt;
+use bytes::{Buf, Bytes};
+use http_body_util::{BodyExt, Full};
 use hyper::{header, Request, Response, StatusCode};
 use routerify::Body;
 use serde::{Deserialize, Serialize};
@@ -44,14 +44,14 @@ pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
 pub fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let json = serde_json::to_string(&data)
         .context("Failed to serialize JSON response")
         .map_err(ApiError::InternalServerError)?;
     let response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json))
+        .body(Full::from(json))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
 }

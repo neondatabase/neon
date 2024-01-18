@@ -7,8 +7,8 @@ use crate::{
     proxy::retry::{retry_after, ShouldRetry},
 };
 use async_trait::async_trait;
-use hyper::StatusCode;
 use pq_proto::StartupMessageParams;
+use reqwest::StatusCode;
 use std::ops::ControlFlow;
 use tokio::time;
 use tracing::{error, info, warn};

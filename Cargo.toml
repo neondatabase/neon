@@ -94,7 +94,7 @@ hyper-util = "0.1.0"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-hyper-tungstenite = "0.11"
+hyper-tungstenite = "0.13.0"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
@@ -153,7 +153,7 @@ tar = "0.4"
 task-local-extensions = "0.1.4"
 test-context = "0.1"
 thiserror = "1.0"
-tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
+tls-listener = { version = "0.9", features = ["rustls", "tokio-net"] }
 tokio = { version = "1.17", features = ["macros"] }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.10.0"

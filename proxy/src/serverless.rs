@@ -6,40 +6,53 @@ mod conn_pool;
 mod sql_over_http;
 mod websocket;
 
+use bytes::Bytes;
 pub use conn_pool::GlobalConnPoolOptions;
 
-use anyhow::bail;
+use http_body_util::Full;
+use hyper::body::Incoming;
 use hyper::StatusCode;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn;
 use metrics::IntCounterPairGuard;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::select;
+use tokio_rustls::TlsAcceptor;
 use tokio_util::task::TaskTracker;
 
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
 use crate::metrics::NUM_CLIENT_CONNECTION_GAUGE;
-use crate::protocol2::{ProxyProtocolAccept, WithClientIp};
+use crate::protocol2::ProxyProtocolAccept;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::{cancellation::CancelMap, config::ProxyConfig};
-use futures::StreamExt;
-use hyper::{
-    server::{
-        accept,
-        conn::{AddrIncoming, AddrStream},
-    },
-    Body, Method, Request, Response,
-};
+use hyper::{Method, Request, Response};
 
 use std::net::IpAddr;
-use std::task::Poll;
-use std::{future::ready, sync::Arc};
-use tls_listener::TlsListener;
+use std::pin::pin;
+use std::sync::Arc;
+use tls_listener::{AsyncTls, TlsListener};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
+
+#[derive(Clone)]
+struct Tls(TlsAcceptor);
+
+impl<C: AsyncRead + AsyncWrite + Unpin> AsyncTls<C> for Tls {
+    type Stream = tokio_rustls::server::TlsStream<C>;
+    type Error = std::io::Error;
+    type AcceptFuture = tokio_rustls::Accept<C>;
+
+    fn accept(&self, conn: C) -> Self::AcceptFuture {
+        tokio_rustls::TlsAcceptor::accept(&self.0, conn)
+    }
+}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -79,42 +92,52 @@ pub async fn task_main(
     };
     let tls_acceptor: tokio_rustls::TlsAcceptor = tls_config.to_server_config().into();
 
-    let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
-    let _ = addr_incoming.set_nodelay(true);
+    // let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
+    // let _ = addr_incoming.set_nodelay(true);
     let addr_incoming = ProxyProtocolAccept {
-        incoming: addr_incoming,
+        incoming: ws_listener,
     };
 
     let ws_connections = tokio_util::task::task_tracker::TaskTracker::new();
+    let ws_connections2 = ws_connections.clone();
     ws_connections.close(); // allows `ws_connections.wait to complete`
 
-    let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
-        if let Err(err) = conn {
-            error!("failed to accept TLS connection for websockets: {err:?}");
-            ready(false)
-        } else {
-            ready(true)
-        }
-    });
+    let mut tls_listener = TlsListener::new(Tls(tls_acceptor), addr_incoming);
 
-    let make_svc = hyper::service::make_service_fn(
-        |stream: &tokio_rustls::server::TlsStream<WithClientIp<AddrStream>>| {
+    tokio::spawn(async move {
+        loop {
+            let (stream, remote_addr) = select! {
+                res = tls_listener.accept() => {
+                    match res {
+                        Err(err) =>
+                        {error!("failed to accept TLS connection for websockets: {err:?}"); continue},
+                        Ok(s) => s,
+                    }
+                }
+                _ = cancellation_token.cancelled() => break,
+            };
             let (io, tls) = stream.get_ref();
             let client_addr = io.client_addr();
-            let remote_addr = io.inner.remote_addr();
             let sni_name = tls.server_name().map(|s| s.to_string());
             let conn_pool = conn_pool.clone();
-            let ws_connections = ws_connections.clone();
+            let ws_connections = ws_connections2.clone();
             let endpoint_rate_limiter = endpoint_rate_limiter.clone();
 
-            async move {
-                let peer_addr = match client_addr {
-                    Some(addr) => addr,
-                    None if config.require_client_ip => bail!("missing required client ip"),
-                    None => remote_addr,
-                };
-                Ok(MetricService::new(hyper::service::service_fn(
-                    move |req: Request<Body>| {
+            let peer_addr = match client_addr {
+                Some(addr) => addr,
+                None if config.require_client_ip => {
+                    tracing::error!("Error serving connection: missing required client ip");
+                    continue;
+                }
+                None => remote_addr,
+            };
+
+            let io = TokioIo::new(stream);
+
+            let cancellation_token = cancellation_token.clone();
+            tokio::task::spawn(async move {
+                let service = MetricService::new(hyper::service::service_fn(
+                    move |req: Request<Incoming>| {
                         let sni_name = sni_name.clone();
                         let conn_pool = conn_pool.clone();
                         let ws_connections = ws_connections.clone();
@@ -144,15 +167,22 @@ pub async fn task_main(
                             .await
                         }
                     },
-                )))
-            }
-        },
-    );
-
-    hyper::Server::builder(accept::from_stream(tls_listener))
-        .serve(make_svc)
-        .with_graceful_shutdown(cancellation_token.cancelled())
-        .await?;
+                ));
+                let builder = conn::auto::Builder::new(TokioExecutor::new());
+                let mut conn = pin!(builder.serve_connection(io, service));
+                let res = select! {
+                    _ = cancellation_token.cancelled() => {
+                        conn.as_mut().graceful_shutdown();
+                        conn.await
+                    }
+                    res = conn.as_mut() => res,
+                };
+                if let Err(err) = res {
+                    tracing::error!("Error serving connection: {:?}", err);
+                }
+            });
+        }
+    });
 
     // await websocket connections
     ws_connections.wait().await;
@@ -184,18 +214,14 @@ where
     type Error = S::Error;
     type Future = S::Future;
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+    fn call(&self, req: Request<ReqBody>) -> Self::Future {
         self.inner.call(req)
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn request_handler(
-    mut request: Request<Body>,
+    mut request: Request<Incoming>,
     config: &'static ProxyConfig,
     tls: &'static TlsConfig,
     conn_pool: Arc<conn_pool::GlobalConnPool>,
@@ -205,7 +231,7 @@ async fn request_handler(
     sni_hostname: Option<String>,
     peer_addr: IpAddr,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let host = request
         .headers()
         .get("host")
@@ -264,7 +290,7 @@ async fn request_handler(
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
-            .body(Body::empty())
+            .body(Full::new(Bytes::new()))
             .map_err(|e| ApiError::InternalServerError(e.into()))
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")

@@ -235,18 +235,19 @@ async fn collect_metrics_iteration(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::TcpListener,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::{Arc, Mutex};
 
     use anyhow::Error;
+    use bytes::{Buf, Bytes};
     use chrono::Utc;
     use consumption_metrics::{Event, EventChunk};
-    use hyper::{
-        service::{make_service_fn, service_fn},
-        Body, Response,
+    use http_body_util::{BodyExt, Empty};
+    use hyper::{body::Incoming, service::service_fn, Response};
+    use hyper_util::{
+        rt::{TokioExecutor, TokioIo},
+        server::conn,
     };
+    use tokio::net::TcpListener;
     use url::Url;
 
     use super::{collect_metrics_iteration, Ids, Metrics};
@@ -254,30 +255,43 @@ mod tests {
 
     #[tokio::test]
     async fn metrics() {
-        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
 
         let reports = Arc::new(Mutex::new(vec![]));
         let reports2 = reports.clone();
 
-        let server = hyper::server::Server::from_tcp(listener)
-            .unwrap()
-            .serve(make_service_fn(move |_| {
-                let reports = reports.clone();
-                async move {
-                    Ok::<_, Error>(service_fn(move |req| {
-                        let reports = reports.clone();
-                        async move {
-                            let bytes = hyper::body::to_bytes(req.into_body()).await?;
-                            let events: EventChunk<'static, Event<Ids, String>> =
-                                serde_json::from_slice(&bytes)?;
-                            reports.lock().unwrap().push(events);
-                            Ok::<_, Error>(Response::new(Body::from(vec![])))
-                        }
-                    }))
-                }
-            }));
-        let addr = server.local_addr();
-        tokio::spawn(server);
+        let service = service_fn(move |req: hyper::Request<Incoming>| {
+            let reports = reports.clone();
+            async move {
+                let bytes = req
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .aggregate()
+                    .reader();
+                let events: EventChunk<'static, Event<Ids, String>> =
+                    serde_json::from_reader(bytes)?;
+                reports.lock().unwrap().push(events);
+                Ok::<_, Error>(Response::new(Empty::<Bytes>::new()))
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let io = TokioIo::new(stream);
+                let service = service.clone();
+                tokio::task::spawn(async move {
+                    let builder = conn::auto::Builder::new(TokioExecutor::new());
+                    let res = builder.serve_connection(io, service).await;
+                    if let Err(err) = res {
+                        println!("Error serving connection: {:?}", err);
+                    }
+                });
+            }
+        });
 
         let metrics = Metrics::default();
         let client = http::new_client(RateLimiterConfig::default());

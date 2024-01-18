@@ -1,15 +1,20 @@
 use std::sync::Arc;
 
 use anyhow::bail;
+use bytes::Buf;
+use bytes::Bytes;
 use futures::pin_mut;
 use futures::StreamExt;
-use hyper::body::HttpBody;
+use http_body::Body;
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use hyper::body::Incoming;
 use hyper::header;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
 use hyper::Response;
 use hyper::StatusCode;
-use hyper::{Body, HeaderMap, Request};
+use hyper::{HeaderMap, Request};
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -235,10 +240,10 @@ pub async fn handle(
     tls: &'static TlsConfig,
     config: &'static HttpConfig,
     ctx: &mut RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-) -> Result<Response<Body>, ApiError> {
+) -> Result<Response<Full<Bytes>>, ApiError> {
     let result = tokio::time::timeout(
         config.request_timeout,
         handle_inner(tls, config, ctx, request, sni_hostname, conn_pool),
@@ -347,10 +352,10 @@ async fn handle_inner(
     tls: &'static TlsConfig,
     config: &'static HttpConfig,
     ctx: &mut RequestMonitoring,
-    request: Request<Body>,
+    request: Request<Incoming>,
     sni_hostname: Option<String>,
     conn_pool: Arc<GlobalConnPool>,
-) -> anyhow::Result<Response<Body>> {
+) -> anyhow::Result<Response<Full<Bytes>>> {
     let _request_gauge = NUM_CONNECTION_REQUESTS_GAUGE
         .with_label_values(&["http"])
         .guard();
@@ -406,8 +411,8 @@ async fn handle_inner(
     //
     // Read the query and query params from the request body
     //
-    let body = hyper::body::to_bytes(request.into_body()).await?;
-    let payload: Payload = serde_json::from_slice(&body)?;
+    let body = request.into_body().collect().await?.aggregate().reader();
+    let payload: Payload = serde_json::from_reader(body)?;
 
     let mut client = conn_pool.get(ctx, conn_info, !allow_pool).await?;
 
@@ -504,7 +509,7 @@ async fn handle_inner(
     let body = serde_json::to_string(&result).expect("json serialization should not fail");
     let len = body.len();
     let response = response
-        .body(Body::from(body))
+        .body(Full::from(body))
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
