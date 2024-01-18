@@ -37,7 +37,7 @@ use utils::{
 use crate::{
     compute_hook::ComputeHook,
     node::Node,
-    persistence::{DatabaseError, Persistence, TenantShardPersistence},
+    persistence::{DatabaseError, NodePersistence, Persistence, TenantShardPersistence},
     scheduler::Scheduler,
     tenant_state::{
         IntentState, ObservedState, ObservedStateLocation, ReconcileResult, ReconcileWaitError,
@@ -991,6 +991,20 @@ impl Service {
         }
 
         Ok(TenantShardMigrateResponse {})
+    }
+
+    pub(crate) async fn node_list(&self) -> Result<Vec<NodePersistence>, ApiError> {
+        // It is convenient to avoid taking the big lock and converting Node to a serializable
+        // structure, by fetching from storage instead of reading in-memory state.
+        let nodes = self
+            .persistence
+            .list_nodes()
+            .await?
+            .into_iter()
+            .map(|n| n.to_persistent())
+            .collect();
+
+        Ok(nodes)
     }
 
     pub(crate) async fn node_register(

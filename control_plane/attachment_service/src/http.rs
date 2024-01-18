@@ -141,6 +141,11 @@ async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, 
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&req);
+    json_response(StatusCode::OK, state.service.node_list().await?)
+}
+
 async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     let config_req = json_request::<NodeConfigureRequest>(&mut req).await?;
@@ -232,6 +237,7 @@ pub fn make_router(
         .post("/attach-hook", |r| request_span(r, handle_attach_hook))
         .post("/inspect", |r| request_span(r, handle_inspect))
         .post("/node", |r| request_span(r, handle_node_register))
+        .get("/node", |r| request_span(r, handle_node_list))
         .put("/node/:node_id/config", |r| {
             request_span(r, handle_node_configure)
         })
