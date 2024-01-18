@@ -576,7 +576,9 @@ async fn timeline_preserve_initdb_handler(
             .get_timeline(timeline_id, false)
             .map_err(|e| ApiError::NotFound(e.into()))?;
 
-        timeline.preserve_initdb_archive().await
+        timeline
+            .preserve_initdb_archive()
+            .await
             .context("preserving initdb archive")
             .map_err(ApiError::InternalServerError)?;
 
@@ -1973,9 +1975,10 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/ignore", |r| {
             api_handler(r, tenant_ignore_handler)
         })
-        .post("/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive", |r| {
-            api_handler(r, timeline_preserve_initdb_handler)
-        })
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
+            |r| api_handler(r, timeline_preserve_initdb_handler),
+        )
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)
         })
