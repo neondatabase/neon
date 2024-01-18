@@ -993,11 +993,14 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        self.attachment_service_port = self.port_distributor.get_port()
-        # Reserve the next port after attachment service for use by its postgres: this
-        # will assert out if the next port wasn't free.
-        attachment_service_pg_port = self.port_distributor.get_port()
-        assert attachment_service_pg_port == self.attachment_service_port + 1
+        # Find two adjacent ports for attachment service and its postgres DB.  This
+        # loop would eventually throw from get_port() if we run out of ports (extremely
+        # unlikely): usually we find two adjacent free ports on the first iteration.
+        while True:
+            self.attachment_service_port = self.port_distributor.get_port()
+            attachment_service_pg_port = self.port_distributor.get_port()
+            if attachment_service_pg_port == self.attachment_service_port + 1:
+                break
 
         # The URL for the pageserver to use as its control_plane_api config
         self.control_plane_api: str = f"http://127.0.0.1:{self.attachment_service_port}/upcall/v1"
@@ -1918,6 +1921,14 @@ class NeonAttachmentService:
             self.running = False
         return self
 
+    def pageserver_api(self) -> PageserverHttpClient:
+        """
+        The attachment service implements a subset of the pageserver REST API, for mapping
+        per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
+        functions via the HttpClient, as an implicit check that these APIs remain compatible.
+        """
+        return PageserverHttpClient(self.env.attachment_service_port, lambda: True)
+
     def request(self, method, *args, **kwargs) -> requests.Response:
         kwargs["headers"] = self.headers()
         return requests.request(method, *args, **kwargs)
@@ -2010,6 +2021,9 @@ class NeonAttachmentService:
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[Dict[Any, Any]] = None,
     ):
+        """
+        Use this rather than pageserver_api() when you need to include shard parameters
+        """
         body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
 
         if shard_count is not None:
@@ -2026,39 +2040,6 @@ class NeonAttachmentService:
         response = self.request("POST", f"{self.env.attachment_service_api}/v1/tenant", json=body)
         response.raise_for_status()
         log.info(f"tenant_create success: {response.json()}")
-
-    def tenant_delete(self, tenant_id):
-        """
-        Deletion API requires retry loop: to save callers the effort, it is implemented
-        inside this function.  Assumes tests are deleting small tenants, so it should
-        complete fast.
-        """
-        tries = 10
-        delay = 0.5
-        while tries > 0:
-            response = self.request(
-                "DELETE", f"{self.env.attachment_service_api}/v1/tenant/{tenant_id}"
-            )
-            if response.status_code == 404:
-                # Success
-                return
-            elif response.status_code == 202:
-                # Deletion in progress
-                pass
-
-            response.raise_for_status()
-
-            tries -= 1
-            time.sleep(delay)
-
-    def tenant_timeline_create(self, tenant_id: TenantId, timeline_id: TimelineId):
-        body: Dict[str, Any] = {"new_timeline_id": str(timeline_id)}
-
-        response = self.request(
-            "POST", f"{self.env.attachment_service_api}/v1/tenant/{tenant_id}/timeline", json=body
-        )
-        response.raise_for_status()
-        log.info(f"tenant_timeline_create success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
