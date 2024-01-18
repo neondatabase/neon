@@ -2850,10 +2850,10 @@ impl Timeline {
         Ok(())
     }
 
-    pub(crate) async fn backup_initdb_archive(&self) -> anyhow::Result<()> {
+    pub(crate) async fn preserve_initdb_archive(&self) -> anyhow::Result<()> {
         if let Some(remote_client) = &self.remote_client {
             remote_client
-                .backup_initdb_archive(
+                .preserve_initdb_archive(
                     &self.tenant_shard_id.tenant_id,
                     &self.timeline_id,
                     &self.cancel,

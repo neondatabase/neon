@@ -561,7 +561,7 @@ async fn timeline_list_handler(
     json_response(StatusCode::OK, response_data)
 }
 
-async fn timeline_backup_initdb_handler(
+async fn timeline_preserve_initdb_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -576,13 +576,13 @@ async fn timeline_backup_initdb_handler(
             .get_timeline(timeline_id, false)
             .map_err(|e| ApiError::NotFound(e.into()))?;
 
-        timeline.backup_initdb_archive().await
-            .context("backing up initdb archive")
+        timeline.preserve_initdb_archive().await
+            .context("preserving initdb archive")
             .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(())
     }
-    .instrument(info_span!("timeline_backup_initdb_archive",
+    .instrument(info_span!("timeline_preserve_initdb_archive",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug(),
                 %timeline_id))
@@ -1973,8 +1973,8 @@ pub fn make_router(
         .post("/v1/tenant/:tenant_id/ignore", |r| {
             api_handler(r, tenant_ignore_handler)
         })
-        .post("/v1/tenant/:tenant_shard_id/timeline/:timeline_id/backup_initdb_archive", |r| {
-            api_handler(r, timeline_backup_initdb_handler)
+        .post("/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive", |r| {
+            api_handler(r, timeline_preserve_initdb_handler)
         })
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)

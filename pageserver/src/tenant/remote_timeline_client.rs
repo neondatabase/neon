@@ -192,7 +192,7 @@ pub(crate) use download::download_initdb_tar_zst;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
-pub(crate) use upload::{backup_initdb_archive, upload_initdb_dir};
+pub(crate) use upload::{preserve_initdb_archive, upload_initdb_dir};
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -257,7 +257,7 @@ pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
 pub(crate) const INITDB_PATH: &str = "initdb.tar.zst";
 
-pub(crate) const INITDB_BACKUP_PATH: &str = "initdb-backup.tar.zst";
+pub(crate) const INITDB_PRESERVED_PATH: &str = "initdb-preserved.tar.zst";
 
 /// Default buffer size when interfacing with [`tokio::fs::File`].
 pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
@@ -1072,7 +1072,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    pub(crate) async fn backup_initdb_archive(
+    pub(crate) async fn preserve_initdb_archive(
         self: &Arc<Self>,
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
@@ -1080,12 +1080,12 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         backoff::retry(
             || async {
-                backup_initdb_archive(&self.storage_impl, tenant_id, timeline_id, cancel).await
+                preserve_initdb_archive(&self.storage_impl, tenant_id, timeline_id, cancel).await
             },
             |_e| false,
             FAILED_DOWNLOAD_WARN_THRESHOLD,
             FAILED_REMOTE_OP_RETRIES,
-            "backup_initdb_tar_zst",
+            "preserve_initdb_tar_zst",
             backoff::Cancel::new(cancel.clone(), || anyhow::anyhow!("Cancelled!")),
         )
         .await
@@ -1183,7 +1183,7 @@ impl RemoteTimelineClient {
                 if p == &latest_index {
                     return false;
                 }
-                if matches!(p.object_name(), Some(INITDB_BACKUP_PATH)) {
+                if p.object_name() == Some(INITDB_PRESERVED_PATH) {
                     return false;
                 }
                 true
@@ -1761,12 +1761,12 @@ pub fn remote_initdb_archive_path(tenant_id: &TenantId, timeline_id: &TimelineId
     .expect("Failed to construct path")
 }
 
-pub fn remote_initdb_backup_archive_path(
+pub fn remote_initdb_preserved_archive_path(
     tenant_id: &TenantId,
     timeline_id: &TimelineId,
 ) -> RemotePath {
     RemotePath::from_string(&format!(
-        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{INITDB_BACKUP_PATH}"
+        "tenants/{tenant_id}/{TIMELINES_SEGMENT_NAME}/{timeline_id}/{INITDB_PRESERVED_PATH}"
     ))
     .expect("Failed to construct path")
 }
