@@ -270,7 +270,7 @@ jobs:
             ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:print_stacktrace=1:disable_coredump=0:\
           strict_string_checks=1:check_initialization_order=1:strict_init_order=1:detect_stack_use_after_return=0"
             UBSAN_OPTIONS="abort_on_error=1:print_stacktrace=1"
-            RUSTFLAGS="-C linker=clang"
+#            RUSTFLAGS="-C linker=clang"
             CC=gcc
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
