@@ -89,7 +89,6 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 		LDFLAGS='$(LDFLAGS)' \
 		$(PG_CONFIGURE_OPTS) \
 		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$* > configure.log)
-	env
 
 # nicer alias to run 'configure'
 # Note: I've been unable to use templates for this part of our configuration.
