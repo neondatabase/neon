@@ -3923,7 +3923,9 @@ def check_restored_datadir_content(test_output_dir: Path, env: NeonEnv, endpoint
     if pgdata_files != restored_files:
         # filter pg_xact and multixact files which are downloaded on demand
         pgdata_files = [
-            f for f in pgdata_files if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
+            f
+            for f in pgdata_files
+            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
         ]
 
     # check that file sets are equal
