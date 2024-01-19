@@ -556,6 +556,216 @@ def test_tenant_delete_concurrent(
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
 
 
+def test_tenant_delete_races_timeline_creation_01(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_02(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_03(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_04(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_05(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_06(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_07(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_08(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_09(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_10(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_11(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_12(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_13(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_14(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_15(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_16(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_17(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_18(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_19(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_20(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_21(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_22(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_23(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_24(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_25(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_26(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_27(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_28(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_29(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
+def test_tenant_delete_races_timeline_creation_30(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
 def test_tenant_delete_races_timeline_creation(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
