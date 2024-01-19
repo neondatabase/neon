@@ -351,6 +351,8 @@ jobs:
 
       - name: Run cargo build
         run: |
+          ls pg_install/v16/bin
+          pg_install/v16/bin/pg_config --includedir-server
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
