@@ -49,7 +49,7 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             other => Some(other),
         }
     }
-    let Some(list) = strip_not_found(std::fs::read_dir(path)) else {
+    let Some(list) = strip_not_found(std::fs::read_dir(&path)) else {
         return Ok(());
     };
     for entry in list? {
