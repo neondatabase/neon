@@ -2,6 +2,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
 use bytes::BytesMut;
+use chrono::{Datelike, TimeZone, Timelike};
 use futures::{Stream, StreamExt};
 use parquet::{
     basic::Compression,
@@ -86,7 +87,11 @@ struct RequestData {
     project: Option<String>,
     branch: Option<String>,
     error: Option<&'static str>,
+    /// Success is counted if we form a HTTP response with sql rows inside
+    /// Or if we make it to proxy_pass
     success: bool,
+    /// Tracks time from session start (HTTP request/libpq TCP handshake)
+    /// Through to success/failure
     duration_us: u64,
 }
 
@@ -273,7 +278,13 @@ async fn upload_parquet(
 
     let compression = len as f64 / len_uncompressed as f64;
     let size = data.len();
-    let id = uuid::Uuid::now_v7();
+    let now = chrono::Utc::now();
+    let id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+        uuid::NoContext,
+        // we won't be running this in 1970. this cast is ok
+        now.timestamp() as u64,
+        now.timestamp_subsec_nanos(),
+    ));
 
     info!(
         %id,
@@ -281,7 +292,14 @@ async fn upload_parquet(
         size, compression, "uploading request parquet file"
     );
 
-    let path = RemotePath::from_string(&format!("requests_{id}.parquet"))?;
+    let year = now.year();
+    let month = now.month();
+    let day = now.day();
+    let hour = now.hour();
+    // segment files by time for S3 performance
+    let path = RemotePath::from_string(&format!(
+        "{year:04}/{month:02}/{day:02}/{hour:02}/requests_{id}.parquet"
+    ))?;
     backoff::retry(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
@@ -339,6 +357,7 @@ mod tests {
         DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
     };
     use tokio::{sync::mpsc, time};
+    use walkdir::WalkDir;
 
     use super::{worker_inner, ParquetConfig, ParquetUploadArgs, RequestData};
 
@@ -451,14 +470,17 @@ mod tests {
 
         worker_inner(storage, rx, config).await.unwrap();
 
-        let mut files = std::fs::read_dir(tmpdir.as_std_path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
+        let mut files = WalkDir::new(tmpdir.as_std_path())
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.path().to_path_buf())
             .collect_vec();
         files.sort();
 
         files
             .into_iter()
+            .map(|path| dbg!(path))
             .map(|path| std::fs::File::open(tmpdir.as_std_path().join(path)).unwrap())
             .map(|file| {
                 (

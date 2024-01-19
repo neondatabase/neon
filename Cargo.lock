@@ -3991,6 +3991,7 @@ dependencies = [
  "url",
  "utils",
  "uuid",
+ "walkdir",
  "webpki-roots 0.25.2",
  "workspace_hack",
  "x509-parser",
