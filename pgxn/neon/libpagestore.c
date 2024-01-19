@@ -102,7 +102,7 @@ static bool pageserver_flush(void);
 static void pageserver_disconnect(void);
 
 static bool
-PagestoreShmemIsValid()
+PagestoreShmemIsValid(void)
 {
 	return pagestore_shared && UsedShmemSegAddr;
 }
@@ -128,7 +128,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 }
 
 static bool
-CheckConnstringUpdated()
+CheckConnstringUpdated(void)
 {
 	if (!PagestoreShmemIsValid())
 		return false;
@@ -136,7 +136,7 @@ CheckConnstringUpdated()
 }
 
 static void
-ReloadConnstring()
+ReloadConnstring(void)
 {
 	uint64		begin_update_counter;
 	uint64		end_update_counter;
