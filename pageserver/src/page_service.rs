@@ -391,7 +391,7 @@ impl PageServerHandler {
     /// - task_mgr requests shutdown of the connection
     ///
     /// The need to check for `task_mgr` cancellation arises mainly from `handle_pagerequests`
-    /// where, at first, `shard_timelines` is empty, see https://github.com/neondatabase/neon/pull/6388
+    /// where, at first, `shard_timelines` is empty, see <https://github.com/neondatabase/neon/pull/6388>
     ///
     /// NB: keep in sync with [`Self::is_connection_cancelled`]
     async fn await_connection_cancelled(&self) {
