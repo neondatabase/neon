@@ -65,22 +65,20 @@ static int max_reconnect_attempts = 60;
 #define MAX_PAGESERVER_CONNSTRING_SIZE 256
 
 /*
- * There is "neon.pageserver_connstring" GUC with PGC_SIGHUP option, allowing
- * to change it using pg_reload_conf(). It is used by control plane to update
- * pageserver connection string if page server is crashed, relocated or new
- * shards are added.  It is copied to shared memory because config can not be
- * loaded during query execution and we need to reestablish connection to page
- * server.
+ * The "neon.pageserver_connstring" GUC is marked with the PGC_SIGHUP option,
+ * allowing it to be changed using pg_reload_conf(). The control plane can
+ * update the connection string if the pageserver crashes, is relocated, or
+ * new shards are added. A copy of the current value of the GUC is kept in
+ * shared memory, updated by the postmaster, because regular backends don't
+ * reload the config during query execution, but we might need to re-establish
+ * the pageserver connection with the new connection string even in the middle
+ * of a query.
  *
- * Copying connection string to shared memory is done by postmaster (because
- * other backends can reload config only after the end of query execution, but
- * to complete query they may need to reestablish connection with page
- * server). And other backends should check update counter to determine of
- * connection URL is changed and connection needs to be reestablished.  We can
- * not use standard Postgres LW-locks, because postmaster doesn't have a proc
- * entry and so can not wait on this primitive. This is why lockless access
- * algorithm is implemented using two atomic counters to enforce consistent
- * reading of connection string value from shared memory.
+ * The shared memory copy is protected by a lockless algorithm using two
+ * atomic counters. The counters allow a backend to quickly check if the value
+ * has changed since last access, and to detect and retry copying the value if
+ * the postmaster changes the value concurrently. (Postmaster doesn't have a
+ * PGPROC entry and therefore cannot use LWLocks.)
  */
 typedef struct
 {
@@ -117,11 +115,11 @@ static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
 	/*
-	 * We want to update connection string in shared memorty only my
-	 * postmaster.
+	 * Only postmaster updates the copy in shared memory.
 	 */
 	if (!PagestoreShmemIsValid() || MyProcPid != PostmasterPid)
 		return;
+
 	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
 	strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
 	pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
@@ -145,9 +143,12 @@ ReloadConnstring(void)
 		return;
 
 	/*
-	 * There is race condition here between backend and postmaster which can
-	 * update shard map. We recheck update counter after copying shard map to
-	 * check that configuration was not changed.
+	 * Copy the current settnig from shared to local memory. Postmaster can
+	 * update the value concurrently, in which case we would copy a garbled
+	 * mix of the old and new values. We will detect it because the counter's
+	 * won't match, and retry. But it's important that we don't do anything
+	 * within the retry-loop that would depend on the string having valid
+	 * contents.
 	 */
 	do
 	{
