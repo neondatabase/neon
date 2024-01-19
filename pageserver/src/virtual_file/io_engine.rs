@@ -141,4 +141,16 @@ impl IoEngineKind {
             }
         }
     }
+    pub(super) async fn metadata(&self, file_guard: FileGuard) -> std::io::Result<std::fs::Metadata> {
+        match self {
+            IoEngineKind::StdFs => {
+                let res = file_guard.with_std_file(|std_file| std_file.metadata());
+                (file_guard, res)
+            },
+            IoEngineKind::TokioEpollUring => {
+                let system = tokio_epoll_uring::thread_local_system().await;
+                let (resources, res) = system.statx();
+            },
+        }
+    }
 }

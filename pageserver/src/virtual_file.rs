@@ -462,8 +462,9 @@ impl VirtualFile {
     }
 
     pub async fn metadata(&self) -> Result<fs::Metadata, Error> {
-        with_file!(self, StorageIoOperation::Metadata, |file_guard| file_guard
-            .with_std_file(|std_file| std_file.metadata()))
+        with_file!(self, StorageIoOperation::Metadata, |file_guard| {
+            io_engine::get().metadata(file_guard).await;
+        })
     }
 
     /// Helper function internal to `VirtualFile` that looks up the underlying File,
