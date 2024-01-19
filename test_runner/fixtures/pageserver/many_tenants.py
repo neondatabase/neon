@@ -41,7 +41,7 @@ def single_timeline(
     )
 
     log.info("detach template tenant form pageserver")
-    env.pageserver.http_client().tenant_detach(template_tenant)
+    env.pageserver.tenant_detach(template_tenant)
     log.info(f"duplicating template tenant {ncopies} times in S3")
     tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
