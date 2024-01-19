@@ -66,6 +66,9 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
             strip_not_found(std::fs::remove_file(entry.path())).unwrap_or(Ok(()))?;
         }
     }
+    if let Some(res) = strip_not_found(std::fs::remove_dir(path)) {
+        res?;
+    }
     Ok(())
 }
 
