@@ -59,6 +59,7 @@ pub struct InspectResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateResponseShard {
+    pub shard_id: TenantShardId,
     pub node_id: NodeId,
     pub generation: u32,
 }

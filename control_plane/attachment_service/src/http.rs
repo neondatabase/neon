@@ -2,7 +2,9 @@ use crate::reconciler::ReconcileError;
 use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
-use pageserver_api::models::{TenantCreateRequest, TimelineCreateRequest};
+use pageserver_api::models::{
+    TenantCreateRequest, TenantLocationConfigRequest, TimelineCreateRequest,
+};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use std::sync::Arc;
@@ -158,6 +160,20 @@ where
             return json_response(StatusCode::CONFLICT, ());
         }
     }
+}
+
+async fn handle_tenant_location_config(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let config_req = json_request::<TenantLocationConfigRequest>(&mut req).await?;
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_location_config(tenant_id, config_req)
+            .await?,
+    )
 }
 
 async fn handle_tenant_delete(
@@ -370,6 +386,9 @@ pub fn make_router(
         })
         .get("/tenant/:tenant_id/locate", |r| {
             tenant_service_handler(r, handle_tenant_locate)
+        })
+        .put("/v1/tenant/:tenant_id/location_config", |r| {
+            tenant_service_handler(r, handle_tenant_location_config)
         })
         // Tenant Shard operations (low level/maintenance)
         .put("/tenant/:tenant_shard_id/migrate", |r| {

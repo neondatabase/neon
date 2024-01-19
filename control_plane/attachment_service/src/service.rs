@@ -21,6 +21,7 @@ use pageserver_api::{
     models,
     models::{
         LocationConfig, LocationConfigMode, ShardParameters, TenantConfig, TenantCreateRequest,
+        TenantLocationConfigRequest, TenantLocationConfigResponse, TenantShardLocation,
         TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
@@ -635,7 +636,7 @@ impl Service {
                 shard_number: tenant_shard_id.shard_number.0 as i32,
                 shard_count: tenant_shard_id.shard_count.0 as i32,
                 shard_stripe_size: create_req.shard_parameters.stripe_size.0 as i32,
-                generation: 0,
+                generation: create_req.generation.map(|g| g as i32).unwrap_or(0),
                 generation_pageserver: i64::MAX,
                 placement_policy: serde_json::to_string(&placement_policy).unwrap(),
                 config: serde_json::to_string(&create_req.config).unwrap(),
@@ -677,6 +678,7 @@ impl Service {
                         })?;
 
                         response_shards.push(TenantCreateResponseShard {
+                            shard_id: tenant_shard_id,
                             node_id: entry
                                 .get()
                                 .intent
@@ -709,6 +711,7 @@ impl Service {
                         })?;
 
                         response_shards.push(TenantCreateResponseShard {
+                            shard_id: tenant_shard_id,
                             node_id: state
                                 .intent
                                 .attached
@@ -742,14 +745,173 @@ impl Service {
             (waiters, response_shards)
         };
 
-        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        self.await_waiters(waiters).await?;
+
+        Ok(TenantCreateResponse {
+            shards: response_shards,
+        })
+    }
+
+    /// Helper for functions that reconcile a number of shards, and would like to do a timeout-bounded
+    /// wait for reconciliation to complete before responding.
+    async fn await_waiters(
+        &self,
+        waiters: Vec<ReconcilerWaiter>,
+    ) -> Result<(), ReconcileWaitError> {
+        let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
         for waiter in waiters {
             let timeout = deadline.duration_since(Instant::now());
             waiter.wait_timeout(timeout).await?;
         }
-        Ok(TenantCreateResponse {
-            shards: response_shards,
-        })
+
+        Ok(())
+    }
+
+    /// This API is used by the cloud control plane to do coarse-grained control of tenants:
+    /// - Call with mode Attached* to upsert the tenant
+    /// - Call
+    pub(crate) async fn tenant_location_config(
+        &self,
+        tenant_id: TenantId,
+        req: TenantLocationConfigRequest,
+    ) -> Result<TenantLocationConfigResponse, ApiError> {
+        if req.tenant_id.shard_count.0 > 1 {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "This API is for importing single-sharded or unsharded tenants"
+            )));
+        }
+
+        let mut waiters = Vec::new();
+        let mut result = TenantLocationConfigResponse { shards: Vec::new() };
+        let maybe_create = {
+            let mut locked = self.inner.write().unwrap();
+            let result_tx = locked.result_tx.clone();
+            let compute_hook = locked.compute_hook.clone();
+            let pageservers = locked.nodes.clone();
+
+            let mut scheduler = Scheduler::new(&locked.tenants, &locked.nodes);
+
+            // Maybe we have existing shards
+            let mut create = true;
+            for (shard_id, shard) in locked
+                .tenants
+                .range_mut(TenantShardId::tenant_range(tenant_id))
+            {
+                // Saw an existing shard: this is not a creation
+                create = false;
+
+                // Note that for existing tenants we do _not_ respect the generation in the request: this is likely
+                // to be stale.  Once a tenant is created in this service, our view of generation is authoritative, and
+                // callers' generations may be ignored.  This represents a one-way migration of tenants from the outer
+                // cloud control plane into this service.
+
+                // Use location config mode as an indicator of policy: if they ask for
+                // attached we go to default HA attached mode.  If they ask for secondary
+                // we go to secondary-only mode.  If they ask for detached we detach.
+                match req.config.mode {
+                    LocationConfigMode::Detached => {
+                        // TODO: implement PlacementPolicy::Detached
+                        todo!();
+                    }
+                    LocationConfigMode::Secondary => {
+                        // TODO: implement secondary-only mode.
+                        todo!();
+                    }
+                    LocationConfigMode::AttachedMulti
+                    | LocationConfigMode::AttachedSingle
+                    | LocationConfigMode::AttachedStale => {
+                        // TODO: persistence for changes in policy
+                        if pageservers.len() > 1 {
+                            shard.policy = PlacementPolicy::Double(1)
+                        } else {
+                            // Convenience for dev/test: if we just have one pageserver, import
+                            // tenants into Single mode so that scheduling will succeed.
+                            shard.policy = PlacementPolicy::Single
+                        }
+                    }
+                }
+
+                shard.schedule(&mut scheduler)?;
+
+                let maybe_waiter = shard.maybe_reconcile(
+                    result_tx.clone(),
+                    &pageservers,
+                    &compute_hook,
+                    &self.config,
+                    &self.persistence,
+                );
+                if let Some(waiter) = maybe_waiter {
+                    waiters.push(waiter);
+                }
+
+                if let Some(node_id) = shard.intent.attached {
+                    result.shards.push(TenantShardLocation {
+                        shard_id: *shard_id,
+                        node_id,
+                    })
+                }
+            }
+
+            if create {
+                // Validate request mode
+                match req.config.mode {
+                    LocationConfigMode::Detached | LocationConfigMode::Secondary => {
+                        // We can only import attached tenants, because we need the request to come with a generation
+                        return Err(ApiError::BadRequest(anyhow::anyhow!(
+                            "Imported tenant must be in attached mode"
+                        )));
+                    }
+
+                    LocationConfigMode::AttachedMulti
+                    | LocationConfigMode::AttachedSingle
+                    | LocationConfigMode::AttachedStale => {
+                        // Pass
+                    }
+                }
+
+                // Validate request generation
+                let Some(generation) = req.config.generation else {
+                    // We can only import attached tenants, because we need the request to come with a generation
+                    return Err(ApiError::BadRequest(anyhow::anyhow!(
+                        "Generation is mandatory when importing tenant"
+                    )));
+                };
+
+                // Synthesize a creation request
+                Some(TenantCreateRequest {
+                    new_tenant_id: TenantShardId::unsharded(tenant_id),
+                    generation: Some(generation),
+                    shard_parameters: ShardParameters {
+                        // Must preserve the incoming shard_count do distinguish unsharded (0)
+                        // from single-sharded (1): this distinction appears in the S3 keys of the tenant.
+                        count: req.tenant_id.shard_count,
+                        // We only import un-sharded or single-sharded tenants, so stripe
+                        // size can be made up arbitrarily here.
+                        stripe_size: ShardParameters::DEFAULT_STRIPE_SIZE,
+                    },
+                    config: req.config.tenant_conf,
+                })
+            } else {
+                None
+            }
+        };
+
+        if let Some(create_req) = maybe_create {
+            let create_resp = self.tenant_create(create_req).await?;
+            result.shards = create_resp
+                .shards
+                .into_iter()
+                .map(|s| TenantShardLocation {
+                    node_id: s.node_id,
+                    shard_id: s.shard_id,
+                })
+                .collect();
+        } else {
+            // This was an update, wait for reconciliation
+            self.await_waiters(waiters).await?;
+        }
+
+        Ok(result)
     }
 
     pub(crate) async fn tenant_delete(&self, tenant_id: TenantId) -> Result<StatusCode, ApiError> {
