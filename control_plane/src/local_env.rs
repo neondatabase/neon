@@ -251,7 +251,13 @@ impl LocalEnv {
         if let Some(conf) = self.pageservers.iter().find(|node| node.id == id) {
             Ok(conf)
         } else {
-            bail!("could not find pageserver {id}")
+            let have_ids = self
+                .pageservers
+                .iter()
+                .map(|node| format!("{}:{}", node.id, node.listen_http_addr))
+                .collect::<Vec<_>>();
+            let joined = have_ids.join(",");
+            bail!("could not find pageserver {id}, have ids {joined}")
         }
     }
 

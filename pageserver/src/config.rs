@@ -1126,11 +1126,12 @@ mod tests {
     };
 
     use camino_tempfile::{tempdir, Utf8TempDir};
+    use pageserver_api::models::EvictionPolicy;
     use remote_storage::{RemoteStorageKind, S3Config};
     use utils::serde_percent::Percent;
 
     use super::*;
-    use crate::{tenant::config::EvictionPolicy, DEFAULT_PG_VERSION};
+    use crate::DEFAULT_PG_VERSION;
 
     const ALL_BASE_VALUES_TOML: &str = r#"
 # Initial configuration file created by 'pageserver --init'

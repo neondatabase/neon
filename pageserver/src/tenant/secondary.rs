@@ -3,22 +3,36 @@ pub mod heatmap;
 mod heatmap_uploader;
 mod scheduler;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
-use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
+use crate::{
+    config::PageServerConf,
+    disk_usage_eviction_task::DiskUsageEvictionInfo,
+    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
+    virtual_file::MaybeFatalIo,
+};
 
 use self::{
     downloader::{downloader_task, SecondaryDetail},
     heatmap_uploader::heatmap_uploader_task,
 };
 
-use super::{config::SecondaryLocationConfig, mgr::TenantManager};
+use super::{
+    config::{SecondaryLocationConfig, TenantConfOpt},
+    mgr::TenantManager,
+    span::debug_assert_current_span_has_tenant_id,
+    storage_layer::LayerFileName,
+};
 
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{
+    models,
+    shard::{ShardIdentity, TenantShardId},
+};
 use remote_storage::GenericRemoteStorage;
 
 use tokio_util::sync::CancellationToken;
-use utils::{completion::Barrier, sync::gate::Gate};
+use tracing::instrument;
+use utils::{completion::Barrier, fs_ext, id::TimelineId, sync::gate::Gate};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -75,12 +89,20 @@ pub(crate) struct SecondaryTenant {
 
     pub(crate) gate: Gate,
 
+    // Secondary mode does not need the full shard identity or the TenantConfOpt.  However,
+    // storing these enables us to report our full LocationConf, enabling convenient reconciliation
+    // by the control plane (see [`Self::get_location_conf`])
+    shard_identity: ShardIdentity,
+    tenant_conf: std::sync::Mutex<TenantConfOpt>,
+
     detail: std::sync::Mutex<SecondaryDetail>,
 }
 
 impl SecondaryTenant {
     pub(crate) fn new(
         tenant_shard_id: TenantShardId,
+        shard_identity: ShardIdentity,
+        tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -91,6 +113,9 @@ impl SecondaryTenant {
             // individual cancellations?
             cancel: CancellationToken::new(),
             gate: Gate::new(format!("SecondaryTenant {tenant_shard_id}")),
+
+            shard_identity,
+            tenant_conf: std::sync::Mutex::new(tenant_conf),
 
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
         })
@@ -107,8 +132,90 @@ impl SecondaryTenant {
         self.detail.lock().unwrap().config = config.clone();
     }
 
-    fn get_tenant_shard_id(&self) -> &TenantShardId {
+    pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
+        *(self.tenant_conf.lock().unwrap()) = *config;
+    }
+
+    /// For API access: generate a LocationConfig equivalent to the one that would be used to
+    /// create a Tenant in the same state.  Do not use this in hot paths: it's for relatively
+    /// rare external API calls, like a reconciliation at startup.
+    pub(crate) fn get_location_conf(&self) -> models::LocationConfig {
+        let conf = self.detail.lock().unwrap().config.clone();
+
+        let conf = models::LocationConfigSecondary { warm: conf.warm };
+
+        let tenant_conf = *self.tenant_conf.lock().unwrap();
+        models::LocationConfig {
+            mode: models::LocationConfigMode::Secondary,
+            generation: None,
+            secondary_conf: Some(conf),
+            shard_number: self.tenant_shard_id.shard_number.0,
+            shard_count: self.tenant_shard_id.shard_count.0,
+            shard_stripe_size: self.shard_identity.stripe_size.0,
+            tenant_conf: tenant_conf.into(),
+        }
+    }
+
+    pub(crate) fn get_tenant_shard_id(&self) -> &TenantShardId {
         &self.tenant_shard_id
+    }
+
+    pub(crate) fn get_layers_for_eviction(self: &Arc<Self>) -> DiskUsageEvictionInfo {
+        self.detail.lock().unwrap().get_layers_for_eviction(self)
+    }
+
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline_id, name=%name))]
+    pub(crate) async fn evict_layer(
+        &self,
+        conf: &PageServerConf,
+        timeline_id: TimelineId,
+        name: LayerFileName,
+    ) {
+        debug_assert_current_span_has_tenant_id();
+
+        let _guard = match self.gate.enter() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::debug!("Dropping layer evictions, secondary tenant shutting down",);
+                return;
+            }
+        };
+
+        let now = SystemTime::now();
+
+        let path = conf
+            .timeline_path(&self.tenant_shard_id, &timeline_id)
+            .join(name.file_name());
+
+        // We tolerate ENOENT, because between planning eviction and executing
+        // it, the secondary downloader could have seen an updated heatmap that
+        // resulted in a layer being deleted.
+        // Other local I/O errors are process-fatal: these should never happen.
+        tokio::fs::remove_file(path)
+            .await
+            .or_else(fs_ext::ignore_not_found)
+            .fatal_err("Deleting layer during eviction");
+
+        // Update the timeline's state.  This does not have to be synchronized with
+        // the download process, because:
+        // - If downloader is racing with us to remove a file (e.g. because it is
+        //   removed from heatmap), then our mutual .remove() operations will both
+        //   succeed.
+        // - If downloader is racing with us to download the object (this would require
+        //   multiple eviction iterations to race with multiple download iterations), then
+        //   if we remove it from the state, the worst that happens is the downloader
+        //   downloads it again before re-inserting, or we delete the file but it remains
+        //   in the state map (in which case it will be downloaded if this secondary
+        //   tenant transitions to attached and tries to access it)
+        //
+        // The important assumption here is that the secondary timeline state does not
+        // have to 100% match what is on disk, because it's a best-effort warming
+        // of the cache.
+        let mut detail = self.detail.lock().unwrap();
+        if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
+            timeline_detail.on_disk_layers.remove(&name);
+            timeline_detail.evicted_at.insert(name, now);
+        }
     }
 }
 

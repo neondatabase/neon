@@ -1,6 +1,9 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
-use crate::key::{is_rel_block_key, Key};
+use crate::{
+    key::{is_rel_block_key, Key},
+    models::ShardParameters,
+};
 use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use thiserror;
@@ -84,6 +87,12 @@ impl TenantShardId {
 
     pub fn is_unsharded(&self) -> bool {
         self.shard_number == ShardNumber(0) && self.shard_count == ShardCount(0)
+    }
+    pub fn to_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_number: self.shard_number,
+            shard_count: self.shard_count,
+        }
     }
 }
 
@@ -333,7 +342,7 @@ const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(256 * 1024 / 8);
 pub struct ShardIdentity {
     pub number: ShardNumber,
     pub count: ShardCount,
-    stripe_size: ShardStripeSize,
+    pub stripe_size: ShardStripeSize,
     layout: ShardLayout,
 }
 
@@ -400,6 +409,17 @@ impl ShardIdentity {
                 layout: LAYOUT_V1,
                 stripe_size,
             })
+        }
+    }
+
+    /// For use when creating ShardIdentity instances for new shards, where a creation request
+    /// specifies the ShardParameters that apply to all shards.
+    pub fn from_params(number: ShardNumber, params: &ShardParameters) -> Self {
+        Self {
+            number,
+            count: params.count,
+            layout: LAYOUT_V1,
+            stripe_size: params.stripe_size,
         }
     }
 
