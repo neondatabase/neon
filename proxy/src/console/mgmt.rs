@@ -13,16 +13,10 @@ use tracing::{error, info, info_span, Instrument};
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
 /// Give caller an opportunity to wait for the cloud's reply.
-pub async fn with_waiter<R, T, E>(
+pub fn get_waiter(
     psql_session_id: impl Into<String>,
-    action: impl FnOnce(Waiter<'static, ComputeReady>) -> R,
-) -> Result<T, E>
-where
-    R: std::future::Future<Output = Result<T, E>>,
-    E: From<waiters::RegisterError>,
-{
-    let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
-    action(waiter).await
+) -> Result<Waiter<'static, ComputeReady>, waiters::RegisterError> {
+    CPLANE_WAITERS.register(psql_session_id.into())
 }
 
 pub fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::NotifyError> {
