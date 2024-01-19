@@ -556,6 +556,15 @@ def test_tenant_delete_concurrent(
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots") == 0
 
 
+@pytest.mark.parametrize("_nth", range(30))
+def test_tenant_delete_races_timeline_creation_repeat(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    _nth: int,
+):
+    test_tenant_delete_races_timeline_creation(neon_env_builder, pg_bin)
+
+
 def test_tenant_delete_races_timeline_creation(
     neon_env_builder: NeonEnvBuilder,
     pg_bin: PgBin,
