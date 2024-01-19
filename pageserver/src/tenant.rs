@@ -3198,7 +3198,7 @@ impl Tenant {
         ));
 
         scopeguard::defer! {
-            if let Err(e) = utils::fs_ext::remove_dir_all(&temp_path) {
+            if let Err(e) = fs::remove_file(&temp_path) {
                 error!("Failed to remove temporary initdb archive '{temp_path}': {e}");
             }
         }
@@ -3261,7 +3261,7 @@ impl Tenant {
         }
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&pgdata_path) {
+            if let Err(e) = utils::fs_ext::remove_dir_all(&pgdata_path) {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
                 error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
             }
