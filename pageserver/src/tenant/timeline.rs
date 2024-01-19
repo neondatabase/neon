@@ -708,14 +708,14 @@ impl Timeline {
         &self,
         lsn: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
-    ) -> Result<(), String> {
-        if lsn >= **latest_gc_cutoff_lsn {
-            return Ok(());
-        }
-        Err(format!(
+    ) -> anyhow::Result<()> {
+        ensure!(
+            lsn >= **latest_gc_cutoff_lsn,
             "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
             lsn,
-            **latest_gc_cutoff_lsn))
+            **latest_gc_cutoff_lsn,
+        );
+        Ok(())
     }
 
     /// Flush to disk all data that was written with the put_* functions

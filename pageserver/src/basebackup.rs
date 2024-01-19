@@ -37,13 +37,6 @@ use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
 use utils::lsn::Lsn;
 
-#[derive(thiserror::Error, Debug)]
-enum SendBasebackupTarballError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-}
-
 /// Create basebackup with non-rel data in it.
 /// Only include relational data if 'full_backup' is true.
 ///
@@ -59,7 +52,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     ctx: &'a RequestContext,
-) -> Result<SendBasebackupTarballError>
+) -> anyhow::Result<()>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
@@ -144,7 +137,7 @@ impl<'a, W> Basebackup<'a, W>
 where
     W: AsyncWrite + Send + Sync + Unpin,
 {
-    async fn send_tarball(mut self) -> Result<(), SendBasebackupTarballError> {
+    async fn send_tarball(mut self) -> anyhow::Result<()> {
         // TODO include checksum
 
         // Create pgdata subdirs structure

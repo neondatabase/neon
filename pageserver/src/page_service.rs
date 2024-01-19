@@ -367,75 +367,6 @@ impl From<WaitLsnError> for PageStreamError {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-enum BasebackupError {
-    /// The entity required to serve the request (tenant or timeline) is not found,
-    /// or is not found in a suitable state to serve a request.
-    #[error("Not found: {0}")]
-    NotFound(std::borrow::Cow<'static, str>),
-
-    /// Ran out of time waiting for an LSN
-    #[error("LSN timeout: {0}")]
-    LsnTimeout(WaitLsnError),
-
-    #[error("invalid basebackup lsn: {0}")]
-    CheckLsnIsInScope(String),
-
-    #[error(transparent)]
-    Connection(#[from] ConnectionError),
-
-    // for flush_cancellable; TODO: flush_cancellable should have more specialized error than QueryError
-    #[error(transparent)]
-    FlushCancellable(QueryError),
-
-    #[error(transparent)]
-    SendBasebackupTarball(anyhow::Error),
-
-    /// We were instructed to shutdown while processing the query
-    #[error("Shutting down")]
-    Shutdown,
-
-    /// We encountered an error that should prompt the client to reconnect:
-    /// in practice this means we drop the connection without sending a response.
-    #[error("Reconnect required: {0}")]
-    Reconnect(Cow<'static, str>),
-}
-
-impl From<GetActiveTimelineError> for BasebackupError {
-    fn from(value: GetActiveTimelineError) -> Self {
-        match value {
-            GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => Self::Shutdown,
-            GetActiveTimelineError::Tenant(e) => Self::NotFound(format!("{e}").into()),
-            GetActiveTimelineError::Timeline(e) => Self::NotFound(format!("{e}").into()),
-        }
-    }
-}
-
-impl From<WaitLsnError> for BasebackupError {
-    fn from(value: WaitLsnError) -> Self {
-        match value {
-            e @ WaitLsnError::Timeout(_) => Self::LsnTimeout(e),
-            WaitLsnError::Shutdown => Self::Shutdown,
-            WaitLsnError::BadState => Self::Reconnect("Timeline is not active".into()),
-        }
-    }
-}
-
-impl Into<QueryError> for BasebackupError {
-    fn into(self) -> QueryError {
-        match self {
-            BasebackupError::NotFound(e) => QueryError::NotFound(e),
-            BasebackupError::LsnTimeout(_) => todo!(),
-            BasebackupError::CheckLsnIsInScope(_) => todo!(),
-            BasebackupError::Connection(c) => QueryError::from(c),
-            BasebackupError::FlushCancellable(e) => e,
-            BasebackupError::SendBasebackupTarball(_) => todo!(),
-            BasebackupError::Shutdown => QueryError::Shutdown,
-            BasebackupError::Reconnect(_) => QueryError::Reconnect,
-        }
-    }
-}
-
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
@@ -1186,7 +1117,7 @@ impl PageServerHandler {
         full_backup: bool,
         gzip: bool,
         ctx: RequestContext,
-    ) -> Result<(), QueryError>
+    ) -> anyhow::Result<()>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
@@ -1205,16 +1136,14 @@ impl PageServerHandler {
             timeline.wait_lsn(lsn, &ctx).await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
-                .map_err(BasebackupError::CheckLsnIsInScope)?;
+                .context("invalid basebackup lsn")?;
         }
 
         let lsn_awaited_after = started.elapsed();
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
-        self.flush_cancellable(pgb, &timeline.cancel)
-            .await
-            .map_err(BasebackupError::FlushCancellable)?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
@@ -1228,8 +1157,7 @@ impl PageServerHandler {
                 full_backup,
                 &ctx,
             )
-            .await
-            .map_err(BasebackupError::SendBasebackupTarball)?;
+            .await?;
         } else {
             let mut writer = pgb.copyout_writer();
             if gzip {
@@ -1250,14 +1178,9 @@ impl PageServerHandler {
                     full_backup,
                     &ctx,
                 )
-                .await
-                .map_err(BasebackupError::SendBasebackupTarball)?;
+                .await?;
                 // shutdown the encoder to ensure the gzip footer is written
-                encoder
-                    .shutdown()
-                    .await
-                    .context("shutdown gzip encoder")
-                    .map_err(BasebackupError::SendBasebackupTarball)?;
+                encoder.shutdown().await?;
             } else {
                 basebackup::send_basebackup_tarball(
                     &mut writer,
@@ -1267,15 +1190,12 @@ impl PageServerHandler {
                     full_backup,
                     &ctx,
                 )
-                .await
-                .map_err(BasebackupError::SendBasebackupTarball)?;
+                .await?;
             }
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
-        self.flush_cancellable(pgb, &timeline.cancel)
-            .await
-            .map_err(BasebackupError::FlushCancellable)?;
+        self.flush_cancellable(pgb, &timeline.cancel).await?;
 
         let basebackup_after = started
             .elapsed()
@@ -1460,9 +1380,7 @@ where
                         gzip,
                         ctx,
                     )
-                    .await
-                    // TODO: map to correct QueryError variant
-                    .map_err(anyhow::Error::new)?;
+                    .await?;
                     pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
                     anyhow::Ok(())
                 },
@@ -1557,9 +1475,7 @@ where
                 false,
                 ctx,
             )
-            .await
-            // TODO: map to correct QueryError variant
-            .map_err(anyhow::Error::new)?;
+            .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
