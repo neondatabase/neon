@@ -421,6 +421,21 @@ impl From<WaitLsnError> for BasebackupError {
     }
 }
 
+impl Into<QueryError> for BasebackupError {
+    fn into(self) -> QueryError {
+        match self {
+            BasebackupError::NotFound(e) => QueryError::NotFound(e),
+            BasebackupError::LsnTimeout(_) => todo!(),
+            BasebackupError::CheckLsnIsInScope(_) => todo!(),
+            BasebackupError::Connection(c) => QueryError::from(c),
+            BasebackupError::FlushCancellable(e) => e,
+            BasebackupError::SendBasebackupTarball(_) => todo!(),
+            BasebackupError::Shutdown => QueryError::Shutdown,
+            BasebackupError::Reconnect(_) => QueryError::Reconnect,
+        }
+    }
+}
+
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
@@ -1171,7 +1186,7 @@ impl PageServerHandler {
         full_backup: bool,
         gzip: bool,
         ctx: RequestContext,
-    ) -> Result<(), BasebackupError>
+    ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
