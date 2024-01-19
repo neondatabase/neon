@@ -121,7 +121,9 @@ AssignPageserverConnstring(const char *newval, void *extra)
 		return;
 
 	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
+	pg_write_barrier();
 	strlcpy(pagestore_shared->pageserver_connstring, newval, MAX_PAGESERVER_CONNSTRING_SIZE);
+	pg_write_barrier();
 	pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
 }
 
@@ -154,8 +156,10 @@ ReloadConnstring(void)
 	{
 		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
 		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
+		pg_read_barrier();
 
 		strlcpy(local_pageserver_connstring, pagestore_shared->pageserver_connstring, sizeof(local_pageserver_connstring));
+		pg_read_barrier();
 	}
 	while (begin_update_counter != end_update_counter
 		   || begin_update_counter != pg_atomic_read_u64(&pagestore_shared->begin_update_counter)
