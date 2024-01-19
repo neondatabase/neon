@@ -480,7 +480,6 @@ mod tests {
 
         files
             .into_iter()
-            .map(|path| dbg!(path))
             .map(|path| std::fs::File::open(tmpdir.as_std_path().join(path)).unwrap())
             .map(|file| {
                 (
