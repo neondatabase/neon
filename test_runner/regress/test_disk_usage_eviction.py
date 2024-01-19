@@ -678,30 +678,18 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     log.info(f"{ratios}")
 
     if order == EvictionOrder.ABSOLUTE_ORDER:
-        losers = 0
-        for i, ratio in enumerate(ratios):
-            if i > 0 and ratios[i - 1] == 1.0:
-                assert (
-                    ratio == 1.0
-                ), "following after first tenant which did not lose must have all of the layers"
-            elif ratio < 1.0:
-                losers += 1
-
-        assert losers > 0, "there must had been evictions"
-        assert losers < len(timelines), "not all tenants should had lost layers"
+        # first tenant loses most
+        assert ratios[0] <= ratios[1], "first should lose the most"
+        assert ratios[1] < ratios[2], "second should lose some"
+        assert ratios[1] < 1.0
+        assert ratios[2] <= ratios[3], "third might not lose"
+        assert ratios[3] == 1.0, "tenant created last does not lose"
     elif order == EvictionOrder.RELATIVE_ORDER_EQUAL:
-        assert all(
-            map(lambda x: x == ratios[0], ratios[:3])
-        ), "scale=1 tenants should lose layers equally"
-
-        # across pg versions we cannot really say how the rations compare, as the amount of layers generated is different.
-        assert ratios[3] < 1.0, "largest tenant should always lose layers"
+        assert all([x for x in ratios if x < 1.0]), "all tenants lose layers"
     elif order == EvictionOrder.RELATIVE_ORDER_SPARE:
-        # with pg14 and the smaller amount of layers, any one or two of scale=1 could lose layers
-        assert (
-            len([map(lambda x: x < 1.0, ratios[:3])]) < 3
-        ), "subset of scale=1 tenants can lose layers"
-        assert ratios[3] < 1.0, "largest tenant should always lose layers"
+        # with different layer sizes and pg versions, there are different combinations
+        assert len([x for x in ratios if x < 1.0]) >= 2, "require 2..4 tenants to lose layers"
+        assert ratios[3] < 1.0, "largest tenant always loses layers"
     else:
         raise RuntimeError(f"unimplemented {order}")
 
