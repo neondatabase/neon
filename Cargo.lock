@@ -3691,7 +3691,6 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls",
- "tokio-util",
  "tracing",
  "workspace_hack",
 ]
