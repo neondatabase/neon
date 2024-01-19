@@ -33,11 +33,12 @@ use utils::failpoint_support;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
-use crate::pgdatadir_mapping::*;
+use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
 use crate::ZERO_PAGE;
+use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
