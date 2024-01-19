@@ -1,7 +1,8 @@
 import threading
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, PgBin
+from fixtures.neon_fixtures import NeonEnv, PgBin
+
 
 def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
@@ -24,9 +25,7 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
         pg_bin.run_capture(["pgbench", "-T30", connstr])
 
     with env.endpoints.create_start(
-        branch_name="main",
-        endpoint_id="primary",
-        tenant_id=tenant
+        branch_name="main", endpoint_id="primary", tenant_id=tenant
     ) as primary:
         pg_bin.run_capture(["pgbench", "-i", "-s10", primary.connstr()])
 
@@ -34,10 +33,16 @@ def test_replication_lag(neon_simple_env: NeonEnv, pg_bin: PgBin):
         t.start()
 
         with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary") as secondary:
-            for i in range(1,n_iterations):
-                primary_lsn = primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()::text", log_query=False)
-                secondary_lsn = secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+            for _ in range(1, n_iterations):
+                primary_lsn = primary.safe_psql_scalar(
+                    "SELECT pg_current_wal_flush_lsn()::text", log_query=False
+                )
+                secondary_lsn = secondary.safe_psql_scalar(
+                    "SELECT pg_last_wal_replay_lsn()", log_query=False
+                )
                 balance = secondary.safe_psql_scalar("select sum(abalance) from pgbench_accounts")
-                log.info(f"primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}, balance={balance}")
+                log.info(
+                    f"primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}, balance={balance}"
+                )
 
         t.join()
