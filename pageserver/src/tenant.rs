@@ -3746,7 +3746,7 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
+    let mut initdb_command = tokio::process::Command::new(&initdb_bin_path)
         .args(["-D", initdb_target_dir.as_ref()])
         .args(["-U", &conf.superuser])
         .args(["-E", "utf8"])
@@ -3767,13 +3767,17 @@ async fn run_initdb(
         .spawn()?;
 
     tokio::select! {
-        initdb_output = initdb_command.wait_with_output() => {
-            let initdb_output = initdb_output?;
-            if !initdb_output.status.success() {
-                return Err(InitdbError::Failed(initdb_output.status, initdb_output.stderr));
+        exit_status = initdb_command.wait() => {
+            let exit_status = exit_status?;
+            if !exit_status.success() {
+                let mut stderr = initdb_command.stderr.take().unwrap();
+                let mut stderr_vec = Vec::new();
+                tokio::io::copy(&mut stderr, &mut stderr_vec).await?;
+                return Err(InitdbError::Failed(exit_status, stderr_vec));
             }
         }
         _ = cancel.cancelled() => {
+            initdb_command.kill().await?;
             return Err(InitdbError::Cancelled);
         }
     }
