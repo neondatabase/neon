@@ -1426,6 +1426,27 @@ components:
           $ref: '#/components/schemas/SecondaryConfig'
         tenant_conf:
           $ref: '#/components/schemas/TenantConfig'
+    TenantLocationConfigResponse:
+      type: object
+      required:
+        - shards
+      properties:
+        shards:
+          description: Pageservers where this tenant's shards are attached.  Not populated for secondary locations.
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantShardLocation"
+    TenantShardLocation:
+      type: object
+      required:
+        - node_id
+        - shard_id
+      properties:
+        node_id:
+          description: Pageserver node ID where this shard is attached
+          type: integer
+        shard_id: Tenant shard ID of the shard
+          type: string
     SecondaryConfig:
       type: object
       properties:
