@@ -77,7 +77,7 @@ async fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
 }
 
 /// A message received by `mgmt` when a compute node is ready.
-pub type ComputeReady = Result<DatabaseInfo, String>;
+pub type ComputeReady = DatabaseInfo;
 
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
@@ -102,7 +102,7 @@ fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), Qu
     let _enter = span.enter();
     info!("got response: {:?}", resp.result);
 
-    match notify(resp.session_id, Ok(resp.result)) {
+    match notify(resp.session_id, resp.result) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?

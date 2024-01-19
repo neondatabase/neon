@@ -72,7 +72,7 @@ pub(super) async fn authenticate(
 
         // Wait for web console response (see `mgmt`).
         info!(parent: &span, "waiting for console's reply...");
-        waiter.await?.map_err(LinkAuthError::AuthFailed)
+        Ok::<_, LinkAuthError>(waiter.await?)
     })
     .await?;
 
