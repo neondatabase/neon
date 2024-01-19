@@ -349,12 +349,9 @@ jobs:
       - name: Build walproposer-lib
         run: mold -run make walproposer-lib -j$(nproc)
 
-#      - name: Run cargo build
-#        run: |
-#          pg_install/v16/bin/pg_config --includedir-server
-#          pg_install/v15/bin/pg_config --includedir-server
-#          pg_install/v14/bin/pg_config --includedir-server
-#          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+      - name: Run cargo build
+        run: |
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
         run: |
