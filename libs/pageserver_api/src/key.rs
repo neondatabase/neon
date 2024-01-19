@@ -479,17 +479,17 @@ pub const AUX_FILES_KEY: Key = Key {
 // we don't preserve these on a branch because safekeepers can't follow timeline
 // switch (and generally it likely should be optional), so ignore these.
 #[inline(always)]
-pub fn is_inherited_key(key: Key) -> bool {
-    key != AUX_FILES_KEY
+pub fn is_inherited_key(key: &Key) -> bool {
+    *key != AUX_FILES_KEY
 }
 
 #[inline(always)]
-pub fn is_rel_fsm_block_key(key: Key) -> bool {
+pub fn is_rel_fsm_block_key(key: &Key) -> bool {
     key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
 }
 
 #[inline(always)]
-pub fn is_rel_vm_block_key(key: Key) -> bool {
+pub fn is_rel_vm_block_key(key: &Key) -> bool {
     key.field1 == 0x00
         && key.field4 != 0
         && key.field5 == VISIBILITYMAP_FORKNUM
@@ -497,7 +497,7 @@ pub fn is_rel_vm_block_key(key: Key) -> bool {
 }
 
 #[inline(always)]
-pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
+pub fn key_to_slru_block(key: &Key) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
     Ok(match key.field1 {
         0x01 => {
             let kind = match key.field2 {
@@ -516,7 +516,7 @@ pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber
 }
 
 #[inline(always)]
-pub fn is_slru_block_key(key: Key) -> bool {
+pub fn is_slru_block_key(key: &Key) -> bool {
     key.field1 == 0x01                // SLRU-related
         && key.field3 == 0x00000001   // but not SlruDir
         && key.field6 != 0xffffffff // and not SlruSegSize
@@ -529,7 +529,7 @@ pub fn is_rel_block_key(key: &Key) -> bool {
 
 /// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
 #[inline(always)]
-pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
+pub fn key_to_rel_block(key: &Key) -> anyhow::Result<(RelTag, BlockNumber)> {
     Ok(match key.field1 {
         0x00 => (
             RelTag {
