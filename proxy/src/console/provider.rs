@@ -302,8 +302,6 @@ impl Api for ConsoleBackend {
         }
     }
 
-    /// When applicable, wake the compute node, gaining its connection info in the process.
-    /// The link auth flow doesn't support this, so we return [`None`] in that case.
     async fn wake_compute(
         &self,
         ctx: &mut RequestMonitoring,
