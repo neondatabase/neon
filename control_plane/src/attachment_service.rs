@@ -357,7 +357,7 @@ impl AttachmentService {
         &self,
         req: TenantCreateRequest,
     ) -> anyhow::Result<TenantCreateResponse> {
-        self.dispatch(Method::POST, "tenant".to_string(), Some(req))
+        self.dispatch(Method::POST, "v1/tenant".to_string(), Some(req))
             .await
     }
 
@@ -414,7 +414,7 @@ impl AttachmentService {
     ) -> anyhow::Result<TimelineInfo> {
         self.dispatch(
             Method::POST,
-            format!("tenant/{tenant_id}/timeline"),
+            format!("v1/tenant/{tenant_id}/timeline"),
             Some(req),
         )
         .await

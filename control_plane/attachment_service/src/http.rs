@@ -205,8 +205,8 @@ pub fn make_router(
         .put("/node/:node_id/config", |r| {
             request_span(r, handle_node_configure)
         })
-        .post("/tenant", |r| request_span(r, handle_tenant_create))
-        .post("/tenant/:tenant_id/timeline", |r| {
+        .post("/v1/tenant", |r| request_span(r, handle_tenant_create))
+        .post("/v1/tenant/:tenant_id/timeline", |r| {
             request_span(r, handle_tenant_timeline_create)
         })
         .get("/tenant/:tenant_id/locate", |r| {
