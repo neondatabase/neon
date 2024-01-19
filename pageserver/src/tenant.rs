@@ -3114,10 +3114,13 @@ impl Tenant {
         let latest_gc_cutoff_lsn = src_timeline.get_latest_gc_cutoff_lsn();
         src_timeline
             .check_lsn_is_in_scope(start_lsn, &latest_gc_cutoff_lsn)
-            .context(format!(
-                "invalid branch start lsn: less than latest GC cutoff {}",
-                *latest_gc_cutoff_lsn,
-            ))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid branch start lsn: less than latest GC cutoff {}: {}",
+                    *latest_gc_cutoff_lsn,
+                    e
+                )
+            })
             .map_err(CreateTimelineError::AncestorLsn)?;
 
         // and then the planned GC cutoff
