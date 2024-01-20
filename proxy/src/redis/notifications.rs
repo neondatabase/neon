@@ -46,14 +46,11 @@ enum Notification {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct AllowedIpsUpdate {
-    #[serde(rename = "project")]
     project_id: SmolStr,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct PasswordUpdate {
-    #[serde(rename = "project")]
     project_id: SmolStr,
-    #[serde(rename = "role")]
     role_name: SmolStr,
 }
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
