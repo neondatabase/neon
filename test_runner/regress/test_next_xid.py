@@ -1,9 +1,9 @@
 import json
 import os
-import pytest
 import time
 from pathlib import Path
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_wal_insert_lsn
 from fixtures.pageserver.utils import (
@@ -99,7 +99,7 @@ def test_import_at_2bil(
     vanilla_pg.safe_psql("CREATE TABLE t (t text);")
     vanilla_pg.safe_psql("INSERT INTO t VALUES ('inserted in vanilla')")
 
-    branch = "import_from_vanilla"
+    branch_name = "import_from_vanilla"
     tenant = TenantId.generate()
     timeline = TimelineId.generate()
 
@@ -400,12 +400,12 @@ def test_one_off_hack_for_nextxid_bug(
         "at-broken-lsn", branch_name, ancestor_start_lsn=broken_lsn, tenant_id=tenant
     )
     with pytest.raises(RuntimeError, match="compute startup timed out; still in Init state"):
-        endpoint_broken = env.endpoints.create_start(
+        env.endpoints.create_start(
             "at-broken-lsn",
             endpoint_id="ep-at-broken-lsn",
             tenant_id=tenant,
         )
-        log.error(f"starting endpoint at broken LSN succeeded unexpectedly")
+        log.error("starting endpoint at broken LSN succeeded unexpectedly")
 
     # But after the bug was fixed, the one-off hack fixed the timeline,
     # and a later LSN works.
