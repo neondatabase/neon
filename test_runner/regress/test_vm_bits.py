@@ -118,8 +118,6 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
 # Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK
 # record.
 #
-# FIXME: This test is broken
-@pytest.mark.skip("See https://github.com/neondatabase/neon/pull/6412#issuecomment-1902072541")
 def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -153,7 +151,7 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     # Remember the XID. We will use it later to verify that we have consumed a lot of
     # XIDs after this.
     cur.execute("select pg_current_xact_id()")
-    locking_xid = cur.fetchall()[0][0]
+    locking_xid = int(cur.fetchall()[0][0])
 
     # Stop and restart postgres, to clear the buffer cache.
     #
@@ -198,13 +196,13 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
 
         if i % 50 == 0:
             cur.execute("select datfrozenxid from pg_database where datname='postgres'")
-            datfrozenxid = cur.fetchall()[0][0]
+            datfrozenxid = int(cur.fetchall()[0][0])
             if datfrozenxid > locking_xid:
                 break
 
     cur.execute("select pg_current_xact_id()")
-    curr_xid = cur.fetchall()[0][0]
-    assert int(curr_xid) - int(locking_xid) >= 100000
+    curr_xid = int(cur.fetchall()[0][0])
+    assert curr_xid - locking_xid >= 100000
 
     # Now, if the VM all-frozen bit was not correctly cleared on
     # replay, we will try to fetch the status of the XID that was
