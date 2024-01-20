@@ -117,7 +117,7 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	/*
 	 * Only postmaster updates the copy in shared memory.
 	 */
-	if (!PagestoreShmemIsValid() || MyProcPid != PostmasterPid)
+	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
 		return;
 
 	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
