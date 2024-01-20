@@ -68,7 +68,13 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
 # 2 billion, it started to look like a very new XID, which caused nextXid
 # to be immediately advanced to the next epoch.
 #
-def test_import_at_2bil(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_distrib_dir: Path, pg_bin, vanilla_pg):
+def test_import_at_2bil(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_distrib_dir: Path,
+    pg_bin,
+    vanilla_pg,
+):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
@@ -172,9 +178,9 @@ def test_import_at_2bil(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
         xid = int(query_scalar(cur, "SELECT txid_current()"))
         log.info(f"xid now {xid}")
         # Consume 10k transactons at a time until we get to 2^31 - 200k
-        if xid < 2*1024*1024*1024 - 100000:
+        if xid < 2 * 1024 * 1024 * 1024 - 100000:
             cur.execute("select test_consume_xids(50000);")
-        elif xid < 2*1024*1024*1024 - 10000:
+        elif xid < 2 * 1024 * 1024 * 1024 - 10000:
             cur.execute("select test_consume_xids(5000);")
         else:
             break
@@ -196,7 +202,7 @@ def test_import_at_2bil(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
         end;
         $$;
         """
-        )
+    )
     # A checkpoint writes a WAL record with xl_xid=0. Many other WAL
     # records would have the same effect.
     cur.execute("checkpoint")
