@@ -102,7 +102,9 @@ impl WalIngest {
         buf.advance(decoded.main_data_offset);
 
         assert!(!self.checkpoint_modified);
-        if self.checkpoint.update_next_xid(decoded.xl_xid) {
+        if decoded.xl_xid != pg_constants::INVALID_TRANSACTION_ID
+            && self.checkpoint.update_next_xid(decoded.xl_xid)
+        {
             self.checkpoint_modified = true;
         }
 
