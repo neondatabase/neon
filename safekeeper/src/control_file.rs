@@ -2,7 +2,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
@@ -155,6 +155,46 @@ impl FileStorage {
             })?;
         Ok(state)
     }
+
+    /// Persist state s to dst_path, optionally fsyncing file.
+    pub async fn do_persist(
+        s: &TimelinePersistentState,
+        dst_path: &Utf8Path,
+        sync: bool,
+    ) -> Result<()> {
+        let mut f = File::create(&dst_path)
+            .await
+            .with_context(|| format!("failed to create partial control file at: {}", &dst_path))?;
+        let mut buf: Vec<u8> = Vec::new();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
+        s.ser_into(&mut buf)?;
+
+        // calculate checksum before resize
+        let checksum = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+
+        f.write_all(&buf).await.with_context(|| {
+            format!(
+                "failed to write safekeeper state into control file at: {}",
+                dst_path
+            )
+        })?;
+        f.flush().await.with_context(|| {
+            format!(
+                "failed to flush safekeeper state into control file at: {}",
+                dst_path
+            )
+        })?;
+
+        // fsync the file
+        if sync {
+            f.sync_all()
+                .await
+                .with_context(|| format!("failed to sync partial control file at {}", dst_path))?;
+        }
+        Ok(())
+    }
 }
 
 impl Deref for FileStorage {
@@ -167,7 +207,7 @@ impl Deref for FileStorage {
 
 #[async_trait::async_trait]
 impl Storage for FileStorage {
-    /// Persists state durably to the underlying storage.
+    /// Atomically persists state durably to the underlying storage.
     ///
     /// For a description, see <https://lwn.net/Articles/457667/>.
     async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
@@ -175,46 +215,9 @@ impl Storage for FileStorage {
 
         // write data to safekeeper.control.partial
         let control_partial_path = self.timeline_dir.join(CONTROL_FILE_NAME_PARTIAL);
-        let mut control_partial = File::create(&control_partial_path).await.with_context(|| {
-            format!(
-                "failed to create partial control file at: {}",
-                &control_partial_path
-            )
-        })?;
-        let mut buf: Vec<u8> = Vec::new();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
-        s.ser_into(&mut buf)?;
-
-        // calculate checksum before resize
-        let checksum = crc32c::crc32c(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
-
-        control_partial.write_all(&buf).await.with_context(|| {
-            format!(
-                "failed to write safekeeper state into control file at: {}",
-                control_partial_path
-            )
-        })?;
-        control_partial.flush().await.with_context(|| {
-            format!(
-                "failed to flush safekeeper state into control file at: {}",
-                control_partial_path
-            )
-        })?;
-
-        // fsync the file
-        if !self.conf.no_sync {
-            control_partial.sync_all().await.with_context(|| {
-                format!(
-                    "failed to sync partial control file at {}",
-                    control_partial_path
-                )
-            })?;
-        }
+        FileStorage::do_persist(s, &control_partial_path, !self.conf.no_sync).await?;
 
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);
-
         // rename should be atomic
         fs::rename(&control_partial_path, &control_path).await?;
         // this sync is not required by any standard but postgres does this (see durable_rename)
