@@ -239,6 +239,8 @@ def test_one_off_hack_for_nextxid_bug(
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
+    env.pageserver.allowed_errors.append(".*nextXid fixed by one-off hack.*")
+
     # We begin with the old bug still present, to create a broken timeline
     ps_http.configure_failpoints(("reintroduce-nextxid-update-bug", "return(true)"))
 
@@ -345,14 +347,15 @@ def test_one_off_hack_for_nextxid_bug(
     # Install extension containing function needed for test
     cur.execute("CREATE EXTENSION neon_test_utils")
 
-    # Advance nextXid close to 2 billion XIDs
+    # Advance nextXid to the target XID, which is somewhat above the 2
+    # billion mark.
     while True:
         xid = int(query_scalar(cur, "SELECT txid_current()"))
         log.info(f"xid now {xid}")
         # Consume 10k transactons at a time until we get to 2^31 - 200k
-        if xid < 2 * 1024 * 1024 * 1024 - 100000:
+        if xid < (2325447052 - 100000):
             cur.execute("select test_consume_xids(50000);")
-        elif xid < 2 * 1024 * 1024 * 1024 - 10000:
+        elif xid < 2325447052 - 10000:
             cur.execute("select test_consume_xids(5000);")
         else:
             break
@@ -408,7 +411,9 @@ def test_one_off_hack_for_nextxid_bug(
     )
     with pytest.raises(RuntimeError, match="Postgres exited unexpectedly with code 1"):
         endpoint_broken.start()
-    assert endpoint_broken.log_contains('Could not open file "pg_xact/0000": No such file or directory')
+    assert endpoint_broken.log_contains(
+        'Could not open file "pg_xact/0000": No such file or directory'
+    )
 
     # But after the bug was fixed, the one-off hack fixed the timeline,
     # and a later LSN works.
@@ -422,4 +427,5 @@ def test_one_off_hack_for_nextxid_bug(
     conn = endpoint_fixed.connect()
     cur = conn.cursor()
     cur.execute("SELECT count(*) from t")
-    assert cur.fetchone() == (10000 + 1,)
+    # One "inserted in vanilla" row, 10000 in the DO-loop, and one "after fix" row
+    assert cur.fetchone() == (1 + 10000 + 1,)
