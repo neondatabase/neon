@@ -26,8 +26,11 @@ use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
+use std::str::FromStr;
+
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
+use hex::FromHex;
 use tracing::*;
 use utils::failpoint_support;
 
@@ -43,10 +46,11 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::v14::xlog_utils::*;
-use postgres_ffi::v14::CheckPoint;
+use postgres_ffi::v14::{CheckPoint, bindings::FullTransactionId};
 use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
 use utils::lsn::Lsn;
+use utils::id::{TenantId, TimelineId};
 
 pub struct WalIngest {
     shard: ShardIdentity,
@@ -107,6 +111,53 @@ impl WalIngest {
         {
             self.checkpoint_modified = true;
         }
+
+        // BEGIN ONE-OFF HACK
+        //
+        // We had a bug where we incorrectly passed 0 to update_next_xid(). That was
+        // harmless as long as nextXid was < 2^31, because 0 looked like a very old
+        // XID. But once nextXid reaches 2^31, 0 starts to look like a very new XID, and
+        // we incorrectly bumped up nextXid to the next epoch, to value '1:1024'
+        //
+        // We have one known timeline in production where that happened. This is a one-off
+        // fix to fix that damage. The last WAL record on that timeline as of this writing
+        // is this:
+        //
+        // rmgr: Standby     len (rec/tot):     50/    50, tx:          0, lsn: 35A/E32D86D8, prev 35A/E32D86B0, desc: RUNNING_XACTS nextXid 2325447052 latestCompletedXid 2325447051 oldestRunningXid 2325447052
+        //
+        // So on that particular timeline, before that LSN, fix the incorrectly set
+        // nextXid to the nextXid value from that record, plus 1000 to give some safety
+        // margin.
+
+        // For testing this hack, this failpoint temporarily re-introduces the bug that
+        // was fixed
+        fn reintroduce_bug_failpoint_activated() -> bool {
+            fail::fail_point!("reintroduce-nextxid-update-bug", |_| { true });
+            return false;
+        }
+        if decoded.xl_xid == pg_constants::INVALID_TRANSACTION_ID
+            && reintroduce_bug_failpoint_activated()
+            && self.checkpoint.update_next_xid(decoded.xl_xid)
+        {
+            info!("failpoint: Incorrectly updated nextXid at LSN {} to {}", lsn, self.checkpoint.nextXid.value);
+            self.checkpoint_modified = true;
+        }
+
+        if self.checkpoint.nextXid.value == 4294968320 && // 1::1024, the incorrect value
+            modification.tline.tenant_shard_id.tenant_id == TenantId::from_hex("df254570a4f603805528b46b0d45a76c").unwrap() &&
+            modification.tline.timeline_id == TimelineId::from_hex("e592ec1cc0e5a41f69060d0c9efb07ed").unwrap() &&
+            lsn < Lsn::from_str("35A/E32D9000").unwrap() &&
+            !reintroduce_bug_failpoint_activated()
+        {
+            // This is the last nextXid value from the last RUNNING_XACTS record, at the
+            // end of the WAL as of this writing.
+            self.checkpoint.nextXid = FullTransactionId {
+                value: 2325447052 + 1000
+            };
+            self.checkpoint_modified = true;
+            warn!("nextXid fixed by one-off hack at LSN {}", lsn);
+        }
+        // END ONE-OFF HACK
 
         match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
