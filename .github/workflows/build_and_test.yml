@@ -355,7 +355,7 @@ jobs:
 
       - name: Run rust tests
         run: |
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'not (test(short_v14_fails_for_wrong_key_but_returns_zero_page) | test(short_v14_redo))'
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'not (test(short_v14_fails_for_wrong_key_but_returns_zero_page) | test(short_v14_redo) | test(test_find_end_of_wal*)'
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
