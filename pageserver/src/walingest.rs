@@ -134,7 +134,7 @@ impl WalIngest {
         // was fixed
         fn reintroduce_bug_failpoint_activated() -> bool {
             fail::fail_point!("reintroduce-nextxid-update-bug", |_| { true });
-            return false;
+            false
         }
         if decoded.xl_xid == pg_constants::INVALID_TRANSACTION_ID
             && reintroduce_bug_failpoint_activated()
