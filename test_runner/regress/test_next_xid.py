@@ -8,6 +8,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_wal_insert_lsn
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
+    wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -377,18 +378,19 @@ def test_one_off_hack_for_nextxid_bug(
     # A checkpoint writes a WAL record with xl_xid=0. Many other WAL
     # records would have the same effect.
     cur.execute("checkpoint")
-    cur.execute("INSERT INTO t VALUES ('before fix')")
-    wait_for_wal_insert_lsn(env, endpoint, tenant, timeline)
 
     # Ok, the nextXid in the pageserver at this LSN should now be incorrectly
     # set to 1:1024. Remember this LSN.
     broken_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
 
+    # Ensure that the broken checkpoint data has reached permanent storage
+    ps_http.timeline_checkpoint(tenant, timeline)
+    wait_for_upload(ps_http, tenant, timeline, broken_lsn)
+
     # Now fix the bug, and generate some WAL with XIDs
     ps_http.configure_failpoints(("reintroduce-nextxid-update-bug", "off"))
     cur.execute("INSERT INTO t VALUES ('after fix')")
     fixed_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
-    wait_for_wal_insert_lsn(env, endpoint, tenant, timeline)
 
     log.info(f"nextXid was broken by {broken_lsn}, and fixed again by {fixed_lsn}")
 
@@ -399,13 +401,14 @@ def test_one_off_hack_for_nextxid_bug(
     env.neon_cli.create_branch(
         "at-broken-lsn", branch_name, ancestor_start_lsn=broken_lsn, tenant_id=tenant
     )
-    with pytest.raises(RuntimeError, match="compute startup timed out; still in Init state"):
-        env.endpoints.create_start(
-            "at-broken-lsn",
-            endpoint_id="ep-at-broken-lsn",
-            tenant_id=tenant,
-        )
-        log.error("starting endpoint at broken LSN succeeded unexpectedly")
+    endpoint_broken = env.endpoints.create(
+        "at-broken-lsn",
+        endpoint_id="ep-at-broken-lsn",
+        tenant_id=tenant,
+    )
+    with pytest.raises(RuntimeError, match="Postgres exited unexpectedly with code 1"):
+        endpoint_broken.start()
+    assert endpoint_broken.log_contains('Could not open file "pg_xact/0000": No such file or directory')
 
     # But after the bug was fixed, the one-off hack fixed the timeline,
     # and a later LSN works.
