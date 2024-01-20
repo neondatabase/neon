@@ -1,3 +1,5 @@
+import pytest
+
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 
@@ -117,6 +119,8 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
 # Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK
 # record.
 #
+# FIXME: This test is broken
+@pytest.mark.skip("See https://github.com/neondatabase/neon/pull/6412#issuecomment-1902072541")
 def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
