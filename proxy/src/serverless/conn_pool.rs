@@ -26,7 +26,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
 
 use crate::{
     auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
-    console,
+    console::{self, messages::MetricsAuxInfo},
     context::RequestMonitoring,
     metrics::NUM_DB_CONNECTIONS_GAUGE,
     proxy::connect_compute::ConnectMechanism,
@@ -362,6 +362,7 @@ impl GlobalConnPool {
 
         // ok return cached connection if found and establish a new one otherwise
         let new_client = if let Some(client) = client {
+            ctx.set_project(client.aux.clone());
             if client.inner.is_closed() {
                 let conn_id = uuid::Uuid::new_v4();
                 info!(%conn_id, "pool: cached connection '{conn_info}' is closed, opening a new one");
@@ -593,10 +594,6 @@ async fn connect_to_compute_once(
     span.in_scope(|| {
         info!(%conn_info, %session, "new connection");
     });
-    let ids = Ids {
-        endpoint_id: node_info.aux.endpoint_id.clone(),
-        branch_id: node_info.aux.branch_id.clone(),
-    };
 
     let db_user = conn_info.db_and_user();
     tokio::spawn(
@@ -664,7 +661,7 @@ async fn connect_to_compute_once(
     Ok(ClientInner {
         inner: client,
         session: tx,
-        ids,
+        aux: node_info.aux.clone(),
         conn_id,
     })
 }
@@ -672,13 +669,17 @@ async fn connect_to_compute_once(
 struct ClientInner {
     inner: tokio_postgres::Client,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
-    ids: Ids,
+    aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
 }
 
 impl Client {
     pub fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.register(self.inner.as_ref().unwrap().ids.clone())
+        let aux = &self.inner.as_ref().unwrap().aux;
+        USAGE_METRICS.register(Ids {
+            endpoint_id: aux.endpoint_id.clone(),
+            branch_id: aux.branch_id.clone(),
+        })
     }
 }
 

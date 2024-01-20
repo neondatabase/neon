@@ -2,7 +2,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
 use bytes::BytesMut;
-use chrono::{Datelike, TimeZone, Timelike};
+use chrono::{Datelike, Timelike};
 use futures::{Stream, StreamExt};
 use parquet::{
     basic::Compression,
