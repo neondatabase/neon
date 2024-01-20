@@ -179,17 +179,18 @@ impl super::Api for Api {
             return Ok(Some(role_secret));
         }
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
-        let project_id = auth_info.project_id.unwrap_or(ep.clone());
-        if let Some(secret) = &auth_info.secret {
-            self.caches
-                .project_info
-                .insert_role_secret(&project_id, ep, user, secret.clone())
+        if let Some(project_id) = auth_info.project_id {
+            if let Some(secret) = &auth_info.secret {
+                self.caches
+                    .project_info
+                    .insert_role_secret(&project_id, ep, user, secret.clone())
+            }
+            self.caches.project_info.insert_allowed_ips(
+                &project_id,
+                ep,
+                Arc::new(auth_info.allowed_ips),
+            );
         }
-        self.caches.project_info.insert_allowed_ips(
-            &project_id,
-            ep,
-            Arc::new(auth_info.allowed_ips),
-        );
         // When we just got a secret, we don't need to invalidate it.
         Ok(auth_info.secret.map(Cached::new_uncached))
     }
@@ -212,15 +213,16 @@ impl super::Api for Api {
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;
-        let project_id = auth_info.project_id.unwrap_or(ep.clone());
-        if let Some(secret) = &auth_info.secret {
+        if let Some(project_id) = auth_info.project_id {
+            if let Some(secret) = &auth_info.secret {
+                self.caches
+                    .project_info
+                    .insert_role_secret(&project_id, ep, user, secret.clone())
+            }
             self.caches
                 .project_info
-                .insert_role_secret(&project_id, ep, user, secret.clone())
+                .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         }
-        self.caches
-            .project_info
-            .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
         Ok(Cached::new_uncached(allowed_ips))
     }
 
