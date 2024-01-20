@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn parse_allowed_ips() -> anyhow::Result<()> {
         let project_id = "new_project".to_string();
-        let data = format!("{{\"project\": \"{project_id}\"}}");
+        let data = format!("{{\"project_id\": \"{project_id}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/allowed_ips_updated",
@@ -174,7 +174,7 @@ mod tests {
     fn parse_password_updated() -> anyhow::Result<()> {
         let project_id = "new_project".to_string();
         let role_name = "new_role".to_string();
-        let data = format!("{{\"project\": \"{project_id}\", \"role\": \"{role_name}\"}}");
+        let data = format!("{{\"project_id\": \"{project_id}\", \"role_name\": \"{role_name}\"}}");
         let text = json!({
             "type": "message",
             "topic": "/password_updated",
