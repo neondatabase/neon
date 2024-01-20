@@ -50,7 +50,7 @@ use postgres_ffi::v14::xlog_utils::*;
 use postgres_ffi::v14::{bindings::FullTransactionId, CheckPoint};
 use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
-use utils::id::{TenantId, TimelineId};
+use utils::id::TenantId;
 use utils::lsn::Lsn;
 
 pub struct WalIngest {
@@ -149,7 +149,6 @@ impl WalIngest {
 
         if self.checkpoint.nextXid.value == 4294968320 && // 1::1024, the incorrect value
             modification.tline.tenant_shard_id.tenant_id == TenantId::from_hex("df254570a4f603805528b46b0d45a76c").unwrap() &&
-            modification.tline.timeline_id == TimelineId::from_hex("e592ec1cc0e5a41f69060d0c9efb07ed").unwrap() &&
             lsn < Lsn::from_str("35A/E32D9000").unwrap() &&
             !reintroduce_bug_failpoint_activated()
         {
