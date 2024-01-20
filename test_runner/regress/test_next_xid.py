@@ -272,7 +272,7 @@ def test_one_off_hack_for_nextxid_bug(
     branch_name = "import_from_vanilla"
     # This is the tenant/timeline that the one-off hack targets
     tenant = "df254570a4f603805528b46b0d45a76c"
-    timeline = "e592ec1cc0e5a41f69060d0c9efb07ed"
+    timeline = TimelineId.generate()
 
     env.pageserver.tenant_create(tenant)
 
