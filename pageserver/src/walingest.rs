@@ -47,11 +47,11 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
 use postgres_ffi::v14::xlog_utils::*;
-use postgres_ffi::v14::{CheckPoint, bindings::FullTransactionId};
+use postgres_ffi::v14::{bindings::FullTransactionId, CheckPoint};
 use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
-use utils::lsn::Lsn;
 use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
 
 pub struct WalIngest {
     shard: ShardIdentity,
@@ -140,7 +140,10 @@ impl WalIngest {
             && reintroduce_bug_failpoint_activated()
             && self.checkpoint.update_next_xid(decoded.xl_xid)
         {
-            info!("failpoint: Incorrectly updated nextXid at LSN {} to {}", lsn, self.checkpoint.nextXid.value);
+            info!(
+                "failpoint: Incorrectly updated nextXid at LSN {} to {}",
+                lsn, self.checkpoint.nextXid.value
+            );
             self.checkpoint_modified = true;
         }
 
@@ -153,7 +156,7 @@ impl WalIngest {
             // This is the last nextXid value from the last RUNNING_XACTS record, at the
             // end of the WAL as of this writing.
             self.checkpoint.nextXid = FullTransactionId {
-                value: 2325447052 + 1000
+                value: 2325447052 + 1000,
             };
             self.checkpoint_modified = true;
             warn!("nextXid fixed by one-off hack at LSN {}", lsn);
