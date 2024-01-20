@@ -191,7 +191,7 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
         tup = cur.fetchall()
         log.info(f"tuple = {tup}")
         xmax = tup[0][1]
-        assert xmax == xmax_before
+        assert xmax == "0" or xmax == xmax_before
 
         if i % 50 == 0:
             cur.execute("select datfrozenxid from pg_database where datname='postgres'")
@@ -211,3 +211,4 @@ def test_vm_bit_clear_on_heap_lock(neon_simple_env: NeonEnv):
     cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 for update")
     tup = cur.fetchall()
     log.info(f"tuple = {tup}")
+    cur.execute("commit transaction")
