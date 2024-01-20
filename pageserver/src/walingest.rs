@@ -332,8 +332,13 @@ impl WalIngest {
                         < 0
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
-                        self.checkpoint_modified = true;
                     }
+
+                    // Write a new checkpoint key-value pair on every checkpoint record, even
+                    // if nothing really changed. Not strictly required, but it seems nice to
+                    // have some trace of the checkpoint records in the layer files at the same
+                    // LSNs.
+                    self.checkpoint_modified = true;
                 }
             }
             pg_constants::RM_LOGICALMSG_ID => {
