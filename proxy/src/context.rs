@@ -32,6 +32,7 @@ pub struct RequestMonitoring {
     user: Option<SmolStr>,
     application: Option<SmolStr>,
     error_kind: Option<ErrorKind>,
+    success: bool,
 
     // extra
     // This sender is here to keep the request monitoring channel open while requests are taking place.
@@ -59,6 +60,7 @@ impl RequestMonitoring {
             user: None,
             application: None,
             error_kind: None,
+            success: false,
 
             sender: LOG_CHAN.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
@@ -94,6 +96,10 @@ impl RequestMonitoring {
 
     pub fn set_user(&mut self, user: SmolStr) {
         self.user = Some(user);
+    }
+
+    pub fn set_success(&mut self) {
+        self.success = true;
     }
 
     pub fn log(&mut self) {
