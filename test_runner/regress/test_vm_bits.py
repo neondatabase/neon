@@ -1,5 +1,4 @@
 import pytest
-
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 
