@@ -10,6 +10,7 @@ use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::validate_password_and_exchange;
 use crate::cache::Cached;
 use crate::console::errors::GetAuthInfoError;
+use crate::console::provider::ConsoleBackend;
 use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
 use crate::proxy::connect_compute::handle_try_wake;
@@ -43,11 +44,8 @@ use tracing::{error, info, warn};
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
 pub enum BackendType<'a, T> {
-    /// Current Cloud API (V2).
-    Console(Cow<'a, console::provider::neon::Api>, T),
-    /// Local mock of Cloud API (V2).
-    #[cfg(feature = "testing")]
-    Postgres(Cow<'a, console::provider::mock::Api>, T),
+    /// Cloud API (V2).
+    Console(Cow<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
     Link(Cow<'a, url::ApiUrl>),
     #[cfg(test)]
@@ -64,9 +62,15 @@ impl std::fmt::Display for BackendType<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use BackendType::*;
         match self {
-            Console(endpoint, _) => fmt.debug_tuple("Console").field(&endpoint.url()).finish(),
-            #[cfg(feature = "testing")]
-            Postgres(endpoint, _) => fmt.debug_tuple("Postgres").field(&endpoint.url()).finish(),
+            Console(api, _) => match &**api {
+                ConsoleBackend::Console(endpoint) => {
+                    fmt.debug_tuple("Console").field(&endpoint.url()).finish()
+                }
+                #[cfg(feature = "testing")]
+                ConsoleBackend::Postgres(endpoint) => {
+                    fmt.debug_tuple("Postgres").field(&endpoint.url()).finish()
+                }
+            },
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
             #[cfg(test)]
             Test(_) => fmt.debug_tuple("Test").finish(),
@@ -81,8 +85,6 @@ impl<T> BackendType<'_, T> {
         use BackendType::*;
         match self {
             Console(c, x) => Console(Cow::Borrowed(c), x),
-            #[cfg(feature = "testing")]
-            Postgres(c, x) => Postgres(Cow::Borrowed(c), x),
             Link(c) => Link(Cow::Borrowed(c)),
             #[cfg(test)]
             Test(x) => Test(*x),
@@ -98,8 +100,6 @@ impl<'a, T> BackendType<'a, T> {
         use BackendType::*;
         match self {
             Console(c, x) => Console(c, f(x)),
-            #[cfg(feature = "testing")]
-            Postgres(c, x) => Postgres(c, f(x)),
             Link(c) => Link(c),
             #[cfg(test)]
             Test(x) => Test(x),
@@ -114,8 +114,6 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
         use BackendType::*;
         match self {
             Console(c, x) => x.map(|x| Console(c, x)),
-            #[cfg(feature = "testing")]
-            Postgres(c, x) => x.map(|x| Postgres(c, x)),
             Link(c) => Ok(Link(c)),
             #[cfg(test)]
             Test(x) => Ok(Test(x)),
@@ -325,8 +323,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 
         match self {
             Console(_, user_info) => user_info.project.clone(),
-            #[cfg(feature = "testing")]
-            Postgres(_, user_info) => user_info.project.clone(),
             Link(_) => Some("link".into()),
             #[cfg(test)]
             Test(_) => Some("test".into()),
@@ -339,8 +335,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
 
         match self {
             Console(_, user_info) => &user_info.user,
-            #[cfg(feature = "testing")]
-            Postgres(_, user_info) => &user_info.user,
             Link(_) => "link",
             #[cfg(test)]
             Test(_) => "test",
@@ -370,19 +364,6 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint> {
                     auth_and_wake_compute(ctx, &*api, user_info, client, allow_cleartext, config)
                         .await?;
                 (cache_info, BackendType::Console(api, user_info))
-            }
-            #[cfg(feature = "testing")]
-            Postgres(api, user_info) => {
-                info!(
-                    user = &*user_info.user,
-                    project = user_info.project(),
-                    "performing authentication using a local postgres instance"
-                );
-
-                let (cache_info, user_info) =
-                    auth_and_wake_compute(ctx, &*api, user_info, client, allow_cleartext, config)
-                        .await?;
-                (cache_info, BackendType::Postgres(api, user_info))
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
@@ -414,8 +395,6 @@ impl BackendType<'_, ComputeUserInfo> {
         use BackendType::*;
         match self {
             Console(api, user_info) => api.get_allowed_ips(ctx, user_info).await,
-            #[cfg(feature = "testing")]
-            Postgres(api, user_info) => api.get_allowed_ips(ctx, user_info).await,
             Link(_) => Ok(Cached::new_uncached(Arc::new(vec![]))),
             #[cfg(test)]
             Test(x) => Ok(Cached::new_uncached(Arc::new(x.get_allowed_ips()?))),
@@ -432,8 +411,6 @@ impl BackendType<'_, ComputeUserInfo> {
 
         match self {
             Console(api, user_info) => api.wake_compute(ctx, user_info).map_ok(Some).await,
-            #[cfg(feature = "testing")]
-            Postgres(api, user_info) => api.wake_compute(ctx, user_info).map_ok(Some).await,
             Link(_) => Ok(None),
             #[cfg(test)]
             Test(x) => x.wake_compute().map(Some),
