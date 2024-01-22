@@ -61,9 +61,9 @@ pub struct ProjectInfoCacheImpl {
     role_cache: Mutex<LruCache<(SmolStr, SmolStr), Entry<AuthSecret>>>,
 
     project2ep: DashMap<SmolStr, HashSet<SmolStr>>,
-    config: ProjectInfoCacheOptions,
 
     start_time: Instant,
+    ttl: Duration,
     ttl_disabled_since_us: AtomicU64,
 }
 
@@ -101,7 +101,7 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
     }
 
     fn disable_ttl(&self) {
-        let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
+        let new_ttl = (self.start_time.elapsed() + self.ttl).as_micros() as u64;
         self.ttl_disabled_since_us
             .store(new_ttl, std::sync::atomic::Ordering::Relaxed);
     }
@@ -111,9 +111,9 @@ impl ProjectInfoCacheImpl {
     pub fn new(config: ProjectInfoCacheOptions) -> Self {
         Self {
             ip_cache: Mutex::new(LruCache::new(config.size)),
-            role_cache: Mutex::new(LruCache::new(config.size)),
+            role_cache: Mutex::new(LruCache::new(config.size * config.max_roles)),
             project2ep: DashMap::new(),
-            config,
+            ttl: config.ttl,
             ttl_disabled_since_us: AtomicU64::new(u64::MAX),
             start_time: Instant::now(),
         }
@@ -128,7 +128,7 @@ impl ProjectInfoCacheImpl {
         let (value, ignore_cache) = {
             let mut cache = self.role_cache.lock();
             let secret = cache.get(&(endpoint_id.clone(), role_name.clone()))?;
-            if secret.created_at < valid_since {
+            if secret.created_at <= valid_since {
                 return None;
             }
             (
@@ -157,7 +157,7 @@ impl ProjectInfoCacheImpl {
         let (value, ignore_cache) = {
             let mut cache = self.ip_cache.lock();
             let allowed_ips = cache.get(endpoint_id)?;
-            if allowed_ips.created_at < valid_since {
+            if allowed_ips.created_at <= valid_since {
                 return None;
             }
             (
@@ -208,7 +208,7 @@ impl ProjectInfoCacheImpl {
     }
 
     fn get_cache_times(&self) -> (Instant, Option<Instant>) {
-        let mut valid_since = Instant::now() - self.config.ttl;
+        let mut valid_since = Instant::now() - self.ttl;
         // Only ignore cache if ttl is disabled.
         let ttl_disabled_since_us = self
             .ttl_disabled_since_us
@@ -286,9 +286,8 @@ mod tests {
         tokio::time::pause();
         let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
             size: 2,
-            max_roles: 2,
+            max_roles: 1,
             ttl: Duration::from_secs(1),
-            gc_interval: Duration::from_secs(600),
         });
         let project_id = "project".into();
         let endpoint_id = "endpoint".into();
@@ -312,7 +311,7 @@ mod tests {
         let user3: SmolStr = "user3".into();
         let secret3 = AuthSecret::Scram(ServerSecret::mock(user3.as_str(), [3; 32]));
         cache.insert_role_secret(&project_id, &endpoint_id, &user3, secret3.clone());
-        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
+        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none(),);
 
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
         assert!(cached.cached());
@@ -334,7 +333,6 @@ mod tests {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_secs(1),
-            gc_interval: Duration::from_secs(600),
         }));
         cache.clone().disable_ttl();
         tokio::time::advance(Duration::from_secs(2)).await;
@@ -382,7 +380,6 @@ mod tests {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_secs(1),
-            gc_interval: Duration::from_secs(600),
         }));
 
         let project_id = "project".into();
