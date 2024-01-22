@@ -7,6 +7,7 @@ use pageserver_api::models::ShardParameters;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -32,7 +33,8 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::{
-    AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, TenantConfOpt,
+    AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
+    TenantConfOpt,
 };
 use crate::tenant::delete::DeleteTenantFlow;
 use crate::tenant::span::debug_assert_current_span_has_tenant_id;
@@ -466,6 +468,26 @@ pub async fn init_tenant_mgr(
             // We have a generation map: treat it as the authority for whether
             // this tenant is really attached.
             if let Some(gen) = generations.get(&tenant_shard_id) {
+                if let LocationMode::Attached(attached) = &location_conf.mode {
+                    if attached.generation > *gen {
+                        tracing::error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                            "Control plane gave decreasing generation ({gen:?}) in re-attach response for tenant that was attached in generation {:?}, demoting to secondary",
+                            attached.generation
+                        );
+
+                        // We cannot safely attach this tenant given a bogus generation number, but let's avoid throwing away
+                        // local disk content: demote to secondary rather than detaching.
+                        tenants.insert(
+                            tenant_shard_id,
+                            TenantSlot::Secondary(SecondaryTenant::new(
+                                tenant_shard_id,
+                                location_conf.shard,
+                                location_conf.tenant_conf,
+                                &SecondaryLocationConfig { warm: false },
+                            )),
+                        );
+                    }
+                }
                 *gen
             } else {
                 match &location_conf.mode {
@@ -902,19 +924,29 @@ impl TenantManager {
                 tenant_map_peek_slot(&locked, &tenant_shard_id, TenantSlotPeekMode::Write)?;
             match (&new_location_config.mode, peek_slot) {
                 (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
-                    if attach_conf.generation == tenant.generation {
-                        // A transition from Attached to Attached in the same generation, we may
-                        // take our fast path and just provide the updated configuration
-                        // to the tenant.
-                        tenant.set_new_location_config(
-                            AttachedTenantConf::try_from(new_location_config.clone())
-                                .map_err(UpsertLocationError::BadRequest)?,
-                        );
+                    match attach_conf.generation.cmp(&tenant.generation) {
+                        Ordering::Equal => {
+                            // A transition from Attached to Attached in the same generation, we may
+                            // take our fast path and just provide the updated configuration
+                            // to the tenant.
+                            tenant.set_new_location_config(
+                                AttachedTenantConf::try_from(new_location_config.clone())
+                                    .map_err(UpsertLocationError::BadRequest)?,
+                            );
 
-                        Some(FastPathModified::Attached(tenant.clone()))
-                    } else {
-                        // Different generations, fall through to general case
-                        None
+                            Some(FastPathModified::Attached(tenant.clone()))
+                        }
+                        Ordering::Less => {
+                            return Err(UpsertLocationError::BadRequest(anyhow::anyhow!(
+                                "Generation {:?} is less than existing {:?}",
+                                attach_conf.generation,
+                                tenant.generation
+                            )));
+                        }
+                        Ordering::Greater => {
+                            // Generation advanced, fall through to general case of replacing `Tenant` object
+                            None
+                        }
                     }
                 }
                 (
