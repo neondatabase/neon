@@ -813,7 +813,7 @@ impl Tenant {
                     SpawnMode::Create => None,
                     SpawnMode::Normal => {Some(TENANT.attach.start_timer())}
                 };
-                match tenant_clone.attach(preload, &ctx).await {
+                match tenant_clone.attach(preload, mode, &ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
                         if let Some(t)=  attach_timer {t.observe_duration();}
@@ -900,15 +900,20 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
+        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let preload = match preload {
-            Some(p) => p,
-            None => {
+        let preload = match (preload, mode) {
+            (Some(p), _) => p,
+            (None, SpawnMode::Create) => TenantPreload {
+                deleting: false,
+                timelines: HashMap::new(),
+            },
+            (None, SpawnMode::Normal) => {
                 // Deprecated dev mode: load from local disk state instead of remote storage
                 // https://github.com/neondatabase/neon/issues/5624
                 return self.load_local(ctx).await;
@@ -4035,7 +4040,7 @@ pub(crate) mod harness {
                         .instrument(info_span!("try_load_preload", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                     tenant
-                        .attach(Some(preload), ctx)
+                        .attach(Some(preload), SpawnMode::Normal, ctx)
                         .instrument(info_span!("try_load", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))
                         .await?;
                 }
