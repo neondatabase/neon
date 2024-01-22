@@ -47,8 +47,12 @@ fn main() -> anyhow::Result<()> {
             panic!("`gcc -print-file-name=libasan.so` failed")
         }
 
+        let output_str = str::from_utf8(&libasan_path.stdout);
+        let mut result_string = String::from("LD_PRELOAD=");
+        result_string.push_str(output_str);
+
         let export_ld_preload = Command::new("export")
-            .arg("LD_PRELOAD=".into_string().push_str(&*String::from_utf8_lossy(&*libasan_path.stdout))
+            .arg(result_string)
             .output()
             .context("failed to execute `export LD_PRELOAD=$(gcc -print-file-name=libasan.so)`")?;
 
