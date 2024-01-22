@@ -74,29 +74,8 @@ fn main() -> anyhow::Result<()> {
             panic!("`gcc -print-file-name=libasan.so` failed")
         }
 
-        let output_str = String::from_utf8(libasan_path.stdout).unwrap();
-        println!("output from gcc command {}", output_str);
-        let mut result_string = String::from("LD_PRELOAD=");
-        result_string.push_str(&*output_str);
-        println!("output from gcc command {}", result_string);
-
-
-        let export_ld_preload = Command::new("export")
-            .arg(result_string)
-            .output()
-            .context("failed to execute `export LD_PRELOAD=$(gcc -print-file-name=libasan.so)`")?;
-
-        if !export_ld_preload.status.success() {
-            println!(
-                "stdout: {}",
-                String::from_utf8_lossy(&export_ld_preload.stdout)
-            );
-            println!(
-                "stderr: {}",
-                String::from_utf8_lossy(&export_ld_preload.stderr)
-            );
-            panic!("`export LD_PRELOAD=$(gcc -print-file-name=libasan.so)` failed")
-        }
+        let libasan_path = String::from_utf8(libasan_path.stdout).unwrap();
+        println!("cargo:rustc-env=LD_PRELOAD={}",libasan_path);
     }
 
     for pg_version in &["v14", "v15", "v16"] {
