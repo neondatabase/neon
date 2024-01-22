@@ -296,8 +296,8 @@ mod tests {
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
         let allowed_ips = Arc::new(vec![
-            "allowed_ip1".parse().unwrap(),
-            "allowed_ip2".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
         ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
@@ -347,8 +347,8 @@ mod tests {
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
         let allowed_ips = Arc::new(vec![
-            "allowed_ip1".parse().unwrap(),
-            "allowed_ip2".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
         ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
@@ -395,8 +395,8 @@ mod tests {
         let secret1 = AuthSecret::Scram(ServerSecret::mock(user1.as_str(), [1; 32]));
         let secret2 = AuthSecret::Scram(ServerSecret::mock(user2.as_str(), [2; 32]));
         let allowed_ips = Arc::new(vec![
-            "allowed_ip1".parse().unwrap(),
-            "allowed_ip2".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
         ]);
         cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
         cache.clone().disable_ttl();
