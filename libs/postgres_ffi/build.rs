@@ -69,14 +69,8 @@ fn main() -> anyhow::Result<()> {
             .context("failed to execute `gcc -print-file-name=libasan.so`")?;
 
         if !libasan_path.status.success() {
-            println!(
-                "stdout: {}",
-                String::from_utf8_lossy(&libasan_path.stdout)
-            );
-            println!(
-                "stderr: {}",
-                String::from_utf8_lossy(&libasan_path.stderr)
-            );
+            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
             panic!("`gcc -print-file-name=libasan.so` failed")
         }
 
@@ -90,8 +84,14 @@ fn main() -> anyhow::Result<()> {
             .context("failed to execute `export LD_PRELOAD=$(gcc -print-file-name=libasan.so)`")?;
 
         if !export_ld_preload.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&export_ld_preload.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&export_ld_preload.stderr));
+            println!(
+                "stdout: {}",
+                String::from_utf8_lossy(&export_ld_preload.stdout)
+            );
+            println!(
+                "stderr: {}",
+                String::from_utf8_lossy(&export_ld_preload.stderr)
+            );
             panic!("`export LD_PRELOAD=$(gcc -print-file-name=libasan.so)` failed")
         }
     }
