@@ -5,7 +5,10 @@ from typing import Any, Dict, Optional
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, S3Scrubber
-from fixtures.pageserver.utils import assert_prefix_empty, tenant_delete_wait_completed
+from fixtures.pageserver.utils import (
+    assert_prefix_empty,
+    tenant_delete_wait_completed,
+)
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
