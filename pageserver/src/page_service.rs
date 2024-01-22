@@ -386,12 +386,18 @@ impl PageServerHandler {
 
     /// Future that completes when we need to shut down the connection.
     ///
-    /// Reasons for need to shut down are:
-    /// - any of the timelines we hold GateGuards for in `shard_timelines` is cancelled
-    /// - task_mgr requests shutdown of the connection
+    /// We currently need to shut down when any of the following happens:
+    /// 1. any of the timelines we hold GateGuards for in `shard_timelines` is cancelled
+    /// 2. task_mgr requests shutdown of the connection
     ///
-    /// The need to check for `task_mgr` cancellation arises mainly from `handle_pagerequests`
-    /// where, at first, `shard_timelines` is empty, see <https://github.com/neondatabase/neon/pull/6388>
+    /// NB on (1): the connection's lifecycle is not actually tied to any of the
+    /// `shard_timelines`s' lifecycles. But it's _necessary_ in the current
+    /// implementation to be responsive to timeline cancellation because
+    /// the connection holds their `GateGuards` open (sored in `shard_timelines`).
+    /// We currently do the easy thing and terminate the connection if any of the
+    /// shard_timelines gets cancelled. But really, we cuold spend more effort
+    /// and simply remove the cancelled timeline from the `shard_timelines`, thereby
+    /// dropping the guard.
     ///
     /// NB: keep in sync with [`Self::is_connection_cancelled`]
     async fn await_connection_cancelled(&self) {
@@ -404,16 +410,17 @@ impl PageServerHandler {
         // immutable &self).  So it's fine to evaluate shard_timelines after the sleep, we don't risk
         // missing any inserts to the map.
 
-        let mut futs = self
-            .shard_timelines
-            .values()
-            .map(|ht| ht.timeline.cancel.cancelled())
-            .collect::<FuturesUnordered<_>>();
-
-        tokio::select! {
-            _ = task_mgr::shutdown_watcher() => { }
-            _ = futs.next() => {}
-        }
+        let mut cancellation_sources = Vec::with_capacity(1 + self.shard_timelines.len());
+        use futures::future::Either;
+        cancellation_sources.push(Either::Left(task_mgr::shutdown_watcher()));
+        cancellation_sources.extend(
+            self.shard_timelines
+                .values()
+                .map(|ht| Either::Right(ht.timeline.cancel.cancelled())),
+        );
+        FuturesUnordered::from_iter(cancellation_sources)
+            .next()
+            .await;
     }
 
     /// Checking variant of [`Self::await_connection_cancelled`].
