@@ -33,8 +33,19 @@ fn main() -> anyhow::Result<()> {
     {
         println!("cargo:rustc-link-arg=-fsanitize=address");
         println!("cargo:rustc-link-arg=-fsanitize=undefined");
-        println!("cargo:rustc-link-arg=-static-libasan");
-        println!("cargo:rustc-link-arg=-static-libubsan");
+        println!("cargo:rustc-link-arg=-export-dynamic");
+
+        //setting dynamically the symbols
+        let output = Command::new("export")
+            .arg("LD_PRELOAD=$(gcc -print-file-name=libasan.so)")
+            .output()
+            .context("failed to execute `export LD_PRELOAD=$(gcc -print-file-name=libasan.so)`")?;
+
+        if !output.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+            panic!("`export LD_PRELOAD=$(gcc -print-file-name=libasan.so)` failed")
+        }
     }
     println!("cargo:rustc-link-lib=static=pgport");
     println!("cargo:rustc-link-lib=static=pgcommon");
