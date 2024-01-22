@@ -71,6 +71,8 @@ fn main() -> anyhow::Result<()> {
                 .context("failed to execute `pg_config --includedir-server`")?;
 
             if !output.status.success() {
+                println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+                println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
                 panic!("`pg_config --includedir-server` failed")
             }
 
