@@ -203,16 +203,13 @@ async fn auth_quirks(
         return Err(auth::AuthError::ip_address_not_allowed());
     }
     let cached_secret = api.get_role_secret(ctx, &info).await?;
-    
+
     let secret = cached_secret.value.clone().unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
         // prevent malicious probing (possible due to missing protocol steps).
         // This mocked secret will never lead to successful authentication.
         info!("authentication info not found, mocking it");
-        AuthSecret::Scram(scram::ServerSecret::mock(
-            &info.user,
-            rand::random(),
-        ))
+        AuthSecret::Scram(scram::ServerSecret::mock(&info.user, rand::random()))
     });
     match authenticate_with_secret(
         ctx,
