@@ -229,7 +229,7 @@ impl PostgresRedoManager {
     ) -> anyhow::Result<Bytes> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
-        let (rel, blknum) = key_to_rel_block(&key).context("invalid record")?;
+        let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
@@ -409,7 +409,7 @@ impl PostgresRedoManager {
                 flags,
             } => {
                 // sanity check that this is modifying the correct relation
-                let (rel, blknum) = key_to_rel_block(&key).context("invalid record")?;
+                let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
                 assert!(
                     rel.forknum == VISIBILITYMAP_FORKNUM,
                     "ClearVisibilityMapFlags record on unexpected rel {}",
@@ -447,7 +447,7 @@ impl PostgresRedoManager {
             // same effects as the corresponding Postgres WAL redo function.
             NeonWalRecord::ClogSetCommitted { xids, timestamp } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(&key).context("invalid record")?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::Clog,
@@ -497,7 +497,7 @@ impl PostgresRedoManager {
             }
             NeonWalRecord::ClogSetAborted { xids } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(&key).context("invalid record")?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::Clog,
@@ -528,7 +528,7 @@ impl PostgresRedoManager {
             }
             NeonWalRecord::MultixactOffsetCreate { mid, moff } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(&key).context("invalid record")?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::MultiXactOffsets,
@@ -561,7 +561,7 @@ impl PostgresRedoManager {
             }
             NeonWalRecord::MultixactMembersCreate { moff, members } => {
                 let (slru_kind, segno, blknum) =
-                    key_to_slru_block(&key).context("invalid record")?;
+                    key_to_slru_block(key).context("invalid record")?;
                 assert_eq!(
                     slru_kind,
                     SlruKind::MultiXactMembers,
