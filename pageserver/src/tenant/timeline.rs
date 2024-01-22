@@ -670,14 +670,13 @@ impl Timeline {
         for range in key_ranges {
             let mut key = range.start;
             while key != range.end {
-                debug_assert!(!self.shard_identity.is_key_disposable(&key));
+                assert!(!self.shard_identity.is_key_disposable(&key));
 
                 let block = self.get(key, lsn, ctx).await;
 
                 if matches!(
                     block,
-                    Err(PageReconstructError::Cancelled)
-                        | Err(PageReconstructError::AncestorStopping(_))
+                    Err(PageReconstructError::Cancelled | PageReconstructError::AncestorStopping(_))
                 ) {
                     return Err(GetVectoredError::Cancelled);
                 }
