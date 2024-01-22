@@ -187,6 +187,7 @@ impl From<TenantSlotUpsertError> for ApiError {
         match e {
             InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
+            ShuttingDown(_) => ApiError::ShuttingDown,
         }
     }
 }
