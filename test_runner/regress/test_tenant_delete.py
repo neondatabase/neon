@@ -789,7 +789,7 @@ def test_tenant_delete_races_timeline_creation(
     )
 
     # This can occur sometimes.
-    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
+    CONFLICT_MESSAGE = ".*Precondition failed: Invalid state Stopping. Expected Active or Broken.*"
 
     env.pageserver.allowed_errors.extend(
         [
@@ -799,6 +799,8 @@ def test_tenant_delete_races_timeline_creation(
             ".*POST.*/timeline.* request was dropped before completing",
             # Timeline creation runs into this error
             CANCELLED_ERROR,
+            # Timeline deletion can run into this error during deletion
+            CONFLICT_MESSAGE,
         ]
     )
 
