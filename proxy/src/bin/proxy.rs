@@ -257,7 +257,6 @@ async fn main() -> anyhow::Result<()> {
                     maintenance_tasks
                         .spawn(notifications::task_main(url.to_owned(), cache.clone()));
                 }
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
             }
             #[cfg(feature = "testing")]
             proxy::console::provider::ConsoleBackend::Postgres(_) => {}

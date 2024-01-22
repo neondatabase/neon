@@ -195,6 +195,7 @@ impl super::Api for Api {
         Ok(auth_info.secret.map(Cached::new_uncached))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_allowed_ips(
         &self,
         ctx: &mut RequestMonitoring,
