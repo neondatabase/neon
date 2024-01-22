@@ -284,7 +284,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     # for dirpath, _dirnames, filenames in (repo_dir / "local_fs_remote_storage").walk():
     for dirpath, _dirnames, filenames in os.walk(repo_dir / "local_fs_remote_storage"):
         for filename in filenames:
-            if filename != "initdb-preserved.tar.zst":
+            if filename != "initdb-preserved.tar.zst" && filename != "initdb.tar.zst":
                 (Path(dirpath) / filename).unlink()
 
     timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
