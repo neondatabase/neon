@@ -36,14 +36,25 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-link-arg=-export-dynamic");
 
         //setting dynamically the symbols
-        let output = Command::new("export")
-            .arg("LD_PRELOAD=$(gcc -print-file-name=libasan.so)")
+        let libasan_path = Command::new("gcc")
+            .arg("-print-file-name=libasan.so")
+            .output()
+            .context("failed to execute `gcc -print-file-name=libasan.so`")?;
+
+        if !libasan_path.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&libasan_path.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&libasan_path.stderr));
+            panic!("`gcc -print-file-name=libasan.so` failed")
+        }
+
+        let export_ld_preload = Command::new("export")
+            .arg("LD_PRELOAD=" + libasan_path)
             .output()
             .context("failed to execute `export LD_PRELOAD=$(gcc -print-file-name=libasan.so)`")?;
 
-        if !output.status.success() {
-            println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-            println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        if !export_ld_preload.status.success() {
+            println!("stdout: {}", String::from_utf8_lossy(&export_ld_preload.stdout));
+            println!("stderr: {}", String::from_utf8_lossy(&export_ld_preload.stderr));
             panic!("`export LD_PRELOAD=$(gcc -print-file-name=libasan.so)` failed")
         }
     }
