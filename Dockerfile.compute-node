@@ -143,6 +143,8 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
 #########################################################################################
 FROM build-deps AS plv8-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ARG PG_VERSION
 RUN apt update && \
     apt install -y ninja-build python3-dev libncurses5 binutils clang
 
@@ -617,6 +619,7 @@ RUN wget https://github.com/theory/pg-semver/archive/refs/tags/v0.32.1.tar.gz -O
 FROM build-deps AS pg-embedding-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+ARG PG_VERSION
 ENV PATH "/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in \
       "v14" | "v15") \
@@ -779,6 +782,8 @@ RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.
 #
 #########################################################################################
 FROM build-deps AS neon-pg-ext-build
+ARG PG_VERSION
+
 # Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=postgis-build /sfcgal/* /

@@ -266,7 +266,7 @@ impl ProjectInfoCacheImpl {
             tokio::time::interval(self.config.gc_interval / (self.cache.shards().len()) as u32);
         loop {
             interval.tick().await;
-            if self.cache.len() <= self.config.size {
+            if self.cache.len() < self.config.size {
                 // If there are not too many entries, wait until the next gc cycle.
                 continue;
             }
