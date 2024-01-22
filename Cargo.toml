@@ -99,7 +99,7 @@ libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
 native-tls = "0.2"
-nix = "0.27"
+nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
