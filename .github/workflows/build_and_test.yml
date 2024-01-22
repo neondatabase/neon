@@ -344,6 +344,7 @@ jobs:
           for i in $(seq 1 60); do
             echo "TEST RUN iteration $i"
             NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=tokio-epoll-uring ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES || true
+            ipcrm -a
           done
           exit 1
 
