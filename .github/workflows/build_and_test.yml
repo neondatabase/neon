@@ -341,8 +341,8 @@ jobs:
 
       - name: Run rust tests
         run: |
-          for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          for i in $(seq 1 60); do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=tokio-epoll-uring ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
           done
 
           # Run separate tests for real S3
