@@ -716,6 +716,10 @@ impl Tenant {
                             // stayed in Activating for such a long time that shutdown found it in
                             // that state.
                             tracing::info!(state=%tenant_clone.current_state(), "Tenant shut down before activation");
+                            // Make the tenant broken so that set_stopping will not hang waiting for it to leave
+                            // the Attaching state.  This is an over-reaction (nothing really broke, the tenant is
+                            // just shutting down), but ensures progress.
+                            make_broken(&tenant_clone, anyhow::anyhow!("Shut down while Attaching"));
                             return Ok(());
                         },
                     )

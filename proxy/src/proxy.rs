@@ -356,6 +356,7 @@ pub async fn proxy_pass(
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
 ) -> anyhow::Result<()> {
+    ctx.set_success();
     ctx.log();
 
     let usage = USAGE_METRICS.register(Ids {

@@ -497,6 +497,7 @@ async fn handle_inner(
             }
         };
 
+    ctx.set_success();
     ctx.log();
     let metrics = client.metrics();
 

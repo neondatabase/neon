@@ -102,7 +102,9 @@ impl WalIngest {
         buf.advance(decoded.main_data_offset);
 
         assert!(!self.checkpoint_modified);
-        if self.checkpoint.update_next_xid(decoded.xl_xid) {
+        if decoded.xl_xid != pg_constants::INVALID_TRANSACTION_ID
+            && self.checkpoint.update_next_xid(decoded.xl_xid)
+        {
             self.checkpoint_modified = true;
         }
 
@@ -330,8 +332,13 @@ impl WalIngest {
                         < 0
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
-                        self.checkpoint_modified = true;
                     }
+
+                    // Write a new checkpoint key-value pair on every checkpoint record, even
+                    // if nothing really changed. Not strictly required, but it seems nice to
+                    // have some trace of the checkpoint records in the layer files at the same
+                    // LSNs.
+                    self.checkpoint_modified = true;
                 }
             }
             pg_constants::RM_LOGICALMSG_ID => {
