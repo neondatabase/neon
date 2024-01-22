@@ -372,11 +372,8 @@ jobs:
 
       - name: Run cargo build
         run: |
-          pg_install/v16/bin/pg_config --includedir-server
-          pg_install/v15/bin/pg_config --includedir-server
-          pg_install/v14/bin/pg_config --includedir-server
-          path=$(gcc -print-file-name=libasan.so)
-          ${cov_prefix} LD_PRELOAD=$(path) mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          export LIBASAN_LIB_PATH=$(gcc -print-file-name=libasan.so)
+          ${cov_prefix} LD_PRELOAD=$(LIBASAN_LIB_PATH) mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run rust tests
         run: |
