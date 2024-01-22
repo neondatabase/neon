@@ -788,6 +788,9 @@ def test_tenant_delete_races_timeline_creation(
         ".*POST.*Cancelled request finished with an error: InternalServerError\\(.*ancelled"
     )
 
+    # This can occur sometimes.
+    CONFLICT_MESSAGE = "Precondition failed: Invalid state Stopping. Expected Active or Broken"
+
     env.pageserver.allowed_errors.extend(
         [
             # lucky race with stopping from flushing a layer we fail to schedule any uploads
