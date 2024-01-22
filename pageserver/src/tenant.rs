@@ -449,6 +449,7 @@ pub enum CreateTimelineError {
 #[derive(thiserror::Error, Debug)]
 enum InitdbError {
     Other(anyhow::Error),
+    #[allow(unused)]
     Cancelled,
     Spawn(std::io::Result<()>),
     Failed(std::process::ExitStatus, Vec<u8>),
@@ -3732,7 +3733,7 @@ async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
     pg_version: u32,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
 ) -> Result<(), InitdbError> {
     let initdb_bin_path = conf
         .pg_bin_dir(pg_version)
@@ -3776,10 +3777,10 @@ async fn run_initdb(
                 return Err(InitdbError::Failed(exit_status, stderr_vec));
             }
         }
-        _ = cancel.cancelled() => {
+        /*_ = cancel.cancelled() => {
             initdb_command.kill().await?;
             return Err(InitdbError::Cancelled);
-        }
+        }*/
     }
 
     Ok(())
