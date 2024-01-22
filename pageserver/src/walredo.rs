@@ -47,11 +47,10 @@ use crate::metrics::{
     WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM,
     WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
 };
-use crate::pgdatadir_mapping::key_to_slru_block;
 use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
 
-use pageserver_api::key::key_to_rel_block;
+use pageserver_api::key::{key_to_rel_block, key_to_slru_block};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;

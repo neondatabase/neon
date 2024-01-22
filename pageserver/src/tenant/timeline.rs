@@ -73,8 +73,8 @@ use crate::metrics::{
     TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
-use crate::pgdatadir_mapping::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::tenant::config::TenantConfOpt;
+use pageserver_api::key::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
